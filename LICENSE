@@ -13,24 +13,43 @@ Licensed Work:        obleth-chat
                       The Licensed Work is © 2026 Johnathan Lee.
 
 Additional Use Grant: You may make production use of the Licensed Work,
-                      provided that you do not offer the Licensed Work to
-                      third parties as a hosted or managed service where the
-                      service provides those third parties with access to a
-                      substantial set of the features or functionality of the
-                      Licensed Work, and provided that you do not distribute,
-                      sell, or otherwise make available — whether hosted or
-                      self-managed — a commercial product or service that is
-                      derived from, based on, or substantially similar to the
-                      Licensed Work and that competes with the Licensed Work
-                      (for example, a competing hosted chat, AI workspace or
-                      agent sandbox offering).
+                      including running it as a service for other people, as
+                      long as you do not charge for it. Specifically, you may
+                      not, before the Change Date:
 
-                      For clarity, the following uses are permitted under this
-                      Additional Use Grant: internal production use within your
-                      own organization; use by academic, research, and
-                      educational institutions; self-hosting the Licensed Work
-                      for your own workloads; and creating and contributing
-                      modifications back to the Licensed Work.
+                      (a) offer the Licensed Work, or a work derived from it,
+                          to third parties as a hosted or managed service for
+                          which you receive payment or other compensation,
+                          whether as subscription, seat, usage or per-token
+                          fees, prepaid credits, advertising revenue, or as
+                          part of a paid product or bundle; or
+
+                      (b) sell, license for a fee, or otherwise commercially
+                          distribute a product that is derived from or
+                          substantially similar to the Licensed Work and that
+                          competes with it (for example, a paid hosted chat,
+                          AI workspace or agent sandbox offering).
+
+                      For clarity, the following uses are permitted:
+
+                      - running the Licensed Work for the users of your own
+                        organization, such as the employees, contractors,
+                        students, faculty, staff and research collaborators of
+                        a company, university, laboratory or public agency;
+                      - recovering your costs from users or units within your
+                        own organization, for example through internal
+                        chargeback or recharge-center billing;
+                      - offering a hosted instance to anyone, provided it is
+                        free of charge and carries no advertising;
+                      - using the Licensed Work behind your own products or
+                        services, provided your customers do not receive
+                        access to the Licensed Work itself or a substantial
+                        set of its features;
+                      - charging for consulting, installation, integration,
+                        training or support, provided you do not charge for
+                        access to a hosted instance of the Licensed Work; and
+                      - creating modifications and contributing them back to
+                        the Licensed Work.
 
 Change Date:          2030-10-20
 

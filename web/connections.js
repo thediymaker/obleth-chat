@@ -207,5 +207,5 @@ export function createConnections({ api, state, capabilities, render, modal, clo
   actions['chat-auto-switch'] = () => switchAuto();
 
   function clear() { local.sequence++; local.items = []; local.error = ''; local.loading = false; chat.id = null; chat.list = null; chat.draftOff.clear(); chat.auto = chat.draftAuto = false; }
-  return { view, load, actions, submit, clear, items: () => local.items, loaded: () => local.loaded, loading: () => local.loading, error: () => local.error, kinds: KINDS, loadChat, composerButton, contextSection, applyDraft, enableAuto, resetDraft: () => { chat.draftOff.clear(); chat.draftAuto = false; }, startAuto: () => { if (autoAllowed()) chat.draftAuto = chat.auto = true; } };
+  return { view, load, actions, submit, clear, items: () => local.items, loaded: () => local.loaded, loading: () => local.loading, error: () => local.error, kinds: KINDS, loadChat, composerButton, contextSection, applyDraft, enableAuto, isAuto: id => chat.id === id && chat.auto, resetDraft: () => { chat.draftOff.clear(); chat.draftAuto = false; }, startAuto: () => { if (autoAllowed()) chat.draftAuto = chat.auto = true; } };
 }

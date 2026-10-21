@@ -404,6 +404,9 @@ code{font-size:.9em}
 .message-actions .icon-btn{width:30px;height:30px}
 .message-actions .icon-btn .icon{width:15px;height:15px}
 .message.user .message-actions{margin-top:6px}
+.message.auto-nudge p{display:flex;gap:8px;align-items:flex-start;font-size:var(--fs-sm);color:var(--muted);line-height:1.5}
+.message.auto-nudge strong{color:var(--text-2);font-weight:500;margin-right:4px}
+.message.auto-nudge .icon{width:14px;height:14px;flex-shrink:0;margin-top:3px}
 .message.user .message-actions .icon-btn{opacity:.8}
 .message.user:hover .message-actions .icon-btn,.message.user:focus-within .message-actions .icon-btn{opacity:1}
 .response-meta{flex:0 1 auto;min-width:0;margin-left:auto;padding-left:12px;font-size:var(--fs-xs);color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

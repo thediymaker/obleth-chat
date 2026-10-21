@@ -80,6 +80,11 @@ async fn main() -> Result<()> {
     if let Some(dir) = config.backup_status_dir {
         state.metrics.register_backup_status(dir)?;
     }
+    // Auto mode's watchdog nudges unattended turns that stopped without finishing.
+    tokio::spawn(obleth_chat::autopilot::worker(
+        state.clone(),
+        state.shutdown.clone(),
+    ));
     let mut maintenance = tokio::spawn(obleth_chat::retention::worker(
         pool.clone(),
         state.shutdown.clone(),

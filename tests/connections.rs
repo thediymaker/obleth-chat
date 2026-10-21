@@ -235,6 +235,7 @@ async fn chat(
 
 struct Fixture {
     app: Router,
+    state: AppState,
     mcp_url: String,
     /// slurmrestd and the Kubernetes API.
     cluster_url: String,
@@ -320,7 +321,8 @@ async fn fixture_with(pool: PgPool, clusters: bool) -> Fixture {
             .clusters(clusters),
     );
     Fixture {
-        app: router(state, "web".into()),
+        app: router(state.clone(), "web".into()),
+        state,
         mcp_url: format!("http://{address}/mcp"),
         cluster_url: format!("http://{address}"),
         mcp_seen,
@@ -729,6 +731,109 @@ async fn auto_mode_runs_actions_without_asking(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(asked, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn auto_mode_nudges_a_turn_that_stopped_until_the_person_stops_it(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Fixture","url":f.mcp_url,"token":TOKEN}),
+        &admin,
+    )
+    .await;
+    let (_, chat) = call(
+        &f.app,
+        "POST",
+        "/api/conversations",
+        json!({"title":"Overnight","model":"fixture-model"}),
+        &admin,
+    )
+    .await;
+    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
+    let uuid: uuid::Uuid = id.parse().unwrap();
+    let path = format!("/api/conversations/{id}/connections");
+    call(&f.app, "PATCH", &path, json!({"auto":true}), &admin).await;
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            json!({"content":"Check job 42 and resubmit it","model":"fixture-model"}),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    response.into_body().collect().await.unwrap();
+
+    // The pod restarted mid-turn a few minutes ago.
+    let stop = |reason: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE messages SET status='interrupted',error_message=$2 WHERE id=(SELECT selected_leaf_id FROM conversations WHERE id=$1)")
+                .bind(uuid).bind(reason).execute(&pool).await.unwrap();
+            sqlx::query("UPDATE conversations SET updated_at=NOW()-INTERVAL '5 minutes',auto_nudged_at=auto_nudged_at-INTERVAL '1 hour' WHERE id=$1")
+                .bind(uuid).execute(&pool).await.unwrap();
+        }
+    };
+    let finished = || async {
+        for _ in 0..200 {
+            let active: Option<uuid::Uuid> =
+                sqlx::query_scalar("SELECT active_generation FROM conversations WHERE id=$1")
+                    .bind(uuid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            if active.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the nudged turn did not finish");
+    };
+    let messages = || async {
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT role,content,status FROM messages WHERE conversation_id=$1 ORDER BY ordinal",
+        )
+        .bind(uuid)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    stop("Service shutting down").await;
+    obleth_chat::autopilot::tick(&f.state).await.unwrap();
+    finished().await;
+    let after = messages().await;
+    assert_eq!(after.len(), 4, "{after:?}");
+    assert_eq!(after[2].0, "user");
+    assert!(
+        after[2].1.starts_with(
+            "[Auto mode] Your last reply stopped before finishing (Service shutting down)"
+        ),
+        "{after:?}"
+    );
+    assert_eq!(after[3].2, "completed", "the nudged turn ran: {after:?}");
+    let nudges: i32 = sqlx::query_scalar("SELECT auto_nudges FROM conversations WHERE id=$1")
+        .bind(uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(nudges, 1);
+
+    // A reply the person stopped stays stopped.
+    stop("Response stopped").await;
+    obleth_chat::autopilot::tick(&f.state).await.unwrap();
+    assert_eq!(messages().await.len(), 4);
+
+    // Nor is a chat nudged once Auto mode is off.
+    stop("Service shutting down").await;
+    call(&f.app, "PATCH", &path, json!({"auto":false}), &admin).await;
+    obleth_chat::autopilot::tick(&f.state).await.unwrap();
+    assert_eq!(messages().await.len(), 4);
 }
 
 #[sqlx::test(migrations = "./migrations")]

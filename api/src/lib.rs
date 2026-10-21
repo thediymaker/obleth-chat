@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod auth;
+pub mod autopilot;
 pub mod config;
 pub mod connections;
 pub mod error;
@@ -483,8 +484,62 @@ async fn send(
         max_tokens: body.max_tokens.or(saved.max_tokens),
         reasoning_effort: body.reasoning_effort.or(saved.reasoning_effort),
     };
+    let launch = Launch {
+        content: body.content,
+        model: body.model,
+        attachment_ids: body.attachment_ids,
+        overrides,
+        variant,
+    };
+    // The person writing again gives Auto mode's watchdog a fresh count.
+    let _ = sqlx::query("UPDATE conversations SET auto_nudges=0,auto_nudged_at=NULL WHERE id=$1 AND owner_id=$2 AND auto_nudges>0")
+        .bind(id)
+        .bind(user.id)
+        .execute(&s.store.pool)
+        .await;
+    let rx = launch_turn(s, gateway, user, Some(headers), id, launch).await?;
+    let mut response = Sse::new(ReceiverStream::new(rx))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    // Sse sets no-cache, which security_headers would keep; a transcript is no-store.
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+/// What a turn starts from: the person's message and settings, or a nudge.
+pub(crate) struct Launch {
+    pub content: String,
+    pub model: String,
+    pub attachment_ids: Vec<Uuid>,
+    pub overrides: models::ParameterOverrides,
+    pub variant: Option<(Uuid, &'static str)>,
+}
+
+/// Starts a turn and its background worker. Without `headers` the turn runs for
+/// no browser session, as Auto mode's nudges do.
+pub(crate) async fn launch_turn(
+    s: AppState,
+    gateway: Gateway,
+    user: Identity,
+    headers: Option<HeaderMap>,
+    id: Uuid,
+    launch: Launch,
+) -> Result<mpsc::Receiver<Result<Event, Infallible>>, ApiError> {
+    let Launch {
+        content,
+        model,
+        attachment_ids,
+        overrides,
+        variant,
+    } = launch;
     let resolved =
-        models::resolve_request(&s.store.pool, &gateway, &user, &body.model, overrides).await?;
+        models::resolve_request(&s.store.pool, &gateway, &user, &model, overrides).await?;
     let parameters = &resolved.parameters;
     // A conversation with a workspace gives the model its tools. Catalog metadata
     // often under-reports tool support, so the explicit workspace choice decides; a
@@ -511,15 +566,15 @@ async fn send(
             .start_variant_turn(
                 user.id,
                 id,
-                &body.content,
+                &content,
                 &resolved.model,
                 &parameters.system_prompt,
                 parameters.temperature,
                 parameters.max_tokens,
                 Some(parameters.reasoning_effort),
                 parameters.top_p,
-                &body.model,
-                &body.attachment_ids,
+                &model,
+                &attachment_ids,
                 resolved.capabilities.supports_vision == Some(true),
                 message,
                 mode,
@@ -530,15 +585,15 @@ async fn send(
             .start_turn_attached(
                 user.id,
                 id,
-                &body.content,
+                &content,
                 &resolved.model,
                 &parameters.system_prompt,
                 parameters.temperature,
                 parameters.max_tokens,
                 Some(parameters.reasoning_effort),
                 parameters.top_p,
-                &body.model,
-                &body.attachment_ids,
+                &model,
+                &attachment_ids,
                 resolved.capabilities.supports_vision == Some(true),
             )
             .await?
@@ -550,18 +605,7 @@ async fn send(
         )
         .await;
     });
-    let mut response = Sse::new(ReceiverStream::new(rx))
-        .keep_alive(
-            KeepAlive::new()
-                .interval(Duration::from_secs(15))
-                .text("keep-alive"),
-        )
-        .into_response();
-    let headers = response.headers_mut();
-    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
-    // Sse sets no-cache, which security_headers would keep; a transcript is no-store.
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    Ok(response)
+    Ok(rx)
 }
 const MAX_AGENT_STEPS: usize = 100;
 /// A tool turn runs while the model keeps answering; this only bounds runaways.
@@ -794,7 +838,7 @@ async fn run_generation(
     s: AppState,
     gateway: Gateway,
     user: Identity,
-    headers: HeaderMap,
+    headers: Option<HeaderMap>,
     id: Uuid,
     resolved: models::ResolvedRequest,
     turn: Turn,
@@ -1549,8 +1593,12 @@ async fn run_generation(
                 }
                 Err(_) => break "The response lost its database connection".into(),
             }
-            if ticks.is_multiple_of(15) || recheck_session {
-                match s.auth.require(&headers, false).await {
+            // A turn in Auto mode outlives the browser session that started it, so
+            // research keeps going overnight; Stop or disabling the account ends it.
+            let due = ticks.is_multiple_of(15) || recheck_session;
+            let attended = due && (!unattended || !auto_mode(s.clone()).await);
+            if let Some(headers) = headers.as_ref().filter(|_| attended) {
+                match s.auth.require(headers, false).await {
                     Ok(_) => recheck_session = false,
                     Err(e) if e.0 == StatusCode::INTERNAL_SERVER_ERROR => recheck_session = true,
                     Err(_) => break "Sign-in session ended".into(),

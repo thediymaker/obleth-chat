@@ -269,7 +269,10 @@ export async function startConnected(capabilities) {
     return `<div class="message-details" id="details-${esc(key)}" ${detailsOpen.has(key) ? '' : 'hidden'}><div class="detail-grid">${cells.filter(([, v]) => v != null && v !== '').map(([k, v, wide]) => `<div class="detail-cell ${wide || ''}"><span>${esc(k)}</span><strong title="${esc(v)}">${esc(v)}</strong></div>`).join('')}</div>${p.systemPrompt ? `<div class="message-details-prompt"><span>System instructions</span><pre>${esc(p.systemPrompt)}</pre></div>` : ''}</div>`;
   }
   function savedNotes(m) { const html = libraryView.cards(m); return html ? `<div class="saved-notes">${html}</div>` : ''; }
+  // Auto mode's watchdog writes these when an unattended turn stopped; they read as a status line.
+  const NUDGE = '[Auto mode] ';
   function message(m, index) {
+    if (m.role === 'user' && String(m.content || '').startsWith(NUDGE)) return `<article class="message auto-nudge" data-message="${index}"><p>${icon('refresh')}<span><strong>Auto mode</strong> ${esc(m.content.slice(NUDGE.length))}</span></p></article>`;
     const key = m.id || `pending-${index}`, details = turnDetails(m, key);
     const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${m.id && !state.streaming && !state.switchingVersion ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
     const status = m.role === 'assistant' ? `<span class="response-meta ${isPendingMessage(m) ? 'is-generating' : ''} ${m.status === 'error' ? 'is-error' : ''}" ${isPendingMessage(m) ? 'role="status"' : ''}>${esc(responseStatus(m))}</span>` : '';
@@ -279,6 +282,7 @@ export async function startConnected(capabilities) {
     const article = $(`[data-message="${index}"]`);
     if (!article) return;
     const body = $('.message-text', article);
+    if (!body) return;
     if (turnView.applies(m)) {
       $('.thinking-panel', article)?.remove(); $('.message-activity', article)?.remove();
       const signature = turnView.signature(m);
@@ -530,6 +534,8 @@ export async function startConnected(capabilities) {
         phase: 'recovering', stopRequested: !!c.generationCancelRequested, stopSent: !!c.generationCancelRequested });
     }
     if (conversationBusy(c) || suggestionsPending(c)) scheduleWatch(c.id);
+    // Auto mode may start a turn on its own; an open chat looks for it.
+    else if (connectionsView.isAuto(c.id) && route().page === 'chat' && route().id === c.id) scheduleWatch(c.id, 30000);
   }
   function scheduleWatch(id, delay) {
     if (!id || !state.user) return;

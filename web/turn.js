@@ -152,7 +152,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
   const fileButton = (path, extra = '') => `<button type="button" class="tr-file" data-action="turn-open-file" data-path="${esc(path)}">${esc(path)}</button>${extra}`;
   const lines = s => `${s.added ? ` <span class="tr-add">+${s.added}</span>` : ''}${s.removed ? ` <span class="tr-del">−${s.removed}</span>` : ''}`;
   function approval(s) {
-    return `<div class="approval"><span>Allow ${esc(s.connection || 'this tool')} to run this?</span>${[['allow', 'Allow', 'primary'], ['chat', 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}">${label}</button>`).join('')}</div>`;
+    return `<div class="approval"><span>Allow ${esc(s.connection || 'this tool')} to run this?</span><div class="approval-actions">${[['allow', 'Allow', 'primary'], ['chat', 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}">${label}</button>`).join('')}</div></div>`;
   }
   function stepText(s) {
     if (s.path && FILE_TOOLS.has(s.tool)) return `${s.tool === 'write_file' ? 'Wrote' : 'Edited'} ${fileButton(s.path, lines(s))}`;

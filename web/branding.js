@@ -5,8 +5,8 @@ const defaults = {
   siteSubtitle: '',
   assistantName: 'Assistant',
   description: 'A space to ask questions, explore ideas, and make something new.',
-  logo: { light: '', dark: '', alt: '' },
-  favicon: { light: '', dark: '' },
+  logo: { light: './assets/obleth-ink.svg', dark: './assets/obleth.svg', alt: '' },
+  favicon: { light: './assets/obleth-ink.svg', dark: './assets/obleth.svg' },
   icons: { greeting: 'chat', assistant: 'chat', loading: 'chat' },
   login: {
     eyebrow: 'A space for every idea',
@@ -17,6 +17,10 @@ const defaults = {
     welcomeDescription: 'Sign in to your personal workspace.',
     help: 'Need an account? Your administrator can create one for you.',
   },
+  links: [
+    { label: 'Documentation', url: 'https://www.obleth.com/docs/chat/introduction' },
+    { label: 'Obleth', url: 'https://www.obleth.com' },
+  ],
   home: {
     eyebrow: 'Your space to explore',
     title: 'What’s on your mind?',
@@ -48,6 +52,19 @@ function assets(value, fallback = '') {
   return { light: light || dark || fallback, dark: dark || light || fallback };
 }
 
+// Footer links may leave the site, but only to web or mail addresses.
+function linkUrl(value) {
+  if (typeof value !== 'string') return '';
+  const url = value.trim();
+  if (/^(https?:\/\/|mailto:)/i.test(url)) return url;
+  return assetPath(url);
+}
+
+function links(value) {
+  if (!Array.isArray(value)) return defaults.links;
+  return Array.from(value).slice(0, 8).map(item => ({ label: text(plainObject(item).label, '').trim(), url: linkUrl(plainObject(item).url) })).filter(item => item.label && item.url);
+}
+
 function copyFields(source, fallback) {
   const input = plainObject(source);
   return Object.fromEntries(Object.entries(fallback).map(([key, value]) => [key, text(input[key], value)]));
@@ -62,13 +79,15 @@ export function normalizeBranding(value) {
     siteSubtitle: text(input.siteSubtitle, defaults.siteSubtitle),
     assistantName: text(input.assistantName, defaults.assistantName).trim() || defaults.assistantName,
     description: text(input.description, defaults.description),
-    logo: { ...assets(input.logo), alt: text(plainObject(input.logo).alt, '') },
-    favicon: assets(input.favicon, './assets/chat.svg'),
+    // A missing logo keeps the Obleth mark; blank paths give a text-only brand.
+    logo: input.logo === undefined ? defaults.logo : { ...assets(input.logo), alt: text(plainObject(input.logo).alt, '') },
+    favicon: input.favicon === undefined ? defaults.favicon : assets(input.favicon, './assets/chat.svg'),
     icons: Object.fromEntries(Object.entries(defaults.icons).map(([role, fallback]) => {
       const name = configuredIcons[role];
       return [role, name === '' || supportedIcons.has(name) ? name : fallback];
     })),
     login: copyFields(input.login, defaults.login),
+    links: links(input.links),
     home: copyFields(input.home, defaults.home),
     appearance: { defaultTheme: ['system', 'light', 'dark'].includes(defaultTheme) ? defaultTheme : defaults.appearance.defaultTheme },
   };
@@ -86,6 +105,11 @@ export function brandLogo(config = branding) {
 
 export function brand(config = branding) {
   return `<a class="brand" href="#chat" aria-label="${esc(config.siteName)} home">${brandLogo(config)}<div class="brand-name">${esc(config.siteName)}${config.siteSubtitle ? `<span>${esc(config.siteSubtitle)}</span>` : ''}</div></a>`;
+}
+
+export function siteFooter(config = branding, year = new Date().getFullYear()) {
+  const items = config.links.map(link => `<a href="${esc(link.url)}"${/^(https?:|mailto:)/i.test(link.url) ? ' target="_blank" rel="noopener noreferrer"' : ''}>${esc(link.label)}</a>`);
+  return `<footer class="site-footer"><span>© ${year} ${esc(config.siteName)}</span>${items.length ? `<nav aria-label="Site links">${items.join('')}</nav>` : ''}</footer>`;
 }
 
 export function brandIcon(role, config = branding) {

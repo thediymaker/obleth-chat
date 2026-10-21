@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
-import { normalizeBranding, brand, brandLogo, brandIcon, copy, pageTitle } from '../web/branding.js';
+import { normalizeBranding, brand, brandLogo, brandIcon, siteFooter, copy, pageTitle } from '../web/branding.js';
 
 test('partial or malformed branding keeps usable defaults and optional copy can be removed', () => {
   for (const input of [undefined, null, 42, [], 'invalid']) {
     const config = normalizeBranding(input);
     assert.equal(config.siteName, 'Obleth Chat');
     assert.equal(config.appearance.defaultTheme, 'system');
-    assert.equal(brandLogo(config), '');
+    assert.match(brandLogo(config), /obleth\.svg/);
+    assert.deepEqual(config.links.map(link => link.label), ['Documentation', 'Obleth']);
   }
   const config = normalizeBranding({
     siteName: '  Acme Chat  ',
@@ -116,4 +117,22 @@ test('browser metadata uses configured branding and favicon follows selected the
     if (savedConfig === undefined) delete globalThis.OblethChatConfig; else globalThis.OblethChatConfig = savedConfig;
     if (savedObserver === undefined) delete globalThis.MutationObserver; else globalThis.MutationObserver = savedObserver;
   }
+});
+
+test('footer links accept web, mail and same-site addresses only', () => {
+  const config = normalizeBranding({ siteName: 'Acme', links: [
+    { label: 'Help', url: 'https://help.example.com' },
+    { label: 'Email', url: 'mailto:help@example.com' },
+    { label: 'Terms', url: './terms.html' },
+    { label: 'Bad', url: 'javascript:alert(1)' },
+    { label: '', url: 'https://example.com' },
+    'nope',
+  ] });
+  assert.deepEqual(config.links.map(link => link.label), ['Help', 'Email', 'Terms']);
+  const html = siteFooter(config, 2026);
+  assert.match(html, /© 2026 Acme/);
+  assert.match(html, /href="https:\/\/help\.example\.com" target="_blank" rel="noopener noreferrer"/);
+  assert.match(html, /href="\.\/terms\.html">Terms/);
+  assert.doesNotMatch(html, /javascript:/);
+  assert.doesNotMatch(siteFooter(normalizeBranding({ links: [] })), /<nav/);
 });

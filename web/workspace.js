@@ -288,7 +288,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   const stepState = { running: 'Running…', awaiting: 'Needs your answer', error: 'Failed', declined: 'Declined' };
   function step(s) {
     const asking = s.status === 'awaiting';
-    const question = asking ? `<div class="approval"><span>Allow ${esc(s.connection || 'this tool')} to run this?</span>${[['allow', 'Allow', 'primary'], ['chat', 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}" ${d === 'chat' ? `title="Run ${esc(s.summary)} without asking for the rest of this conversation"` : ''}>${label}</button>`).join('')}</div>` : '';
+    const question = asking ? `<div class="approval"><span>Allow ${esc(s.connection || 'this tool')} to run this?</span><div class="approval-actions">${[['allow', 'Allow', 'primary'], ['chat', 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}" ${d === 'chat' ? `title="Run ${esc(s.summary)} without asking for the rest of this conversation"` : ''}>${label}</button>`).join('')}</div></div>` : '';
     const time = stepState[s.status] || (s.durationMs != null ? `${(s.durationMs / 1000).toFixed(1)}s` : '');
     return `<li class="activity-step ${esc(s.status)}">${icon(s.connection ? 'link' : toolIcons[s.tool] || 'terminal')}<div class="grow"><span>${esc(s.summary)}</span>${s.detail && s.status !== 'running' ? `<pre>${esc(s.detail)}</pre>` : ''}${question}</div><small>${esc(time)}</small></li>`;
   }

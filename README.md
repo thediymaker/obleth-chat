@@ -123,9 +123,10 @@ Accounts and chats work right away. To list models and stream replies, [connect 
 
 ## Branding and appearance
 
-Edit [web/site.config.js](web/site.config.js) and reload the page. This public, commented configuration controls the site name and subtitle, assistant name, browser title and description, optional logo and favicon, greeting and assistant icons, and the sign-in and home page text. You can also view the deployed file at `/site.config.js`. No build is needed when editing the served file; never put secrets in it.
+Edit [web/site.config.js](web/site.config.js) and reload the page. This public, commented configuration controls the site name and subtitle, assistant name, browser title and description, logo and favicon, greeting and assistant icons, the sign-in and home page text, and the sign-in footer links. You can also view the deployed file at `/site.config.js`. No build is needed when editing the served file; never put secrets in it.
 
-- Set `logo.light` and `logo.dark` to local image paths such as `./assets/custom/logo-light.svg`. One image works in both themes; leave both blank for a text-only brand. The default favicon is a neutral chat bubble.
+- The logo and favicon default to the Obleth mark. To swap them, set `logo.light` and `logo.dark` (and `favicon`) to local image paths such as `./assets/custom/logo-light.svg`. One image works in both themes; leave both logo paths blank for a text-only brand.
+- `links` lists the sign-in footer links as `{ label, url }`; use `[]` for none.
 - Choose built-in icon names from [web/icons.js](web/icons.js), such as `chat`, `book`, or `sun`; set an icon to `''` to hide it.
 - Text is plain text, with `\n` for a line break. Set optional text, including the sign-in and home page footers, to `''` to hide it.
 - Set `appearance.defaultTheme` to `system`, `light`, or `dark`. People can switch appearance on the sign-in page or in Settings; their browser remembers their choice.

@@ -7,12 +7,13 @@ window.OblethChatConfig = {
   assistantName: 'Assistant',
   description: 'A space to ask questions, explore ideas, and make something new.',
 
-  // Optional logo: use local image paths, e.g. './assets/custom/logo-light.svg'.
-  // Leave both blank for a text-only brand. One image works in both themes.
-  logo: { light: '', dark: '', alt: '' },
+  // Logo beside the site name. Swap in local image paths, e.g. './assets/custom/logo.svg':
+  // 'light' shows on the light theme, 'dark' on the dark theme, and one image covers both.
+  // Leave both blank for a text-only brand.
+  logo: { light: './assets/obleth-ink.svg', dark: './assets/obleth.svg', alt: '' },
 
-  // Browser tab icon. Blank uses the neutral chat icon; one image covers both themes.
-  favicon: { light: '', dark: '' },
+  // Browser tab icon. Blank uses a neutral chat icon; one image covers both themes.
+  favicon: { light: './assets/obleth-ink.svg', dark: './assets/obleth.svg' },
 
   // Built-in names from icons.js, e.g. 'chat', 'book', 'sun', 'bolt', or 'cube'.
   // Use '' to hide an icon. These icons are separate from the optional site logo.
@@ -27,6 +28,12 @@ window.OblethChatConfig = {
     welcomeDescription: 'Sign in to your personal workspace.',
     help: 'Need an account? Your administrator can create one for you.',
   },
+
+  // Links in the sign-in page footer, e.g. help, privacy or terms. Use [] for none.
+  links: [
+    { label: 'Documentation', url: 'https://www.obleth.com/docs/chat/introduction' },
+    { label: 'Obleth', url: 'https://www.obleth.com' },
+  ],
 
   home: {
     eyebrow: 'Your space to explore',

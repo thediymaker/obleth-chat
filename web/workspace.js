@@ -209,6 +209,13 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     }
     return xterm;
   }
+  function terminalTheme() {
+    const css = getComputedStyle(document.documentElement), color = name => css.getPropertyValue(name).trim();
+    return { background: color('--bg'), foreground: color('--text'), cursor: color('--text'), cursorAccent: color('--bg'), selectionBackground: color('--selection') };
+  }
+  window.addEventListener('obleth-theme-change', () => {
+    if (shell?.term) shell.term.options.theme = terminalTheme();
+  });
   function closeTerminal() {
     if (!shell) return;
     shell.closed = true; shell.socket?.close(); shell.observer.disconnect(); shell.term.dispose(); terminalEl.replaceChildren(); shell = null;
@@ -221,8 +228,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     let lib;
     try { lib = await loadXterm(); } catch { shell = null; toast('The terminal could not load.'); return; }
     if (shell?.loading !== id || current()?.id !== id) { if (shell?.loading === id) shell = null; return; }
-    const css = getComputedStyle(document.documentElement), color = name => css.getPropertyValue(name).trim();
-    const term = new lib.Terminal({ cursorBlink: true, fontSize: 13, fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace', scrollback: 5000, theme: { background: color('--bg') || '#09090b', foreground: color('--text') || '#f4f4f5', cursor: color('--text') || '#f4f4f5', selectionBackground: '#3f3f46' } });
+    const term = new lib.Terminal({ cursorBlink: true, fontSize: 13, fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace', scrollback: 5000, minimumContrastRatio: 4.5, theme: terminalTheme() });
     const fit = new lib.FitAddon(); term.loadAddon(fit); term.open(terminalEl);
     const observer = new ResizeObserver(() => { if (!terminalEl.hidden) try { fit.fit(); } catch { /* not laid out yet */ } });
     observer.observe(terminalEl);

@@ -3,10 +3,13 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="dark">
-    <meta name="description" content="Obleth Chat — a workspace for your models, your knowledge, and your compute.">
-    <title>obleth · Chat</title>
-    <link rel="icon" href="./assets/favicon-32.png" sizes="32x32" type="image/png">
+    <meta name="color-scheme" content="light dark">
+    <meta name="description" content="A space to ask questions, explore ideas, and create.">
+    <title>Chat</title>
+    <link rel="icon" href="./assets/chat.svg" type="image/svg+xml">
+    <!-- Public branding and theme defaults; edit site.config.js to customize. -->
+    <script src="./site.config.js"></script>
+    <script src="./theme.js"></script>
     <link rel="preload" href="./assets/space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="./styles.css">
     <script type="module" src="./app.js"></script>
@@ -26,6 +29,6 @@
     <div id="app"></div>
     <dialog id="modal" aria-labelledby="modal-title"></dialog>
     <div id="toast" role="status" aria-live="polite"></div>
-    <noscript>Obleth Chat requires JavaScript. The local service exposes /healthz, /readyz, and /metrics independently.</noscript>
+    <noscript>This chat requires JavaScript. Please enable it to continue.</noscript>
   </body>
 </html>

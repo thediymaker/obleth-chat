@@ -1,0 +1,119 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
+import { normalizeBranding, brand, brandLogo, brandIcon, copy, pageTitle } from '../web/branding.js';
+
+test('partial or malformed branding keeps usable defaults and optional copy can be removed', () => {
+  for (const input of [undefined, null, 42, [], 'invalid']) {
+    const config = normalizeBranding(input);
+    assert.equal(config.siteName, 'Obleth Chat');
+    assert.equal(config.appearance.defaultTheme, 'system');
+    assert.equal(brandLogo(config), '');
+  }
+  const config = normalizeBranding({
+    siteName: '  Acme Chat  ',
+    assistantName: '',
+    home: { eyebrow: '', description: false },
+    login: { title: '', footer: '' },
+    icons: { greeting: '', assistant: 'book', loading: 'toString' },
+    appearance: { defaultTheme: 'unknown' },
+  });
+  assert.equal(config.siteName, 'Acme Chat');
+  assert.equal(config.assistantName, 'Assistant');
+  assert.equal(config.home.eyebrow, '');
+  assert.equal(config.login.title, '');
+  assert.equal(config.login.footer, '');
+  assert.equal(config.home.description, 'Ask a question, explore an idea, or start something new.');
+  assert.equal(brandIcon('greeting', config), '');
+  assert.match(brandIcon('assistant', config), /<svg/);
+  assert.equal(config.icons.loading, 'chat');
+  assert.equal(config.appearance.defaultTheme, 'system');
+});
+
+test('public config is executable without a build and matches fallback branding', async () => {
+  const window = {};
+  runInNewContext(await readFile(new URL('../web/site.config.js', import.meta.url), 'utf8'), { window });
+  assert.deepEqual(normalizeBranding(window.OblethChatConfig), normalizeBranding());
+});
+
+test('branding text is escaped and configured line breaks are preserved', () => {
+  assert.equal(copy('<img src=x onerror="alert(1)">\nA & B\r\nC'), '&lt;img src=x onerror=&quot;alert(1)&quot;&gt;<br>A &amp; B<br>C');
+  const config = normalizeBranding({ siteName: 'Acme <Chat>', siteSubtitle: 'Ask & learn', logo: { light: './assets/mark.svg', alt: '"Brand"' } });
+  const html = brand(config);
+  assert.match(html, /Acme &lt;Chat&gt; home/);
+  assert.match(html, /Ask &amp; learn/);
+  assert.match(html, /alt="&quot;Brand&quot;"/);
+  assert.doesNotMatch(html, /Obleth|obleth\.svg|<Chat>/);
+  assert.equal(pageTitle('Settings', config), 'Settings · Acme <Chat>');
+  assert.equal(pageTitle('', config), 'Acme <Chat>');
+});
+
+test('logo removal and light/dark asset fallback work without a mandatory mark', () => {
+  const noLogo = normalizeBranding({ logo: { light: '', dark: '' } });
+  assert.equal(brandLogo(noLogo), '');
+  assert.doesNotMatch(brand(noLogo), /<img|brand-logo/);
+  for (const variant of ['light', 'dark']) {
+    const config = normalizeBranding({ logo: { [variant]: './assets/custom/mark.svg' }, favicon: { [variant]: '/custom/tab.ico' } });
+    assert.equal(config.logo.light, './assets/custom/mark.svg');
+    assert.equal(config.logo.dark, './assets/custom/mark.svg');
+    assert.equal(config.favicon.light, '/custom/tab.ico');
+    assert.equal(config.favicon.dark, '/custom/tab.ico');
+    assert.match(brandLogo(config), /class="brand-logo-light"/);
+    assert.match(brandLogo(config), /class="brand-logo-dark"/);
+  }
+  const config = normalizeBranding({ logo: { light: './light.svg', dark: './dark.svg' } });
+  assert.equal(config.logo.light, './light.svg');
+  assert.equal(config.logo.dark, './dark.svg');
+});
+
+test('asset paths reject external and executable URLs while preserving local image paths', () => {
+  const unsafe = ['https://example.com/logo.svg', '//example.com/logo.svg', 'javascript:alert(1)', 'data:image/svg+xml,<svg/>', '\\example.com/logo.svg', '/\\example.com/logo.svg', '\njava\nscript:alert(1)', '#fragment'];
+  for (const path of unsafe) {
+    const config = normalizeBranding({ logo: { light: path, dark: path }, favicon: { light: path } });
+    assert.equal(brandLogo(config), '', path);
+    assert.equal(config.favicon.light, './assets/chat.svg', path);
+  }
+  const config = normalizeBranding({ logo: { light: './assets/my%20logo.svg?v=2' } });
+  assert.equal(config.logo.light, './assets/my%20logo.svg?v=2');
+});
+
+test('browser metadata uses configured branding and favicon follows selected theme', async () => {
+  const savedConfig = globalThis.OblethChatConfig;
+  const savedObserver = globalThis.MutationObserver;
+  let callback, observed;
+  const element = () => ({
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+    removeAttribute(name) { delete this.attributes[name]; },
+  });
+  const description = element(), favicon = element();
+  favicon.attributes = { type: 'image/png', sizes: '32x32' };
+  const doc = {
+    documentElement: { dataset: { theme: 'light' } },
+    querySelector(selector) { return selector.startsWith('meta') ? description : favicon; },
+  };
+  globalThis.OblethChatConfig = { siteName: 'Acme Chat', description: 'A place to think.', favicon: { light: './light.svg', dark: './dark.svg' } };
+  globalThis.MutationObserver = class {
+    constructor(fn) { callback = fn; }
+    observe(node, options) { observed = { node, options }; }
+    disconnect() {}
+  };
+  try {
+    const { applyBranding } = await import('../web/branding.js?metadata-test');
+    applyBranding(doc);
+    assert.equal(doc.title, 'Acme Chat');
+    assert.equal(description.attributes.content, 'A place to think.');
+    assert.equal(favicon.attributes.href, './light.svg');
+    assert.equal(favicon.attributes.type, undefined);
+    assert.equal(favicon.attributes.sizes, undefined);
+    assert.equal(observed.node, doc.documentElement);
+    assert.deepEqual(observed.options.attributeFilter, ['data-theme']);
+    doc.documentElement.dataset.theme = 'dark';
+    callback();
+    assert.equal(favicon.attributes.href, './dark.svg');
+  } finally {
+    if (savedConfig === undefined) delete globalThis.OblethChatConfig; else globalThis.OblethChatConfig = savedConfig;
+    if (savedObserver === undefined) delete globalThis.MutationObserver; else globalThis.MutationObserver = savedObserver;
+  }
+});

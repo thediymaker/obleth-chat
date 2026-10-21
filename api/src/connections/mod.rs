@@ -1,7 +1,7 @@
 //! Connections: MCP servers, Slurm clusters (slurmrestd) and Kubernetes clusters.
 //! People add their own, and administrators can share one with everyone; for a
-//! shared Slurm or Kubernetes cluster each person adds their own token, so calls run
-//! as them. Tools join every chat's tool loop, and a tool that may change something
+//! shared Slurm or Kubernetes cluster, and a shared MCP server set to personal
+//! tokens, each person adds their own token, so calls run as them. Tools join every chat's tool loop, and a tool that may change something
 //! waits for the person's Allow or Deny.
 pub mod kubernetes;
 pub mod mcp;
@@ -44,6 +44,10 @@ pub struct Connections {
     clients: mcp::Clients,
     /// Lets people's own connections reach private addresses (development only).
     private_allowed: bool,
+    /// Whether Slurm and Kubernetes clusters are offered (OBLETH_CHAT_CONNECTIONS=all).
+    clusters: bool,
+    /// Whether a chat may run its tools without asking (OBLETH_CHAT_AUTO_MODE).
+    auto_mode: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -98,9 +102,14 @@ impl Row {
     fn kind(&self) -> Kind {
         Kind::parse(&self.kind).unwrap_or(Kind::Mcp)
     }
-    /// A shared cluster needs the person's own credentials before it can be used.
+    /// A shared cluster, or a shared MCP server set to personal tokens, runs with
+    /// each person's own token rather than one for everyone.
+    fn personal_tokens(&self) -> bool {
+        self.shared() && (self.kind() != Kind::Mcp || self.options["personalTokens"] == true)
+    }
+    /// Such a connection needs the person's own credentials before it can be used.
     fn usable(&self) -> bool {
-        self.kind() == Kind::Mcp || !self.shared() || self.credential.is_some()
+        !self.personal_tokens() || self.credential.is_some()
     }
     /// The Slurm user, namespace and identity in effect for the viewer.
     fn settings(&self) -> &Value {
@@ -162,7 +171,42 @@ impl Connections {
             key: mac.finalize().into_bytes().into(),
             clients: mcp::Clients::new(private_allowed)?,
             private_allowed,
+            clusters: true,
+            auto_mode: true,
         })
+    }
+
+    /// Lets people switch a chat to Auto mode (the default) or not.
+    pub fn auto_mode(mut self, allowed: bool) -> Self {
+        self.auto_mode = allowed;
+        self
+    }
+
+    /// Whether this chat's tool calls run without asking: it is in Auto mode and
+    /// the installation allows that.
+    pub async fn auto(&self, conversation: Uuid) -> bool {
+        self.auto_mode
+            && sqlx::query_scalar("SELECT auto_approve FROM conversations WHERE id=$1")
+                .bind(conversation)
+                .fetch_optional(&self.pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false)
+    }
+
+    /// Offers Slurm and Kubernetes clusters (the default) or MCP servers only.
+    pub fn clusters(mut self, on: bool) -> Self {
+        self.clusters = on;
+        self
+    }
+
+    pub fn clusters_enabled(&self) -> bool {
+        self.clusters
+    }
+
+    pub fn auto_mode_allowed(&self) -> bool {
+        self.auto_mode
     }
 
     /// Encrypts a token bound to `aad`: the connection id, plus the user id for a
@@ -302,8 +346,12 @@ impl Connections {
         .bind(user.id)
         .fetch_all(&self.pool)
         .await?;
-        // A shared connection an administrator switched off is hidden from everyone else.
-        rows.retain(|r| r.enabled || !r.shared() || user.is_admin());
+        // A shared connection an administrator switched off is hidden from everyone else,
+        // and clusters are hidden while they are turned off for the installation.
+        rows.retain(|r| {
+            (r.enabled || !r.shared() || user.is_admin())
+                && (self.clusters || r.kind() == Kind::Mcp)
+        });
         Ok(rows)
     }
 
@@ -315,10 +363,10 @@ impl Connections {
             .ok_or_else(ApiError::not_found)
     }
 
-    /// The token a row uses for `user`: its own, or the person's credential for a
-    /// shared cluster. None when there is none or it cannot be decrypted.
+    /// The token a row uses for `user`: its own, or the person's credential where
+    /// each person brings one. None when there is none or it cannot be decrypted.
     fn token_for(&self, row: &Row, user: Uuid) -> Option<String> {
-        match (&row.credential, row.shared() && row.kind() != Kind::Mcp) {
+        match (&row.credential, row.personal_tokens()) {
             (Some(sealed), true) => self.unseal(&credential_aad(row.id, user), sealed),
             _ => row
                 .token
@@ -347,7 +395,11 @@ impl Connections {
             servers: vec![],
             tools: vec![],
         };
-        for row in rows.into_iter().filter(|r| !r.opted_out && r.usable()) {
+        let clusters = self.clusters;
+        for row in rows
+            .into_iter()
+            .filter(|r| !r.opted_out && r.usable() && (clusters || r.kind() == Kind::Mcp))
+        {
             let Ok(url) = Url::parse(&row.url) else {
                 continue;
             };
@@ -724,13 +776,14 @@ fn view(row: &Row, user: &Identity) -> Value {
         .map(|t| json!({"name":t.name,"title":t.title,"description":t.description.chars().take(240).collect::<String>(),"readOnly":t.read_only}))
         .collect();
     let settings = row.settings();
-    let credential = (row.kind() != Kind::Mcp && row.shared() && row.credential.is_some())
+    let credential = (row.personal_tokens() && row.credential.is_some())
         .then(|| json!({"user":settings["user"],"namespace":settings["namespace"],"identity":settings["identity"]}));
     json!({
         "id": row.id, "name": row.name, "url": row.url, "kind": row.kind, "shared": row.shared(),
         "canManage": row.can_manage(user), "enabled": row.enabled, "optedOut": row.opted_out,
         "active": row.enabled && !row.opted_out && row.usable(), "usable": row.usable(),
         "needsCredential": !row.usable(), "credential": credential,
+        "personalTokens": row.personal_tokens(),
         "confirmActions": row.confirm_actions, "hasToken": row.token.is_some(),
         "hasCa": row.options["ca"].is_string(),
         "user": settings["user"], "namespace": settings["namespace"], "identity": settings["identity"],
@@ -866,7 +919,11 @@ fn clean_label(value: &str, what: &str) -> Result<String, ApiError> {
 fn clean_options(kind: Kind, options: &Value, personal: bool) -> Result<Value, ApiError> {
     let mut clean = json!({});
     match kind {
-        Kind::Mcp => {}
+        Kind::Mcp => {
+            if !personal && options["personalTokens"] == true {
+                clean["personalTokens"] = json!(true);
+            }
+        }
         Kind::Kubernetes => {
             if let Some(ca) = options["ca"]
                 .as_str()
@@ -930,6 +987,11 @@ async fn create(
     let kind = Kind::parse(body.kind.as_deref().unwrap_or("mcp")).ok_or_else(|| {
         ApiError::bad("Choose an MCP server, a Slurm cluster or a Kubernetes cluster")
     })?;
+    if kind != Kind::Mcp && !connections.clusters {
+        return Err(ApiError::bad(
+            "Clusters are turned off on this installation",
+        ));
+    }
     let name = clean_name(&body.name)?;
     let token = clean_token(&body.token)?;
     let native = kind != Kind::Mcp;
@@ -1226,7 +1288,8 @@ struct Credential {
     namespace: Option<String>,
 }
 
-/// Saves a person's token for a shared Slurm or Kubernetes cluster after checking it.
+/// Saves a person's token for a shared Slurm or Kubernetes cluster, or a shared MCP
+/// server set to personal tokens, after checking it.
 async fn save_credential(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1236,13 +1299,14 @@ async fn save_credential(
     let (connections, user) = manager(&s, &headers, true).await?;
     let row = connections.find(&user, id).await?;
     let kind = row.kind();
-    if kind == Kind::Mcp || !row.shared() || !row.enabled {
+    if !row.personal_tokens() || !row.enabled {
         return Err(ApiError::bad(
-            "Only shared clusters take personal credentials",
+            "Only shared clusters and shared servers set to personal tokens take your own token",
         ));
     }
     let token = clean_token(&body.token)?.ok_or_else(|| ApiError::bad("Enter your token"))?;
     let mut options = match kind {
+        Kind::Mcp => json!({}),
         Kind::Slurm => {
             json!({"user": clean_label(body.user.as_deref().unwrap_or(""), "Slurm user name")?})
         }
@@ -1269,7 +1333,9 @@ async fn save_credential(
             .is_some_and(|n| !n.trim().is_empty());
         settle_namespace(&mut options, given, checked.identity.as_deref());
     }
-    options["identity"] = json!(checked.identity);
+    if kind != Kind::Mcp {
+        options["identity"] = json!(checked.identity);
+    }
     let sealed = connections.seal(&credential_aad(id, user.id), &token);
     sqlx::query("INSERT INTO connection_credentials(connection_id,user_id,token,options) VALUES($1,$2,$3,$4) ON CONFLICT (connection_id,user_id) DO UPDATE SET token=EXCLUDED.token,options=EXCLUDED.options,updated_at=NOW()")
         .bind(id).bind(user.id).bind(sealed).bind(&options)
@@ -1313,14 +1379,19 @@ async fn chat_connections(
         .filter(|r| r.enabled && !r.opted_out && r.usable())
         .map(|r| json!({"id":r.id,"name":r.name,"kind":r.kind,"shared":r.shared(),"tools":r.tools().len(),"on":!off.contains(&r.id)}))
         .collect();
-    Ok(Json(json!({"connections": list})))
+    let auto = connections.auto(conversation).await;
+    Ok(Json(
+        json!({"connections": list, "auto": auto, "autoAllowed": connections.auto_mode}),
+    ))
 }
 
+/// Switches one connection on or off in a chat, or the chat's Auto mode.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Switch {
-    connection_id: Uuid,
-    on: bool,
+    connection_id: Option<Uuid>,
+    on: Option<bool>,
+    auto: Option<bool>,
 }
 
 async fn switch_chat_connection(
@@ -1331,15 +1402,34 @@ async fn switch_chat_connection(
 ) -> Result<StatusCode, ApiError> {
     let (connections, user) = manager(&s, &headers, true).await?;
     owned(&connections.pool, user.id, conversation).await?;
-    connections.find(&user, body.connection_id).await?;
-    let query = if body.on {
+    if let Some(auto) = body.auto {
+        if auto && !connections.auto_mode {
+            return Err(ApiError::bad(
+                "Auto mode is turned off on this installation",
+            ));
+        }
+        sqlx::query("UPDATE conversations SET auto_approve=$2 WHERE id=$1")
+            .bind(conversation)
+            .bind(auto)
+            .execute(&connections.pool)
+            .await?;
+    }
+    let (Some(connection), Some(on)) = (body.connection_id, body.on) else {
+        return if body.auto.is_some() {
+            Ok(StatusCode::NO_CONTENT)
+        } else {
+            Err(ApiError::bad("Name a connection and whether it is on"))
+        };
+    };
+    connections.find(&user, connection).await?;
+    let query = if on {
         "DELETE FROM conversation_connections_off WHERE conversation_id=$1 AND connection_id=$2"
     } else {
         "INSERT INTO conversation_connections_off(conversation_id,connection_id) VALUES($1,$2) ON CONFLICT DO NOTHING"
     };
     sqlx::query(query)
         .bind(conversation)
-        .bind(body.connection_id)
+        .bind(connection)
         .execute(&connections.pool)
         .await?;
     Ok(StatusCode::NO_CONTENT)

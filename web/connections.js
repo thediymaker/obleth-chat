@@ -22,9 +22,11 @@ export function createConnections({ api, state, capabilities, render, modal, clo
   };
   const kindOf = c => KINDS[c?.kind] ? c.kind : 'mcp';
   const native = c => kindOf(c) !== 'mcp';
+  const clustersOn = () => !!capabilities.features?.clusters;
   const tokenHelp = {
     slurm: 'On a login node run scontrol token lifespan=2592000 and paste the part after SLURM_JWT=. It acts as the Slurm user named above.',
     kubernetes: 'For a service account run kubectl create token NAME -n NAMESPACE --duration=720h, or use the token from your kubeconfig.',
+    mcp: 'Your personal token or API key for this server. It is sent as a Bearer token.',
   };
 
   function tools(c) {
@@ -32,11 +34,12 @@ export function createConnections({ api, state, capabilities, render, modal, clo
     if (!list.length) return '';
     return `<details class="connection-tools"><summary>${list.length} tool${list.length === 1 ? '' : 's'}</summary><ul>${list.map(t => `<li><div class="spread"><code>${esc(t.title || t.name)}</code>${t.readOnly ? badge('Read-only') : badge(c.confirmActions ? 'Asks first' : 'Runs without asking', 'amber')}</div>${t.description ? `<p>${esc(t.description)}</p>` : ''}</li>`).join('')}</ul></details>`;
   }
-  // A person's own token on a shared cluster.
+  // A person's own token on a shared cluster, or a shared server set to personal tokens.
   function credential(c) {
-    if (!c.shared || !native(c)) return '';
+    if (!c.personalTokens) return '';
     const id = `data-id="${esc(c.id)}"`;
-    if (!c.credential) return c.enabled ? `<div class="connection-credential needs"><p>${icon('lock')}Add your own token to use this cluster. Tools then act as you.</p>${btn('Add your token', 'connection-credential', { tone: 'small primary', attrs: id })}</div>` : '';
+    if (!c.credential) return c.enabled ? `<div class="connection-credential needs"><p>${icon('lock')}Add your own token to use this ${native(c) ? 'cluster' : 'server'}. Tools then act as you.</p>${btn('Add your token', 'connection-credential', { tone: 'small primary', attrs: id })}</div>` : '';
+    if (!native(c)) return `<div class="connection-credential"><p>${icon('check')}Using <strong>your own token</strong></p><div class="user-actions">${btn('Replace token', 'connection-credential', { tone: 'small ghost', attrs: id })}${btn('Remove my token', 'connection-credential-remove', { tone: 'small ghost', attrs: id })}</div></div>`;
     const scope = kindOf(c) === 'slurm' ? `Slurm user ${c.credential.user}` : `namespace ${c.credential.namespace}`;
     return `<div class="connection-credential"><p>${icon('check')}Acting as <strong>${esc(c.credential.identity || c.credential.user || 'you')}</strong> · ${esc(scope)}</p><div class="user-actions">${btn('Replace token', 'connection-credential', { tone: 'small ghost', attrs: id })}${btn('Remove my token', 'connection-credential-remove', { tone: 'small ghost', attrs: id })}</div></div>`;
   }
@@ -52,7 +55,7 @@ export function createConnections({ api, state, capabilities, render, modal, clo
     const servers = local.items.filter(c => !native(c));
     const own = servers.filter(c => !c.shared), shared = servers.filter(c => c.shared);
     const list = items => `<div class="connection-list">${items.map(row).join('')}</div>`;
-    return `<div class="connections-page"><div class="settings-section-heading spread"><div><h2>MCP servers</h2><p>Servers that give the model extra tools in your chats. Tools that may change something ask you first. Slurm and Kubernetes clusters are on the <a href="#clusters">Clusters</a> page.</p></div>${btn('Add MCP server', 'connection-add', { icon: 'plus', tone: 'primary small' })}</div>${errorBox(local.error, 'connections-refresh')}${local.loading && !local.items.length ? '<p class="inline-note" role="status">Loading…</p>' : ''}<section class="setting-card card"><h2>Yours</h2>${own.length ? list(own) : empty('No MCP servers yet', 'Add one by its URL, such as https://example.com/mcp, with a token if it needs one.')}</section>${shared.length || isAdmin() ? `<section class="setting-card card"><h2>Shared with everyone</h2><p class="inline-note">${isAdmin() ? 'Added by administrators for every account. Shared servers may use internal addresses.' : 'Added by your administrators. Turn one off to keep it out of your chats.'}</p>${shared.length ? list(shared) : '<p class="inline-note">None yet.</p>'}</section>` : ''}</div>`;
+    return `<div class="connections-page"><div class="settings-section-heading spread"><div><h2>MCP servers</h2><p>Servers that give the model extra tools in your chats. Tools that may change something ask you first.${clustersOn() ? ' Slurm and Kubernetes clusters are on the <a href="#clusters">Clusters</a> page.' : ''}</p></div>${btn('Add MCP server', 'connection-add', { icon: 'plus', tone: 'primary small' })}</div>${errorBox(local.error, 'connections-refresh')}${local.loading && !local.items.length ? '<p class="inline-note" role="status">Loading…</p>' : ''}<section class="setting-card card"><h2>Yours</h2>${own.length ? list(own) : empty('No MCP servers yet', 'Add one by its URL, such as https://example.com/mcp, with a token if it needs one.')}</section>${shared.length || isAdmin() ? `<section class="setting-card card"><h2>Shared with everyone</h2><p class="inline-note">${isAdmin() ? 'Added by administrators for every account. Shared servers may use internal addresses.' : 'Added by your administrators. Turn one off to keep it out of your chats.'}</p>${shared.length ? list(shared) : '<p class="inline-note">None yet.</p>'}</section>` : ''}</div>`;
   }
 
   function pickKind(kinds = Object.keys(KINDS)) {
@@ -62,6 +65,9 @@ export function createConnections({ api, state, capabilities, render, modal, clo
     const shared = c ? c.shared : false, k = KINDS[kind], cluster = kind !== 'mcp';
     const ownToken = !cluster || !shared;
     const sharedNote = cluster ? 'Every account can use it with their own token. Only administrators can change it.' : 'Every account can use it. Only administrators can change it.';
+    // A shared MCP server either uses the token entered here for everyone, or each
+    // person adds their own and this one only lists the server's tools.
+    const personalBox = !cluster && isAdmin() && (!c || shared) ? `<div class="connection-personal-tokens ${c ? '' : 'when-shared'}">${checkbox('connection-personal-tokens', 'Each person adds their own token', !!c?.personalTokens, 'For servers where tokens are personal. Calls then act as that person. The token above is used only to list the server’s tools.')}</div>` : '';
     const fields = [
       field('connection-name', 'Name', textInput('connection-name', c?.name || '', `maxlength="40" required placeholder="${esc(kind === 'mcp' ? 'Research tools' : kind === 'slurm' ? 'HPC cluster' : 'Lab cluster')}"`), 'Tools appear to the model under this name.'),
       field('connection-url', kind === 'mcp' ? 'Server URL' : kind === 'slurm' ? 'slurmrestd URL' : 'API server URL', textInput('connection-url', c?.url || '', `type="url" maxlength="2048" required placeholder="${esc(k.url)}"`), k.urlHelp),
@@ -72,22 +78,23 @@ export function createConnections({ api, state, capabilities, render, modal, clo
       ownToken ? `<div class="connection-personal">${field('connection-token', 'Access token', textInput('connection-token', '', `type="password" autocomplete="off" maxlength="4096" placeholder="${c?.hasToken ? 'Saved. Leave empty to keep it' : cluster ? '' : 'Optional'}"`), c?.hasToken ? 'Enter a new token to replace the saved one.' : cluster ? `${tokenHelp[kind]} Stored encrypted and never shown again.` : 'Sent as a Bearer token. Stored encrypted and never shown again.')}${c?.hasToken && !cluster ? checkbox('connection-clear-token', 'Remove the saved token') : ''}</div>` : '',
       checkbox('connection-confirm', 'Ask before tools that may change things', c ? c.confirmActions : true, cluster ? 'Submitting, cancelling, applying and deleting. Reading always runs without asking.' : 'Read-only tools always run without asking.'),
       !c && !cluster && isAdmin() ? checkbox('connection-shared', 'Share with everyone', false, sharedNote) : '',
+      personalBox,
       c && shared ? checkbox('connection-enabled', 'Available to everyone', c.enabled) : '',
     ];
     modal(c ? `Edit ${c.name}` : `Add a ${k.label}`, `<form id="connection-form" class="${cluster && !c ? 'cluster-form' : ''}" data-id="${esc(c?.id || '')}" data-kind="${kind}">${fields.join('')}${formEnd(c ? 'Save' : 'Connect')}</form>`);
   }
   function credentialDialog(c) {
     const kind = kindOf(c), mine = c.credential || {};
-    modal(`Your token for ${c.name}`, `<form id="connection-credential-form" data-id="${esc(c.id)}"><p class="inline-note">Tools on this cluster act as you, with your permissions. The token is checked now, stored encrypted and never shown again.</p>${kind === 'slurm' ? field('credential-user', 'Slurm user name', textInput('credential-user', mine.user || state.user?.username || '', 'maxlength="63" autocomplete="off" required'), 'The account the token belongs to.') : field('credential-namespace', 'Namespace', textInput('credential-namespace', mine.namespace === 'default' ? '' : mine.namespace || '', `maxlength="63" autocomplete="off" placeholder="From the token"`), 'Where tools work when the model names none. Empty: a service account’s own namespace, or default.')}${field('credential-token', 'Token', textInput('credential-token', '', 'type="password" autocomplete="off" maxlength="4096" required'), tokenHelp[kind])}${formEnd(c.credential ? 'Replace token' : 'Save token')}</form>`);
+    modal(`Your token for ${c.name}`, `<form id="connection-credential-form" data-id="${esc(c.id)}"><p class="inline-note">Tools on this ${kind === 'mcp' ? 'server' : 'cluster'} act as you, with your permissions. The token is checked now, stored encrypted and never shown again.</p>${kind === 'mcp' ? '' : kind === 'slurm' ? field('credential-user', 'Slurm user name', textInput('credential-user', mine.user || state.user?.username || '', 'maxlength="63" autocomplete="off" required'), 'The account the token belongs to.') : field('credential-namespace', 'Namespace', textInput('credential-namespace', mine.namespace === 'default' ? '' : mine.namespace || '', `maxlength="63" autocomplete="off" placeholder="From the token"`), 'Where tools work when the model names none. Empty: a service account’s own namespace, or default.')}${field('credential-token', 'Token', textInput('credential-token', '', 'type="password" autocomplete="off" maxlength="4096" required'), tokenHelp[kind])}${formEnd(c.credential ? 'Replace token' : 'Save token')}</form>`);
   }
 
   async function submit(form) {
     const status = form.querySelector('.form-error'); if (status) status.textContent = 'Checking…';
     if (form.id === 'connection-credential-form') {
       const c = byId(form.dataset.id), body = { token: getValue(form, 'credential-token').trim() };
-      if (kindOf(c) === 'slurm') body.user = getValue(form, 'credential-user').trim(); else body.namespace = getValue(form, 'credential-namespace').trim();
+      if (kindOf(c) === 'slurm') body.user = getValue(form, 'credential-user').trim(); else if (kindOf(c) === 'kubernetes') body.namespace = getValue(form, 'credential-namespace').trim();
       const item = await api.request(`/api/connections/${encodeURIComponent(form.dataset.id)}/credential`, { method: 'PUT', body });
-      replace(item); close(); render(); toast(`${item.name} ready as ${item.credential?.identity || 'you'}`);
+      replace(item); close(); render(); toast(`${item.name} ready${native(item) ? ` as ${item.credential?.identity || 'you'}` : ' with your token'}`);
       return;
     }
     if (form.id !== 'connection-form') return;
@@ -98,6 +105,10 @@ export function createConnections({ api, state, capabilities, render, modal, clo
     if (token && !(shared && kind !== 'mcp')) body.token = token; else if (isChecked(form, 'connection-clear-token')) body.token = '';
     if (!c && shared) body.shared = true;
     if (c?.shared) body.enabled = isChecked(form, 'connection-enabled');
+    if (kind === 'mcp' && shared && isAdmin()) {
+      const personal = isChecked(form, 'connection-personal-tokens');
+      if (!c || personal !== !!c.personalTokens) body.options = personal ? { personalTokens: true } : {};
+    }
     if (kind !== 'mcp') {
       const options = {}, ca = getValue(form, 'connection-ca').trim();
       if (kind === 'kubernetes' && (ca || isChecked(form, 'connection-clear-ca'))) options.ca = ca;
@@ -109,6 +120,7 @@ export function createConnections({ api, state, capabilities, render, modal, clo
     const item = await api.request(id ? `/api/connections/${encodeURIComponent(id)}` : '/api/connections', { method: id ? 'PATCH' : 'POST', body });
     replace(item); close(); render();
     if (id) toast('Connection saved');
+    else if (kind === 'mcp' && item.personalTokens) { toast(`${item.name} shared. Add your own token to use it.`); credentialDialog(item); }
     else if (kind === 'mcp') toast(`${item.name} connected with ${item.tools.length} tool${item.tools.length === 1 ? '' : 's'}`);
     else if (item.shared) { toast(`${item.name} shared. Add your own token to use it.`); credentialDialog(item); }
     else toast(`${item.name} connected as ${item.identity || 'you'}`);
@@ -131,36 +143,39 @@ export function createConnections({ api, state, capabilities, render, modal, clo
       const item = await api.request(`/api/connections/${encodeURIComponent(el.dataset.id)}/refresh`, { method: 'POST' });
       replace(item); render(); toast(native(item) ? `${item.name} is reachable` : `${item.tools.length} tool${item.tools.length === 1 ? '' : 's'} found`);
     },
-    'connection-remove': el => { const c = byId(el.dataset.id); modal(`Remove ${c?.name || 'this connection'}?`, `<p>${c?.shared ? 'It will disappear from everyone’s chats.' : 'Its tools will no longer be offered in your chats.'} ${c?.shared && native(c) ? 'Everyone’s saved tokens for it are deleted.' : 'Its saved token is deleted.'}</p><div class="modal-actions">${btn('Keep it', 'close')}${btn('Remove', 'connection-confirm-remove', { tone: 'danger', attrs: `data-id="${esc(el.dataset.id)}"` })}</div>`); },
+    'connection-remove': el => { const c = byId(el.dataset.id); modal(`Remove ${c?.name || 'this connection'}?`, `<p>${c?.shared ? 'It will disappear from everyone’s chats.' : 'Its tools will no longer be offered in your chats.'} ${c?.personalTokens ? 'Everyone’s saved tokens for it are deleted.' : 'Its saved token is deleted.'}</p><div class="modal-actions">${btn('Keep it', 'close')}${btn('Remove', 'connection-confirm-remove', { tone: 'danger', attrs: `data-id="${esc(el.dataset.id)}"` })}</div>`); },
     'connection-confirm-remove': async el => { await api.request(`/api/connections/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' }); local.items = local.items.filter(c => c.id !== el.dataset.id); onChange({ id: el.dataset.id, removed: true }); close(); render(); toast('Connection removed'); },
   };
   // In chats: every active connection is on unless switched off for that chat. A new
   // chat keeps its choices locally until it is created.
-  const chat = { id: null, list: null, draftOff: new Set() };
+  // Auto mode: the chat's tools run without asking. A new chat keeps it locally too.
+  const chat = { id: null, list: null, draftOff: new Set(), auto: false, draftAuto: false };
+  const autoAllowed = () => !!capabilities.features?.autoMode;
   const chatId = () => (location.hash.match(/^#chat\/([^/]+)/) || [])[1] || null;
   async function loadChat(id) {
     if (!capabilities.features?.connections) return;
     chat.id = id || null;
     try {
-      if (id) chat.list = (await api.request(`/api/conversations/${encodeURIComponent(id)}/connections`)).connections || [];
-      else { const r = await api.request('/api/connections'); chat.list = (r.connections || []).filter(c => c.active).map(c => ({ id: c.id, name: c.name, shared: c.shared, tools: c.tools.length, on: !chat.draftOff.has(c.id) })); }
-    } catch { chat.list = []; }
+      if (id) { const r = await api.request(`/api/conversations/${encodeURIComponent(id)}/connections`); chat.list = r.connections || []; chat.auto = !!r.auto; }
+      else { const r = await api.request('/api/connections'); chat.list = (r.connections || []).filter(c => c.active).map(c => ({ id: c.id, kind: c.kind, name: c.name, shared: c.shared, tools: c.tools.length, on: !chat.draftOff.has(c.id) })); chat.auto = chat.draftAuto; }
+    } catch { chat.list = []; chat.auto = false; }
     if (chat.id === (chatId() || null)) render();
   }
   const listed = () => chat.id === chatId() ? chat.list || [] : [];
   function composerButton() {
     const list = listed();
     if (!list.length) return '';
-    const on = list.filter(c => c.on).length;
-    return `<button type="button" class="btn ghost small connections-toggle ${on ? 'on' : ''}" data-action="chat-connections" title="Clusters and MCP servers the model can use in this chat" aria-label="Tools: ${on} of ${list.length} on" ${state.streaming ? 'disabled' : ''}>${icon('link')}<span class="option-text">Tools</span><span class="count">${on}/${list.length}</span></button>`;
+    const on = list.filter(c => c.on).length, auto = chat.auto && autoAllowed();
+    return `<button type="button" class="btn ghost small connections-toggle ${on ? 'on' : ''}" data-action="chat-connections" title="Clusters and MCP servers the model can use in this chat${auto ? '. Auto: tools run without asking' : ''}" aria-label="Tools: ${on} of ${list.length} on${auto ? ', Auto mode' : ''}" ${state.streaming ? 'disabled' : ''}>${icon('link')}<span class="option-text">Tools</span><span class="count">${on}/${list.length}</span>${auto ? '<span class="auto-badge">Auto</span>' : ''}</button>`;
   }
   function contextSection() {
     const list = listed();
     if (!list.length) return '';
-    return `<section class="context-section"><span class="eyebrow">Tools</span>${list.map(c => `<div class="detail-row"><span>${esc(c.name)}</span><span>${c.on ? `${c.tools} tool${c.tools === 1 ? '' : 's'}` : 'Off'}</span></div>`).join('')}<button class="btn small" data-action="chat-connections">${icon('link')}Choose tools</button></section>`;
+    return `<section class="context-section"><span class="eyebrow">Tools</span>${chat.auto && autoAllowed() ? '<div class="detail-row"><span>Auto mode</span><span>Runs without asking</span></div>' : ''}${list.map(c => `<div class="detail-row"><span>${esc(c.name)}</span><span>${c.on ? `${c.tools} tool${c.tools === 1 ? '' : 's'}` : 'Off'}</span></div>`).join('')}<button class="btn small" data-action="chat-connections">${icon('link')}Choose tools</button></section>`;
   }
   function chooser() {
-    modal('Tools in this chat', `<p class="inline-note">The model can use the clusters and MCP servers that are on. Changes apply from the next message.</p><div class="chat-connections">${listed().map(c => `<div class="setting-line">${icon(KINDS[c.kind]?.glyph || 'link')}<div class="grow"><h3>${esc(c.name)} ${c.shared ? badge('Shared') : ''}</h3><p>${c.tools} tool${c.tools === 1 ? '' : 's'}</p></div><button type="button" class="btn small ${c.on ? '' : 'primary'}" data-action="chat-connection-switch" data-id="${esc(c.id)}" aria-pressed="${c.on}">${c.on ? 'On' : 'Off'}</button></div>`).join('')}</div><div class="modal-actions"><a class="btn ghost small" href="#clusters">Clusters</a><a class="btn ghost small" href="#settings/mcp">MCP servers</a><button class="btn primary" data-action="close">Done</button></div>`);
+    const auto = autoAllowed() ? `<div class="setting-line auto-line">${icon('bolt')}<div class="grow"><h3>Auto mode</h3><p>Every tool runs without asking, including ones that submit, apply or delete. For long research runs you won’t be watching.</p></div><button type="button" class="switch ${chat.auto ? 'on' : ''}" role="switch" data-action="chat-auto-switch" aria-checked="${chat.auto}" aria-label="Auto mode"></button></div>` : '';
+    modal('Tools in this chat', `<p class="inline-note">The model can use the clusters and MCP servers that are on. Changes apply from the next message.</p>${auto}<div class="chat-connections">${listed().map(c => `<div class="setting-line">${icon(KINDS[c.kind]?.glyph || 'link')}<div class="grow"><h3>${esc(c.name)} ${c.shared ? badge('Shared') : ''}</h3><p>${c.tools} tool${c.tools === 1 ? '' : 's'}</p></div><button type="button" class="switch ${c.on ? 'on' : ''}" role="switch" data-action="chat-connection-switch" data-id="${esc(c.id)}" aria-checked="${c.on}" aria-label="Use ${esc(c.name)} in this chat"></button></div>`).join('')}</div><div class="modal-actions">${clustersOn() ? '<a class="btn ghost small" href="#clusters">Clusters</a>' : ''}<a class="btn ghost small" href="#settings/mcp">MCP servers</a><button class="btn primary" data-action="close">Done</button></div>`);
   }
   async function switchOne(id) {
     const item = listed().find(c => c.id === id); if (!item) return;
@@ -169,14 +184,28 @@ export function createConnections({ api, state, capabilities, render, modal, clo
     else if (on) chat.draftOff.delete(id); else chat.draftOff.add(id);
     item.on = on; chooser(); render();
   }
+  async function switchAuto() {
+    const auto = !chat.auto;
+    if (chat.id) await api.request(`/api/conversations/${encodeURIComponent(chat.id)}/connections`, { method: 'PATCH', body: { auto } });
+    else chat.draftAuto = auto;
+    chat.auto = auto; chooser(); render();
+  }
   /** A new chat was created: store the choices made before it existed. */
   async function applyDraft(id) {
     const off = [...chat.draftOff]; chat.draftOff.clear();
+    if (chat.draftAuto) { chat.draftAuto = false; await api.request(`/api/conversations/${encodeURIComponent(id)}/connections`, { method: 'PATCH', body: { auto: true } }).catch(() => {}); }
     await Promise.all(off.map(connectionId => api.request(`/api/conversations/${encodeURIComponent(id)}/connections`, { method: 'PATCH', body: { connectionId, on: false } }).catch(() => {})));
+  }
+  /** Research turns Auto mode on for its chat, where the installation allows it. */
+  async function enableAuto(id) {
+    if (!autoAllowed()) return;
+    await api.request(`/api/conversations/${encodeURIComponent(id)}/connections`, { method: 'PATCH', body: { auto: true } }).catch(() => {});
+    if (chat.id === id) { chat.auto = true; render(); }
   }
   actions['chat-connections'] = () => chooser();
   actions['chat-connection-switch'] = el => switchOne(el.dataset.id);
+  actions['chat-auto-switch'] = () => switchAuto();
 
-  function clear() { local.sequence++; local.items = []; local.error = ''; local.loading = false; chat.id = null; chat.list = null; chat.draftOff.clear(); }
-  return { view, load, actions, submit, clear, items: () => local.items, loaded: () => local.loaded, loading: () => local.loading, error: () => local.error, kinds: KINDS, loadChat, composerButton, contextSection, applyDraft, resetDraft: () => chat.draftOff.clear() };
+  function clear() { local.sequence++; local.items = []; local.error = ''; local.loading = false; chat.id = null; chat.list = null; chat.draftOff.clear(); chat.auto = chat.draftAuto = false; }
+  return { view, load, actions, submit, clear, items: () => local.items, loaded: () => local.loaded, loading: () => local.loading, error: () => local.error, kinds: KINDS, loadChat, composerButton, contextSection, applyDraft, enableAuto, resetDraft: () => { chat.draftOff.clear(); chat.draftAuto = false; }, startAuto: () => { if (autoAllowed()) chat.draftAuto = chat.auto = true; } };
 }

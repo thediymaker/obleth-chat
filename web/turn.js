@@ -11,7 +11,7 @@ const kindOf = e => e.kind || 'tool';
 const FILE_TOOLS = new Set(['write_file', 'edit_file']);
 // Searching knowledge, saving and asking are not work to show: their cards sit below
 // the answer.
-const KNOWLEDGE = e => e.kind === 'sources' || e.kind === 'saved' || e.kind === 'question' || e.tool === 'search_knowledge' || e.tool === 'save_item';
+const KNOWLEDGE = e => e.kind === 'sources' || e.kind === 'saved' || e.kind === 'question' || e.kind === 'workspace' || e.kind === 'research' || e.tool === 'search_knowledge' || e.tool === 'save_item';
 
 export function duration(ms) {
   if (ms == null || !Number.isFinite(ms)) return '';
@@ -58,7 +58,7 @@ export function workOf(m) {
   };
   for (const e of list) {
     const kind = kindOf(e);
-    if (kind === 'sources' || kind === 'saved' || kind === 'question') continue;
+    if (kind === 'sources' || kind === 'saved' || kind === 'question' || kind === 'workspace' || kind === 'research') continue;
     if (kind === 'thought') {
       const text = reasoning.slice(e.from || 0, e.to ?? reasoning.length).trim();
       if (text) pending.push({ type: 'thought', e, text });
@@ -243,7 +243,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
     const recent = work.rows.filter(r => r.type !== 'thought' && !(r.type === 'step' && r.e.status === 'awaiting')).slice(-3);
     const isOpen = open.has(m.id || 'live');
     const notes = (queued.get(conversation()) || []).filter(n => !work.entries.some(e => kindOf(e) === 'note' && e.summary === n));
-    return `<section class="run-card" aria-label="Working"><div class="run-head"><span class="run-pulse" aria-hidden="true"></span><div class="grow"><strong>${esc(now)}</strong><small><span data-since="${new Date(began).toISOString()}">${esc(clock(Date.now() - began))}</span> · ${s.steps} step${s.steps === 1 ? '' : 's'}${s.files.length ? ` · ${s.files.length} file${s.files.length === 1 ? '' : 's'} changed` : ''}</small></div></div><ol class="run-rail">${rail}</ol>${waiting.map(w => `<div class="run-ask">${approval(w)}<pre>${esc(w.detail || '')}</pre></div>`).join('')}${nowBlock}${thoughtText ? `<div class="run-thought">${icon('orbit')}<div class="grow"><span class="eyebrow">Latest thought</span><p>${esc(latest(thoughtText))}</p></div></div>` : ''}${files}${recent.length ? `<div class="run-section"><div class="spread"><span class="eyebrow">Recent steps</span><button type="button" class="tr-link" data-action="trace-toggle" data-id="${esc(m.id || 'live')}" aria-expanded="${isOpen}">${isOpen ? 'Hide steps' : `Show all ${s.steps}`}</button></div><ol class="trace-list compact">${recent.map(row).join('')}</ol></div>` : ''}${notes.map(n => `<p class="run-queued">${icon('clock')}Queued for the next step: ${esc(n)}</p>`).join('')}</section>${isOpen ? trace(m, work) : ''}`;
+    return `<section class="run-card" aria-label="Working"><div class="run-head"><span class="run-pulse" aria-hidden="true"></span><div class="grow"><strong>${esc(now)}</strong><small><span data-since="${new Date(began).toISOString()}">${esc(clock(Date.now() - began))}</span> · ${s.steps} step${s.steps === 1 ? '' : 's'}${s.files.length ? ` · ${s.files.length} file${s.files.length === 1 ? '' : 's'} changed` : ''}</small></div></div><ol class="run-rail">${rail}</ol>${waiting.map(w => `<div class="run-ask">${approval(w)}<pre>${esc(w.detail || '')}</pre></div>`).join('')}${nowBlock}${thoughtText ? `<div class="run-thought">${icon('orbit')}<div class="grow"><span class="eyebrow">Latest thought</span><p>${esc(latest(thoughtText))}</p></div></div>` : ''}${files}${recent.length ? `<div class="run-section"><div class="spread"><span class="eyebrow">Recent steps</span><button type="button" class="tr-link" data-action="trace-toggle" data-id="${esc(m.id || 'live')}" aria-expanded="${isOpen}">${isOpen ? 'Hide steps' : `Show all ${s.steps}`}</button></div><ol class="trace-list compact">${recent.map(row).join('')}</ol></div>` : ''}${notes.map(n => `<p class="run-queued">${icon('clock')}<span><span class="run-queued-label">Queued for the next step</span>${esc(n)}</span></p>`).join('')}</section>${isOpen ? trace(m, work) : ''}`;
   }
   function steerForm() {
     return `<form class="steer-form" id="steer-form" data-conversation="${esc(conversation() || '')}"><label for="steer-text">Steer</label><input id="steer-text" name="steer-text" autocomplete="off" maxlength="2000" placeholder="Add a note without stopping, like “make the mane darker”" value="${esc(steerDraft)}"><button class="btn small primary" type="submit">Send at next step</button></form>`;

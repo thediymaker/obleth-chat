@@ -26,7 +26,9 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     Object.assign(local, { list: r.projects || [], groups: r.groups || [] });
     return local.list;
   }
-  const tab = () => location.hash.split('/')[2] === 'research' ? 'research' : 'overview';
+  // Research runs in workspaces, so its tab exists only where they are enabled.
+  const researchOn = () => !!capabilities.features?.workspaces;
+  const tab = () => researchOn() && location.hash.split('/')[2] === 'research' ? 'research' : 'overview';
   async function load(id = '') {
     const sequence = ++local.sequence; local.error = ''; render();
     if (id && tab() === 'research') research.load(id); else research.stop();
@@ -74,7 +76,7 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     const starts = `<section class="card project-section"><span class="eyebrow">Chats here start with</span>${d.collections.map(c => `<div class="detail-row">${icon('book')}<a class="grow" href="#knowledge/${encodeURIComponent(c.id)}">${esc(c.name)}</a><span class="faint">${count(c.documents, 'doc')}</span></div>`).join('')}${knowledge() ? `<div class="detail-row">${icon('bookmark')}<span class="grow">Saved in this project</span><span class="faint">${count(p.saved, 'item')}</span></div>` : ''}${!d.collections.length && !knowledge() ? '<p class="context-note">Just the instructions.</p>' : ''}${mine && knowledge() ? btn('Choose collections', 'project-collections', { icon: 'book', tone: 'small' }) : ''}</section>`;
     const people = `<section class="card project-section"><span class="eyebrow">People</span><div class="detail-row"><span class="avatar small">${esc((p.ownerName || '?').slice(0, 1).toUpperCase())}</span><span class="grow">${mine ? 'You' : esc(p.ownerName)}</span><span class="faint">owner</span></div>${p.scope === 'group' ? `<p class="context-note">Shared through the group <a href="#groups/${encodeURIComponent(p.groupId)}">${esc(p.groupName || '')}</a>. Members see the instructions, collections and saved items, and can start their own chats here. Only the owner changes the project.</p>` : `<p class="context-note">Only you can see this project.${mine ? ' Share it with a group from Edit.' : ''}</p>`}</section>`;
     const here = tab(), link = (t, label) => `<a href="#projects/${encodeURIComponent(p.id)}${t === 'research' ? '/research' : ''}" class="${here === t ? 'active' : ''}" ${here === t ? 'aria-current="page"' : ''}>${label}</a>`;
-    const tabs = `<nav class="project-tabs" aria-label="Project">${link('overview', 'Overview')}${link('research', 'Research')}</nav>`;
+    const tabs = researchOn() ? `<nav class="project-tabs" aria-label="Project">${link('overview', 'Overview')}${link('research', 'Research')}</nav>` : '';
     const content = here === 'research' ? research.view(p) : `<div class="project-layout"><div class="project-main">${saved}${chats}</div><div class="project-side">${instructions}${starts}${people}</div></div>`;
     return `<div class="page project-page">${head}${tabs}${errorBox(local.error, 'project-reload')}${content}</div>`;
   }
@@ -161,7 +163,8 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     'project-delete': el => modal('Delete this project?', `<p>The project, its instructions and its collection choices are deleted. Its chats and saved items are kept, outside any project.</p><div class="modal-actions">${btn('Keep project', 'close')}${btn('Delete project', 'project-delete-confirm', { tone: 'danger', attrs: `data-id="${esc(el.dataset.id)}"` })}</div>`),
     'project-delete-confirm': async el => { await api.request(path(el.dataset.id), { method: 'DELETE' }); close(); toast('Project deleted'); await list(true); go('projects'); },
     'project-chat': el => { newChat(); chat.draft = el.dataset.id; render(); },
-    'project-research': el => { newChat(); chat.draft = el.dataset.id; },
+    // Research runs unattended, so its chat starts in Auto mode where that's allowed.
+    'project-research': el => { newChat({ auto: true }); chat.draft = el.dataset.id; },
     'project-draft-clear': () => { chat.draft = null; render(); },
     'project-collections': collectionsPicker,
     'project-collection': el => toggleCollection(el.dataset.id),
@@ -176,5 +179,15 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     },
   };
   function clear() { local.sequence++; Object.assign(local, { list: null, groups: [], detail: null, error: '', collections: null }); Object.assign(chat, { id: null, project: null, draft: null }); }
-  return { load, list, page, sidebar, editor, submit, actions, clear, loadChat, crumb, composerChip, contextSection, applyDraft, chatProject, choices: () => local.list || [], resetDraft: () => { chat.draft = null; }, refresh: () => list(true).then(render).catch(() => {}) };
+  /** Moves a chat into a new project named after the research it will run. */
+  async function researchHome(id, goal) {
+    const name = String(goal || '').trim().replace(/[.\s]+$/, '').slice(0, 120) || 'Research';
+    const made = await api.request('/api/projects', { method: 'POST', body: { name, description: 'Research started from a chat.', color: 'violet', scope: 'personal' } });
+    const r = await api.request(`/api/conversations/${encodeURIComponent(id)}/project`, { method: 'PUT', body: { projectId: made.project.id } });
+    if (chat.id === id) chat.project = r.project;
+    await list(true).catch(() => {});
+    render();
+    return r.project;
+  }
+  return { load, list, researchHome, page, sidebar, editor, submit, actions, clear, loadChat, crumb, composerChip, contextSection, applyDraft, chatProject, choices: () => local.list || [], resetDraft: () => { chat.draft = null; }, refresh: () => list(true).then(render).catch(() => {}) };
 }

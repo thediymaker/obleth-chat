@@ -139,7 +139,7 @@ pub async fn prompt(pool: &PgPool, standing: &Standing, sandbox: &Sandbox) -> St
 2. The run command and environment are a fixed contract. Never vary them between nodes or pass settings through environment variables; put every knob in committed code or config files and vary those.\n\
 3. Grow the tree downward. A round is a few sibling options of one decision under one parent (which learning rate? which cache type?). The next round branches from that round's winner, never from the baseline again. A long row of children under the baseline, or a chain of options that do not build on each other, is the wrong shape. Before making X a child of Y, name what Y established that X builds on; if you cannot, they are siblings.\n\
 4. A run that crashes, runs out of memory or times out answered nothing: the node stays open. Check it out, fix it and run it again. After two repairs in a row that answer nothing, or the same failure on a second node, stop and ask the person.\n\
-5. Each run starts from a clean checkout of the node's commit in its own folder, without untracked or ignored files such as .venv, node_modules or downloaded data. The run command must set up what it needs, or use absolute paths under {dir} for shared data and environments. Make the code print its settings and final metrics.\n\
+5. Each run starts from a clean checkout of the node's commit in its own folder, without untracked or ignored files such as downloaded data. The project's .venv and node_modules are linked into it: install packages in the project folder beforehand, not in the run command. Use absolute paths under {dir} for shared data such as model weights. Make the code print its settings and final metrics.\n\
 6. The loop: read research_status, create one round's children, edit each on its branch, start their runs (up to {max} at once), then call experiment_wait. Each time a run finishes, read its result before anything else and decide: repair the node, run the next option, promote the winner (the next round branches from it), or stop. Stop when the goal is met or after about three runs in a row without a gain.\n\
 7. Report only results you read from runs, citing them as \"run N\", and label inferences as such. When a round ends or you stop, give one line per node: what it tested, its status and its result.",
         goal = research.goal,
@@ -975,10 +975,18 @@ mod tests {
         assert_eq!(state, "exit 0", "{log}");
         assert_eq!(super::super::parse_metrics(&log)["score"], 160.0);
         assert!(
-            !runs.join("demo/runs/1/src/node_modules").exists(),
-            "ignored files are not in the run"
+            runs.join("demo/runs/1/src/node_modules")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the project's node_modules is linked into the run"
         );
         local(&dir, &runs, &super::super::cleanup_script(), &["1"], None);
+        assert!(
+            dir.join("node_modules/big.js").exists(),
+            "removing the run leaves the project's node_modules alone"
+        );
         assert!(
             !runs.join("demo/runs/1/src").exists(),
             "the run's checkout is removed"

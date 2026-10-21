@@ -17,6 +17,16 @@ pub struct Config {
     pub backup_status_dir: Option<PathBuf>,
     /// Lets people's own connections reach private addresses. For development.
     pub connections_allow_private: bool,
+    /// Which connections people can add: none, MCP servers only, or also clusters.
+    pub connections: ConnectionsMode,
+    /// Whether a chat may switch to Auto mode, where tools run without asking.
+    pub auto_mode: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConnectionsMode {
+    Off,
+    Mcp,
+    All,
 }
 impl Config {
     pub fn from_env() -> Result<Self> {
@@ -98,6 +108,27 @@ impl Config {
                 .map(PathBuf::from),
             connections_allow_private: env::var("OBLETH_CHAT_CONNECTIONS_ALLOW_PRIVATE")
                 .is_ok_and(|v| v == "true"),
+            connections: match env::var("OBLETH_CHAT_CONNECTIONS")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .as_deref()
+                .map(str::trim)
+            {
+                None | Some("all") => ConnectionsMode::All,
+                Some("mcp") => ConnectionsMode::Mcp,
+                Some("off") => ConnectionsMode::Off,
+                Some(_) => bail!("OBLETH_CHAT_CONNECTIONS must be all, mcp or off"),
+            },
+            auto_mode: match env::var("OBLETH_CHAT_AUTO_MODE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .as_deref()
+                .map(str::trim)
+            {
+                None | Some("allowed") => true,
+                Some("off") => false,
+                Some(_) => bail!("OBLETH_CHAT_AUTO_MODE must be allowed or off"),
+            },
         })
     }
 }

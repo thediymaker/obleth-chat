@@ -98,9 +98,77 @@ pub fn entry(call_id: &str, questions: Vec<Value>) -> Value {
 /// What the model reads back: the turn ends here.
 pub const SHOWN: &str = "The person sees your questions now. End your reply without repeating them; their answers arrive as their next message.";
 
+/// Offered when the person may have workspaces but this chat has none: the model
+/// asks for one, and the card's button turns it on and carries on.
+pub const WORKSPACE_TOOL: &str = "request_workspace";
+
+pub fn workspace_definition() -> Value {
+    json!({"type":"function","function":{"name":WORKSPACE_TOOL,
+        "description":"Ask the person to turn on a workspace for this chat: a private Linux machine where you can write files, run commands and code, and show a live preview. Call it when the request needs that, such as building or running an app, running code or experiments, keeping files, or research, and you cannot do it well without one. Do not call it for questions you can answer in text. Your reply ends with a button that turns the workspace on; once they press it, you continue in their next message with the workspace tools.",
+        "parameters":{"type":"object","properties":{
+            "reason":{"type":"string","description":"Why this needs a workspace, in one short sentence the person reads, such as \"To build the app and show you a live preview.\""}},
+        "required":["reason"],"additionalProperties":false}}})
+}
+
+/// The card for a workspace request, or what the model must fix.
+pub fn workspace_entry(call_id: &str, arguments: &str) -> Value {
+    let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+    let reason = text(&args["reason"], 240);
+    json!({"id":call_id,"kind":"workspace","tool":WORKSPACE_TOOL,"status":"asked","summary":"Asked for a workspace","reason":reason})
+}
+
+/// Offered when the person may run research but this chat isn't doing any: the
+/// model can suggest it, and the card's button sets the chat up for research.
+pub const RESEARCH_TOOL: &str = "suggest_research";
+
+pub fn research_definition() -> Value {
+    json!({"type":"function","function":{"name":RESEARCH_TOOL,
+        "description":"Suggest turning this into a research project, where you try several alternatives as git branches, run each with the same command, and keep the best result as the starting point of the next round. Suggest it only when the person wants something measurably better (faster, more accurate, smaller, cheaper) and getting there takes several tries that can be measured by one number, not for a question with a known answer or a one-off change. The person sees a card with a button that moves the chat into a project, turns on a workspace and starts setting up the research. Your reply ends at the card.",
+        "parameters":{"type":"object","properties":{
+            "goal":{"type":"string","description":"What to improve, in one short sentence, such as \"Make decode at least 5% faster on this node\""},
+            "metric":{"type":"string","description":"The number that decides it, such as \"decode tokens per second, higher is better\""}},
+        "required":["goal"],"additionalProperties":false}}})
+}
+
+/// The card for a research suggestion. `in_project` says the chat's own project can
+/// hold the research; otherwise the button makes a new project for it.
+pub fn research_entry(call_id: &str, arguments: &str, in_project: bool) -> Value {
+    let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+    json!({"id":call_id,"kind":"research","tool":RESEARCH_TOOL,"status":"asked","summary":"Suggested research","goal":text(&args["goal"], 200),"metric":text(&args["metric"], 120),"inProject":in_project})
+}
+
+pub const WORKSPACE_SHOWN: &str = "The person sees a button to turn on a workspace for this chat. End your reply now in at most one short sentence, without repeating the reason; when they turn it on, their next message continues the task and you will have the workspace tools.";
+
+pub const RESEARCH_SHOWN: &str = "The person sees a card suggesting research, with a button to start it. End your reply now in at most one short sentence, without repeating the goal; if they start it, their next message asks you to set the research up and you will have the workspace and research tools.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workspace_request_carries_a_short_reason() {
+        let entry = workspace_entry(
+            "call_1",
+            &json!({"reason":"To build the app\u{7} and show a preview."}).to_string(),
+        );
+        assert_eq!(entry["kind"], "workspace");
+        assert_eq!(entry["reason"], "To build the app and show a preview.");
+        assert_eq!(workspace_entry("call_2", "not json")["reason"], "");
+    }
+
+    #[test]
+    fn a_research_suggestion_carries_its_goal_and_metric() {
+        let entry = research_entry(
+            "call_1",
+            &json!({"goal":"Make decode faster","metric":"tokens per second"}).to_string(),
+            false,
+        );
+        assert_eq!(entry["kind"], "research");
+        assert_eq!(entry["goal"], "Make decode faster");
+        assert_eq!(entry["metric"], "tokens per second");
+        assert_eq!(entry["inProject"], false);
+        assert_eq!(research_entry("call_2", "{}", true)["metric"], "");
+    }
 
     #[test]
     fn keeps_good_questions_and_explains_bad_ones() {

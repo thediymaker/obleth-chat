@@ -68,11 +68,14 @@ pub async fn for_project(pool: &PgPool, project: Uuid) -> Result<Option<Research
 const RUN_DIR: &str = "R=${OBLETH_RESEARCH_DIR:-/workspace/.obleth-research}/$OBLETH_SLUG/runs/$1";
 pub(crate) const GIT: &str = "git() { command git -c user.name=obleth -c user.email=research@obleth.invalid -c core.quotepath=off -c advice.detachedHead=false \"$@\"; }";
 
+/// Each run checks out the node's commit in its own folder. The project's .venv and
+/// node_modules are linked in, so every node shares one environment.
 pub(crate) fn launch_script() -> String {
     format!(
         "{RUN_DIR}\n{GIT}\nrm -rf \"$R\" && mkdir -p \"$R\" && cat > \"$R/cmd\" || exit 1\n\
          git worktree prune 2>/dev/null\n\
          git worktree add -q --detach -f \"$R/src\" \"$2\" > \"$R/log\" 2>&1 || {{ cat \"$R/log\"; exit 3; }}\n\
+         for d in .venv node_modules; do [ -d \"$d\" ] && [ ! -e \"$R/src/$d\" ] && ln -s \"$PWD/$d\" \"$R/src/$d\"; done\n\
          nohup setsid sh -c 'echo $$ > \"$1/pid\"; cd \"$1/src\" && sh \"$1/cmd\" > \"$1/log\" 2>&1 < /dev/null; echo $? > \"$1/exit.tmp\" && mv \"$1/exit.tmp\" \"$1/exit\"' sh \"$R\" > /dev/null 2>&1 < /dev/null &\n\
          echo started"
     )

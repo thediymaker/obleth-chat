@@ -17,6 +17,21 @@ button,input,textarea,select,a{outline-offset:3px}
 button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--focus)}
 input:focus-visible,textarea:focus-visible,select:focus-visible{outline:1px solid var(--focus);outline-offset:1px;border-color:var(--control-border)}
 input,textarea,select{color:var(--text);border:1px solid var(--line);background:var(--bg);border-radius:var(--radius-md);font-size:var(--fs-base)}
+/* Browsers paint autofilled fields their own blue; keep them in the theme. */
+input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus{-webkit-text-fill-color:var(--text);caret-color:var(--text);-webkit-box-shadow:0 0 0 1000px var(--bg) inset;box-shadow:0 0 0 1000px var(--bg) inset;transition:background-color 100000s}
+/* Dropdowns draw their open list in the theme where the browser allows it
+   (customizable select); elsewhere the native list follows color-scheme. */
+@supports (appearance:base-select){
+  select{appearance:base-select;cursor:pointer;display:inline-flex;align-items:center;gap:8px}
+  select::picker-icon{color:var(--muted);transition:rotate .15s}
+  select:open::picker-icon{rotate:180deg}
+  select::picker(select){appearance:base-select;margin-top:4px;padding:4px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--floating-bg);color:var(--text-2);box-shadow:0 12px 32px var(--shadow)}
+  select option{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:var(--radius-sm);font-size:var(--fs-md);color:var(--text-2);background:transparent;cursor:pointer}
+  select option:hover,select option:focus-visible{background:var(--secondary);color:var(--text);outline:0}
+  select option:checked{color:var(--text);font-weight:500}
+  select option::checkmark{order:1;margin-left:auto;color:var(--text)}
+  select option:disabled{color:var(--faint);cursor:default}
+}
 input,textarea{padding:10px 12px}
 textarea{resize:vertical}
 input::placeholder,textarea::placeholder{color:var(--faint)}
@@ -307,7 +322,7 @@ code{font-size:.9em}
 /* Conversation */
 .chat-layout{display:grid;grid-template-columns:minmax(0,1fr) var(--context-w);min-height:calc(100dvh - var(--topbar-h) - var(--footer-h))}
 .chat-layout.no-context{grid-template-columns:minmax(0,1fr)}
-.chat-column{min-width:0;display:flex;flex-direction:column}
+.chat-column{min-width:0;display:flex;flex-direction:column;container-type:inline-size}
 .conversation-header{height:52px;padding:0 24px;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line-soft)}
 .conversation-header-title{display:flex;gap:9px;align-items:center;min-width:0}
 .conversation-header h2{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-base);font-weight:500;letter-spacing:0;color:var(--text-2)}
@@ -316,6 +331,8 @@ code{font-size:.9em}
 .messages{max-width:calc(var(--chat-w) + 64px);width:100%;padding:28px 32px 8px;margin:0 auto;flex:1}
 .message{margin-bottom:32px}
 .message-heading{display:flex;align-items:center;gap:8px;margin:0 0 8px -32px;font-size:var(--fs-md);font-weight:600}
+/* The avatar hangs in the gutter only when the column leaves room for one. */
+@container (max-width:960px){.message-heading{margin-left:0}}
 .message-heading .avatar{width:24px;height:24px;font-size:var(--fs-2xs)}
 .message-heading img{width:16px;height:22px;object-fit:contain;margin:0 4px}
 .message-heading .brand-logo{width:24px;height:24px}
@@ -930,10 +947,10 @@ td .icon{width:16px;height:16px;color:var(--faint)}
   .thinking-content{max-height:240px;padding:11px 12px}
   .composer textarea{padding:14px 14px 6px}
   .composer-bottom{gap:6px;padding-left:10px;padding-right:10px}
-  .composer-options{flex-wrap:nowrap;gap:4px}
+  .composer-options{flex-wrap:wrap;gap:4px}
   .composer-options .btn{flex-shrink:0}
   .composer-options .btn .option-text{display:none}
-  .composer .model-button,.home .composer .model-button{max-width:calc(100vw - 236px);padding:5px 8px}
+  .composer .model-button,.home .composer .model-button{max-width:160px;flex-shrink:0;padding:5px 8px}
   .effort-button{padding:5px 7px;gap:5px}
   .attachment-trigger{width:28px}
   .attachment-chip{max-width:100%;flex:1;min-width:130px}
@@ -1155,6 +1172,9 @@ body.workspace-open .content{margin-right:var(--workspace-w)}
 .approval{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 16px;margin:8px 0 4px;padding:8px 8px 8px 12px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--card);font-size:var(--fs-md)}
 .approval>span{color:var(--text);font-weight:500}
 .approval-actions{display:flex;flex-wrap:wrap;gap:6px}
+/* Shown in the add dialog once "Share with everyone" is ticked. */
+.connection-personal-tokens.when-shared{display:none}
+#connection-form:has(#connection-shared:checked) .connection-personal-tokens.when-shared{display:block}
 .activity-step.awaiting>.icon,.activity-step.awaiting small{color:var(--amber)}
 .activity-step.declined small{color:var(--faint)}
 
@@ -1189,8 +1209,14 @@ body.collapsed.workspace-full .workspace-pane{left:0}
 }
 .connections-toggle .count{font-size:var(--fs-2xs);color:var(--muted);font-variant-numeric:tabular-nums}
 .connections-toggle.on{color:var(--text)}
-.chat-connections{margin-top:8px}
-.chat-connections .setting-line .btn{min-width:48px;justify-content:center}
+.chat-connections{margin-top:4px}
+.auto-line{margin-top:4px;padding:10px 12px!important;border:1px solid var(--line);border-radius:var(--radius);background:var(--raised)}
+.auto-line p{line-height:1.5}
+.auto-badge{margin-left:4px;padding:1px 6px;border-radius:var(--radius-sm);background:rgb(var(--amber-rgb) / 14%);color:var(--amber);font-size:var(--fs-2xs);font-weight:500;letter-spacing:.04em}
+.chat-connections .setting-line{padding:10px 0;gap:12px}
+.chat-connections .setting-line:last-child{border-bottom:0}
+.chat-connections .setting-line h3{display:flex;align-items:center;gap:6px}
+.chat-connections .setting-line .pill{margin-left:0;font-size:var(--fs-2xs)}
 /* Clusters page */
 
 .cluster-card{padding:20px;margin-bottom:20px;min-width:0}
@@ -1273,8 +1299,11 @@ body.workspace-full .workspace-resize{display:none}
 .run-file.is-next{border-style:dashed;border-color:var(--line-strong);color:var(--faint)}
 .run-ask{margin:12px 14px 0;padding:10px 12px;border:1px solid rgb(var(--amber-rgb) / 30%);border-radius:6px;background:rgb(var(--amber-rgb) / 4%)}
 .run-ask pre{margin:8px 0 0;max-height:160px;overflow:auto;padding:6px 8px;border-radius:4px;background:var(--bg);color:var(--muted);font-size:var(--fs-xs);white-space:pre-wrap;overflow-wrap:anywhere}
-.run-queued{display:flex;align-items:center;gap:6px;margin:10px 14px 0;font-size:var(--fs-sm);color:var(--muted)}
-.run-queued .icon{width:13px;height:13px}
+.run-queued{display:flex;align-items:flex-start;gap:8px;margin:12px 0 0;padding:9px 14px;border-top:1px solid var(--line);background:var(--raised);font-size:var(--fs-sm);line-height:1.5;color:var(--text-2);overflow-wrap:anywhere}
+.run-queued .icon{width:13px;height:13px;margin-top:3px;flex-shrink:0;color:var(--muted)}
+.run-queued-label{color:var(--muted);margin-right:6px}
+.run-queued+.run-queued{margin-top:0;border-top-color:var(--line-soft)}
+.run-card>.run-queued:last-child{margin-bottom:0}
 .run-card>:last-child{margin-bottom:14px}
 .steer-form{display:flex;align-items:center;gap:8px;margin:-8px 0 16px;padding:6px 6px 6px 12px;border:1px solid var(--line-strong);border-radius:8px;background:var(--code-bg)}
 .steer-form label{font-size:var(--fs-sm);color:var(--muted)}
@@ -1617,6 +1646,17 @@ body.workspace-full .workspace-resize{display:none}
 .question-card.is-closed>.icon{width:15px;height:15px;flex-shrink:0;margin-top:1px}
 .question-card.is-closed p+p{margin-top:4px}
 .question-card.is-closed strong{color:var(--text-2);font-weight:500;margin-right:4px}
+.workspace-offer{display:flex;align-items:center;gap:12px;padding:12px 12px 12px 14px;flex-wrap:wrap}
+.workspace-offer .grow{min-width:200px}
+.workspace-offer strong{font-size:var(--fs-base);font-weight:500;color:var(--text)}
+.workspace-offer p{margin-top:2px;font-size:var(--fs-sm);color:var(--muted);line-height:1.5}
+.workspace-offer-icon{width:32px;height:32px;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--raised);color:var(--text-2)}
+.workspace-offer-icon .icon{width:16px;height:16px}
+.workspace-offer-actions{display:flex;gap:6px;margin-left:auto}
+.research-offer{align-items:flex-start}
+.research-offer .workspace-offer-actions{align-self:center}
+.workspace-offer p.research-offer-metric{color:var(--text-2)}
+.workspace-offer p.faint{margin-top:6px;font-size:var(--fs-xs)}
 /* Project tabs and Research */
 .project-tabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin:-6px 0 20px}
 .project-tabs a{padding:8px 0;margin-bottom:-1px;font-size:var(--fs-md);color:var(--muted);border-bottom:1px solid transparent}
@@ -1679,3 +1719,4 @@ a.research-chip:hover{color:var(--text)}
 .research-step{display:inline-flex;width:20px;height:20px;border-radius:50%;background:var(--secondary);font-size:var(--fs-xs);align-items:center;justify-content:center}
 @media (max-width:1100px){.research-goal{flex-direction:column}.research-steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){.research-node{margin-left:calc(var(--depth) * 10px)}.research-node .research-sha{display:none}.research-steps{grid-template-columns:1fr}}
+.research-pending{margin:12px auto 0;max-width:460px}

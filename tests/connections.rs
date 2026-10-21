@@ -29,6 +29,8 @@ use uuid::Uuid;
 const ORIGIN: &str = "http://localhost:8085";
 const PASSWORD: &str = "fixture-only-password-42";
 const TOKEN: &str = "fixture-mcp-token";
+/// A person's own token for a shared MCP server set to personal tokens.
+const PERSONAL_TOKEN: &str = "fixture-personal-mcp-token";
 const SLURM_TOKEN: &str = "fixture-slurm-jwt";
 const KUBE_TOKEN: &str = "fixture-kube-token";
 /// A service account token of namespace "team".
@@ -44,12 +46,17 @@ async fn mcp(
     headers: HeaderMap,
     Json(message): Json<Value>,
 ) -> Response {
-    if headers.get("authorization").and_then(|v| v.to_str().ok())
-        != Some(&format!("Bearer {TOKEN}"))
-    {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let personal = auth == format!("Bearer {PERSONAL_TOKEN}");
+    if auth != format!("Bearer {TOKEN}") && !personal {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    seen.lock().unwrap().push(message.clone());
+    let mut record = message.clone();
+    record["personal"] = json!(personal);
+    seen.lock().unwrap().push(record);
     let id = message["id"].clone();
     match message["method"].as_str().unwrap_or("") {
         "initialize" => (
@@ -249,6 +256,11 @@ fn tool_script(calls: &[(&str, &str, Value)]) -> Value {
 }
 
 async fn fixture(pool: PgPool) -> Fixture {
+    fixture_with(pool, true).await
+}
+
+/// `clusters`: whether Slurm and Kubernetes are offered (OBLETH_CHAT_CONNECTIONS).
+async fn fixture_with(pool: PgPool, clusters: bool) -> Fixture {
     let mcp_seen: Seen = Arc::default();
     let cluster_seen: Seen = Arc::default();
     let gateway_seen: Seen = Arc::default();
@@ -302,7 +314,11 @@ async fn fixture(pool: PgPool) -> Fixture {
     let mut state = AppState::new(auth, pool.clone(), Some(gateway), 4);
     state.followups_enabled = false;
     // The mock listens on loopback, so private addresses are allowed here.
-    state.connections = Some(Connections::new(pool, pem.as_bytes(), true).unwrap());
+    state.connections = Some(
+        Connections::new(pool, pem.as_bytes(), true)
+            .unwrap()
+            .clusters(clusters),
+    );
     Fixture {
         app: router(state, "web".into()),
         mcp_url: format!("http://{address}/mcp"),
@@ -653,6 +669,69 @@ async fn read_only_tools_run_and_actions_wait_for_allow(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn auto_mode_runs_actions_without_asking(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Fixture","url":f.mcp_url,"token":TOKEN}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, chat) = call(
+        &f.app,
+        "POST",
+        "/api/conversations",
+        json!({"title":"Jobs","model":"fixture-model"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/conversations/{id}/connections");
+    let (status, _) = call(&f.app, "PATCH", &path, json!({"auto":true}), &admin).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, listed) = call(&f.app, "GET", &path, json!({}), &admin).await;
+    assert_eq!(
+        (listed["auto"].clone(), listed["autoAllowed"].clone()),
+        (json!(true), json!(true))
+    );
+
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            json!({"content":"Check job 42 and resubmit it","model":"fixture-model"}),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = String::from_utf8(
+        tokio::time::timeout(Duration::from_secs(20), response.into_body().collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(text.contains("\"status\":\"completed\""), "{text}");
+    // The action ran without an approval card.
+    assert_eq!(tool_calls(&f.mcp_seen), ["lookup", "submit_job"]);
+    let asked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_approvals")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(asked, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn declined_actions_do_not_run(pool: PgPool) {
     let f = fixture(pool.clone()).await;
     let admin = login(&f.app, "test-admin").await;
@@ -925,6 +1004,131 @@ fn cluster_requests(f: &Fixture, method: &str, path: &str) -> Vec<Value> {
         .filter(|r| r["method"] == method && r["path"] == path)
         .cloned()
         .collect()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_shared_mcp_server_can_take_each_persons_own_token(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    // The administrator's token only lists the tools; calls use each person's own.
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Fixture","url":f.mcp_url,"token":TOKEN,"shared":true,"options":{"personalTokens":true}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    assert_eq!(
+        (
+            shared["personalTokens"].clone(),
+            shared["needsCredential"].clone(),
+            shared["active"].clone()
+        ),
+        (json!(true), json!(true), json!(false))
+    );
+    assert_eq!(shared["tools"].as_array().unwrap().len(), 2);
+    let path = format!(
+        "/api/connections/{}/credential",
+        shared["id"].as_str().unwrap()
+    );
+    let (status, _) = call(&f.app, "PUT", &path, json!({"token":"wrong"}), &admin).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, ready) = call(
+        &f.app,
+        "PUT",
+        &path,
+        json!({"token":PERSONAL_TOKEN}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ready}");
+    assert_eq!(
+        (ready["active"].clone(), ready["credential"].is_object()),
+        (json!(true), true)
+    );
+
+    let (_, stream) = send(&f, &admin, "Check job 42 and resubmit it").await;
+    let waiting = pending(&pool).await;
+    let calls: Vec<bool> = f
+        .mcp_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m["method"] == "tools/call")
+        .map(|m| m["personal"] == true)
+        .collect();
+    assert_eq!(calls, [true], "the lookup ran with the person's own token");
+    let conversation: String =
+        sqlx::query_scalar("SELECT conversation_id::text FROM tool_approvals WHERE call_id=$1")
+            .bind(&waiting)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{conversation}/approvals"),
+        json!({"callId":waiting,"decision":"deny"}),
+        &admin,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Removing the token takes the server out of this person's chats again.
+    let (status, removed) = call(&f.app, "DELETE", &path, json!({}), &admin).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(removed["active"], false);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn clusters_can_be_turned_off_for_the_installation(pool: PgPool) {
+    let f = fixture_with(pool.clone(), false).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, capabilities) = call(&f.app, "GET", "/api/capabilities", json!({}), &admin).await;
+    assert_eq!(
+        (
+            capabilities["features"]["connections"].clone(),
+            capabilities["features"]["clusters"].clone()
+        ),
+        (json!(true), json!(false))
+    );
+    let (status, refused) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Slurm","url":f.cluster_url,"shared":true}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    // A cluster saved while they were on is hidden, and MCP servers still work.
+    sqlx::query("INSERT INTO connections(id,owner_id,name,url,kind,options,tools) VALUES($1,NULL,'Old','http://127.0.0.1:1','slurm','{}','[]')")
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, created) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Fixture","url":f.mcp_url,"token":TOKEN}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (_, listed) = call(&f.app, "GET", "/api/connections", json!({}), &admin).await;
+    let kinds: Vec<&str> = listed["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["mcp"]);
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -129,7 +129,7 @@ Edit [web/site.config.js](web/site.config.js) and reload the page. This public, 
 - `links` lists the sign-in footer links as `{ label, url }`; use `[]` for none.
 - Choose built-in icon names from [web/icons.js](web/icons.js), such as `chat`, `book`, or `sun`; set an icon to `''` to hide it.
 - Text is plain text, with `\n` for a line break. Set optional text, including the sign-in and home page footers, to `''` to hide it.
-- Set `appearance.defaultTheme` to `system`, `light`, or `dark`. People can switch appearance on the sign-in page or in Settings; their browser remembers their choice.
+- Set `appearance.defaultTheme` to `system`, `light`, or `dark`. People can switch appearance in the header or in Settings; their browser remembers their choice.
 
 For Docker, copy the configuration and place your images in a host directory:
 

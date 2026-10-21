@@ -244,7 +244,7 @@ async fn metrics_endpoint(State(s): State<AppState>) -> impl IntoResponse {
     )
 }
 async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Value> {
-    let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":true,"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
+    let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":true,"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
     let user = s.auth.require(&headers, false).await.ok();
     if user.as_ref().is_some_and(|u| u.is_admin()) {
         value["adminGatewayUrl"] = json!(s.admin_gateway_url);
@@ -884,6 +884,27 @@ async fn run_generation(
     if asks {
         tools.push(questions::definition());
     }
+    // People who may have a workspace can be asked to turn one on for this chat.
+    let offers_workspace =
+        asks && workspace.is_none() && s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(&user));
+    if offers_workspace {
+        tools.push(questions::workspace_definition());
+    }
+    // Research can be suggested in a chat that isn't part of a project's research.
+    let offers_research = asks
+        && research_standing.is_none()
+        && s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(&user));
+    // Its button keeps the chat's project when that project can take the research.
+    let research_here = match (&project, offers_research) {
+        (Some(project), true) => matches!(
+            research::tools::standing(&s.store.pool, user.id, id, project.id).await,
+            Some(research::tools::Standing::Absent | research::tools::Standing::Here(_))
+        ),
+        _ => false,
+    };
+    if offers_research {
+        tools.push(questions::research_definition());
+    }
     if research_tools {
         tools.extend(research::tools::definitions());
     }
@@ -1108,6 +1129,8 @@ async fn run_generation(
                 c.name != knowledge::chat::TOOL
                     && c.name != knowledge::chat::SAVE_TOOL
                     && c.name != questions::TOOL
+                    && c.name != questions::WORKSPACE_TOOL
+                    && c.name != questions::RESEARCH_TOOL
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
             });
             let mut running = None;
@@ -1126,6 +1149,40 @@ async fn run_generation(
             }
             let (mut wrote, mut broken, mut asked) = (false, false, false);
             for call in &calls {
+                if call.name == questions::WORKSPACE_TOOL || call.name == questions::RESEARCH_TOOL {
+                    let research = call.name == questions::RESEARCH_TOOL;
+                    let offered = if research {
+                        offers_research
+                    } else {
+                        offers_workspace
+                    };
+                    let output = if offered && !asked {
+                        asked = true;
+                        let entry = if research {
+                            questions::research_entry(&call.id, &call.arguments, research_here)
+                        } else {
+                            questions::workspace_entry(&call.id, &call.arguments)
+                        };
+                        record(&mut activity, &entry, true);
+                        emit(&mut tx, "tool", entry);
+                        if research {
+                            questions::RESEARCH_SHOWN
+                        } else {
+                            questions::WORKSPACE_SHOWN
+                        }
+                        .to_string()
+                    } else if asked {
+                        "Ask for one thing at a time: your reply already ends with a question."
+                            .to_string()
+                    } else {
+                        format!("There is no tool named {}.", call.name)
+                    };
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
                 if call.name == questions::TOOL {
                     let output = match questions::parse(&call.arguments) {
                         Ok(list) if !asked && asks => {
@@ -1206,7 +1263,12 @@ async fn run_generation(
                 if let (Some(index), Some(set)) = (connection, toolset.as_mut()) {
                     let mut entry = json!({"id":call.id,"tool":call.name,"connection":set.connection(index),"summary":set.label(index),"status":"running","startedAt":chrono::Utc::now()});
                     record(&mut activity, &entry, true);
+                    let auto = match &s.connections {
+                        Some(c) => c.auto(id).await,
+                        None => false,
+                    };
                     if set.needs_approval(index)
+                        && !auto
                         && !connections::granted(&s.store.pool, id, set.grant(index)).await
                     {
                         entry["status"] = json!("awaiting");
@@ -1543,7 +1605,9 @@ async fn run_generation(
         .observe(started.elapsed().as_secs_f64());
     drop(permit);
     // Suggested follow-ups would compete with the model's own questions.
-    let asked = activity.iter().any(|e| e["kind"] == "question");
+    let asked = activity
+        .iter()
+        .any(|e| ["question", "workspace", "research"].contains(&e["kind"].as_str().unwrap_or("")));
     let followups = if status == "completed" && !content.is_empty() && !asked && s.followups_enabled
     {
         tokio::time::timeout(

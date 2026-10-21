@@ -1,7 +1,7 @@
 use anyhow::Result;
 use obleth_chat::{
     auth::{Auth, AuthConfig},
-    config::Config,
+    config::{Config, ConnectionsMode},
     gateway::Gateway,
     router, AppState, MIGRATOR,
 };
@@ -51,13 +51,24 @@ async fn main() -> Result<()> {
         state.sandboxes = Some(sandboxes);
     }
     // Connections need the gateway; their token key is derived from its signing key.
-    if let Some(path) = &config.signing_key_file {
+    if let (Some(path), true) = (
+        &config.signing_key_file,
+        config.connections != ConnectionsMode::Off,
+    ) {
         let material = tokio::fs::read(path).await?;
-        state.connections = Some(obleth_chat::connections::Connections::new(
-            pool.clone(),
-            &material,
-            config.connections_allow_private,
-        )?);
+        state.connections = Some(
+            obleth_chat::connections::Connections::new(
+                pool.clone(),
+                &material,
+                config.connections_allow_private,
+            )?
+            .clusters(config.connections == ConnectionsMode::All)
+            .auto_mode(config.auto_mode),
+        );
+        tracing::info!(
+            clusters = config.connections == ConnectionsMode::All,
+            "connections enabled"
+        );
     }
     if let Some(knowledge) = obleth_chat::knowledge::Knowledge::from_env(pool.clone())? {
         if let Some(gateway) = state.gateway.clone() {

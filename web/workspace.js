@@ -294,7 +294,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   }
   function activity(m) {
     // Thoughts show in the thinking panel and knowledge searches in the Sources card.
-    const steps = (Array.isArray(m.activity) ? m.activity : []).filter(s => s.kind !== 'sources' && s.kind !== 'thought' && s.kind !== 'saved' && s.kind !== 'question' && s.tool !== 'search_knowledge' && s.tool !== 'save_item');
+    const steps = (Array.isArray(m.activity) ? m.activity : []).filter(s => s.kind !== 'sources' && s.kind !== 'thought' && s.kind !== 'saved' && s.kind !== 'question' && s.kind !== 'workspace' && s.kind !== 'research' && s.tool !== 'search_knowledge' && s.tool !== 'save_item');
     if (!steps.length) return '';
     const live = steps.find(s => s.status === 'awaiting') || steps.find(s => s.status === 'running'), failed = steps.filter(s => s.status === 'error').length;
     const kind = steps.every(s => !s.connection) ? 'workspace step' : 'step';

@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <img src=".github/assets/screenshots/workspace-build.png" alt="A chat building a reading-list app in a workspace: the model's summary, checkpoints and Show work on the left, the running app in the live preview on the right" width="100%">
+  <img src=".github/assets/screenshots/workspace-build.png" alt="A chat building an interactive heat diffusion simulator in a workspace: checkpoints and Show work on the left, the running app in the live preview on the right" width="100%">
 </p>
 
 ---
@@ -83,6 +83,14 @@ obleth-chat runs on your own servers in front of [obleth](https://github.com/the
     <td align="center"><sub>Your clusters, as tools that act as you</sub></td>
   </tr>
   <tr>
+    <td width="50%"><img src=".github/assets/screenshots/questions.png" alt="The model asking where a weekly benchmark should run, with a recommended option"></td>
+    <td width="50%"><img src=".github/assets/screenshots/approval.png" alt="A Kubernetes apply waiting for Allow or Deny, with the manifest the model wants to apply"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>The model asks before it plans</sub></td>
+    <td align="center"><sub>Nothing changes until you allow it</sub></td>
+  </tr>
+  <tr>
     <td width="50%"><img src=".github/assets/screenshots/project.png" alt="A project page with instructions for every chat, its collections and its chats"></td>
     <td width="50%"><img src=".github/assets/screenshots/clusters.png" alt="A Slurm cluster seen live: CPUs and memory in use, partitions, nodes and the queue"></td>
   </tr>
@@ -112,6 +120,32 @@ docker compose --env-file .env -f deploy/compose.connected.yaml up --build -d
 ```
 
 Accounts and chats work right away. To list models and stream replies, [connect the gateway](https://www.obleth.com/docs/run-chat/connect-gateway). The [install guide](https://www.obleth.com/docs/run-chat/install) covers Kubernetes, the first sign-in and production settings.
+
+## Branding and appearance
+
+Edit [web/site.config.js](web/site.config.js) and reload the page. This public, commented configuration controls the site name and subtitle, assistant name, browser title and description, optional logo and favicon, greeting and assistant icons, and the sign-in and home page text. You can also view the deployed file at `/site.config.js`. No build is needed when editing the served file; never put secrets in it.
+
+- Set `logo.light` and `logo.dark` to local image paths such as `./assets/custom/logo-light.svg`. One image works in both themes; leave both blank for a text-only brand. The default favicon is a neutral chat bubble.
+- Choose built-in icon names from [web/icons.js](web/icons.js), such as `chat`, `book`, or `sun`; set an icon to `''` to hide it.
+- Text is plain text, with `\n` for a line break. Set optional text, including the sign-in and home page footers, to `''` to hide it.
+- Set `appearance.defaultTheme` to `system`, `light`, or `dark`. People can switch appearance on the sign-in page or in Settings; their browser remembers their choice.
+
+For Docker, copy the configuration and place your images in a host directory:
+
+```bash
+mkdir -p branding/assets
+cp web/site.config.js branding/site.config.js
+```
+
+Add these mounts under the `obleth-chat` service in `deploy/compose.connected.yaml` (paths are relative to that Compose file):
+
+```yaml
+volumes:
+  - ../branding/site.config.js:/app/web/site.config.js:ro
+  - ../branding/assets:/app/web/assets/custom:ro
+```
+
+Recreate the container after adding the mounts. Subsequent branding edits only need a browser reload. Keep image URLs local to the app, for example `./assets/custom/logo-light.svg`; externally hosted images are not supported by the site's security policy. When serving a built `dist/` directory, edit its `site.config.js` and assets, or rebuild after editing `web/`.
 
 ## Repository
 

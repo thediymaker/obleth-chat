@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+FROM rust:1.99.1-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a AS build
+
+WORKDIR /source
+COPY Cargo.toml Cargo.lock ./
+COPY api/ ./api/
+COPY migrations/ ./migrations/
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/source/target \
+    cargo build --locked --release --bin obleth-chat \
+    && cp target/release/obleth-chat /usr/local/bin/obleth-chat
+
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS runtime
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl poppler-utils unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=build /usr/local/bin/obleth-chat /usr/local/bin/obleth-chat
+COPY --chown=10001:10001 web/ ./web/
+
+ENV OBLETH_CHAT_LISTEN=0.0.0.0:8085 \
+    OBLETH_CHAT_STATIC_DIR=/app/web \
+    RUST_LOG=obleth_chat=info
+USER 10001:10001
+EXPOSE 8085
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=15s --timeout=3s --start-period=15s --retries=3 \
+    CMD curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8085/readyz > /dev/null || exit 1
+ENTRYPOINT ["/usr/local/bin/obleth-chat"]

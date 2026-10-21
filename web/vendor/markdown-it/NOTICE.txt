@@ -1,0 +1,24 @@
+markdown-it 15.0.3
+https://github.com/markdown-it/markdown-it/releases/tag/15.0.3
+https://markdown-it.github.io/markdown-it/
+
+This is the self-contained ESM browser distribution from the published npm
+package markdown-it@15.0.3. The only changes are renaming the file to .js and
+removing its sourceMappingURL comment (the source map is not shipped).
+No CDN requests or npm install are required by Obleth Chat at build/runtime.
+
+Upstream tarball:
+https://registry.npmjs.org/markdown-it/-/markdown-it-15.0.3.tgz
+SHA-512 integrity:
+sha512-+Az7Ojz3iRGu8KYMvJ6xVhvrxP3eE+vEtJX75Ow88XBpcQNV/0lGX5ZynIIBftREo4DC2jsveAMDaeltmm8QvQ==
+Unmodified browser bundle SHA-256:
+d5432491790141da046b1197353705db03264f40b5727f3b4b591f5aba193e30
+
+The parser is MIT licensed; see LICENSE. The bundled dependency versions match
+the upstream 15.0.3 package-lock.json. Their license notices are included in
+DEPENDENCY-LICENSES.txt: mdurl 2.1.0, uc.micro 3.0.0, entities 8.1.0,
+linkify-it 6.1.0, and punycode.js 2.3.1.
+
+Update by downloading a reviewed tagged npm release with npm pack
+--ignore-scripts, verifying the registry integrity, and replacing its browser
+ESM bundle and all license notices. Run tests/markdown.test.mjs after updates.

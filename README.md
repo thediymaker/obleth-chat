@@ -1,0 +1,111 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.svg">
+    <img src=".github/assets/logo-light.svg" alt="obleth" height="72">
+  </picture>
+</p>
+
+<h1 align="center">obleth-chat</h1>
+
+<p align="center">
+  A self-hosted chat app for everyone who shares your models.<br>
+  Private conversations, document search with citations, workspaces that build apps with a live preview,<br>
+  and your Slurm and Kubernetes clusters as tools.
+</p>
+
+<p align="center">
+  <a href="https://www.obleth.com/docs/chat/introduction"><b>Documentation</b></a> ·
+  <a href="https://www.obleth.com/docs/run-chat/install">Install</a> ·
+  <a href="https://www.obleth.com/docs/run-chat/connect-gateway">Connect the gateway</a> ·
+  <a href="https://github.com/thediymaker/obleth-gateway">obleth gateway</a>
+</p>
+
+---
+
+obleth-chat runs on your own servers in front of [obleth](https://github.com/thediymaker/obleth-gateway), the fairshare gateway for self-hosted models. Each person signs in with their own account and their chats are stored in your Postgres. Every request reaches the gateway as that person, so fair share, budgets and usage apply per person, and nobody handles a shared API key.
+
+## What it does
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Everyday chat</h3>
+      Pick a model or <b>Auto</b>, set the thinking effort, attach files and images, and edit or regenerate with versions you can step through. Responses keep running on the server when you close the tab.
+      <br><a href="https://www.obleth.com/docs/chat/conversations">Conversations →</a>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Knowledge</h3>
+      Upload PDFs, Word files, HTML, Markdown and code into collections. Replies cite the passage they used, and each citation opens the source at that page.
+      <br><a href="https://www.obleth.com/docs/chat/knowledge">Knowledge collections →</a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Workspaces</h3>
+      Describe an app and the model writes, runs and fixes it in a private Linux pod. The running app appears in a preview next to the chat, with files, a terminal and checkpoints.
+      <br><a href="https://www.obleth.com/docs/chat/workspaces">Workspaces →</a>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Connections</h3>
+      MCP servers, Slurm clusters and Kubernetes clusters become tools, acting as your own account. Anything that changes state waits for you to Allow or Deny it.
+      <br><a href="https://www.obleth.com/docs/chat/connections">Connections →</a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Projects and groups</h3>
+      Give a set of chats shared instructions, documents and saved notes, and share the project with a group, such as a class.
+      <br><a href="https://www.obleth.com/docs/chat/projects">Library, projects and groups →</a>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Research</h3>
+      Run a tree of measured experiments: each idea is a git branch, every run uses the same command, and a chart tracks the best result.
+      <br><a href="https://www.obleth.com/docs/chat/research">Research →</a>
+    </td>
+  </tr>
+</table>
+
+Administrators publish models and choose who sees them, set generation defaults and daily allowances, manage accounts and groups, and can add OIDC sign-in.
+
+## Quick start
+
+You need Rust stable and PostgreSQL 17 with [pgvector](https://github.com/pgvector/pgvector). Node.js 20.12+ is optional; it runs the wrapper that loads `.env`.
+
+```bash
+cp .env.example .env
+# Set OBLETH_CHAT_DATABASE_URL, OBLETH_CHAT_ORIGIN and OBLETH_CHAT_BOOTSTRAP_PASSWORD
+npm run start:api
+# http://localhost:8085, sign in as admin
+```
+
+Or with Docker Compose, which brings its own Postgres:
+
+```bash
+docker compose --env-file .env -f deploy/compose.connected.yaml up --build -d
+```
+
+Accounts and chats work right away. To list models and stream replies, [connect the gateway](https://www.obleth.com/docs/run-chat/connect-gateway). The [install guide](https://www.obleth.com/docs/run-chat/install) covers Kubernetes, the first sign-in and production settings.
+
+## Repository
+
+| Path | What's there |
+| --- | --- |
+| `api/` | The Rust server: auth, conversations, gateway streaming, Knowledge, workspaces, connections, research |
+| `web/` | The browser app, plain JavaScript modules with no build step |
+| `migrations/` | Postgres migrations, applied at startup |
+| `deploy/` | Dockerfiles, Compose, a Kubernetes reference manifest, the workspace image, Prometheus samples |
+| `tests/` | Rust integration tests and Node unit tests |
+| `server/` | A static design preview with sample data (`npm start`) |
+
+## Development
+
+```bash
+npm test                       # web unit tests
+cargo check --all-targets
+# Rust tests need a disposable Postgres server; they create their own databases
+DATABASE_URL=postgresql://… TEST_DATABASE_URL=postgresql://… cargo test --all-targets
+```
+
+## Credits
+
+Space Grotesk is bundled under the SIL Open Font License (`web/assets/FONT-LICENSE.txt`). markdown-it and its dependencies are bundled with their notices in `web/vendor/markdown-it/`. Research mode follows the playbook of [OpenResearch](https://github.com/alphaXiv/OpenResearch) (MIT).

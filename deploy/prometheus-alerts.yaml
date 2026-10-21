@@ -1,0 +1,48 @@
+groups:
+  - name: obleth-chat
+    rules:
+      - alert: OblethChatReplicaUnavailable
+        expr: sum(up{job="obleth-chat"}) < 2 or absent(up{job="obleth-chat"})
+        for: 3m
+        labels:
+          severity: warning
+          service: obleth-chat
+        annotations:
+          summary: Obleth Chat has fewer than two healthy replicas
+          description: Check app readiness, database connectivity, and Kubernetes events.
+      - alert: OblethChatServerErrors
+        expr: sum(rate(obleth_chat_http_requests_total{job="obleth-chat",status=~"5.."}[5m])) / clamp_min(sum(rate(obleth_chat_http_requests_total{job="obleth-chat"}[5m])), 0.01) > 0.05 and sum(increase(obleth_chat_http_requests_total{job="obleth-chat",status=~"5.."}[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: obleth-chat
+        annotations:
+          summary: Obleth Chat is returning server errors
+          description: More than five requests and over 5% of requests failed in the recent window.
+      - alert: OblethChatGenerationErrors
+        expr: sum(increase(obleth_chat_generations_total{job="obleth-chat",outcome="error"}[10m])) / clamp_min(sum(increase(obleth_chat_generations_total{job="obleth-chat"}[10m])), 1) > 0.2 and sum(increase(obleth_chat_generations_total{job="obleth-chat",outcome="error"}[10m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: obleth-chat
+        annotations:
+          summary: Obleth Chat generations are failing
+          description: Check Gateway availability, upstream errors, and database writes. User cancellations are excluded.
+      - alert: OblethChatSlowFirstToken
+        expr: histogram_quantile(0.95, sum by (le) (rate(obleth_chat_first_token_seconds_bucket{job="obleth-chat"}[10m]))) > 30 and sum(increase(obleth_chat_first_token_seconds_count{job="obleth-chat"}[10m])) > 20
+        for: 10m
+        labels:
+          severity: warning
+          service: obleth-chat
+        annotations:
+          summary: Obleth Chat first tokens are slow
+          description: The recent 95th percentile exceeds 30 seconds. Inspect upstream capacity and queues.
+      - alert: OblethChatBackupStale
+        expr: time() - max(obleth_chat_backup_last_success_timestamp_seconds{job="obleth-chat"}) > 36 * 3600 or (absent_over_time(obleth_chat_backup_last_success_timestamp_seconds{job="obleth-chat"}[2h]) and on() sum(up{job="obleth-chat"}) > 0)
+        for: 10m
+        labels:
+          severity: warning
+          service: obleth-chat
+        annotations:
+          summary: Obleth Chat has no recent complete backup
+          description: The newest complete backup is over 36 hours old, or the running app has reported none for two hours. Check obleth-chat-backup.service on the management host and the obleth-chat-backup-status ConfigMap. Requires a backup job that publishes the status files (OBLETH_CHAT_BACKUP_STATUS_DIR); drop this rule where none does.

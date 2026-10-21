@@ -1,0 +1,129 @@
+# Chat workspaces: one Pod and one volume per person, created by Chat through the
+# Kubernetes API. Chat's own Deployment must run as the obleth-chat ServiceAccount
+# below (namespace obleth-chat). Pod Security "restricted" is enforced by the API server, so
+# Chat cannot create a privileged, root or host-network pod here even if asked to.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: obleth-sandboxes
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: obleth-chat
+  namespace: obleth-chat
+automountServiceAccountToken: false
+---
+# Chat's only cluster permissions: manage pods and volumes in this namespace and
+# exec into those pods. No Secrets, Services, RBAC or other namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: obleth-chat-workspaces
+  namespace: obleth-sandboxes
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [get, create]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: obleth-chat-workspaces
+  namespace: obleth-sandboxes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: obleth-chat-workspaces
+subjects:
+  - kind: ServiceAccount
+    name: obleth-chat
+    namespace: obleth-chat
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workspaces
+  namespace: obleth-sandboxes
+spec:
+  hard:
+    pods: "8"
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+    persistentvolumeclaims: "40"
+    requests.storage: 200Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: obleth-sandboxes
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Only Chat reaches a workspace: the preview proxy and the readiness check.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: from-chat
+  namespace: obleth-sandboxes
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: obleth-sandbox}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: obleth-chat}
+          podSelector:
+            matchLabels: {app: obleth-chat}
+---
+# DNS, and HTTP(S) to public addresses for package installs. Private ranges (the
+# LAN, nodes, the API server and every cluster service) are unreachable. Replace
+# the public rule with a package mirror before opening workspaces to students.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress
+  namespace: obleth-sandboxes
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: obleth-sandbox}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, 224.0.0.0/4]
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 80}
+---
+# gVisor for workspace pods (OBLETH_CHAT_SANDBOX_RUNTIME_CLASS=gvisor). Every node
+# needs runsc first: https://gvisor.dev/docs/user_guide/containerd/quick_start/
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc

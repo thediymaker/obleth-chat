@@ -1,0 +1,18 @@
+services:
+  obleth-chat:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # Local-only preview. The service has no authentication or live integrations.
+    ports:
+      - "127.0.0.1:${PORT:-4173}:4173"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4173
+    read_only: true
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped

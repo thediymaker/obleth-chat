@@ -1,0 +1,15 @@
+# Merge this scrape job into an existing Prometheus configuration. In Compose,
+# attach Prometheus to the obleth-chat_application network; the target is private.
+# For a host-based Prometheus, use 127.0.0.1:8085 instead.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: obleth-chat
+    metrics_path: /metrics
+    scrape_timeout: 5s
+    static_configs:
+      - targets: ["obleth-chat:8085"]
+        labels:
+          service: obleth-chat

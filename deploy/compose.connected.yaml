@@ -1,0 +1,92 @@
+# Run from the repository root:
+# docker compose --env-file .env -f deploy/compose.connected.yaml up --build -d
+# This is the connected app. deploy/compose.yaml remains the static design preview.
+name: obleth-chat
+
+services:
+  postgres:
+    # PostgreSQL 17 with pgvector, which Knowledge needs.
+    image: pgvector/pgvector:0.8.7-pg17-trixie@sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${OBLETH_CHAT_POSTGRES_ADMIN_PASSWORD:?Set a separate PostgreSQL administrator password}
+      OBLETH_CHAT_POSTGRES_PASSWORD: ${OBLETH_CHAT_POSTGRES_PASSWORD:?Set the Chat database password using openssl rand -hex 32}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-obleth-chat.sh:ro
+    networks:
+      - database
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    # No host port is published for PostgreSQL.
+
+  obleth-chat:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    image: obleth-chat:0.4.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${OBLETH_CHAT_PORT:-8085}:8085"
+    environment:
+      # Generate a hexadecimal database password so it is safe inside this URL.
+      OBLETH_CHAT_DATABASE_URL: postgresql://obleth_chat:${OBLETH_CHAT_POSTGRES_PASSWORD:?Set a hexadecimal Chat database password}@postgres:5432/obleth_chat
+      OBLETH_CHAT_LISTEN: 0.0.0.0:8085
+      OBLETH_CHAT_STATIC_DIR: /app/web
+      OBLETH_CHAT_ORIGIN: ${OBLETH_CHAT_ORIGIN:-http://localhost:8085}
+      OBLETH_CHAT_BOOTSTRAP_USERNAME: ${OBLETH_CHAT_BOOTSTRAP_USERNAME:-admin}
+      OBLETH_CHAT_BOOTSTRAP_PASSWORD: ${OBLETH_CHAT_BOOTSTRAP_PASSWORD:?Set a strong initial administrator password}
+      OBLETH_CHAT_GATEWAY_URL: ${OBLETH_CHAT_GATEWAY_URL:?Set the gateway origin reachable from the container}
+      OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE: /run/secrets/gateway_signing_key
+      OBLETH_CHAT_GATEWAY_ISSUER: ${OBLETH_CHAT_GATEWAY_ISSUER:-${OBLETH_CHAT_ORIGIN:-http://localhost:8085}}
+      OBLETH_CHAT_GATEWAY_AUDIENCE: ${OBLETH_CHAT_GATEWAY_AUDIENCE:-obleth}
+      OBLETH_CHAT_MAX_STREAMS: ${OBLETH_CHAT_MAX_STREAMS:-128}
+      OBLETH_CHAT_DB_CONNECTIONS: ${OBLETH_CHAT_DB_CONNECTIONS:-20}
+      OBLETH_CHAT_SESSION_HOURS: ${OBLETH_CHAT_SESSION_HOURS:-12}
+      OBLETH_CHAT_LOGIN_RATE_PER_MINUTE: ${OBLETH_CHAT_LOGIN_RATE_PER_MINUTE:-300}
+      OBLETH_CHAT_TRUSTED_PROXY: ${OBLETH_CHAT_TRUSTED_PROXY:-}
+      OBLETH_CHAT_OIDC_ISSUER: ${OBLETH_CHAT_OIDC_ISSUER:-}
+      OBLETH_CHAT_OIDC_CLIENT_ID: ${OBLETH_CHAT_OIDC_CLIENT_ID:-}
+      OBLETH_CHAT_OIDC_CLIENT_SECRET: ${OBLETH_CHAT_OIDC_CLIENT_SECRET:-}
+      OBLETH_CHAT_OIDC_ALLOW_SIGNUP: ${OBLETH_CHAT_OIDC_ALLOW_SIGNUP:-}
+      RUST_LOG: ${RUST_LOG:-obleth_chat=info}
+    secrets:
+      - gateway_signing_key
+    networks:
+      - database
+      - application
+    # Useful when Obleth runs on the Docker host rather than in this Compose project.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+secrets:
+  gateway_signing_key:
+    # Use an absolute host path. The file must be readable by container UID/GID10001;
+    # e.g. chgrp 10001 <file> && chmod 0440 <file>. Never commit the private key.
+    file: ${OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE:?Set an absolute host path to the gateway signing key}
+
+volumes:
+  postgres-data:
+
+networks:
+  database:
+    internal: true
+  application:

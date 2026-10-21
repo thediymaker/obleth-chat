@@ -1,0 +1,146 @@
+# Application hosting example only: it does not set up workspaces, Knowledge
+# storage or cluster connections. Provide an external PostgreSQL 17 database with
+# the pgvector extension created in it (CREATE EXTENSION vector, as a superuser).
+# Before applying, replace the image and ConfigMap origins, and create:
+#   Secret obleth-chat-env with OBLETH_CHAT_DATABASE_URL and
+#     OBLETH_CHAT_BOOTSTRAP_PASSWORD (optional OIDC settings can go here too).
+#   Secret obleth-chat-gateway-signing-key with a gateway_signing_key PEM file.
+# Use the same signing key, origin, issuer, database, and OIDC config on all replicas.
+# Expose the ClusterIP service through your existing HTTPS ingress. Permit metrics
+# access only from monitoring, and configure ingress SSE buffering/timeouts.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: obleth-chat
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: obleth-chat-config
+  namespace: obleth-chat
+data:
+  OBLETH_CHAT_ORIGIN: https://chat.example.internal
+  OBLETH_CHAT_LISTEN: 0.0.0.0:8085
+  OBLETH_CHAT_STATIC_DIR: /app/web
+  OBLETH_CHAT_BOOTSTRAP_USERNAME: admin
+  OBLETH_CHAT_GATEWAY_URL: http://obleth-gateway.obleth.svc.cluster.local:8080
+  OBLETH_CHAT_GATEWAY_ISSUER: https://chat.example.internal
+  OBLETH_CHAT_GATEWAY_AUDIENCE: obleth
+  OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE: /run/secrets/gateway_signing_key
+  OBLETH_CHAT_MAX_STREAMS: "128"
+  OBLETH_CHAT_DB_CONNECTIONS: "20"
+  RUST_LOG: obleth_chat=info
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: obleth-chat
+  namespace: obleth-chat
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: obleth-chat
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: obleth-chat
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: chat
+          image: ghcr.io/your-organization/obleth-chat:0.4.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8085
+          envFrom:
+            - configMapRef:
+                name: obleth-chat-config
+            - secretRef:
+                name: obleth-chat-env
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: gateway-key
+              mountPath: /run/secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: gateway-key
+          secret:
+            secretName: obleth-chat-gateway-signing-key
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: obleth-chat
+  namespace: obleth-chat
+spec:
+  type: ClusterIP
+  selector:
+    app: obleth-chat
+  ports:
+    - name: http
+      port: 8085
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: obleth-chat
+  namespace: obleth-chat
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: obleth-chat

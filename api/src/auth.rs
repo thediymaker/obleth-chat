@@ -1,0 +1,1373 @@
+//! Local accounts are always available; OIDC is an optional additional sign-in method.
+//! Browser credentials are opaque, revocable server-side sessions. Identity and roles
+//! always come from Postgres, never from a request header or browser-stored claim.
+
+use std::{
+    convert::Infallible,
+    env,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+
+use anyhow::{bail, Context};
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use axum::{
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State},
+    http::{header, request::Parts, Extensions, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, patch, post},
+    Json, Router,
+};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use chrono::{DateTime, Utc};
+use rand::{rngs::OsRng, RngCore};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use sqlx::{
+    encode::IsNull,
+    error::BoxDynError,
+    postgres::{PgArgumentBuffer, PgTypeInfo, PgValueRef},
+    FromRow, PgPool, Postgres, Transaction,
+};
+use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
+use url::Url;
+use uuid::Uuid;
+
+use crate::error::ApiError;
+pub(crate) mod accounts;
+mod group_policy;
+mod oidc;
+#[cfg(test)]
+mod tests;
+
+#[derive(Clone)]
+pub struct AuthConfig {
+    pub origin: String,
+    pub session_hours: u32,
+    pub bootstrap_username: Option<String>,
+    pub bootstrap_password: Option<String>,
+    pub oidc: Option<OidcConfig>,
+    pub login_rate_per_minute: u32,
+}
+
+#[derive(Clone)]
+pub struct OidcConfig {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub allow_signup: bool,
+}
+
+impl AuthConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let origin =
+            env::var("OBLETH_CHAT_ORIGIN").unwrap_or_else(|_| "http://localhost:8085".into());
+        let issuer = optional_env("OBLETH_CHAT_OIDC_ISSUER");
+        let client_id = optional_env("OBLETH_CHAT_OIDC_CLIENT_ID");
+        let client_secret = optional_env("OBLETH_CHAT_OIDC_CLIENT_SECRET");
+        let allow_signup = optional_env("OBLETH_CHAT_OIDC_ALLOW_SIGNUP");
+        let oidc = match (issuer, client_id, client_secret) {
+            (None, None, None) if allow_signup.is_none() => None,
+            (Some(issuer), Some(client_id), Some(client_secret)) => Some(OidcConfig {
+                issuer, client_id, client_secret,
+                allow_signup: match allow_signup.as_deref().unwrap_or("false") {
+                    "true" => true,
+                    "false" => false,
+                    _ => bail!("OBLETH_CHAT_OIDC_ALLOW_SIGNUP must be true or false"),
+                },
+            }),
+            _ => bail!("OIDC requires OBLETH_CHAT_OIDC_ISSUER, OBLETH_CHAT_OIDC_CLIENT_ID and OBLETH_CHAT_OIDC_CLIENT_SECRET"),
+        };
+        let config = Self {
+            origin,
+            session_hours: optional_env("OBLETH_CHAT_SESSION_HOURS")
+                .map(|v| v.parse())
+                .transpose()?
+                .unwrap_or(12),
+            bootstrap_username: optional_env("OBLETH_CHAT_BOOTSTRAP_USERNAME"),
+            bootstrap_password: optional_env("OBLETH_CHAT_BOOTSTRAP_PASSWORD"),
+            oidc,
+            login_rate_per_minute: optional_env("OBLETH_CHAT_LOGIN_RATE_PER_MINUTE")
+                .map(|v| v.parse())
+                .transpose()?
+                .unwrap_or(300),
+        };
+        config.validated()
+    }
+
+    fn validated(mut self) -> anyhow::Result<Self> {
+        let url = Url::parse(&self.origin).context("OBLETH_CHAT_ORIGIN must be a URL")?;
+        validate_transport(&url)?;
+        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            bail!("OBLETH_CHAT_ORIGIN must be an origin without a path, query or fragment");
+        }
+        self.origin = url.origin().ascii_serialization();
+        if !(1..=168).contains(&self.session_hours) {
+            bail!("OBLETH_CHAT_SESSION_HOURS must be between 1 and 168");
+        }
+        if !(1..=10_000).contains(&self.login_rate_per_minute) {
+            bail!("OBLETH_CHAT_LOGIN_RATE_PER_MINUTE must be between 1 and 10000");
+        }
+        match (&self.bootstrap_username, &self.bootstrap_password) {
+            (None, None) => (),
+            (Some(username), Some(password)) => {
+                self.bootstrap_username =
+                    Some(normalize_username(username).map_err(|e| anyhow::anyhow!(e.1))?);
+                validate_password(password).map_err(|e| anyhow::anyhow!(e.1))?;
+            }
+            _ => {
+                bail!("Set both OBLETH_CHAT_BOOTSTRAP_USERNAME and OBLETH_CHAT_BOOTSTRAP_PASSWORD")
+            }
+        }
+        if let Some(config) = &self.oidc {
+            let issuer = Url::parse(&config.issuer).context("OIDC issuer must be a URL")?;
+            validate_transport(&issuer)?;
+            if issuer.query().is_some() || issuer.fragment().is_some() {
+                bail!("OIDC issuer cannot have a query or fragment");
+            }
+            if config.client_id.is_empty() || config.client_secret.is_empty() {
+                bail!("OIDC client ID and secret cannot be empty");
+            }
+        }
+        Ok(self)
+    }
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+fn validate_transport(url: &Url) -> anyhow::Result<()> {
+    let loopback = match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    if url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+    {
+        bail!("Use HTTPS; HTTP is allowed only for an explicit loopback host");
+    }
+    Ok(())
+}
+
+/// Unrefunded password attempts per account from one client, and from all clients, per minute.
+const CLIENT_ACCOUNT_FAILURES: i32 = 10;
+const ACCOUNT_FAILURES: i32 = 50;
+
+#[derive(Clone)]
+pub struct Auth {
+    pool: PgPool,
+    config: Arc<AuthConfig>,
+    oidc: Option<Arc<oidc::Oidc>>,
+    dummy_password_hash: Arc<String>,
+    password_slots: Arc<Semaphore>,
+    group_policy: Arc<group_policy::GroupPolicy>,
+    trusted_proxies: Arc<Vec<(IpAddr, u8)>>,
+}
+
+/// Throttling identity of the caller: the peer address, or the nearest untrusted
+/// X-Forwarded-For hop when the peer is a configured trusted proxy.
+pub(crate) struct Client(String);
+
+impl FromRequestParts<Auth> for Client {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, auth: &Auth) -> Result<Self, Infallible> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
+        Ok(Self(client_key(
+            &auth.trusted_proxies,
+            peer,
+            &parts.headers,
+        )))
+    }
+}
+
+/// Account role. JSON and the `users.role` TEXT column (CHECK user/admin) both use
+/// the lowercase names; an unexpected stored value is a decode error, never a panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Admin,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Admin => "admin",
+        }
+    }
+    fn parse(role: &str) -> Option<Self> {
+        match role {
+            "user" => Some(Self::User),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+    /// Request-supplied role from account administration; exact lowercase names only.
+    pub(crate) fn requested(role: Option<&str>) -> Result<Option<Self>, ApiError> {
+        role.map(|r| Self::parse(r).ok_or_else(|| ApiError::bad("Role must be user or admin")))
+            .transpose()
+    }
+}
+
+impl sqlx::Type<Postgres> for Role {
+    fn type_info() -> PgTypeInfo {
+        <str as sqlx::Type<Postgres>>::type_info()
+    }
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        <str as sqlx::Type<Postgres>>::compatible(ty)
+    }
+}
+
+impl sqlx::Encode<'_, Postgres> for Role {
+    fn encode_by_ref(&self, buf: &mut PgArgumentBuffer) -> Result<IsNull, BoxDynError> {
+        <&str as sqlx::Encode<Postgres>>::encode_by_ref(&self.as_str(), buf)
+    }
+}
+
+impl sqlx::Decode<'_, Postgres> for Role {
+    fn decode(value: PgValueRef<'_>) -> Result<Self, BoxDynError> {
+        let role = <&str as sqlx::Decode<Postgres>>::decode(value)?;
+        Self::parse(role).ok_or_else(|| format!("unknown account role {role:?}").into())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Identity {
+    pub id: Uuid,
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+}
+
+impl Identity {
+    pub fn is_admin(&self) -> bool {
+        self.role == Role::Admin
+    }
+}
+
+#[derive(FromRow)]
+struct PasswordUser {
+    id: Uuid,
+    username: String,
+    display_name: String,
+    role: Role,
+    password_hash: Option<String>,
+    enabled: bool,
+    password_change_required: bool,
+}
+
+#[derive(FromRow)]
+struct SessionIdentity {
+    #[sqlx(flatten)]
+    user: Identity,
+    password_change_required: bool,
+}
+
+impl PasswordUser {
+    fn identity(&self) -> Identity {
+        Identity {
+            id: self.id,
+            username: self.username.clone(),
+            display_name: self.display_name.clone(),
+            role: self.role,
+        }
+    }
+}
+
+impl Auth {
+    pub async fn new(pool: PgPool, config: AuthConfig) -> anyhow::Result<Self> {
+        let config = config.validated()?;
+        let group_policy = group_policy::GroupPolicy::from_env(config.oidc.is_some())?;
+        let trusted_proxies =
+            parse_trusted_proxies(optional_env("OBLETH_CHAT_TRUSTED_PROXY").as_deref())?;
+        group_policy.validate(&pool).await?;
+        let oidc = match &config.oidc {
+            Some(provider) => Some(Arc::new(oidc::Oidc::new(provider, &config.origin).await?)),
+            None => None,
+        };
+        let dummy_password_hash = hash_password(random_token())
+            .await
+            .map_err(|_| anyhow::anyhow!("Password hashing failed"))?;
+        let mut auth = Self {
+            pool,
+            config: Arc::new(config),
+            oidc,
+            dummy_password_hash: Arc::new(dummy_password_hash),
+            password_slots: Arc::new(Semaphore::new(4)),
+            group_policy: Arc::new(group_policy),
+            trusted_proxies: Arc::new(trusted_proxies),
+        };
+        auth.bootstrap().await?;
+        if let Some(config) = Arc::get_mut(&mut auth.config) {
+            config.bootstrap_username = None;
+            config.bootstrap_password = None;
+        }
+        Ok(auth)
+    }
+
+    pub fn oidc_enabled(&self) -> bool {
+        self.oidc.is_some()
+    }
+    pub fn client_report(&self, extensions: &Extensions, headers: &HeaderMap) -> Value {
+        let peer = extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
+        client_report(&self.trusted_proxies, peer, headers)
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.config.origin
+    }
+
+    pub fn router(&self) -> Router<()> {
+        Router::new()
+            .route("/api/session", get(session))
+            .route("/api/auth/login", post(login))
+            .route("/api/auth/logout", post(logout))
+            .route("/api/auth/password", post(change_password))
+            .route("/api/admin/users", get(list_users).post(create_user))
+            .route("/api/admin/users/{id}", patch(update_user))
+            .route("/api/admin/users/{id}/password", post(reset_password))
+            .route("/api/admin/oidc-identities", post(link_oidc_identity))
+            .route("/api/auth/oidc/login", get(oidc::login))
+            .route("/api/auth/oidc/callback", get(oidc::callback))
+            .merge(accounts::router())
+            .with_state(self.clone())
+    }
+
+    pub async fn require(&self, headers: &HeaderMap, mutation: bool) -> Result<Identity, ApiError> {
+        self.require_session(headers, mutation, false).await
+    }
+
+    async fn require_session(
+        &self,
+        headers: &HeaderMap,
+        mutation: bool,
+        allow_password_change: bool,
+    ) -> Result<Identity, ApiError> {
+        if mutation {
+            self.check_origin(headers)?;
+        }
+        let token = self
+            .session_token(headers)
+            .ok_or_else(ApiError::unauthorized)?;
+        let identity = sqlx::query_as::<_, SessionIdentity>(
+            "SELECT u.id, u.username, u.display_name, u.role, u.password_change_required FROM auth_sessions s \
+             JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 \
+             AND s.expires_at > NOW() AND u.enabled = TRUE",
+        )
+        .bind(digest(&token))
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
+        if mutation {
+            let supplied = headers
+                .get("x-csrf-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let expected = csrf_token(&token);
+            if supplied.len() != expected.len()
+                || !bool::from(supplied.as_bytes().ct_eq(expected.as_bytes()))
+            {
+                return Err(ApiError::forbidden());
+            }
+        }
+        if identity.password_change_required && !allow_password_change {
+            return Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "Change your password before continuing".into(),
+            ));
+        }
+        Ok(identity.user)
+    }
+
+    pub(crate) async fn require_admin(
+        &self,
+        headers: &HeaderMap,
+        mutation: bool,
+    ) -> Result<Identity, ApiError> {
+        let identity = self.require(headers, mutation).await?;
+        if !identity.is_admin() {
+            return Err(ApiError::forbidden());
+        }
+        Ok(identity)
+    }
+
+    async fn lock_admin(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        admin_id: Uuid,
+    ) -> Result<(), ApiError> {
+        // A serialized recheck prevents simultaneous administrators disabling one
+        // another and prevents a revoked administrator finishing a queued mutation.
+        sqlx::query("SELECT pg_advisory_xact_lock(7346281951102)")
+            .execute(&mut **tx)
+            .await?;
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND enabled AND role = 'admin' AND NOT password_change_required)",
+        )
+        .bind(admin_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if !active {
+            return Err(ApiError::forbidden());
+        }
+        Ok(())
+    }
+
+    fn check_origin(&self, headers: &HeaderMap) -> Result<(), ApiError> {
+        if headers.get_all(header::ORIGIN).iter().count() != 1
+            || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
+                != Some(&self.config.origin)
+        {
+            return Err(ApiError::forbidden());
+        }
+        Ok(())
+    }
+
+    fn session_cookie_name(&self) -> &'static str {
+        if self.secure() {
+            "__Host-obleth_chat"
+        } else {
+            "obleth_chat_session"
+        }
+    }
+
+    fn oidc_cookie_name(&self) -> &'static str {
+        if self.secure() {
+            "__Host-obleth_oidc"
+        } else {
+            "obleth_oidc"
+        }
+    }
+
+    fn secure(&self) -> bool {
+        self.config.origin.starts_with("https://")
+    }
+
+    fn cookie(&self, name: &str, token: &str, max_age: i64) -> HeaderValue {
+        HeaderValue::from_str(&format!(
+            "{name}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{}",
+            if self.secure() { "; Secure" } else { "" }
+        ))
+        .expect("cookie contains only internal ASCII values")
+    }
+
+    fn session_token(&self, headers: &HeaderMap) -> Option<String> {
+        cookie_value(headers, self.session_cookie_name())
+    }
+
+    fn session_response(
+        &self,
+        user: Identity,
+        token: &str,
+        lifetime: i64,
+        password_change_required: bool,
+    ) -> Response {
+        let mut response = Json(json!({"authenticated": true, "user": user, "csrfToken": csrf_token(token), "oidcEnabled": self.oidc_enabled(), "passwordChangeRequired": password_change_required})).into_response();
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            self.cookie(self.session_cookie_name(), token, lifetime),
+        );
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+    }
+
+    async fn bootstrap(&self) -> anyhow::Result<()> {
+        let (Some(username), Some(password)) = (
+            &self.config.bootstrap_username,
+            &self.config.bootstrap_password,
+        ) else {
+            return Ok(());
+        };
+        // All replicas take the same transaction lock before testing database emptiness.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(7346281951101)")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users)")
+            .fetch_one(&mut *tx)
+            .await?;
+        if !exists {
+            let password_hash = hash_password(password.clone())
+                .await
+                .map_err(|_| anyhow::anyhow!("Password hashing failed"))?;
+            sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, $2, $2, $3, $4)")
+                .bind(Uuid::new_v4()).bind(username).bind(Role::Admin).bind(password_hash).execute(&mut *tx).await?;
+            tracing::info!("Created the configured bootstrap administrator");
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Waits briefly for an Argon2 slot so a short burst queues instead of failing.
+    async fn password_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            self.password_slots.clone().acquire_owned(),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or_else(too_many_requests)
+    }
+
+    async fn check_password(&self, password: String, encoded: String) -> Result<bool, ApiError> {
+        let permit = self.password_permit().await?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            PasswordHash::new(&encoded)
+                .ok()
+                .map(|hash| {
+                    Argon2::default()
+                        .verify_password(password.as_bytes(), &hash)
+                        .is_ok()
+                })
+                .unwrap_or(false)
+        })
+        .await
+        .map_err(|_| ApiError::internal())
+    }
+
+    async fn new_password_hash(&self, password: String) -> Result<String, ApiError> {
+        let permit = self.password_permit().await?;
+        tokio::task::spawn_blocking(move || {
+            // Keep the CPU/memory permit inside the blocking task, including when
+            // its originating HTTP request is cancelled.
+            let _permit = permit;
+            let salt = SaltString::generate(&mut OsRng);
+            Argon2::default()
+                .hash_password(password.as_bytes(), &salt)
+                .map(|hash| hash.to_string())
+                .map_err(|_| ApiError::internal())
+        })
+        .await
+        .map_err(|_| ApiError::internal())?
+    }
+
+    /// Every request counts toward its client's per-minute budget. Account attempts
+    /// are counted before verification, so concurrent guesses cannot overrun the
+    /// limits, and a verified password refunds its own attempt. A client stopped by
+    /// its account limit does not spend the higher all-client backstop, so one client
+    /// cannot lock another out.
+    async fn throttle(
+        &self,
+        scope: &str,
+        client: &Client,
+        account: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let mut tx = self.pool.begin().await?;
+        let window = throttle_window(&mut tx).await?;
+        sqlx::query("DELETE FROM login_throttles WHERE window_start < $1")
+            .bind(window - 10)
+            .execute(&mut *tx)
+            .await?;
+        let requests = throttle_count(&mut tx, &format!("{scope}:{}", client.0), window).await?;
+        let mut allowed = requests <= self.config.login_rate_per_minute as i32;
+        if let (true, Some(account)) = (allowed, account) {
+            let (account_key, client_key) = failure_keys(client, account);
+            allowed = throttle_take(&mut tx, &client_key, window, CLIENT_ACCOUNT_FAILURES).await?;
+            if allowed && !throttle_take(&mut tx, &account_key, window, ACCOUNT_FAILURES).await? {
+                allowed = false;
+                throttle_release(&mut tx, &[client_key], window).await?;
+            }
+        }
+        tx.commit().await?;
+        if !allowed {
+            return Err(too_many_requests());
+        }
+        Ok(())
+    }
+
+    /// A verified password returns the attempt it took from both account limits.
+    /// It never clears them, so a user sharing a client address cannot reset
+    /// someone else's guesses.
+    async fn throttle_refund(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        client: &Client,
+        account: &str,
+    ) -> Result<(), ApiError> {
+        let window = throttle_window(tx).await?;
+        let (account_key, client_key) = failure_keys(client, account);
+        throttle_release(tx, &[account_key, client_key], window).await
+    }
+
+    async fn insert_session(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: Uuid,
+        token: &str,
+        lifetime: i64,
+        headers: &HeaderMap,
+    ) -> Result<(), ApiError> {
+        sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= NOW()")
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("DELETE FROM auth_sessions WHERE id IN (SELECT id FROM auth_sessions WHERE user_id=$1 ORDER BY created_at DESC,id DESC OFFSET 31)")
+            .bind(user_id).execute(&mut **tx).await?;
+        let user_agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(256)
+            .collect::<String>();
+        sqlx::query("INSERT INTO auth_sessions (token_hash, user_id, expires_at, user_agent) VALUES ($1, $2, NOW() + make_interval(secs => $3), $4)")
+            .bind(digest(token)).bind(user_id).bind(lifetime as f64).bind(user_agent).execute(&mut **tx).await?;
+        Ok(())
+    }
+}
+
+fn too_many_requests() -> ApiError {
+    ApiError(
+        StatusCode::TOO_MANY_REQUESTS,
+        "Too many sign-in attempts; try again shortly".into(),
+    )
+}
+
+async fn throttle_window(tx: &mut Transaction<'_, Postgres>) -> Result<i64, ApiError> {
+    Ok(
+        sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM NOW()) / 60)::BIGINT")
+            .fetch_one(&mut **tx)
+            .await?,
+    )
+}
+
+fn failure_keys(client: &Client, account: &str) -> (String, String) {
+    let account = URL_SAFE_NO_PAD.encode(digest(account));
+    (
+        format!("account:{account}"),
+        format!("account:{account}:{}", client.0),
+    )
+}
+
+/// `loopback` stands for a reverse proxy on the same host. There is deliberately no
+/// preset for private ranges: home and office clients use them too, and a trusted
+/// client can choose its own throttling address.
+const LOOPBACK: &[&str] = &["127.0.0.0/8", "::1"];
+
+fn parse_trusted_proxies(value: Option<&str>) -> anyhow::Result<Vec<(IpAddr, u8)>> {
+    value
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .flat_map(|entry| {
+            if entry.eq_ignore_ascii_case("loopback") {
+                LOOPBACK.to_vec()
+            } else {
+                vec![entry]
+            }
+        })
+        .map(|entry| {
+            let (address, prefix) = match entry.split_once('/') {
+                Some((address, prefix)) => (address, Some(prefix)),
+                None => (entry, None),
+            };
+            let address = address.parse::<IpAddr>().ok();
+            let width = if address.is_some_and(|ip| ip.is_ipv4()) { 32 } else { 128 };
+            let prefix = match prefix {
+                Some(prefix) => prefix.parse::<u8>().ok().filter(|p| *p <= width),
+                None => Some(width),
+            };
+            // An IPv4-mapped range such as ::ffff:10.0.0.0/104 becomes 10.0.0.0/8.
+            let (address, prefix) = match (address, prefix) {
+                (Some(ip), Some(p)) if ip.is_ipv6() && ip.to_canonical().is_ipv4() => {
+                    (Some(ip.to_canonical()), p.checked_sub(96))
+                }
+                pair => pair,
+            };
+            match (address, prefix) {
+                (Some(address), Some(prefix)) => Ok((address, prefix)),
+                _ => bail!(
+                    "OBLETH_CHAT_TRUSTED_PROXY must list IP addresses, CIDR ranges or `loopback`, separated by commas"
+                ),
+            }
+        })
+        .collect()
+}
+
+fn forwarded_hops(headers: &HeaderMap) -> Vec<&str> {
+    headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .map(|v| v.to_str())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .collect()
+}
+
+fn client_address(trusted: &[(IpAddr, u8)], peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+    let mut client = peer.to_canonical();
+    let trusted_proxy = |ip| trusted.iter().any(|network| in_network(ip, *network));
+    if trusted_proxy(client) {
+        // Walk back from the nearest hop; anything left of an untrusted or
+        // malformed entry can be client-supplied.
+        for hop in forwarded_hops(headers).into_iter().rev() {
+            let Ok(ip) = hop.parse::<IpAddr>() else {
+                break;
+            };
+            client = ip.to_canonical();
+            if !trusted_proxy(client) {
+                break;
+            }
+        }
+    }
+    client
+}
+
+/// Explains how this request's client address was derived, so an administrator
+/// can check OBLETH_CHAT_TRUSTED_PROXY against the real proxy chain.
+fn client_report(trusted: &[(IpAddr, u8)], peer: Option<IpAddr>, headers: &HeaderMap) -> Value {
+    let trusted_proxy = |ip| trusted.iter().any(|network| in_network(ip, *network));
+    let hops = forwarded_hops(headers);
+    let Some(peer) = peer.map(|ip| ip.to_canonical()) else {
+        return json!({"peer":null,"resolved":null,"status":"unknown","trustedProxyConfigured":!trusted.is_empty()});
+    };
+    let resolved = client_address(trusted, peer, headers);
+    let has_header = headers.contains_key("x-forwarded-for");
+    let status = if !trusted_proxy(peer) {
+        if has_header {
+            "untrusted-proxy"
+        } else if local(peer) {
+            // A same-host or container-network peer is usually a proxy that
+            // does not forward the client address.
+            "local-peer"
+        } else {
+            "direct"
+        }
+    } else if !has_header {
+        "missing-header"
+    } else if hops.last().is_none_or(|hop| hop.parse::<IpAddr>().is_err()) {
+        "malformed-header"
+    } else if trusted_proxy(resolved) {
+        "chain-ends-trusted"
+    } else {
+        "forwarded"
+    };
+    json!({
+        "peer": peer.to_string(),
+        "peerTrusted": trusted_proxy(peer),
+        "forwardedFor": hops.iter().take(16).map(|hop| hop.chars().take(64).collect::<String>()).collect::<Vec<_>>(),
+        "resolved": resolved.to_string(),
+        "status": status,
+        "trustedProxyConfigured": !trusted.is_empty(),
+    })
+}
+
+fn local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        IpAddr::V6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
+fn client_key(trusted: &[(IpAddr, u8)], peer: Option<IpAddr>, headers: &HeaderMap) -> String {
+    let Some(peer) = peer else {
+        return "unknown".into();
+    };
+    let client = client_address(trusted, peer, headers);
+    // One IPv6 host can rotate through its whole /64.
+    let bucket = match client {
+        IpAddr::V6(ip) => format!(
+            "{}/64",
+            Ipv6Addr::from(u128::from(ip) & !(u64::MAX as u128))
+        ),
+        IpAddr::V4(ip) => ip.to_string(),
+    };
+    URL_SAFE_NO_PAD.encode(digest(&bucket))
+}
+
+fn in_network(ip: IpAddr, (network, prefix): (IpAddr, u8)) -> bool {
+    let bits = |ip: IpAddr| match ip.to_canonical() {
+        IpAddr::V4(ip) => (u128::from(u32::from(ip)), 32),
+        IpAddr::V6(ip) => (u128::from(ip), 128),
+    };
+    let ((ip, width), (network, network_width)) = (bits(ip), bits(network));
+    let prefix = u32::from(prefix);
+    width == network_width && (prefix == 0 || (ip ^ network) >> (width - prefix) == 0)
+}
+
+async fn throttle_count(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &str,
+    window: i64,
+) -> Result<i32, ApiError> {
+    Ok(sqlx::query_scalar("INSERT INTO login_throttles (key, window_start, attempts) VALUES ($1, $2, 1) \
+        ON CONFLICT (key) DO UPDATE SET window_start = $2, \
+        attempts = CASE WHEN login_throttles.window_start = $2 THEN LEAST(login_throttles.attempts + 1, 1000000) ELSE 1 END \
+        RETURNING attempts").bind(key).bind(window).fetch_one(&mut **tx).await?)
+}
+
+/// Counts one attempt unless the key has already reached `limit` in this window.
+async fn throttle_take(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &str,
+    window: i64,
+    limit: i32,
+) -> Result<bool, ApiError> {
+    let counted: Option<i32> = sqlx::query_scalar("INSERT INTO login_throttles (key, window_start, attempts) VALUES ($1, $2, 1) \
+        ON CONFLICT (key) DO UPDATE SET window_start = $2, \
+        attempts = CASE WHEN login_throttles.window_start = $2 THEN login_throttles.attempts + 1 ELSE 1 END \
+        WHERE login_throttles.window_start <> $2 OR login_throttles.attempts < $3 \
+        RETURNING attempts").bind(key).bind(window).bind(limit).fetch_optional(&mut **tx).await?;
+    Ok(counted.is_some())
+}
+
+async fn throttle_release(
+    tx: &mut Transaction<'_, Postgres>,
+    keys: &[String],
+    window: i64,
+) -> Result<(), ApiError> {
+    sqlx::query("UPDATE login_throttles SET attempts = attempts - 1 WHERE key = ANY($1) AND window_start = $2 AND attempts > 0")
+        .bind(keys)
+        .bind(window)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+fn random_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn digest(secret: &str) -> Vec<u8> {
+    Sha256::digest(secret.as_bytes()).to_vec()
+}
+fn csrf_token(session: &str) -> String {
+    URL_SAFE_NO_PAD.encode(digest(&format!("obleth-chat-csrf:{session}")))
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut result = None;
+    for header in headers.get_all(header::COOKIE) {
+        for value in header.to_str().ok()?.split(';') {
+            if let Some((key, value)) = value.trim().split_once('=') {
+                if key == name {
+                    // Reject duplicates to prevent ambiguous cookie selection.
+                    if result.is_some()
+                        || value.len() != 43
+                        || !value
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                    {
+                        return None;
+                    }
+                    result = Some(value.to_string());
+                }
+            }
+        }
+    }
+    result
+}
+
+fn normalize_username(username: &str) -> Result<String, ApiError> {
+    let username = username.trim().to_ascii_lowercase();
+    if !(3..=64).contains(&username.len())
+        || !username
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'@'))
+    {
+        return Err(ApiError::bad(
+            "Username must be 3–64 letters, digits, dots, underscores, hyphens or @ characters",
+        ));
+    }
+    Ok(username)
+}
+
+fn validate_password(password: &str) -> Result<(), ApiError> {
+    if password.chars().count() < 12 || password.len() > 1024 {
+        return Err(ApiError::bad(
+            "Password must contain at least 12 characters and at most 1024 bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_display_name(name: &str) -> Result<String, ApiError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+        return Err(ApiError::bad("Display name must contain 1–100 characters"));
+    }
+    Ok(name.to_owned())
+}
+
+async fn hash_password(password: String) -> Result<String, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|hash| hash.to_string())
+            .map_err(|_| ApiError::internal())
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+}
+
+async fn session(State(auth): State<Auth>, headers: HeaderMap) -> Result<Response, ApiError> {
+    let body = match auth.require_session(&headers, false, true).await {
+        Ok(user) => {
+            let password_change_required: bool =
+                sqlx::query_scalar("SELECT password_change_required FROM users WHERE id=$1")
+                    .bind(user.id)
+                    .fetch_one(&auth.pool)
+                    .await?;
+            json!({"authenticated": true, "user": user, "csrfToken": csrf_token(&auth.session_token(&headers).ok_or_else(ApiError::unauthorized)?), "oidcEnabled": auth.oidc_enabled(), "passwordChangeRequired": password_change_required})
+        }
+        Err(error) if error.0 == StatusCode::UNAUTHORIZED => {
+            json!({"authenticated": false, "oidcEnabled": auth.oidc_enabled()})
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response())
+}
+
+#[derive(Deserialize)]
+struct LoginInput {
+    username: String,
+    password: String,
+}
+
+async fn login(
+    State(auth): State<Auth>,
+    client: Client,
+    headers: HeaderMap,
+    Json(input): Json<LoginInput>,
+) -> Result<Response, ApiError> {
+    auth.check_origin(&headers)?;
+    let username = normalize_username(&input.username).unwrap_or_else(|_| "!invalid".into());
+    auth.throttle("login", &client, Some(&username)).await?;
+    if input.password.len() > 1024 {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Invalid username or password".into(),
+        ));
+    }
+    let user = sqlx::query_as::<_, PasswordUser>("SELECT id, username, display_name, role, password_hash, enabled, password_change_required FROM users WHERE username = $1")
+        .bind(&username).fetch_optional(&auth.pool).await?;
+    let encoded = user
+        .as_ref()
+        .and_then(|u| u.password_hash.clone())
+        .unwrap_or_else(|| auth.dummy_password_hash.as_ref().clone());
+    let verified = auth.check_password(input.password, encoded.clone()).await?;
+    if !verified
+        || user
+            .as_ref()
+            .is_none_or(|u| !u.enabled || u.password_hash.is_none())
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Invalid username or password".into(),
+        ));
+    }
+    let mut tx = auth.pool.begin().await?;
+    let user = sqlx::query_as::<_, PasswordUser>("SELECT id, username, display_name, role, password_hash, enabled, password_change_required FROM users WHERE username = $1 FOR UPDATE")
+        .bind(&username).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::unauthorized)?;
+    // A concurrent reset or disable cannot create a session using stale credentials.
+    if !user.enabled || user.password_hash.as_deref() != Some(&encoded) {
+        return Err(ApiError::unauthorized());
+    }
+    auth.throttle_refund(&mut tx, &client, &username).await?;
+    if let Some(old_token) = auth.session_token(&headers) {
+        sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")
+            .bind(digest(&old_token))
+            .execute(&mut *tx)
+            .await?;
+    }
+    let token = random_token();
+    let lifetime = auth.config.session_hours as i64 * 3600;
+    auth.insert_session(&mut tx, user.id, &token, lifetime, &headers)
+        .await?;
+    tx.commit().await?;
+    Ok(auth.session_response(
+        user.identity(),
+        &token,
+        lifetime,
+        user.password_change_required,
+    ))
+}
+
+async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Result<Response, ApiError> {
+    auth.require_session(&headers, true, true).await?;
+    let token = auth
+        .session_token(&headers)
+        .ok_or_else(ApiError::unauthorized)?;
+    sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")
+        .bind(digest(&token))
+        .execute(&auth.pool)
+        .await?;
+    Ok((
+        [(
+            header::SET_COOKIE,
+            auth.cookie(auth.session_cookie_name(), "", 0),
+        )],
+        StatusCode::NO_CONTENT,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordInput {
+    current_password: String,
+    new_password: String,
+}
+
+async fn change_password(
+    State(auth): State<Auth>,
+    client: Client,
+    headers: HeaderMap,
+    Json(input): Json<PasswordInput>,
+) -> Result<Response, ApiError> {
+    let identity = auth.require_session(&headers, true, true).await?;
+    validate_password(&input.new_password)?;
+    if input.current_password.len() > 1024 {
+        return Err(ApiError::bad("Current password is incorrect"));
+    }
+    auth.throttle("login", &client, Some(&identity.username))
+        .await?;
+    let encoded: Option<String> =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1 AND enabled")
+            .bind(identity.id)
+            .fetch_optional(&auth.pool)
+            .await?
+            .flatten();
+    let Some(encoded) = encoded else {
+        return Err(ApiError::bad("This account signs in through OIDC"));
+    };
+    if !auth
+        .check_password(input.current_password, encoded.clone())
+        .await?
+    {
+        return Err(ApiError::bad("Current password is incorrect"));
+    }
+    let next_hash = auth.new_password_hash(input.new_password).await?;
+    let mut tx = auth.pool.begin().await?;
+    let updated = sqlx::query("UPDATE users SET password_hash = $1, password_change_required = FALSE, updated_at = NOW() WHERE id = $2 AND password_hash = $3 AND enabled")
+        .bind(next_hash).bind(identity.id).bind(encoded).execute(&mut *tx).await?.rows_affected();
+    if updated != 1 {
+        return Err(ApiError::unauthorized());
+    }
+    auth.throttle_refund(&mut tx, &client, &identity.username)
+        .await?;
+    sqlx::query("DELETE FROM auth_sessions WHERE user_id = $1")
+        .bind(identity.id)
+        .execute(&mut *tx)
+        .await?;
+    let token = random_token();
+    let lifetime = auth.config.session_hours as i64 * 3600;
+    auth.insert_session(&mut tx, identity.id, &token, lifetime, &headers)
+        .await?;
+    sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
+        .bind(identity.id)
+        .execute(&mut *tx)
+        .await?;
+    accounts::record_audit(
+        &mut tx,
+        Some(identity.id),
+        "password_changed",
+        "user",
+        Some(&identity.id.to_string()),
+        json!({}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(auth.session_response(identity, &token, lifetime, false))
+}
+
+#[derive(Serialize, FromRow)]
+struct AdminUser {
+    id: Uuid,
+    username: String,
+    display_name: String,
+    role: Role,
+    enabled: bool,
+    local_password: bool,
+    password_change_required: bool,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+struct UserQuery {
+    q: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn list_users(
+    State(auth): State<Auth>,
+    headers: HeaderMap,
+    Query(query): Query<UserQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth.require_admin(&headers, false).await?;
+    let search = query.q.as_deref().unwrap_or("").trim();
+    let limit = query.limit.unwrap_or(1000);
+    if search.len() > 256 || !(1..=1000).contains(&limit) {
+        return Err(ApiError::bad(
+            "Search is limited to 256 bytes and limit must be between 1 and 1000",
+        ));
+    }
+    // strpos treats wildcard characters literally; a search cannot silently match
+    // every user through SQL LIKE patterns. UUIDs can also be searched exactly.
+    let mut users = sqlx::query_as::<_, AdminUser>("SELECT id, username, display_name, role, enabled, password_hash IS NOT NULL AS local_password, password_change_required, created_at FROM users \
+        WHERE $1 = '' OR strpos(lower(username), lower($1)) > 0 OR strpos(lower(display_name), lower($1)) > 0 OR id::text = $1 \
+        ORDER BY created_at DESC, id DESC LIMIT $2")
+        .bind(search).bind(limit + 1)
+        .fetch_all(&auth.pool).await?;
+    let has_more = users.len() > limit as usize;
+    users.truncate(limit as usize);
+    Ok(Json(json!({"users": users, "hasMore": has_more})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateUserInput {
+    username: String,
+    display_name: Option<String>,
+    password: String,
+    role: Option<String>,
+    #[serde(default)]
+    force_password_change: bool,
+}
+
+async fn create_user(
+    State(auth): State<Auth>,
+    headers: HeaderMap,
+    Json(input): Json<CreateUserInput>,
+) -> Result<(StatusCode, Json<Identity>), ApiError> {
+    let admin = auth.require_admin(&headers, true).await?;
+    let username = normalize_username(&input.username)?;
+    let display_name = validate_display_name(input.display_name.as_deref().unwrap_or(&username))?;
+    let role = Role::requested(input.role.as_deref())?.unwrap_or(Role::User);
+    validate_password(&input.password)?;
+    let hash = auth.new_password_hash(input.password).await?;
+    let mut tx = auth.pool.begin().await?;
+    auth.lock_admin(&mut tx, admin.id).await?;
+    let result = sqlx::query_as::<_, Identity>("INSERT INTO users (id, username, display_name, role, password_hash, password_change_required) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, display_name, role")
+        .bind(Uuid::new_v4()).bind(username).bind(display_name).bind(role).bind(hash).bind(input.force_password_change).fetch_one(&mut *tx).await;
+    match result {
+        Ok(identity) => {
+            auth.group_policy.initial(&mut tx, identity.id).await?;
+            accounts::record_audit(
+                &mut tx,
+                Some(admin.id),
+                "user_created",
+                "user",
+                Some(&identity.id.to_string()),
+                json!({"role":identity.role,"forcePasswordChange":input.force_password_change}),
+            )
+            .await?;
+            tx.commit().await?;
+            Ok((StatusCode::CREATED, Json(identity)))
+        }
+        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => Err(ApiError(
+            StatusCode::CONFLICT,
+            "Username already exists".into(),
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateUserInput {
+    enabled: Option<bool>,
+    role: Option<String>,
+    display_name: Option<String>,
+}
+
+async fn update_user(
+    State(auth): State<Auth>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateUserInput>,
+) -> Result<StatusCode, ApiError> {
+    let admin = auth.require_admin(&headers, true).await?;
+    if input.enabled.is_none() && input.role.is_none() && input.display_name.is_none() {
+        return Err(ApiError::bad("Provide an account field to update"));
+    }
+    let requested_role = Role::requested(input.role.as_deref())?;
+    let display_name = input
+        .display_name
+        .as_deref()
+        .map(validate_display_name)
+        .transpose()?;
+    if admin.id == id && input.enabled == Some(false) {
+        return Err(ApiError::bad(
+            "Administrators cannot disable their own account",
+        ));
+    }
+    let mut tx = auth.pool.begin().await?;
+    auth.lock_admin(&mut tx, admin.id).await?;
+    let (enabled, role): (bool, Role) =
+        sqlx::query_as("SELECT enabled,role FROM users WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+    let next_enabled = input.enabled.unwrap_or(enabled);
+    let next_role = requested_role.unwrap_or(role);
+    if enabled && role == Role::Admin && (!next_enabled || next_role != Role::Admin) {
+        let another_ready_admin: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u WHERE u.id<>$1 AND u.enabled AND u.role='admin' AND (u.password_hash IS NOT NULL OR EXISTS(SELECT 1 FROM oidc_identities o WHERE o.user_id=u.id)))")
+            .bind(id).fetch_one(&mut *tx).await?;
+        if !another_ready_admin {
+            return Err(ApiError::bad(
+                "At least one enabled administrator is required",
+            ));
+        }
+    }
+    sqlx::query("UPDATE users SET enabled=$2,role=$3,display_name=COALESCE($4,display_name),updated_at=NOW() WHERE id=$1")
+        .bind(id).bind(next_enabled).bind(next_role).bind(&display_name).execute(&mut *tx).await?;
+    if enabled != next_enabled || role != next_role {
+        sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    accounts::record_audit(&mut tx, Some(admin.id), "user_updated", "user", Some(&id.to_string()), json!({"enabled":next_enabled,"role":next_role,"displayNameChanged":display_name.is_some()})).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetPasswordInput {
+    new_password: String,
+    #[serde(default)]
+    force_password_change: bool,
+}
+
+async fn reset_password(
+    State(auth): State<Auth>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ResetPasswordInput>,
+) -> Result<StatusCode, ApiError> {
+    let admin = auth.require_admin(&headers, true).await?;
+    if admin.id == id {
+        return Err(ApiError::bad("Use change password for your own account"));
+    }
+    validate_password(&input.new_password)?;
+    let hash = auth.new_password_hash(input.new_password).await?;
+    let mut tx = auth.pool.begin().await?;
+    auth.lock_admin(&mut tx, admin.id).await?;
+    // Administrators cannot silently add local credentials to an OIDC-only identity.
+    if sqlx::query("UPDATE users SET password_hash = $1, password_change_required=$3, updated_at = NOW() WHERE id = $2 AND password_hash IS NOT NULL")
+        .bind(hash).bind(id).bind(input.force_password_change).execute(&mut *tx).await?.rows_affected() == 0 { return Err(ApiError::not_found()); }
+    sqlx::query("DELETE FROM auth_sessions WHERE user_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    accounts::record_audit(
+        &mut tx,
+        Some(admin.id),
+        "password_reset",
+        "user",
+        Some(&id.to_string()),
+        json!({"forcePasswordChange":input.force_password_change}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkOidcInput {
+    user_id: Uuid,
+    subject: String,
+}
+
+async fn link_oidc_identity(
+    State(auth): State<Auth>,
+    headers: HeaderMap,
+    Json(input): Json<LinkOidcInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let admin = auth.require_admin(&headers, true).await?;
+    let provider = auth
+        .config
+        .oidc
+        .as_ref()
+        .ok_or_else(|| ApiError::bad("OIDC is not configured"))?;
+    if input.subject.is_empty()
+        || input.subject.len() > 255
+        || !input.subject.is_ascii()
+        || input.subject.chars().any(char::is_control)
+    {
+        return Err(ApiError::bad(
+            "OIDC subject must be 1–255 printable ASCII characters",
+        ));
+    }
+    let mut tx = auth.pool.begin().await?;
+    auth.lock_admin(&mut tx, admin.id).await?;
+    let user: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE id = $1 AND enabled FOR UPDATE")
+            .bind(input.user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if user.is_none() {
+        return Err(ApiError::not_found());
+    }
+    let inserted = sqlx::query("INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3) ON CONFLICT (issuer, subject) DO NOTHING")
+        .bind(&provider.issuer).bind(&input.subject).bind(input.user_id).execute(&mut *tx).await?.rows_affected();
+    if inserted == 0 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This OIDC identity is already linked".into(),
+        ));
+    }
+    // Pending invitation or recovery links must not add a local password afterwards.
+    sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
+        .bind(input.user_id)
+        .execute(&mut *tx)
+        .await?;
+    accounts::record_audit(
+        &mut tx,
+        Some(admin.id),
+        "oidc_linked",
+        "user",
+        Some(&input.user_id.to_string()),
+        json!({}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"userId": input.user_id, "issuer": provider.issuer, "subject": input.subject})),
+    ))
+}

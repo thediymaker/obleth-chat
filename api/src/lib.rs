@@ -1,0 +1,1616 @@
+pub mod attachments;
+pub mod auth;
+pub mod config;
+pub mod connections;
+pub mod error;
+pub mod gateway;
+pub mod groups;
+pub mod images;
+pub mod knowledge;
+pub mod lifecycle;
+pub mod metrics;
+pub mod models;
+pub mod operations;
+pub mod projects;
+pub mod questions;
+pub mod research;
+pub mod retention;
+pub mod sandbox;
+pub mod steer;
+pub mod store;
+pub mod suggestions;
+
+use auth::{Auth, Identity};
+use axum::{
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{
+        sse::{Event, KeepAlive},
+        IntoResponse, Response, Sse,
+    },
+    routing::{get, post},
+    Json, Router,
+};
+use error::ApiError;
+use futures_util::StreamExt;
+use gateway::{Decoder, Gateway};
+use metrics::Metrics;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use sqlx::PgPool;
+use std::{
+    convert::Infallible,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use store::{ReasoningEffort, Store, Turn};
+use tokio::sync::{mpsc, Semaphore};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
+use tower_http::{compression::CompressionLayer, services::ServeDir};
+use uuid::Uuid;
+
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+#[derive(Clone)]
+pub struct AppState {
+    pub auth: Auth,
+    pub store: Store,
+    pub gateway: Option<Gateway>,
+    pub metrics: Metrics,
+    pub slots: Arc<Semaphore>,
+    pub shutdown: CancellationToken,
+    pub admin_gateway_url: Option<String>,
+    pub followups_enabled: bool,
+    pub sandboxes: Option<sandbox::Sandboxes>,
+    pub connections: Option<connections::Connections>,
+    pub knowledge: Option<knowledge::Knowledge>,
+}
+impl AppState {
+    pub fn new(auth: Auth, pool: PgPool, gateway: Option<Gateway>, max_streams: usize) -> Self {
+        Self {
+            auth,
+            store: Store::new(pool),
+            gateway,
+            metrics: Metrics::new(),
+            slots: Arc::new(Semaphore::new(max_streams)),
+            shutdown: CancellationToken::new(),
+            admin_gateway_url: None,
+            followups_enabled: true,
+            sandboxes: None,
+            connections: None,
+            knowledge: None,
+        }
+    }
+}
+pub fn router(state: AppState, static_dir: PathBuf) -> Router {
+    let auth = state.auth.router();
+    let catalog = models::router(state.clone());
+    let operations = operations::router(state.clone());
+    let retention = retention::router(state.clone());
+    let attachments = attachments::router(state.clone());
+    let images = images::router(state.clone());
+    let projects = projects::router(state.clone());
+    let groups = groups::router(state.clone());
+    let research = research::router(state.clone());
+    let workspaces = sandbox::router(state.clone());
+    let connections = connections::router(state.clone());
+    let steering = steer::router(state.clone());
+    let knowledge = knowledge::router(state.clone());
+    let metrics = state.metrics.clone();
+    let sandboxes = state.sandboxes.clone();
+    let _ = CSP.set(content_security_policy(sandboxes.as_ref()));
+    Router::new()
+        .route(
+            "/healthz",
+            get(|| async { Json(json!({"status":"ok","mode":"connected"})) }),
+        )
+        .route("/readyz", get(ready))
+        .route("/metrics", get(metrics_endpoint))
+        .route("/.well-known/jwks.json", get(jwks))
+        .route("/api/capabilities", get(capabilities))
+        .route("/api/conversations", get(list).post(create))
+        .route(
+            "/api/conversations/{id}",
+            get(detail).patch(rename).delete(delete),
+        )
+        .route("/api/conversations/{id}/branch", post(branch))
+        .route("/api/conversations/{id}/fork", post(fork_turn))
+        .route("/api/conversations/{id}/branches", get(branches))
+        .route("/api/conversations/bulk", post(bulk))
+        .route("/api/conversations/export", post(export))
+        .route(
+            "/api/conversations/import",
+            post(import).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+        )
+        .route("/api/conversations/{id}/messages", post(send))
+        .route("/api/conversations/{id}/stop", post(lifecycle::stop))
+        .route(
+            "/api/conversations/{id}/messages/{message}/select",
+            post(select_version),
+        )
+        .route(
+            "/api/{*rest}",
+            get(|| async { ApiError::not_found() }).post(|| async { ApiError::not_found() }),
+        )
+        .with_state(state)
+        .merge(auth)
+        .merge(catalog)
+        .merge(operations)
+        .merge(retention)
+        .merge(attachments)
+        .merge(images)
+        .merge(projects)
+        .merge(groups)
+        .merge(research)
+        .merge(workspaces)
+        .merge(connections)
+        .merge(steering)
+        .merge(knowledge)
+        .fallback_service(static_files(static_dir))
+        .layer(DefaultBodyLimit::max(128 * 1024))
+        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(metrics, metrics::record))
+        // Outermost: preview hosts are answered before any Chat route or header policy.
+        .layer(middleware::from_fn_with_state(
+            sandboxes,
+            sandbox::preview::dispatch,
+        ))
+}
+static CSP: std::sync::OnceLock<HeaderValue> = std::sync::OnceLock::new();
+/// Chat may frame its workspace previews, which live on their own origins.
+fn content_security_policy(sandboxes: Option<&sandbox::Sandboxes>) -> HeaderValue {
+    let frames = sandboxes
+        .map(|sb| {
+            format!(
+                " frame-src {}://*.{};",
+                sb.config().preview_scheme,
+                sb.config().preview_domain
+            )
+        })
+        .unwrap_or_default();
+    HeaderValue::from_str(&format!("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self';{frames} base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"))
+        .expect("static policy")
+}
+/// The frontend loads unhashed ES modules by relative URL, so browsers keep a copy
+/// but revalidate it (ServeDir answers If-Modified-Since with 304) on every load;
+/// other statuses, such as a 404 for an unknown path, keep the no-store default.
+/// Compression applies to this service only, away from the streaming API routes.
+fn static_files(static_dir: PathBuf) -> Router {
+    Router::new()
+        .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
+        .layer(middleware::map_response(|mut response: Response| async {
+            let status = response.status();
+            if status.is_success() || status == StatusCode::NOT_MODIFIED {
+                response
+                    .headers_mut()
+                    .entry(header::CACHE_CONTROL)
+                    .or_insert(HeaderValue::from_static("no-cache"));
+            }
+            response
+        }))
+        .layer(CompressionLayer::new())
+}
+/// Defaults only: a handler's own header (such as the attachment sandbox CSP)
+/// is kept, and any response that did not choose a cache policy is no-store.
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    for (key, value) in [
+        ("cache-control", "no-store"),
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "DENY"),
+        ("referrer-policy", "no-referrer"),
+        (
+            "permissions-policy",
+            "camera=(), microphone=(), geolocation=()",
+        ),
+    ] {
+        headers
+            .entry(key)
+            .or_insert(HeaderValue::from_static(value));
+    }
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert_with(|| CSP.get_or_init(|| content_security_policy(None)).clone());
+    response
+}
+async fn ready(State(s): State<AppState>) -> impl IntoResponse {
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query("SELECT 1").execute(&s.store.pool),
+    )
+    .await
+    {
+        Ok(Ok(_)) if !s.shutdown.is_cancelled() => (
+            StatusCode::OK,
+            Json(json!({"status":"ready","mode":"connected"})),
+        ),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status":"not_ready"})),
+        ),
+    }
+}
+async fn metrics_endpoint(State(s): State<AppState>) -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        s.metrics.render(),
+    )
+}
+async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Value> {
+    let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":true,"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
+    let user = s.auth.require(&headers, false).await.ok();
+    if user.as_ref().is_some_and(|u| u.is_admin()) {
+        value["adminGatewayUrl"] = json!(s.admin_gateway_url);
+    }
+    if let (Some(sb), Some(user)) = (&s.sandboxes, &user) {
+        value["features"]["workspaces"] = json!(sb.allowed(user));
+    }
+    Json(value)
+}
+async fn jwks(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(s.gateway.as_ref().ok_or_else(not_configured)?.jwks()))
+}
+fn not_configured() -> ApiError {
+    ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Gateway integration is not configured".into(),
+    )
+}
+async fn list(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<store::HistoryQuery>,
+) -> Result<Json<store::HistoryPage>, ApiError> {
+    let u = s.auth.require(&headers, false).await?;
+    Ok(Json(s.store.history(u.id, query).await?))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Create {
+    title: String,
+    model: String,
+    #[serde(default)]
+    reasoning_effort: ReasoningEffort,
+}
+async fn create(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Create>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            json!({"conversation":s.store.create_with_effort(u.id,&body.title,&body.model,body.reasoning_effort).await?}),
+        ),
+    ))
+}
+async fn detail(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let u = s.auth.require(&headers, false).await?;
+    Ok(Json(json!({"conversation":s.store.get(u.id,id).await?})))
+}
+async fn rename(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<store::ConversationPatch>,
+) -> Result<Json<Value>, ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    Ok(Json(
+        json!({"conversation":s.store.patch(u.id,id,body).await?}),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Fork {
+    message_id: Uuid,
+    mode: String,
+    content: Option<String>,
+}
+async fn fork_turn(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<Fork>,
+) -> Result<(StatusCode, Json<store::ForkResult>), ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            s.store
+                .fork_turn(
+                    u.id,
+                    id,
+                    body.message_id,
+                    &body.mode,
+                    body.content.as_deref(),
+                )
+                .await?,
+        ),
+    ))
+}
+async fn branches(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let u = s.auth.require(&headers, false).await?;
+    Ok(Json(
+        json!({"conversations":s.store.branches(u.id,id).await?}),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Bulk {
+    ids: Vec<Uuid>,
+    action: String,
+}
+async fn bulk(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Bulk>,
+) -> Result<StatusCode, ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    s.store.bulk(u.id, &body.ids, &body.action).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Selection {
+    ids: Vec<Uuid>,
+}
+async fn export(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Selection>,
+) -> Result<Json<store::ChatArchive>, ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    Ok(Json(s.store.export(u.id, &body.ids).await?))
+}
+async fn import(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<store::ChatArchive>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"conversations":s.store.import(u.id,body).await?})),
+    ))
+}
+async fn delete(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    s.store.delete(u.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Branch {
+    through_message_id: Uuid,
+}
+async fn branch(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<Branch>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"conversation":s.store.branch(u.id,id,body.through_message_id).await?})),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Send {
+    #[serde(default)]
+    content: String,
+    model: String,
+    #[serde(default)]
+    attachment_ids: Vec<Uuid>,
+    system_prompt: Option<String>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    max_tokens: Option<i32>,
+    reasoning_effort: Option<ReasoningEffort>,
+    regenerate_message_id: Option<Uuid>,
+    edit_message_id: Option<Uuid>,
+}
+async fn select_version(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path((id, message)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let user = s.auth.require(&headers, true).await?;
+    Ok(Json(
+        json!({"conversation":s.store.select_version(user.id,id,message).await?}),
+    ))
+}
+async fn send(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(mut body): Json<Send>,
+) -> Result<Response, ApiError> {
+    let user = s.auth.require(&headers, true).await?;
+    let gateway = s.gateway.clone().ok_or_else(not_configured)?;
+    if s.shutdown.is_cancelled() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service is shutting down".into(),
+        ));
+    }
+    if body.regenerate_message_id.is_some() && body.edit_message_id.is_some() {
+        return Err(ApiError::bad("Choose either edit or regenerate"));
+    }
+    let variant = body
+        .regenerate_message_id
+        .map(|message| (message, "regenerate"))
+        .or_else(|| body.edit_message_id.map(|message| (message, "edit")));
+    // Only settings are needed before model resolution; start_turn_inner performs
+    // the turn's single locked transcript load and every admission check.
+    let saved = if let Some((message, mode)) = variant {
+        let context = s.store.variant_context(user.id, id, message, mode).await?;
+        if mode == "regenerate" {
+            body.content = context.draft;
+            body.attachment_ids = context.attachments.iter().map(|a| a.id).collect();
+        }
+        context.settings
+    } else {
+        s.store.saved_settings(user.id, id).await?
+    };
+    let saved: models::ParameterOverrides =
+        serde_json::from_value(saved).map_err(|_| ApiError::internal())?;
+    let overrides = models::ParameterOverrides {
+        system_prompt: body.system_prompt.or(saved.system_prompt),
+        temperature: body.temperature.or(saved.temperature),
+        top_p: body.top_p.or(saved.top_p),
+        max_tokens: body.max_tokens.or(saved.max_tokens),
+        reasoning_effort: body.reasoning_effort.or(saved.reasoning_effort),
+    };
+    let resolved =
+        models::resolve_request(&s.store.pool, &gateway, &user, &body.model, overrides).await?;
+    let parameters = &resolved.parameters;
+    // A conversation with a workspace gives the model its tools. Catalog metadata
+    // often under-reports tool support, so the explicit workspace choice decides; a
+    // model that cannot call tools answers without them or reports the error.
+    let workspace = match &s.sandboxes {
+        Some(sb) if sb.allowed(&user) => sb.get(user.id, id).await?,
+        _ => None,
+    };
+    // Connection tools go to every chat whose model may call tools.
+    let toolset = match &s.connections {
+        Some(c) if resolved.capabilities.supports_function_calling != Some(false) => {
+            Some(c.toolset(user.id, id).await).filter(|t| !t.is_empty())
+        }
+        _ => None,
+    };
+    let permit = s.slots.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Chat is at capacity. Try again shortly.".into(),
+        )
+    })?;
+    let turn = if let Some((message, mode)) = variant {
+        s.store
+            .start_variant_turn(
+                user.id,
+                id,
+                &body.content,
+                &resolved.model,
+                &parameters.system_prompt,
+                parameters.temperature,
+                parameters.max_tokens,
+                Some(parameters.reasoning_effort),
+                parameters.top_p,
+                &body.model,
+                &body.attachment_ids,
+                resolved.capabilities.supports_vision == Some(true),
+                message,
+                mode,
+            )
+            .await?
+    } else {
+        s.store
+            .start_turn_attached(
+                user.id,
+                id,
+                &body.content,
+                &resolved.model,
+                &parameters.system_prompt,
+                parameters.temperature,
+                parameters.max_tokens,
+                Some(parameters.reasoning_effort),
+                parameters.top_p,
+                &body.model,
+                &body.attachment_ids,
+                resolved.capabilities.supports_vision == Some(true),
+            )
+            .await?
+    };
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
+    tokio::spawn(async move {
+        run_generation(
+            s, gateway, user, headers, id, resolved, turn, tx, permit, workspace, toolset,
+        )
+        .await;
+    });
+    let mut response = Sse::new(ReceiverStream::new(rx))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    // Sse sets no-cache, which security_headers would keep; a transcript is no-store.
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+const MAX_AGENT_STEPS: usize = 100;
+/// A tool turn runs while the model keeps answering; this only bounds runaways.
+const TOOL_TURN_SECS: u64 = 3 * 60 * 60;
+/// How long the model may send nothing before a tool turn pauses.
+const STALL_SECS: u64 = 10 * 60;
+const AGENT_STEP_LIMIT: &str = "The workspace agent stopped after";
+const STALLED: &str = "The model sent nothing for";
+/// Bytes of tool output kept in the request history; older outputs are elided.
+const TOOL_HISTORY_BYTES: usize = 160 * 1024;
+
+struct ToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Merges streamed tool-call fragments, which arrive keyed by index.
+/// The file a streaming write_file or edit_file call is producing: its path and the
+/// last lines typed so far.
+fn draft_of(call: &ToolCall) -> Option<Value> {
+    let field = match call.name.as_str() {
+        "write_file" => "content",
+        "edit_file" => "new_text",
+        _ => return None,
+    };
+    let path = partial_string(&call.arguments, "path").unwrap_or_default();
+    let text = partial_string(&call.arguments, field)?;
+    let lines = text.lines().count();
+    let tail: Vec<&str> = text.lines().rev().take(8).collect();
+    let tail: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    Some(
+        json!({"id":call.id,"tool":call.name,"path":path.chars().take(200).collect::<String>(),"lines":lines,"tail":tail.chars().rev().take(1200).collect::<String>().chars().rev().collect::<String>()}),
+    )
+}
+
+/// The value of `"key": "…"` in JSON that may still be arriving, unescaped as far as
+/// it goes.
+fn partial_string(json: &str, key: &str) -> Option<String> {
+    let at = json.find(&format!("\"{key}\""))? + key.len() + 2;
+    let rest = json[at..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start()
+        .strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => {}
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(c);
+                    }
+                }
+                Some(other) => out.push(other),
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+fn accumulate_tool_calls(calls: &mut Vec<ToolCall>, deltas: &[Value]) -> Result<(), String> {
+    for (position, delta) in deltas.iter().enumerate() {
+        let index = delta
+            .get("index")
+            .and_then(Value::as_u64)
+            .map_or(position, |i| i as usize);
+        if index >= 16 {
+            return Err("The model requested too many tools at once".into());
+        }
+        while calls.len() <= index {
+            calls.push(ToolCall {
+                id: format!("call_{}", calls.len()),
+                name: String::new(),
+                arguments: String::new(),
+            });
+        }
+        let call = &mut calls[index];
+        if let Some(id) = delta
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+        {
+            call.id = id.to_owned();
+        }
+        if let Some(name) = delta.pointer("/function/name").and_then(Value::as_str) {
+            call.name.push_str(name);
+        }
+        if let Some(arguments) = delta.pointer("/function/arguments").and_then(Value::as_str) {
+            call.arguments.push_str(arguments);
+        }
+        if call.name.len() > 64 || call.arguments.len() > 2 * 1024 * 1024 {
+            return Err("The model sent an oversized tool call".into());
+        }
+    }
+    Ok(())
+}
+
+/// Keeps agent requests bounded: the oldest tool outputs are replaced by a note
+/// once their total passes TOOL_HISTORY_BYTES.
+fn trim_tool_history(payload: &mut Value) {
+    let Some(messages) = payload["messages"].as_array_mut() else {
+        return;
+    };
+    let mut total: usize = messages
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().map_or(0, str::len))
+        .sum();
+    for message in messages.iter_mut().filter(|m| m["role"] == "tool") {
+        if total <= TOOL_HISTORY_BYTES {
+            break;
+        }
+        let size = message["content"].as_str().map_or(0, str::len);
+        if size > 200 {
+            total -= size;
+            message["content"] = json!(
+                "[Earlier output omitted to save context. Run the tool again if you need it.]"
+            );
+        }
+    }
+}
+
+/// Adds a tool step to the activity log, or updates the step just added.
+fn record(activity: &mut Vec<Value>, entry: &Value, new: bool) {
+    match activity.last_mut() {
+        Some(last) if !new => *last = entry.clone(),
+        _ => {
+            if activity.len() >= 300 {
+                activity.remove(0);
+            }
+            activity.push(entry.clone());
+        }
+    }
+}
+
+fn emit(tx: &mut Option<mpsc::Sender<Result<Event, Infallible>>>, name: &str, data: Value) {
+    // A slow or disconnected browser must never hold up model consumption.
+    // Closing this subscriber makes it reconcile from durable checkpoints.
+    if tx.as_ref().is_some_and(|sender| {
+        sender
+            .try_send(Ok(Event::default().event(name).data(data.to_string())))
+            .is_err()
+    }) {
+        *tx = None;
+    }
+}
+#[allow(clippy::too_many_arguments)]
+async fn run_generation(
+    s: AppState,
+    gateway: Gateway,
+    user: Identity,
+    headers: HeaderMap,
+    id: Uuid,
+    resolved: models::ResolvedRequest,
+    turn: Turn,
+    tx: mpsc::Sender<Result<Event, Infallible>>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    workspace: Option<sandbox::Sandbox>,
+    mut toolset: Option<connections::Toolset>,
+) {
+    let workspace_turn = workspace.is_some();
+    // The chat's project: instructions, and collections and saved items it also searches.
+    let project = projects::for_conversation(&s.store.pool, user.id, id).await;
+    // Passages from the chat's knowledge collections, found before the model starts.
+    let mut knowledge_turn = match &s.knowledge {
+        Some(k) => {
+            let messages: Vec<(String, String)> = turn
+                .messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect();
+            let tools = resolved.capabilities.supports_function_calling != Some(false);
+            let library = resolved.capabilities.supports_function_calling == Some(true);
+            k.prepare(
+                &gateway,
+                &user,
+                id,
+                &messages,
+                tools,
+                library,
+                project.as_ref(),
+            )
+            .await
+        }
+        None => None,
+    };
+    // Models with tools may ask the person to choose before going on.
+    let asks = resolved.capabilities.supports_function_calling == Some(true);
+    let tool_turn = workspace_turn
+        || asks
+        || toolset.is_some()
+        || knowledge_turn
+            .as_ref()
+            .is_some_and(|t| t.searchable() || t.library);
+    s.metrics.streams.inc();
+    let started = Instant::now();
+    let mut content = String::new();
+    let mut reasoning_content = String::new();
+    let mut usage = None;
+    let mut request_id = None;
+    // With Auto the gateway picks the model; the stream says which one it was.
+    let mut served: Option<String> = None;
+    let mut finish_reason: Option<String> = None;
+    let mut first = true;
+    let generation_id = turn.generation_id;
+    let mut tx = Some(tx);
+    let mut messages = vec![];
+    let parameters = &resolved.parameters;
+    if !parameters.system_prompt.is_empty() {
+        messages.push(json!({"role":"system","content":parameters.system_prompt}));
+    }
+    messages.extend(turn.messages.iter().map(|m| {
+        if m.role == "assistant" {
+            return json!({"role":"assistant","content":store::replay_content(m)});
+        }
+        let files = turn.attachments.get(&m.id);
+        let content = if let Some(files) = files.filter(|files| !files.is_empty()) {
+            if files.iter().all(|f| f.meta.kind == "text") {
+                let mut text = m.content.clone();
+                for file in files {
+                    if let Some(context) = file.text_context() {
+                        text.push_str(&context);
+                    }
+                }
+                json!(text)
+            } else {
+                let mut parts = vec![json!({"type":"text","text":m.content})];
+                parts.extend(files.iter().map(attachments::Attachment::content_part));
+                json!(parts)
+            }
+        } else {
+            json!(m.content)
+        };
+        json!({"role":m.role,"content":content})
+    }));
+    let workspace = workspace.zip(s.sandboxes.clone());
+    let mut preamble = vec![];
+    if let Some(project) = &project {
+        preamble.push(project.prompt());
+    }
+    if let Some((sandbox, sandboxes)) = &workspace {
+        let instructions = models::agent_instructions(&s.store.pool, user.id).await;
+        let context = sandbox::tools::project_context(sandboxes, sandbox).await;
+        preamble.push(sandbox::tools::system_prompt(
+            sandbox,
+            instructions.as_deref(),
+            &context,
+        ));
+    }
+    // A workspace chat in a project can run the project's research.
+    let research_standing = match (&workspace, &project) {
+        (Some(_), Some(project)) => {
+            research::tools::standing(&s.store.pool, user.id, id, project.id).await
+        }
+        _ => None,
+    };
+    if let (Some(standing), Some((sandbox, _))) = (&research_standing, &workspace) {
+        preamble.push(research::tools::prompt(&s.store.pool, standing, sandbox).await);
+    }
+    let research_tools = matches!(
+        research_standing,
+        Some(research::tools::Standing::Absent | research::tools::Standing::Here(_))
+    );
+    if let Some(toolset) = &toolset {
+        preamble.push(toolset.prompt());
+    }
+    if let Some(prompt) = knowledge_turn
+        .as_ref()
+        .map(|k| k.prompt())
+        .filter(|p| !p.is_empty())
+    {
+        preamble.push(prompt);
+    }
+    if !preamble.is_empty() {
+        preamble.push(format!("Earlier replies in this conversation may end with a bracketed note that starts with \"{}\". Chat adds it so you remember which tools ran; you did not write it and the person does not see it. Never write such a note yourself: your tools report their own results.", store::RECORD));
+        if !parameters.system_prompt.is_empty() {
+            preamble.push(parameters.system_prompt.clone());
+        }
+        let prompt = preamble.join("\n\n");
+        if parameters.system_prompt.is_empty() {
+            messages.insert(0, json!({"role":"system","content":prompt}));
+        } else {
+            messages[0] = json!({"role":"system","content":prompt});
+        }
+    }
+    // Workspace turns write whole files through tool arguments.
+    let max_tokens = if workspace.is_some() {
+        parameters.max_tokens.max(16_384)
+    } else {
+        parameters.max_tokens
+    };
+    let mut payload = json!({"model":resolved.model,"messages":messages,"temperature":parameters.temperature,"top_p":parameters.top_p,"max_tokens":max_tokens,"reasoning_effort":turn.reasoning_effort,"stream":true,"stream_options":{"include_usage":true}});
+    if resolved.capabilities.supports_reasoning == Some(false) {
+        payload.as_object_mut().unwrap().remove("reasoning_effort");
+    }
+    let mut tools = vec![];
+    if workspace.is_some() {
+        if let Value::Array(definitions) = sandbox::tools::definitions() {
+            tools.extend(definitions);
+        }
+    }
+    if let Some(toolset) = &toolset {
+        tools.extend(toolset.definitions());
+    }
+    if knowledge_turn.as_ref().is_some_and(|t| t.searchable()) {
+        tools.push(knowledge::chat::definition());
+    }
+    if knowledge_turn.as_ref().is_some_and(|t| t.library) {
+        tools.push(knowledge::chat::save_definition());
+    }
+    if asks {
+        tools.push(questions::definition());
+    }
+    if research_tools {
+        tools.extend(research::tools::definitions());
+    }
+    if !tools.is_empty() {
+        payload["tools"] = Value::Array(tools);
+    }
+    let mut activity: Vec<Value> = vec![];
+    let user_message_id = turn.messages.last().map(|m| m.id);
+    emit(
+        &mut tx,
+        "meta",
+        json!({"conversationId":id,"messageId":turn.assistant_id,"userMessageId":user_message_id,"generationId":generation_id,"requestId":request_id,"resolvedModel":resolved.model,"settings":parameters}),
+    );
+    if let Some(knowledge) = knowledge_turn.as_ref().filter(|k| k.has_collections()) {
+        let entry = knowledge.entry();
+        record(&mut activity, &entry, true);
+        emit(&mut tx, "tool", entry);
+    }
+    let work = async {
+        let mut steps = 0;
+        let mut checkpoint = tokio::time::interval(Duration::from_millis(750));
+        checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut saved_bytes = 0;
+        let mut saved_at = Instant::now();
+        let mut drafted = Instant::now();
+        let mut checkpoints = 0;
+        loop {
+            steps += 1;
+            let step_start = content.len();
+            // Where this step's thinking starts, in UTF-16 units as the browser counts.
+            let thought_from = reasoning_content.encode_utf16().count();
+            let round_began = Instant::now();
+            if steps > 1 && tool_turn {
+                // Notes the person sent while the model worked, read at the step boundary.
+                for (note, text) in steer::take(&s.store.pool, generation_id).await {
+                    payload["messages"].as_array_mut().unwrap().push(json!({"role":"user","content":format!("[A note from the person while you work: {text}]")}));
+                    let entry = json!({"id":format!("note-{note}"),"kind":"note","summary":text,"status":"completed","startedAt":chrono::Utc::now()});
+                    record(&mut activity, &entry, true);
+                    emit(&mut tx, "tool", entry);
+                }
+            }
+            let mut calls: Vec<ToolCall> = vec![];
+            let response = tokio::time::timeout(
+                Duration::from_secs(STALL_SECS),
+                gateway.chat(&user, id, payload.clone()),
+            )
+            .await
+            .map_err(|_| format!("{STALLED} {} minutes", STALL_SECS / 60))?
+            .map_err(|e| e.1)?;
+            if let Some(found) = response
+                .headers()
+                .get("x-obleth-request-id")
+                .and_then(|v| v.to_str().ok())
+                .filter(|s| s.len() <= 200)
+            {
+                request_id = Some(found.to_owned());
+            }
+            emit(
+                &mut tx,
+                "meta",
+                json!({"conversationId":id,"messageId":turn.assistant_id,"userMessageId":user_message_id,"generationId":generation_id,"requestId":request_id,"resolvedModel":resolved.model,"settings":parameters}),
+            );
+            let mut stream = response.bytes_stream();
+            let mut decoder = Decoder::default();
+            let mut done = false;
+            let mut heard = Instant::now();
+            'outer: loop {
+                let chunk = tokio::select! {
+                    chunk=stream.next()=>match chunk {Some(chunk)=>{heard=Instant::now();chunk},None=>break},
+                    _=checkpoint.tick()=>{
+                        if heard.elapsed() > Duration::from_secs(STALL_SECS) {
+                            return Err(format!("{STALLED} {} minutes", STALL_SECS / 60));
+                        }
+                        let total=content.len()+reasoning_content.len();
+                        if lifecycle::checkpoint_due(total,saved_bytes,saved_at.elapsed()) {
+                            match lifecycle::checkpoint(&s.store.pool,user.id,id,generation_id,&content,&reasoning_content,request_id.as_deref()).await {
+                                Ok(())=>{saved_bytes=total;saved_at=Instant::now();}
+                                // A transient database error retries on a later tick; the
+                                // control loop bounds how long work runs without the database.
+                                Err(e) if e.0==StatusCode::INTERNAL_SERVER_ERROR=>tracing::warn!("could not checkpoint chat generation; retrying"),
+                                Err(_)=>return Err("The response could not save progress".to_string()),
+                            }
+                        }
+                        continue;
+                    }
+                };
+                let chunk = chunk.map_err(|_| "Gateway stream was interrupted".to_string())?;
+                for event in decoder.push(&chunk).map_err(str::to_string)? {
+                    if event == "[DONE]" {
+                        done = true;
+                        break 'outer;
+                    }
+                    let v: Value = serde_json::from_str(&event)
+                        .map_err(|_| "Gateway returned an invalid stream event".to_string())?;
+                    if v.get("error").is_some() {
+                        return Err("Gateway reported an error during generation".to_string());
+                    }
+                    if resolved.model == "auto" && served.is_none() {
+                        if let Some(model) = v
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .filter(|m| gateway::valid_model(m) && *m != "auto")
+                        {
+                            // The upstream may name the model its own way; record and
+                            // keep the gateway's name, which later tool rounds need.
+                            let model =
+                                models::gateway_name(model, &resolved.choices).unwrap_or(model);
+                            served = Some(model.to_owned());
+                            if resolved.choices.iter().any(|c| c == model) {
+                                // Keep the rest of this turn's tool rounds on the same model.
+                                payload["model"] = json!(model);
+                            }
+                            emit(&mut tx, "model", json!({"model":model}));
+                        }
+                    }
+                    if let Some(u) = v.get("usage").filter(|v| v.is_object()) {
+                        let mut clean = usage
+                            .take()
+                            .and_then(|u: Value| u.as_object().cloned())
+                            .unwrap_or_default();
+                        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+                            if let Some(n) = u
+                                .get(key)
+                                .and_then(Value::as_u64)
+                                .filter(|n| *n <= 1_000_000_000)
+                            {
+                                // Agent steps are separate requests; the turn reports their sum.
+                                let previous = if steps > 1 {
+                                    clean.get(key).and_then(Value::as_u64).unwrap_or(0)
+                                } else {
+                                    0
+                                };
+                                clean.insert(key.into(), json!(previous + n));
+                            }
+                        }
+                        usage = Some(Value::Object(clean));
+                    }
+                    if let Some(choice) = v
+                        .get("choices")
+                        .and_then(Value::as_array)
+                        .and_then(|a| a.first())
+                    {
+                        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                            if reason.len() <= 80 {
+                                finish_reason = Some(reason.into());
+                            }
+                        }
+                        if let Some(deltas) = choice
+                            .pointer("/delta/tool_calls")
+                            .and_then(Value::as_array)
+                        {
+                            if !tool_turn {
+                                return Err(
+                                    "This model requested tools. Turn on the workspace to let it use them."
+                                        .to_string(),
+                                );
+                            }
+                            accumulate_tool_calls(&mut calls, deltas)?;
+                            // Show the file the model is typing, a few times a second.
+                            if drafted.elapsed() >= Duration::from_millis(300) {
+                                if let Some(draft) = calls.last().and_then(draft_of) {
+                                    drafted = Instant::now();
+                                    emit(&mut tx, "draft", draft);
+                                }
+                            }
+                        }
+                        for (channel, delta) in gateway::text_deltas(choice) {
+                            // Generated images arrive inline; keep them as files and link them.
+                            let stored;
+                            let delta = if channel == "delta" && images::has_inline(delta) {
+                                stored =
+                                    images::store_inline(&s.store.pool, user.id, id, delta).await;
+                                stored.as_str()
+                            } else {
+                                delta
+                            };
+                            if content.len() + reasoning_content.len() + delta.len()
+                                > store::MAX_RESPONSE_BYTES
+                            {
+                                return Err(
+                                    "The response exceeded the 1 MiB storage limit".to_string()
+                                );
+                            }
+                            if first {
+                                s.metrics
+                                    .first_token
+                                    .observe(started.elapsed().as_secs_f64());
+                                first = false;
+                            }
+                            if channel == "reasoning" {
+                                reasoning_content.push_str(delta);
+                            } else {
+                                content.push_str(delta);
+                            }
+                            emit(&mut tx, channel, json!({"content":delta}));
+                        }
+                    }
+                }
+            }
+            if !done {
+                return Err("Gateway stream ended before completion".to_string());
+            }
+            let thought_to = reasoning_content.encode_utf16().count();
+            if tool_turn && thought_to > thought_from {
+                let entry = json!({"id":format!("thought-{steps}"),"kind":"thought","from":thought_from,"to":thought_to,"durationMs":round_began.elapsed().as_millis() as u64,"status":"completed"});
+                record(&mut activity, &entry, true);
+                emit(&mut tx, "tool", entry);
+            }
+            if calls.is_empty() || !tool_turn {
+                break;
+            }
+            if steps >= MAX_AGENT_STEPS {
+                return Err(format!("{AGENT_STEP_LIMIT} {MAX_AGENT_STEPS} steps"));
+            }
+            let text = content[step_start..].to_owned();
+            payload["messages"].as_array_mut().unwrap().push(json!({
+                "role":"assistant",
+                "content": if text.is_empty() { Value::Null } else { json!(text) },
+                "tool_calls": calls.iter().map(|c| json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.arguments}})).collect::<Vec<_>>(),
+            }));
+            let workspace_call = calls.iter().any(|c| {
+                c.name != knowledge::chat::TOOL
+                    && c.name != knowledge::chat::SAVE_TOOL
+                    && c.name != questions::TOOL
+                    && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
+            });
+            let mut running = None;
+            if let Some((sandbox, sandboxes)) = workspace.as_ref().filter(|_| workspace_call) {
+                // The first workspace tool of a turn may need to start or wake the pod.
+                let sandbox = sandboxes.ensure_running(sandbox).await?;
+                // A woken pod has no server yet; bring the preview back before the tools run.
+                if sandbox.preview_port.is_none() {
+                    if let Ok(Some(server)) =
+                        sandbox::tools::ensure_dev_server(sandboxes, &sandbox).await
+                    {
+                        emit(&mut tx, "preview", json!({"port":server.port}));
+                    }
+                }
+                running = Some((sandbox, sandboxes));
+            }
+            let (mut wrote, mut broken, mut asked) = (false, false, false);
+            for call in &calls {
+                if call.name == questions::TOOL {
+                    let output = match questions::parse(&call.arguments) {
+                        Ok(list) if !asked && asks => {
+                            asked = true;
+                            let entry = questions::entry(&call.id, list);
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry);
+                            questions::SHOWN.to_string()
+                        }
+                        Ok(_) if asked => "Ask all your questions in one call.".to_string(),
+                        Ok(_) => format!("There is no tool named {}.", call.name),
+                        Err(problem) => problem,
+                    };
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
+                if call.name == knowledge::chat::TOOL {
+                    let (Some(k), Some(found)) = (&s.knowledge, knowledge_turn.as_mut()) else {
+                        payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":format!("There is no tool named {}.", call.name)}));
+                        continue;
+                    };
+                    let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
+                    let query = knowledge::excerpt(args["query"].as_str().unwrap_or("").trim(), 80);
+                    let mut entry = json!({"id":call.id,"tool":call.name,"summary":format!("Searched for “{query}”"),"status":"running","startedAt":chrono::Utc::now()});
+                    record(&mut activity, &entry, true);
+                    emit(&mut tx, "tool", entry.clone());
+                    let began = Instant::now();
+                    let (ok, output, detail) =
+                        k.call(&gateway, &user, found, &call.arguments).await;
+                    entry["status"] = json!(if ok { "completed" } else { "error" });
+                    entry["detail"] = json!(detail);
+                    entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                    record(&mut activity, &entry, false);
+                    emit(&mut tx, "tool", entry);
+                    let sources = found.entry();
+                    match activity.iter_mut().find(|e| e["id"] == "knowledge") {
+                        Some(saved) => *saved = sources.clone(),
+                        None => record(&mut activity, &sources, true),
+                    }
+                    emit(&mut tx, "tool", sources);
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
+                if call.name == knowledge::chat::SAVE_TOOL {
+                    let output = match (&s.knowledge, knowledge_turn.as_ref().filter(|t| t.library))
+                    {
+                        (Some(k), Some(found)) => {
+                            let (_, output, entry) = k
+                                .save_call(
+                                    &gateway,
+                                    &user,
+                                    found,
+                                    id,
+                                    turn.assistant_id,
+                                    &call.id,
+                                    &call.arguments,
+                                )
+                                .await;
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry);
+                            output
+                        }
+                        _ => format!("There is no tool named {}.", call.name),
+                    };
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
+                let connection = toolset.as_ref().and_then(|t| t.find(&call.name));
+                if let (Some(index), Some(set)) = (connection, toolset.as_mut()) {
+                    let mut entry = json!({"id":call.id,"tool":call.name,"connection":set.connection(index),"summary":set.label(index),"status":"running","startedAt":chrono::Utc::now()});
+                    record(&mut activity, &entry, true);
+                    if set.needs_approval(index)
+                        && !connections::granted(&s.store.pool, id, set.grant(index)).await
+                    {
+                        entry["status"] = json!("awaiting");
+                        entry["detail"] = json!(connections::arguments_preview(&call.arguments));
+                        record(&mut activity, &entry, false);
+                        emit(&mut tx, "tool", entry.clone());
+                        // Saved now so a reloaded page shows the question too.
+                        let _ = lifecycle::save_activity(
+                            &s.store.pool,
+                            user.id,
+                            id,
+                            generation_id,
+                            &activity,
+                        )
+                        .await;
+                        connections::ask(
+                            &s.store.pool,
+                            user.id,
+                            id,
+                            generation_id,
+                            &call.id,
+                            set.grant(index),
+                        )
+                        .await
+                        .map_err(|_| "The response could not ask for approval".to_string())?;
+                        let decision =
+                            connections::wait(&s.store.pool, generation_id, &call.id).await;
+                        entry["status"] = json!("running");
+                        if decision != connections::Decision::Allow {
+                            entry["status"] = json!("declined");
+                            entry["detail"] =
+                                json!(if decision == connections::Decision::Expired {
+                                    "No answer within 15 minutes"
+                                } else {
+                                    "Declined"
+                                });
+                            record(&mut activity, &entry, false);
+                            emit(&mut tx, "tool", entry);
+                            payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":"The person declined this tool call, so it did not run. Do not try it again unless they ask."}));
+                            let _ = lifecycle::save_activity(
+                                &s.store.pool,
+                                user.id,
+                                id,
+                                generation_id,
+                                &activity,
+                            )
+                            .await;
+                            continue;
+                        }
+                        record(&mut activity, &entry, false);
+                        // A reloaded page stops showing the question.
+                        let _ = lifecycle::save_activity(
+                            &s.store.pool,
+                            user.id,
+                            id,
+                            generation_id,
+                            &activity,
+                        )
+                        .await;
+                    }
+                    emit(&mut tx, "tool", entry.clone());
+                    let began = Instant::now();
+                    let outcome = set.call(index, &call.arguments).await;
+                    entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
+                    entry["detail"] = json!(outcome.detail);
+                    entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                    record(&mut activity, &entry, false);
+                    emit(&mut tx, "tool", entry);
+                    payload["messages"].as_array_mut().unwrap().push(
+                        json!({"role":"tool","tool_call_id":call.id,"content":outcome.output}),
+                    );
+                    continue;
+                }
+                let Some((sandbox, sandboxes)) = &running else {
+                    payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":format!("There is no tool named {}.", call.name)}));
+                    continue;
+                };
+                let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
+                let researching = research_tools && research::tools::is_tool(&call.name);
+                let label = if researching {
+                    research::tools::summary(&call.name, &args)
+                } else {
+                    sandbox::tools::summary(&call.name, &args)
+                };
+                let mut entry = json!({"id":call.id,"tool":call.name,"summary":label,"status":"running","startedAt":chrono::Utc::now()});
+                record(&mut activity, &entry, true);
+                emit(&mut tx, "tool", entry.clone());
+                let began = Instant::now();
+                let outcome = match project.as_ref().filter(|_| researching) {
+                    Some(project) => {
+                        let ctx = research::tools::Ctx {
+                            pool: &s.store.pool,
+                            sb: sandboxes,
+                            sandbox,
+                            user: user.id,
+                            conversation: id,
+                            project: project.id,
+                        };
+                        research::tools::run(&ctx, &call.name, &call.arguments).await
+                    }
+                    None => {
+                        sandbox::tools::run(sandboxes, sandbox, &call.name, &call.arguments).await
+                    }
+                };
+                entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
+                entry["summary"] = json!(outcome.summary);
+                entry["detail"] = json!(outcome.detail);
+                entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                if let Some(facts) = outcome.extra.as_object() {
+                    for (key, value) in facts {
+                        entry[key] = value.clone();
+                    }
+                }
+                if outcome.ok && matches!(call.name.as_str(), "write_file" | "edit_file") {
+                    wrote = true;
+                }
+                if entry["check"] == "error" {
+                    broken = true;
+                } else if entry["check"] == "ok" {
+                    broken = false;
+                }
+                record(&mut activity, &entry, false);
+                emit(&mut tx, "tool", entry);
+                if let Some(port) = outcome.preview {
+                    emit(&mut tx, "preview", json!({"port":port}));
+                }
+                payload["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"role":"tool","tool_call_id":call.id,"content":outcome.output}));
+            }
+            // A round that changed files and left the app compiling is a checkpoint.
+            if let (true, false, Some((sandbox, sandboxes))) = (wrote, broken, &running) {
+                checkpoints += 1;
+                let label = format!("Checkpoint {checkpoints}");
+                if let Some((sha, stat)) =
+                    sandbox::tools::checkpoint(sandboxes, sandbox, &label).await
+                {
+                    let entry = json!({"id":format!("checkpoint-{sha}"),"kind":"checkpoint","sha":sha,"summary":label,"stat":stat,"status":"completed","startedAt":chrono::Utc::now()});
+                    record(&mut activity, &entry, true);
+                    emit(&mut tx, "tool", entry);
+                }
+            }
+            trim_tool_history(&mut payload);
+            if let Err(e) =
+                lifecycle::save_activity(&s.store.pool, user.id, id, generation_id, &activity).await
+            {
+                if e.0 != StatusCode::INTERNAL_SERVER_ERROR {
+                    return Err("The response could not save progress".to_string());
+                }
+            }
+            // The reply ends at the questions; the answers start the next turn.
+            if asked {
+                break;
+            }
+            if !content.is_empty() && !content.ends_with("\n\n") {
+                content.push_str("\n\n");
+                emit(&mut tx, "delta", json!({"content":"\n\n"}));
+            }
+        }
+        let trimmed = content.trim_end().len();
+        content.truncate(trimmed);
+        if content.is_empty() && reasoning_content.is_empty() && activity.is_empty() {
+            Err(
+                "The model returned an empty response. Retry or choose a different model."
+                    .to_string(),
+            )
+        } else {
+            Ok(())
+        }
+    };
+    let control = async {
+        let mut ticks = 0u64;
+        let mut renewed = Instant::now();
+        let mut recheck_session = false;
+        loop {
+            let renew = ticks == 0 || renewed.elapsed() >= lifecycle::LEASE_RENEW_INTERVAL;
+            let state = if renew {
+                lifecycle::heartbeat(&s.store.pool, user.id, id, generation_id).await
+            } else {
+                lifecycle::check(&s.store.pool, user.id, id, generation_id).await
+            };
+            match state {
+                Ok(Some(reason)) => break reason.to_owned(),
+                Ok(None) if renew => renewed = Instant::now(),
+                Ok(None) => {}
+                // Ride out a database blip while the lease is still comfortably valid.
+                Err(_) if renewed.elapsed() < lifecycle::LEASE_GRACE => {
+                    tracing::warn!("could not check chat generation lease; retrying")
+                }
+                Err(_) => break "The response lost its database connection".into(),
+            }
+            if ticks.is_multiple_of(15) || recheck_session {
+                match s.auth.require(&headers, false).await {
+                    Ok(_) => recheck_session = false,
+                    Err(e) if e.0 == StatusCode::INTERNAL_SERVER_ERROR => recheck_session = true,
+                    Err(_) => break "Sign-in session ended".into(),
+                }
+            }
+            ticks += 1;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    };
+    let limit = if tool_turn { TOOL_TURN_SECS } else { 540 };
+    let mut result = tokio::select! {reason=control=>Err(reason),result=tokio::time::timeout(Duration::from_secs(limit),work)=>match result{Ok(r)=>r,Err(_)=>Err(format!("Generation reached the {}-minute time limit", limit / 60))},_=s.shutdown.cancelled()=>Err("Service shutting down".into())};
+    // Steps that never finished are shown as stopped, while the lease still allows writes.
+    if !activity.is_empty() {
+        for entry in &mut activity {
+            if entry["status"] == "running" || entry["status"] == "awaiting" {
+                entry["status"] = json!("error");
+                entry["detail"] = json!("Stopped before this step finished");
+            }
+        }
+        let _ =
+            lifecycle::save_activity(&s.store.pool, user.id, id, generation_id, &activity).await;
+    }
+    if let Some(toolset) = toolset.take() {
+        toolset.close();
+        connections::finish(&s.store.pool, generation_id).await;
+    }
+    // A tool turn that stalls or reaches a runaway limit pauses: what it did is kept
+    // and replayed, and "continue" resumes it.
+    if tool_turn {
+        if let Err(reason) = &result {
+            let why = if reason.starts_with(AGENT_STEP_LIMIT) {
+                Some(format!(
+                    "Paused after {MAX_AGENT_STEPS} {}steps",
+                    if workspace_turn { "workspace " } else { "" }
+                ))
+            } else if reason.starts_with("Generation reached the") {
+                Some(format!(
+                    "Paused after {} hours of work",
+                    TOOL_TURN_SECS / 3600
+                ))
+            } else if reason.starts_with(STALLED) {
+                Some(format!(
+                    "Paused because the model sent nothing for {} minutes",
+                    STALL_SECS / 60
+                ))
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                let note = format!(
+                    "{}_{why}. Say \"continue\" to pick up where it left off._",
+                    if content.trim().is_empty() {
+                        ""
+                    } else {
+                        "\n\n"
+                    },
+                );
+                let note = note
+                    .trim_start_matches(|c| content.ends_with("\n\n") && c == '\n')
+                    .to_owned();
+                content.push_str(&note);
+                emit(&mut tx, "delta", json!({"content":note}));
+                result = Ok(());
+            }
+        }
+    }
+    let mut status = match &result {
+        Ok(()) => "completed",
+        Err(e)
+            if e == "Response stopped"
+                || e == "Response is no longer active"
+                || e == "Service shutting down"
+                || e == "Sign-in session ended" =>
+        {
+            "interrupted"
+        }
+        _ => "error",
+    };
+    // Drop any replay note the model copied into its own reply.
+    let cleaned = store::strip_records(&content);
+    let rewritten = (cleaned != content).then(|| cleaned.clone());
+    content = cleaned;
+    let mut persisted = Err(ApiError::internal());
+    for attempt in 0..3 {
+        persisted = tokio::time::timeout(
+            Duration::from_secs(5),
+            s.store.finish_turn_detailed(
+                user.id,
+                id,
+                generation_id,
+                &content,
+                &reasoning_content,
+                status,
+                usage.clone(),
+                request_id.as_deref(),
+                finish_reason.as_deref(),
+                result.as_ref().err().map(String::as_str),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| Err(ApiError::internal()));
+        if persisted.is_ok() {
+            break;
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(150 * (attempt + 1))).await;
+        }
+    }
+    if persisted.is_err() {
+        status = "error";
+        tracing::error!("could not persist completed chat generation");
+    } else if let Some(model) = &served {
+        if let Err(error) = s.store.set_served_model(turn.assistant_id, model).await {
+            tracing::warn!("could not record the model Auto chose: {error:?}");
+        }
+    }
+    for (key, kind) in [
+        ("prompt_tokens", "prompt"),
+        ("completion_tokens", "completion"),
+    ] {
+        if let Some(n) = usage
+            .as_ref()
+            .and_then(|u: &Value| u.get(key))
+            .and_then(Value::as_u64)
+        {
+            s.metrics.tokens.with_label_values(&[kind]).inc_by(n);
+        }
+    }
+    if usage
+        .as_ref()
+        .and_then(|u: &Value| u.get("total_tokens"))
+        .is_none()
+    {
+        s.metrics.missing_usage.inc();
+    }
+    s.metrics.streams.dec();
+    s.metrics.generations.with_label_values(&[status]).inc();
+    s.metrics
+        .generation_duration
+        .observe(started.elapsed().as_secs_f64());
+    drop(permit);
+    // Suggested follow-ups would compete with the model's own questions.
+    let asked = activity.iter().any(|e| e["kind"] == "question");
+    let followups = if status == "completed" && !content.is_empty() && !asked && s.followups_enabled
+    {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            suggestions::schedule(
+                s.clone(),
+                user.clone(),
+                id,
+                turn.assistant_id,
+                resolved.model.clone(),
+            ),
+        )
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    if persisted.is_err() {
+        emit(
+            &mut tx,
+            "error",
+            json!({"message":"The response could not be saved. Reload before sending another message."}),
+        );
+    } else if let Err(message) = result {
+        emit(&mut tx, "error", json!({"message":message}));
+    }
+    emit(&mut tx, "done", {
+        let mut done = json!({"status":status,"usage":usage,"requestId":request_id,"finishReason":finish_reason,"followUpsStatus":if followups {"pending"}else{"idle"}});
+        if let Some(model) = &served {
+            done["settings"] = json!({"model":model,"resolvedModel":model,"auto":true,"systemPrompt":parameters.system_prompt,"temperature":parameters.temperature,"topP":parameters.top_p,"maxTokens":parameters.max_tokens,"reasoningEffort":turn.reasoning_effort});
+        }
+        if let Some(text) = rewritten {
+            done["content"] = json!(text);
+        }
+        done
+    });
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_being_typed_shows_its_last_lines() {
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "write_file".into(),
+            arguments:
+                r#"{"path":"js/rig.js","content":"const A = 1;\nconst \"B\" = 2;\n// θé and mo"#
+                    .into(),
+        };
+        let draft = draft_of(&call).unwrap();
+        assert_eq!(draft["path"], "js/rig.js");
+        assert_eq!(draft["lines"], 3);
+        assert_eq!(
+            draft["tail"],
+            "const A = 1;\nconst \"B\" = 2;\n// θé and mo"
+        );
+        let reading = ToolCall {
+            name: "read_file".into(),
+            ..call
+        };
+        assert!(draft_of(&reading).is_none());
+        assert_eq!(
+            partial_string(r#"{"path": "a b"}"#, "path").as_deref(),
+            Some("a b")
+        );
+        assert_eq!(partial_string(r#"{"content":"x"}"#, "path"), None);
+    }
+}

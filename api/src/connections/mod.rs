@@ -636,11 +636,24 @@ impl Toolset {
 
 /// Shown on the approval card: the arguments the model chose.
 pub fn arguments_preview(arguments: &str) -> String {
-    let pretty = serde_json::from_str::<Value>(arguments)
-        .ok()
-        .and_then(|v| serde_json::to_string_pretty(&v).ok())
-        .unwrap_or_else(|| arguments.to_owned());
-    clip(&pretty, 2048)
+    let preview = match serde_json::from_str::<Value>(arguments) {
+        // One line per argument, so a manifest or script reads as itself
+        // instead of a JSON string full of \n escapes.
+        Ok(Value::Object(map)) if !map.is_empty() => map
+            .iter()
+            .map(|(key, value)| match value {
+                Value::String(text) if text.contains('\n') => {
+                    format!("{key}:\n{}", text.trim_end())
+                }
+                Value::String(text) => format!("{key}: {text}"),
+                other => format!("{key}: {other}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| arguments.to_owned()),
+        Err(_) => arguments.to_owned(),
+    };
+    clip(&preview, 2048)
 }
 
 #[derive(Debug, PartialEq)]
@@ -1391,6 +1404,19 @@ async fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arguments_preview_shows_multiline_text_as_is() {
+        let preview = arguments_preview(
+            r#"{"namespace":"lab","manifest":"kind: Deployment\nmetadata:\n  name: hello\n","replicas":1}"#,
+        );
+        assert_eq!(
+            preview,
+            "manifest:\nkind: Deployment\nmetadata:\n  name: hello\nnamespace: lab\nreplicas: 1"
+        );
+        assert_eq!(arguments_preview("[1,2]"), "[\n  1,\n  2\n]");
+        assert_eq!(arguments_preview("not json"), "not json");
+    }
 
     #[test]
     fn prefixes_are_tool_name_safe() {

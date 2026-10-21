@@ -21,6 +21,10 @@
 </p>
 
 <p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSL%201.1-blue.svg" alt="License: BSL 1.1"></a>
+</p>
+
+<p align="center">
   <img src=".github/assets/screenshots/workspace-build.png" alt="A chat building a reading-list app in a workspace: the model's summary, checkpoints and Show work on the left, the running app in the live preview on the right" width="100%">
 </p>
 
@@ -132,3 +136,7 @@ DATABASE_URL=postgresql://… TEST_DATABASE_URL=postgresql://… cargo test --al
 ## Credits
 
 Space Grotesk is bundled under the SIL Open Font License (`web/assets/FONT-LICENSE.txt`). markdown-it and its dependencies are bundled with their notices in `web/vendor/markdown-it/`. Research mode follows the playbook of [OpenResearch](https://github.com/alphaXiv/OpenResearch) (MIT).
+
+## License
+
+[Business Source License 1.1](LICENSE). Source-available; each release converts to [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) four years after publication. Free for internal, academic, research, and educational use. You may not offer obleth-chat as a hosted service or distribute a competing product derived from it until the Change Date. Contact the maintainers for commercial licensing.

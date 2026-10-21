@@ -20,6 +20,10 @@
   <a href="https://github.com/thediymaker/obleth-gateway">obleth gateway</a>
 </p>
 
+<p align="center">
+  <img src=".github/assets/screenshots/workspace-build.png" alt="A chat building a reading-list app in a workspace: the model's summary, checkpoints and Show work on the left, the running app in the live preview on the right" width="100%">
+</p>
+
 ---
 
 obleth-chat runs on your own servers in front of [obleth](https://github.com/thediymaker/obleth-gateway), the fairshare gateway for self-hosted models. Each person signs in with their own account and their chats are stored in your Postgres. Every request reaches the gateway as that person, so fair share, budgets and usage apply per person, and nobody handles a shared API key.
@@ -62,6 +66,25 @@ obleth-chat runs on your own servers in front of [obleth](https://github.com/the
       Run a tree of measured experiments: each idea is a git branch, every run uses the same command, and a chart tracks the best result.
       <br><a href="https://www.obleth.com/docs/chat/research">Research →</a>
     </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="50%"><img src=".github/assets/screenshots/knowledge-chat.png" alt="An answer citing a cluster handbook, with the passage it used and Open at page"></td>
+    <td width="50%"><img src=".github/assets/screenshots/cluster-chat.png" alt="The model reading a Slurm cluster's partitions, node and queue through its tools"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Answers cite your documents, page by page</sub></td>
+    <td align="center"><sub>Your clusters, as tools that act as you</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src=".github/assets/screenshots/project.png" alt="A project page with instructions for every chat, its collections and its chats"></td>
+    <td width="50%"><img src=".github/assets/screenshots/clusters.png" alt="A Slurm cluster seen live: CPUs and memory in use, partitions, nodes and the queue"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Projects share instructions and documents</sub></td>
+    <td align="center"><sub>Clusters, live, as your account sees them</sub></td>
   </tr>
 </table>
 

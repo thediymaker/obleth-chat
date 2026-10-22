@@ -5,13 +5,15 @@ import { icon, esc } from './manage-ui.js';
 // When it is done: what changed and whether it works, checkpoints, and a "Show
 // work" trace in which each thought sits before the step it led to.
 
-const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file' };
+const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
 const RESEARCH = new Set(['research_setup', 'research_status', 'experiment_create', 'experiment_checkout', 'experiment_run', 'experiment_wait', 'run_log']);
 const kindOf = e => e.kind || 'tool';
+const BROWSING = e => String(e.tool || '').startsWith('browser_');
+const CARDS = new Set(['sources', 'saved', 'question', 'workspace', 'research', 'browser-handoff', 'browser-request']);
 const FILE_TOOLS = new Set(['write_file', 'edit_file']);
 // Searching knowledge, saving and asking are not work to show: their cards sit below
 // the answer.
-const KNOWLEDGE = e => e.kind === 'sources' || e.kind === 'saved' || e.kind === 'question' || e.kind === 'workspace' || e.kind === 'research' || e.tool === 'search_knowledge' || e.tool === 'save_item';
+const KNOWLEDGE = e => CARDS.has(e.kind) || e.tool === 'search_knowledge' || e.tool === 'save_item';
 
 export function duration(ms) {
   if (ms == null || !Number.isFinite(ms)) return '';
@@ -51,6 +53,7 @@ export function workOf(m) {
     if (e.connection) return e.connection;
     if (e.tool === 'plan') return 'Plan';
     if (RESEARCH.has(e.tool)) return 'Research';
+    if (BROWSING(e)) return 'Browse';
     if (FILE_TOOLS.has(e.tool)) return 'Build';
     if (e.tool === 'start_server' || e.tool === 'server_logs') return 'Run';
     if (e.tool === 'run_command') return wrote ? 'Run' : 'Explore';
@@ -58,7 +61,7 @@ export function workOf(m) {
   };
   for (const e of list) {
     const kind = kindOf(e);
-    if (kind === 'sources' || kind === 'saved' || kind === 'question' || kind === 'workspace' || kind === 'research') continue;
+    if (CARDS.has(kind)) continue;
     if (kind === 'thought') {
       const text = reasoning.slice(e.from || 0, e.to ?? reasoning.length).trim();
       if (text) pending.push({ type: 'thought', e, text });
@@ -152,18 +155,20 @@ export function createTurn({ state, markdown, chatPath, route }) {
   const fileButton = (path, extra = '') => `<button type="button" class="tr-file" data-action="turn-open-file" data-path="${esc(path)}">${esc(path)}</button>${extra}`;
   const lines = s => `${s.added ? ` <span class="tr-add">+${s.added}</span>` : ''}${s.removed ? ` <span class="tr-del">−${s.removed}</span>` : ''}`;
   function approval(s) {
-    return `<div class="approval"><span>Allow ${esc(s.connection || 'this tool')} to run this?</span><div class="approval-actions">${[['allow', 'Allow', 'primary'], ['chat', 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}">${label}</button>`).join('')}</div></div>`;
+    return `<div class="approval"><span>${s.question ? esc(s.question) : `Allow ${esc(s.connection || 'this tool')} to run this?`}</span><div class="approval-actions">${[['allow', s.question ? 'Allow once' : 'Allow', 'primary'], ['chat', s.remember || 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}">${label}</button>`).join('')}</div></div>`;
   }
   function stepText(s) {
     if (s.path && FILE_TOOLS.has(s.tool)) return `${s.tool === 'write_file' ? 'Wrote' : 'Edited'} ${fileButton(s.path, lines(s))}`;
     if (s.tool === 'plan' && Array.isArray(s.files)) return `Planned ${s.files.length} file${s.files.length === 1 ? '' : 's'}`;
+    if (BROWSING(s) && s.url) { let host = ''; try { host = new URL(s.url).host; } catch { /* not a URL */ } return `${esc(s.summary || s.tool)}${host && s.tool !== 'browser_open' ? ` <span class="tr-quiet">· ${esc(host)}</span>` : ''}`; }
     return esc(s.summary || s.tool);
   }
   const stepTime = s => ({ running: 'Running…', awaiting: 'Needs your answer', error: 'Failed', declined: 'Declined' }[s.status] || duration(s.durationMs));
   function step(s, extraClass = '') {
     const mark = s.status === 'error' || s.check === 'error' ? 'bad' : s.status === 'running' || s.status === 'awaiting' ? 'now' : s.status === 'declined' ? 'off' : 'ok';
     const glyph = icon(s.connection ? 'link' : TOOL_ICONS[s.tool] || 'terminal');
-    const head = `<span class="tr-text">${stepText(s)}${s.check === 'error' ? ' <span class="tr-del">· preview broke</span>' : ''}</span><small>${esc(stepTime(s))}</small>`;
+    const thumb = s.thumb && String(s.thumb).startsWith('data:image/jpeg;base64,') ? `<img class="tr-thumb" src="${esc(s.thumb)}" alt="" loading="lazy">` : '';
+    const head = `${thumb}<span class="tr-text">${stepText(s)}${s.check === 'error' ? ' <span class="tr-del">· preview broke</span>' : ''}</span><small>${esc(stepTime(s))}</small>`;
     const detail = s.detail && s.status !== 'running' && s.status !== 'awaiting' ? String(s.detail) : '';
     const body = s.status === 'awaiting'
       ? `<div class="tr-line">${head}</div>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}${approval(s)}`
@@ -225,7 +230,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
     const seen = work.rows.filter(r => r.type === 'step').map(r => r.phase);
     const current = draft ? 'Build' : seen.at(-1);
     // Workspace work goes through the usual phases; a cluster or server is its own.
-    const usual = draft || work.steps.some(x => !x.connection) ? PHASES.filter(p => p !== 'Plan' || seen.includes('Plan')) : [];
+    const usual = draft || work.steps.some(x => !x.connection && !BROWSING(x)) ? PHASES.filter(p => p !== 'Plan' || seen.includes('Plan')) : [];
     const phases = [...new Set([...usual, ...seen])];
     const rail = phases.map(p => {
       const at = phases.indexOf(p), cur = phases.indexOf(current);
@@ -243,7 +248,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
     const recent = work.rows.filter(r => r.type !== 'thought' && !(r.type === 'step' && r.e.status === 'awaiting')).slice(-3);
     const isOpen = open.has(m.id || 'live');
     const notes = (queued.get(conversation()) || []).filter(n => !work.entries.some(e => kindOf(e) === 'note' && e.summary === n));
-    return `<section class="run-card" aria-label="Working"><div class="run-head"><span class="run-pulse" aria-hidden="true"></span><div class="grow"><strong>${esc(now)}</strong><small><span data-since="${new Date(began).toISOString()}">${esc(clock(Date.now() - began))}</span> · ${s.steps} step${s.steps === 1 ? '' : 's'}${s.files.length ? ` · ${s.files.length} file${s.files.length === 1 ? '' : 's'} changed` : ''}</small></div></div><ol class="run-rail">${rail}</ol>${waiting.map(w => `<div class="run-ask">${approval(w)}<pre>${esc(w.detail || '')}</pre></div>`).join('')}${nowBlock}${thoughtText ? `<div class="run-thought">${icon('orbit')}<div class="grow"><span class="eyebrow">Latest thought</span><p>${esc(latest(thoughtText))}</p></div></div>` : ''}${files}${recent.length ? `<div class="run-section"><div class="spread"><span class="eyebrow">Recent steps</span><button type="button" class="tr-link" data-action="trace-toggle" data-id="${esc(m.id || 'live')}" aria-expanded="${isOpen}">${isOpen ? 'Hide steps' : `Show all ${s.steps}`}</button></div><ol class="trace-list compact">${recent.map(row).join('')}</ol></div>` : ''}${notes.map(n => `<p class="run-queued">${icon('clock')}<span><span class="run-queued-label">Queued for the next step</span>${esc(n)}</span></p>`).join('')}</section>${isOpen ? trace(m, work) : ''}`;
+    return `<section class="run-card" aria-label="Working"><div class="run-head"><span class="run-pulse" aria-hidden="true"></span><div class="grow"><strong>${esc(now)}</strong><small><span data-since="${new Date(began).toISOString()}">${esc(clock(Date.now() - began))}</span> · ${s.steps} step${s.steps === 1 ? '' : 's'}${s.files.length ? ` · ${s.files.length} file${s.files.length === 1 ? '' : 's'} changed` : ''}</small></div></div><ol class="run-rail">${rail}</ol>${waiting.map(w => `<div class="run-ask">${approval(w)}${w.detail ? `<pre>${esc(w.detail)}</pre>` : ''}</div>`).join('')}${nowBlock}${thoughtText ? `<div class="run-thought">${icon('orbit')}<div class="grow"><span class="eyebrow">Latest thought</span><p>${esc(latest(thoughtText))}</p></div></div>` : ''}${files}${recent.length ? `<div class="run-section"><div class="spread"><span class="eyebrow">Recent steps</span><button type="button" class="tr-link" data-action="trace-toggle" data-id="${esc(m.id || 'live')}" aria-expanded="${isOpen}">${isOpen ? 'Hide steps' : `Show all ${s.steps}`}</button></div><ol class="trace-list compact">${recent.map(row).join('')}</ol></div>` : ''}${notes.map(n => `<p class="run-queued">${icon('clock')}<span><span class="run-queued-label">Queued for the next step</span>${esc(n)}</span></p>`).join('')}</section>${isOpen ? trace(m, work) : ''}`;
   }
   function steerForm() {
     return `<form class="steer-form" id="steer-form" data-conversation="${esc(conversation() || '')}"><label for="steer-text">Steer</label><input id="steer-text" name="steer-text" autocomplete="off" maxlength="2000" placeholder="Add a note without stopping, like “make the mane darker”" value="${esc(steerDraft)}"><button class="btn small primary" type="submit">Send at next step</button></form>`;

@@ -2,12 +2,13 @@ import { icon, esc, badge, iconButton } from './manage-ui.js';
 
 // Workspace UI: the composer toggle, tool activity inside responses, and the
 // preview pane. The pane lives outside the re-rendered app so the running preview
-// is never reloaded by chat updates.
-export function createWorkspace({ api, state, route, toast, chatPath, capabilities, render, modal, close }) {
+// is never reloaded by chat updates. It also holds the chat's browser tab, so a chat
+// with the browser on and no workspace gets a pane with only that tab.
+export function createWorkspace({ api, state, route, toast, chatPath, capabilities, render, modal, close, browser = null }) {
   const spaces = new Map();
   const pane = document.createElement('aside');
   pane.className = 'workspace-pane'; pane.hidden = true; pane.setAttribute('aria-label', 'Workspace');
-  pane.innerHTML = '<div class="workspace-bar"></div><div class="workspace-body"><div class="workspace-preview"><div class="workspace-empty"></div><iframe title="Workspace preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe></div><div class="workspace-files" hidden></div><div class="workspace-terminal" hidden></div></div>';
+  pane.innerHTML = '<div class="workspace-bar"></div><div class="workspace-body"><div class="workspace-preview"><div class="workspace-empty"></div><iframe title="Workspace preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe></div><div class="workspace-files" hidden></div><div class="workspace-terminal" hidden></div><div class="workspace-browser" hidden></div></div>';
   document.body.append(pane);
   // Drag the pane's left edge to resize it. The width is remembered in this browser;
   // double-click resets it.
@@ -50,14 +51,20 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   });
   addEventListener('resize', applyWidth);
   const frame = pane.querySelector('iframe'), empty = pane.querySelector('.workspace-empty');
-  const terminalEl = pane.querySelector('.workspace-terminal'), encoder = new TextEncoder();
+  const terminalEl = pane.querySelector('.workspace-terminal'), browserEl = pane.querySelector('.workspace-browser'), encoder = new TextEncoder();
   let shownId = null, frameSrc = '', polling = null, shell = null, xterm = null, diskLimit = 0;
 
   const enabled = () => !!capabilities.features?.workspaces;
   const entry = id => { if (!spaces.has(id)) spaces.set(id, { workspace: null, loaded: false, tab: 'preview', open: true, files: null, file: null, url: '' }); return spaces.get(id); };
   // The pane shows beside a chat, or full width on a project's page under Workspaces.
   const full = () => route().page === 'workspaces' && !!route().id;
-  const current = () => { const r = route(), id = r.page === 'chat' || full() ? r.id : null; return id && spaces.get(id)?.workspace ? { id, space: spaces.get(id) } : null; };
+  const browsing = id => !!browser?.visible(id);
+  const current = () => {
+    const r = route(), id = r.page === 'chat' || full() ? r.id : null;
+    if (!id) return null;
+    if (spaces.get(id)?.workspace) return { id, space: spaces.get(id) };
+    return browsing(id) ? { id, space: entry(id) } : null;
+  };
   const listing = { items: null, error: '', loading: false };
 
   async function load(id) {
@@ -124,7 +131,8 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   }
   function bar(id, space) {
     const w = space.workspace;
-    const tabs = [['preview', 'Preview'], ['files', 'Files'], ['terminal', 'Terminal']].map(([key, label]) => `<button class="tab ${space.tab === key ? 'active' : ''}" data-action="workspace-tab" data-tab="${key}" ${space.tab === key ? 'aria-current="true"' : ''}>${label}</button>`).join('');
+    const tabs = [...(w ? [['preview', 'Preview'], ['files', 'Files'], ['terminal', 'Terminal']] : []), ...(browser?.on(id) ? [['browser', 'Browser']] : [])].map(([key, label]) => `<button class="tab ${space.tab === key ? 'active' : ''}" data-action="workspace-tab" data-tab="${key}" ${space.tab === key ? 'aria-current="true"' : ''}>${label}</button>`).join('');
+    if (space.tab === 'browser') return `<div class="workspace-tabs">${tabs}</div><span class="grow"></span><div class="workspace-actions">${iconButton('power', 'browser-off', 'Turn off the browser in this chat')}${full() ? '' : iconButton('x', 'workspace-close', 'Hide pane')}</div>`;
     const address = space.origin ? `<span class="workspace-address" title="${esc(space.origin)}">${esc(space.origin.replace(/^https?:\/\//, ''))}</span>` : '<span class="workspace-address muted">No preview yet</span>';
     const used = w.diskBytes, diskFull = used != null && diskLimit && used > diskLimit;
     const usage = used != null && diskLimit ? `<span class="workspace-usage ${diskFull ? 'full' : ''}" title="${diskFull ? 'Your workspaces are full: delete files to keep working' : 'Disk used by all of your workspaces'}">${(used / 2 ** 30).toFixed(1)} / ${Math.round(diskLimit / 2 ** 30)} GB</span>` : '';
@@ -176,16 +184,29 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
 
   // Called after every app render and whenever workspace state changes.
   function update() {
-    const shown = current(), visible = !!shown && (full() || (shown.space.open && route().page === 'chat'));
+    const shown = current(), visible = !!shown && (full() || ((shown.space.workspace ? shown.space.open : browsing(shown.id)) && route().page === 'chat'));
     document.body.classList.toggle('workspace-open', visible && !full());
     document.body.classList.toggle('workspace-full', visible && full());
     pane.hidden = !visible;
-    if (!visible) { if (!shown) shownId = null; return; }
+    if (!visible) { if (!shown) shownId = null; browser?.hide(); return; }
     const { id, space } = shown;
     if (shownId !== id) { closeTerminal(); shownId = id; frameSrc = ''; frame.removeAttribute('src'); if (space.url) { frameSrc = space.url; frame.src = space.url; } }
+    // Without a workspace only the browser tab exists; with the browser off it goes.
+    if (!space.workspace) space.tab = 'browser';
+    else if (space.tab === 'browser' && !browser?.on(id)) space.tab = 'preview';
+    pane.querySelector('.workspace-bar').innerHTML = bar(id, space);
+    const browsingTab = space.tab === 'browser';
+    browserEl.hidden = !browsingTab;
+    if (browsingTab) {
+      pane.querySelector('.workspace-preview').hidden = true;
+      pane.querySelector('.workspace-files').hidden = true;
+      terminalEl.hidden = true;
+      browser.show(browserEl, id);
+      return;
+    }
+    browser?.hide();
     // The preview can come back after the pane opened, for example once a woken pod's server is up.
     if (space.workspace.previewPort && !space.url) showPreview(id);
-    pane.querySelector('.workspace-bar').innerHTML = bar(id, space);
     const previewing = space.tab === 'preview', hasPreview = !!(space.workspace.previewPort && frameSrc);
     pane.querySelector('.workspace-preview').hidden = !previewing;
     pane.querySelector('.workspace-files').hidden = space.tab !== 'files';
@@ -288,13 +309,13 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   const stepState = { running: 'Running…', awaiting: 'Needs your answer', error: 'Failed', declined: 'Declined' };
   function step(s) {
     const asking = s.status === 'awaiting';
-    const question = asking ? `<div class="approval"><span>Allow ${esc(s.connection || 'this tool')} to run this?</span><div class="approval-actions">${[['allow', 'Allow', 'primary'], ['chat', 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}" ${d === 'chat' ? `title="Run ${esc(s.summary)} without asking for the rest of this conversation"` : ''}>${label}</button>`).join('')}</div></div>` : '';
+    const question = asking ? `<div class="approval"><span>${s.question ? esc(s.question) : `Allow ${esc(s.connection || 'this tool')} to run this?`}</span><div class="approval-actions">${[['allow', s.question ? 'Allow once' : 'Allow', 'primary'], ['chat', s.remember || 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}" ${d === 'chat' ? `title="Run ${esc(s.summary)} without asking for the rest of this conversation"` : ''}>${label}</button>`).join('')}</div></div>` : '';
     const time = stepState[s.status] || (s.durationMs != null ? `${(s.durationMs / 1000).toFixed(1)}s` : '');
     return `<li class="activity-step ${esc(s.status)}">${icon(s.connection ? 'link' : toolIcons[s.tool] || 'terminal')}<div class="grow"><span>${esc(s.summary)}</span>${s.detail && s.status !== 'running' ? `<pre>${esc(s.detail)}</pre>` : ''}${question}</div><small>${esc(time)}</small></li>`;
   }
   function activity(m) {
     // Thoughts show in the thinking panel and knowledge searches in the Sources card.
-    const steps = (Array.isArray(m.activity) ? m.activity : []).filter(s => s.kind !== 'sources' && s.kind !== 'thought' && s.kind !== 'saved' && s.kind !== 'question' && s.kind !== 'workspace' && s.kind !== 'research' && s.tool !== 'search_knowledge' && s.tool !== 'save_item');
+    const steps = (Array.isArray(m.activity) ? m.activity : []).filter(s => s.kind !== 'sources' && s.kind !== 'thought' && s.kind !== 'saved' && s.kind !== 'question' && s.kind !== 'workspace' && s.kind !== 'research' && s.kind !== 'browser-request' && s.kind !== 'browser-handoff' && s.tool !== 'search_knowledge' && s.tool !== 'save_item');
     if (!steps.length) return '';
     const live = steps.find(s => s.status === 'awaiting') || steps.find(s => s.status === 'running'), failed = steps.filter(s => s.status === 'error').length;
     const kind = steps.every(s => !s.connection) ? 'workspace step' : 'step';
@@ -343,7 +364,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     },
     'workspace-tab': el => { const c = current(); if (!c) return; c.space.tab = el.dataset.tab; c.space.file = null; if (c.space.tab === 'files') c.space.files = null; update(); },
     'workspace-reload': () => { const c = current(); if (!c) return; if (c.space.tab === 'terminal') { closeTerminal(); update(); return; } if (c.space.tab === 'files') { c.space.files = null; c.space.file = null; update(); } else showPreview(c.id); },
-    'workspace-close': () => { const c = current(); if (c) { c.space.open = false; update(); return 'render'; } },
+    'workspace-close': () => { const c = current(); if (!c) return; if (c.space.workspace) c.space.open = false; else browser?.actions['browser-toggle'](); update(); return 'render'; },
     'workspace-remove': el => { const item = listing.items?.find(p => p.conversationId === el.dataset.id); modal(`Delete this workspace?`, `<p>The project folder of “${esc(item?.title || 'this conversation')}” and everything in it are deleted. The conversation stays.</p><div class="modal-actions"><button class="btn" data-action="close">Keep it</button><button class="btn danger" data-action="workspace-confirm-remove" data-id="${esc(el.dataset.id)}">Delete workspace</button></div>`); },
     'workspace-confirm-remove': async el => { await api.request(`${chatPath(el.dataset.id)}/workspace`, { method: 'DELETE' }); spaces.delete(el.dataset.id); close(); toast('Workspace deleted'); await loadList(); },
     'turn-open-file': el => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.open = true; space.tab = 'files'; space.files = null; openFile(id, el.dataset.path); return 'render'; },
@@ -365,5 +386,12 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     'workspace-file-back': () => { const c = current(); if (c) { c.space.file = null; update(); } },
   };
 
-  return { load, loadList, page, create, update, toggleButton, activity, activitySignature, onEvent, actions, hasWorkspace, enabled, isOpen: id => !!spaces.get(id)?.workspace && spaces.get(id).open, reset: () => { closeTerminal(); spaces.clear(); shownId = null; frame.removeAttribute('src'); update(); } };
+  /** Opens the pane on a tab, such as the browser when the model starts browsing. */
+  function showTab(id, tab) {
+    const space = entry(id);
+    space.tab = tab; if (space.workspace) space.open = true;
+    if (route().id === id) render(); else update();
+  }
+  const showing = (id, tab) => !pane.hidden && shownId === id && entry(id).tab === tab;
+  return { load, loadList, page, create, update, toggleButton, activity, activitySignature, onEvent, actions, hasWorkspace, enabled, showTab, showing, isOpen: id => (!!spaces.get(id)?.workspace && spaces.get(id).open) || browsing(id), reset: () => { closeTerminal(); spaces.clear(); shownId = null; frame.removeAttribute('src'); update(); } };
 }

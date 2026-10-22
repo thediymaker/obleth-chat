@@ -8,6 +8,7 @@ import { createAdmin } from './admin.js';
 import { createHistory } from './history.js';
 import { createAttachments } from './attachments.js';
 import { createWorkspace } from './workspace.js';
+import { createBrowser } from './browser.js';
 import { createConnections } from './connections.js';
 import { createClusters } from './clusters.js';
 import { createKnowledge } from './knowledge.js';
@@ -42,7 +43,7 @@ export async function startConnected(capabilities) {
     active: null, loadingChat: false, streaming: false, streamController: null, streamChatId: null,
     context: true, compact: false, users: null, busy: false, loginError: '',
     systemPrompt: '', temperature: 0.7, topP: 1, maxTokens: 2048, reasoningEffort: 'medium', preferences: null, preferenceOverrides: {}, presets: [],
-    workspaceDraft: false, openActivity: new Set(),
+    workspaceDraft: false, browserDraft: false, openActivity: new Set(),
   };
   let toastTimer, loadSequence = 0, identityEpoch = 0, menuAnchor = null, effortAnchor = null;
   let effortSaveQueue = Promise.resolve(), effortSequence = 0;
@@ -79,8 +80,10 @@ export async function startConnected(capabilities) {
     clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('show'), 5000);
   };
   const attachments = createAttachments({ api, state, render, modal, close, toast: message => toast(message) });
-  const workspace = createWorkspace({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close() });
-  const personal = createSettings({ api, state, render, modal, close, toast: message => toast(message), applyPreferences, applyPreset, workspaces: () => workspace.enabled() });
+  const browserView = createBrowser({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), send: text => send(text), modal: (...args) => modal(...args), close: () => close(), assistantName: () => branding.assistantName });
+  const workspace = createWorkspace({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), browser: browserView });
+  browserView.attach({ update: () => workspace.update(), showTab: (id, tab) => workspace.showTab(id, tab), showing: (id, tab) => workspace.showing(id, tab) });
+  const personal = createSettings({ api, state, render, modal, close, toast: message => toast(message), applyPreferences, applyPreset, workspaces: () => workspace.enabled(), browserCard: () => browserView.settingsCard() });
   const connectionsView = createConnections({ api, state, capabilities, render, modal, close, toast: message => toast(message), onChange: item => clustersView.changed(item) });
   const clustersView = createClusters({ api, route, render, connections: connectionsView });
   const knowledgeView = createKnowledge({ api, state, capabilities, render, modal, close, toast: message => toast(message), go });
@@ -122,8 +125,8 @@ export async function startConnected(capabilities) {
     for (const op of operations.values()) op.controller?.abort();
     operations.clear(); revisions.clear(); versionSelections.clear();
     for (const timer of watches.values()) clearTimeout(timer); watches.clear();
-    Object.assign(state, { user: null, usage: null, chats: [], models: [], model: '', active: null, users: null, draft: '', streaming: false, streamChatId: null, error: '', chatError: '', catalogError: '', systemPrompt: '', reasoningEffort: 'medium', temperature: 0.7, topP: 1, maxTokens: 2048, compact: false, context: true, preferences: null, preferenceOverrides: {}, presets: [], workspaceDraft: false });
-    state.openActivity.clear(); workspace.reset();
+    Object.assign(state, { user: null, usage: null, chats: [], models: [], model: '', active: null, users: null, draft: '', streaming: false, streamChatId: null, error: '', chatError: '', catalogError: '', systemPrompt: '', reasoningEffort: 'medium', temperature: 0.7, topP: 1, maxTokens: 2048, compact: false, context: true, preferences: null, preferenceOverrides: {}, presets: [], workspaceDraft: false, browserDraft: false });
+    state.openActivity.clear(); workspace.reset(); browserView.reset();
     document.body.classList.remove('collapsed', 'sidebar-open');
     delete capabilities.adminGatewayUrl; delete capabilities.gatewayAdminUrl;
     api.clearSession(); attachments.clear(); personal.clear(); connectionsView.clear(); clustersView.clear(); knowledgeView.clear(); libraryView.clear(); projectsView.clear(); groupsView.clear(); questionsView.clear(); researchView.clear(); hideSelection(); administration.clear(); historyView.clear(); thinkingOpen.clear(); detailsOpen.clear(); pendingEfforts.clear(); closeMenu(false); closeEffort(false); closeModels(false); close();
@@ -215,7 +218,7 @@ export async function startConnected(capabilities) {
   function composer(home = false) {
     const available = state.models.length > 0, op = currentOperation();
     const hint = state.switchingVersion ? 'Switching response version…' : state.streaming ? op?.stopRequested ? 'Stopping the response…' : op?.phase === 'recovering' ? 'Reconnecting to the saved response…' : op?.phase === 'sending' ? 'Sending your message…' : 'Generating a response…' : 'AI can make mistakes. Check important information.';
-    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="12000" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar()}${workspace.toggleButton()}${connectionsView.composerButton()}${knowledgeView.composerButton()}<button type="button" class="model-button" data-action="models" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-popover" aria-label="Model: ${esc(modelName(state.model))}" ${!available || state.streaming ? 'disabled' : ''}>${icon('cube')}<span>${esc(modelName(state.model))}</span>${icon('down')}</button>${effortButton()}<button type="button" class="btn ghost small" data-action="parameters" title="Generation parameters" aria-label="Generation parameters" ${state.streaming ? 'disabled' : ''}>${icon('settings')}<span class="option-text">Parameters</span></button></div><button class="send-btn" type="${state.streaming ? 'button' : 'submit'}" ${state.streaming ? 'data-action="stop"' : ''} ${(state.streaming ? op?.stopRequested : state.switchingVersion || !available || attachments.busy()) ? 'disabled' : ''} aria-label="${state.streaming ? 'Stop response' : 'Send message'}">${icon(state.streaming ? 'stop' : 'arrow')}</button></div></form><div class="composer-hint">${esc(hint)}</div>`;
+    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="12000" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar()}${workspace.toggleButton()}${browserView.toggleButton()}${connectionsView.composerButton()}${knowledgeView.composerButton()}<button type="button" class="model-button" data-action="models" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-popover" aria-label="Model: ${esc(modelName(state.model))}" ${!available || state.streaming ? 'disabled' : ''}>${icon('cube')}<span>${esc(modelName(state.model))}</span>${icon('down')}</button>${effortButton()}<button type="button" class="btn ghost small" data-action="parameters" title="Generation parameters" aria-label="Generation parameters" ${state.streaming ? 'disabled' : ''}>${icon('settings')}<span class="option-text">Parameters</span></button></div><button class="send-btn" type="${state.streaming ? 'button' : 'submit'}" ${state.streaming ? 'data-action="stop"' : ''} ${(state.streaming ? op?.stopRequested : state.switchingVersion || !available || attachments.busy()) ? 'disabled' : ''} aria-label="${state.streaming ? 'Stop response' : 'Send message'}">${icon(state.streaming ? 'stop' : 'arrow')}</button></div></form><div class="composer-hint">${esc(hint)}</div>`;
   }
   function home() {
     return `<div class="home"><div class="home-heading">${branding.home.eyebrow ? `<div class="greeting-mark">${brandIcon('greeting')}${brandCopy(branding.home.eyebrow)}</div>` : ''}${branding.home.title ? `<h1>${brandCopy(branding.home.title)}</h1>` : ''}${branding.home.description ? `<p>${brandCopy(branding.home.description)}</p>` : ''}</div>${alert(state.catalogError, 'refresh')}${composer(true)}<div class="shortcuts">${[...(workspace.enabled() ? [['terminal', 'Build an app', 'Describe it, then watch it run in a live preview.', 'Build me a site for ', true]] : [['code', 'Build something', 'Go from a question to working code.', 'Help me plan a small coding project. Start by asking what I want to build.']]), ['chat', 'Think it through', 'Find a fresh way into a tricky problem.', 'Help me think through a problem. Ask me what I am working on.'], ['book', 'Learn something', 'Make a complex idea feel approachable.', 'Help me learn something new. Ask what topic interests me.']].map(([i, title, copy, prompt, space]) => `<button class="shortcut" data-action="starter" data-prompt="${esc(prompt)}" ${space ? 'data-workspace="1"' : ''}>${icon(i)}<h3>${title}</h3><p>${copy}</p></button>`).join('')}</div><section class="home-recents"><div class="section-title"><h2>${state.chats.length ? 'Pick up where you left off' : 'A fresh start, just for you.'}</h2>${state.chats.length ? btn('All conversations', 'search', { icon: 'right', tone: 'ghost small', type: '' }) : ''}</div><div class="resume-list">${state.chats.slice(0, 4).map(c => `<a class="resume-row" href="#chat/${encodeURIComponent(c.id)}">${icon('chat')}<div class="grow"><div class="resume-title">${esc(c.title)}</div><div class="resume-desc">${esc(modelName(c.model))}</div></div>${icon('right')}</a>`).join('')}</div>${!state.chats.length ? '<p class="inline-note">Your conversations appear here after your first message.</p>' : ''}</section>${branding.home.footer ? `<div class="home-foot">${brandCopy(branding.home.footer)}</div>` : ''}</div>`;
@@ -276,7 +279,7 @@ export async function startConnected(capabilities) {
     const key = m.id || `pending-${index}`, details = turnDetails(m, key);
     const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${m.id && !state.streaming && !state.switchingVersion ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
     const status = m.role === 'assistant' ? `<span class="response-meta ${isPendingMessage(m) ? 'is-generating' : ''} ${m.status === 'error' ? 'is-error' : ''}" ${isPendingMessage(m) ? 'role="status"' : ''}>${esc(responseStatus(m))}</span>` : '';
-    return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(initials())}</span>You` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) ? turnView.steerForm() : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
+    return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(initials())}</span>You` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) ? turnView.steerForm() : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
   }
   function updateMessage(m, index) {
     const article = $(`[data-message="${index}"]`);
@@ -327,9 +330,9 @@ export async function startConnected(capabilities) {
       else if (html) answer.insertAdjacentHTML('afterend', html);
       article._notes = notesSignature;
     }
-    const questionSignature = questionsView.signature(m, index);
+    const questionSignature = questionsView.signature(m, index) + browserView.signature(m, index);
     if (article._questions !== questionSignature) {
-      const [current, ...extra] = article.querySelectorAll('.question-card'), html = questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index);
+      const [current, ...extra] = article.querySelectorAll('.question-card'), html = questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index);
       extra.forEach(card => card.remove());
       if (current) { if (html) current.outerHTML = html; else current.remove(); }
       else if (html) ($('.saved-notes', article) || $('.knowledge-sources', article) || answer).insertAdjacentHTML('afterend', html);
@@ -476,7 +479,7 @@ export async function startConnected(capabilities) {
     }
     const running = operations.get(id);
     if (running?.conversation) {
-      state.active = running.conversation; state.loadingChat = false; workspace.load(id); connectionsView.loadChat(id); knowledgeView.loadChat(id); projectsView.loadChat(id);
+      state.active = running.conversation; state.loadingChat = false; workspace.load(id); browserView.load(id); connectionsView.loadChat(id); knowledgeView.loadChat(id); projectsView.loadChat(id);
       if (state.models.some(m => m.id === state.active.model)) state.model = state.active.model;
       resetGeneration({ ...(state.active.settings || {}), reasoningEffort: state.active.reasoningEffort });
       render(); scrollToEnd(); scheduleWatch(id, 100); return;
@@ -488,7 +491,7 @@ export async function startConnected(capabilities) {
       if ((revisions.get(id) || 0) !== revision) { if (operations.get(id)?.conversation) c = operations.get(id).conversation; else { scheduleWatch(id, 0); return; } }
       const desiredEffort = pendingEfforts.get(id) || requestedEffort;
       if (desiredEffort) c.reasoningEffort = desiredEffort.value;
-      state.active = c; workspace.load(c.id); connectionsView.loadChat(c.id); knowledgeView.loadChat(c.id); projectsView.loadChat(c.id);
+      state.active = c; workspace.load(c.id); browserView.load(c.id); connectionsView.loadChat(c.id); knowledgeView.loadChat(c.id); projectsView.loadChat(c.id);
       if (c.model && state.models.some(m => m.id === c.model)) state.model = c.model;
       resetGeneration({ ...(c.settings || {}), ...(efforts.includes(c.reasoningEffort) ? { reasoningEffort: c.reasoningEffort } : {}) });
       observeConversation(c);
@@ -691,6 +694,7 @@ export async function startConnected(capabilities) {
         operations.delete(op.key); op.key = c.id; op.conversation = c; c.messages ||= []; operations.set(c.id, op); touchConversation(c.id); upsert(c);
         if (route().page === 'chat' && !route().id && state.draftKey === op.draftKey) { state.active = c; history.replaceState(null, '', `#chat/${encodeURIComponent(c.id)}`); }
         if (state.workspaceDraft) { state.workspaceDraft = false; await workspace.create(c.id); if (!operationIsCurrent(op)) return; }
+        if (state.browserDraft) { state.browserDraft = false; await browserView.setOn(c.id, true); if (!operationIsCurrent(op)) return; }
         await Promise.all([connectionsView.applyDraft(c.id), knowledgeView.applyDraft(c.id), projectsView.applyDraft(c.id)]); connectionsView.loadChat(c.id); knowledgeView.loadChat(c.id); projectsView.loadChat(c.id);
       }
       const c = op.conversation; c.model = settings.model; c.reasoningEffort = settings.reasoningEffort; c.settings = { ...settings };
@@ -720,6 +724,7 @@ export async function startConnected(capabilities) {
         if (event.event === 'model') { assistant.settings = { ...assistant.settings, resolvedModel: event.data.model, auto: true }; }
         if (event.event === 'delta') { assistant.content += event.data.content || ''; assistant.status = 'streaming'; }
         if (event.event === 'reasoning') { assistant.reasoningContent += event.data.content || ''; assistant.status = 'streaming'; assistant._draft = null; }
+        browserView.observe(event, c.id);
         if (workspace.onEvent(event, assistant, c.id)) assistant.status = 'streaming';
         if (event.event === 'done') { Object.assign(assistant, event.data); assistant.status = event.data.status || 'completed'; op.terminal = true; }
         if (event.event === 'error') { assistant.status = 'error'; assistant.errorMessage = event.data.message || 'The model could not complete this response.'; op.terminal = true; }
@@ -788,7 +793,7 @@ export async function startConnected(capabilities) {
     focus: () => savePreference({ focus: !document.body.classList.contains('collapsed') }),
     context: () => savePreference({ context: !state.context }),
     compact: () => savePreference({ density: state.compact ? 'comfortable' : 'compact' }),
-    'new-chat': () => { state.draftKey++; state.draft = ''; state.workspaceDraft = false; connectionsView.resetDraft(); knowledgeView.resetDraft(); projectsView.resetDraft(); attachments.clear(); applyPreferences(state.preferences); go('chat'); requestAnimationFrame(() => $('#prompt')?.focus()); },
+    'new-chat': () => { state.draftKey++; state.draft = ''; state.workspaceDraft = false; state.browserDraft = false; connectionsView.resetDraft(); knowledgeView.resetDraft(); projectsView.resetDraft(); attachments.clear(); applyPreferences(state.preferences); go('chat'); requestAnimationFrame(() => $('#prompt')?.focus()); },
     starter: el => { if (route().page !== 'chat') { state.draftKey++; go('chat'); } state.draft = el.dataset.prompt; if (el.dataset.workspace && !route().id) state.workspaceDraft = true; render(); const prompt = $('#prompt'); if (prompt) { prompt.focus(); prompt.setSelectionRange(prompt.value.length, prompt.value.length); } },
     stop: stopCurrent,
     profile: openProfileMenu,
@@ -917,7 +922,7 @@ export async function startConnected(capabilities) {
     if (menu.contains(el)) closeMenu(false);
     event.preventDefault();
     if (state.phase !== 'ready' && !['retry-session', 'close', 'logout'].includes(el.dataset.action)) return;
-    const workspaceAction = workspace.actions[el.dataset.action];
+    const workspaceAction = workspace.actions[el.dataset.action] || browserView.actions[el.dataset.action];
     if (workspaceAction) { perform(async () => { if (await workspaceAction(el) === 'render') render(); }); return; }
     perform(() => (actions[el.dataset.action] || personal.actions[el.dataset.action] || connectionsView.actions[el.dataset.action] || clustersView.actions[el.dataset.action] || knowledgeView.actions[el.dataset.action] || libraryView.actions[el.dataset.action] || projectsView.actions[el.dataset.action] || questionsView.actions[el.dataset.action] || researchView.actions[el.dataset.action] || groupsView.actions[el.dataset.action] || turnActions[el.dataset.action] || administration.actions[el.dataset.action] || historyView.actions[el.dataset.action] || attachments.actions[el.dataset.action])?.(el));
   });
@@ -1019,6 +1024,7 @@ export async function startConnected(capabilities) {
     administration.input(event); historyView.input(event);
     if (event.target.id === 'message-files') { attachments.upload(event.target); return; }
     if (knowledgeView.input(event) || libraryView.input(event)) return;
+    if (event.target.matches?.('[data-browser-engine]')) { browserView.input(event.target); return; }
     if (event.target.id !== 'reasoning-effort' || !state.active || state.streaming) return;
     const id = state.active.id, effort = state.reasoningEffort, epoch = identityEpoch, sequence = ++effortSequence;
     pendingEfforts.set(id, { value: effort, sequence });

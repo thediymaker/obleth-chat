@@ -689,7 +689,11 @@ impl Sandboxes {
             .await?;
         for kind in ["pods", "persistentvolumeclaims"] {
             for object in kube
-                .list(kind, "app.kubernetes.io/managed-by=obleth-chat")
+                // Browser pods share the labels for network policy but are not workspaces.
+                .list(
+                    kind,
+                    "app.kubernetes.io/managed-by=obleth-chat,!obleth.io/browser",
+                )
                 .await?
             {
                 let labels = object.pointer("/metadata/labels");
@@ -744,14 +748,14 @@ impl Sandboxes {
     }
 }
 
-enum PodState {
+pub(crate) enum PodState {
     Ready(String),
     Pending,
     Finished,
     Deleting,
 }
 
-fn pod_state(pod: &Value) -> PodState {
+pub(crate) fn pod_state(pod: &Value) -> PodState {
     if pod.pointer("/metadata/deletionTimestamp").is_some() {
         return PodState::Deleting;
     }
@@ -771,7 +775,7 @@ fn pod_state(pod: &Value) -> PodState {
     }
 }
 
-fn waiting_reason(pod: &Value) -> String {
+pub(crate) fn waiting_reason(pod: &Value) -> String {
     pod.pointer("/status/containerStatuses/0/state/waiting/reason")
         .or_else(|| pod.pointer("/status/containerStatuses/0/state/terminated/reason"))
         .or_else(|| pod.pointer("/status/reason"))
@@ -1115,7 +1119,7 @@ async fn raw(
 }
 
 /// A Kubernetes quantity such as 10Gi, 500M or 1073741824 in bytes.
-fn quantity_bytes(quantity: &str) -> Option<u64> {
+pub(crate) fn quantity_bytes(quantity: &str) -> Option<u64> {
     let quantity = quantity.trim();
     let split = quantity
         .find(|c: char| !c.is_ascii_digit())

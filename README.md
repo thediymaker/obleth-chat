@@ -71,6 +71,18 @@ obleth-chat runs on your own servers in front of [obleth](https://github.com/the
       <br><a href="https://www.obleth.com/docs/chat/research">Research →</a>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Browser</h3>
+      The model searches the web and reads pages in a real Chrome tab you watch beside the chat. Take over to sign in; it sees nothing until you hand back, and asks before submitting forms.
+      <br><a href="https://www.obleth.com/docs/chat/browser">Browser →</a>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Any stack in a workspace</h3>
+      Workspaces come with Node.js, Python with Jupyter and uv, Rust and Go. Any web server, from Flask or Streamlit to axum, shows in the preview.
+      <br><a href="https://www.obleth.com/docs/chat/workspaces">Workspaces →</a>
+    </td>
+  </tr>
 </table>
 
 <table>

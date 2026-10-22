@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod auth;
 pub mod autopilot;
+pub mod browser;
 pub mod config;
 pub mod connections;
 pub mod error;
@@ -66,6 +67,7 @@ pub struct AppState {
     pub admin_gateway_url: Option<String>,
     pub followups_enabled: bool,
     pub sandboxes: Option<sandbox::Sandboxes>,
+    pub browsers: Option<browser::Browsers>,
     pub connections: Option<connections::Connections>,
     pub knowledge: Option<knowledge::Knowledge>,
 }
@@ -81,6 +83,7 @@ impl AppState {
             admin_gateway_url: None,
             followups_enabled: true,
             sandboxes: None,
+            browsers: None,
             connections: None,
             knowledge: None,
         }
@@ -97,6 +100,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let groups = groups::router(state.clone());
     let research = research::router(state.clone());
     let workspaces = sandbox::router(state.clone());
+    let browsing = browser::router(state.clone());
     let connections = connections::router(state.clone());
     let steering = steer::router(state.clone());
     let knowledge = knowledge::router(state.clone());
@@ -147,6 +151,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(groups)
         .merge(research)
         .merge(workspaces)
+        .merge(browsing)
         .merge(connections)
         .merge(steering)
         .merge(knowledge)
@@ -253,6 +258,10 @@ async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Val
     if let (Some(sb), Some(user)) = (&s.sandboxes, &user) {
         value["features"]["workspaces"] = json!(sb.allowed(user));
     }
+    value["features"]["browser"] = json!(match (&s.browsers, &user) {
+        (Some(b), Some(user)) => b.allowed(user),
+        _ => false,
+    });
     Json(value)
 }
 async fn jwks(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -875,8 +884,27 @@ async fn run_generation(
     };
     // Models with tools may ask the person to choose before going on.
     let asks = resolved.capabilities.supports_function_calling == Some(true);
+    // A chat with the browser on gets the browser tools and its owner's search engine.
+    let browser_allowed = s.browsers.as_ref().is_some_and(|b| b.allowed(&user));
+    let browsing = match &s.browsers {
+        Some(b)
+            if browser_allowed
+                && resolved.capabilities.supports_function_calling != Some(false)
+                && b.is_on(user.id, id).await =>
+        {
+            let engine = b
+                .get(user.id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(|| "duckduckgo".to_owned(), |b| b.search_engine);
+            Some((b.clone(), engine))
+        }
+        _ => None,
+    };
     let tool_turn = workspace_turn
         || asks
+        || browsing.is_some()
         || toolset.is_some()
         || knowledge_turn
             .as_ref()
@@ -961,6 +989,9 @@ async fn run_generation(
     if let Some(toolset) = &toolset {
         preamble.push(toolset.prompt());
     }
+    if let Some((_, engine)) = &browsing {
+        preamble.push(browser::tools::prompt(engine));
+    }
     if let Some(prompt) = knowledge_turn
         .as_ref()
         .map(|k| k.prompt())
@@ -1031,6 +1062,17 @@ async fn run_generation(
     }
     if research_tools {
         tools.extend(research::tools::definitions());
+    }
+    if browsing.is_some() {
+        tools.extend(browser::tools::definitions());
+        if asks {
+            tools.push(browser::tools::handoff_definition());
+        }
+    }
+    // People who may use the browser can be asked to turn it on for this chat.
+    let offers_browser = asks && browsing.is_none() && browser_allowed;
+    if offers_browser {
+        tools.push(browser::tools::request_definition());
     }
     if !tools.is_empty() {
         payload["tools"] = Value::Array(tools);
@@ -1262,6 +1304,9 @@ async fn run_generation(
                     && c.name != questions::TOOL
                     && c.name != questions::WORKSPACE_TOOL
                     && c.name != questions::RESEARCH_TOOL
+                    && c.name != browser::tools::HANDOFF
+                    && c.name != browser::tools::REQUEST
+                    && !(browsing.is_some() && browser::tools::is_tool(&c.name))
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
             });
             let mut running = None;
@@ -1312,6 +1357,122 @@ async fn run_generation(
                         .as_array_mut()
                         .unwrap()
                         .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
+                if call.name == browser::tools::HANDOFF || call.name == browser::tools::REQUEST {
+                    let handoff = call.name == browser::tools::HANDOFF;
+                    let offered = if handoff {
+                        asks && browsing.is_some()
+                    } else {
+                        offers_browser
+                    };
+                    let output = if offered && !asked {
+                        asked = true;
+                        if let (true, Some((browsers, _))) = (handoff, &browsing) {
+                            let _ = browsers.set_controller(user.id, id, "user").await;
+                        }
+                        let entry =
+                            browser::tools::card_entry(&call.id, &call.name, &call.arguments);
+                        record(&mut activity, &entry, true);
+                        emit(&mut tx, "tool", entry);
+                        if handoff {
+                            browser::tools::HANDOFF_SHOWN
+                        } else {
+                            browser::tools::REQUEST_SHOWN
+                        }
+                        .to_string()
+                    } else if asked {
+                        "Ask for one thing at a time: your reply already ends with a question."
+                            .to_string()
+                    } else {
+                        format!("There is no tool named {}.", call.name)
+                    };
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
+                if let Some((browsers, _)) = browsing
+                    .as_ref()
+                    .filter(|_| browser::tools::is_tool(&call.name))
+                {
+                    let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
+                    let mut entry = json!({"id":call.id,"tool":call.name,"summary":browser::tools::summary(&call.name, &args),"status":"running","startedAt":chrono::Utc::now()});
+                    record(&mut activity, &entry, true);
+                    emit(&mut tx, "tool", entry.clone());
+                    let began = Instant::now();
+                    let mut ctx = browser::tools::Ctx {
+                        browsers,
+                        owner: user.id,
+                        conversation: id,
+                        approved: false,
+                        auto: auto_mode(s.clone()).await,
+                    };
+                    let mut run = browser::tools::run(&ctx, &call.name, &call.arguments).await;
+                    if let Some((question, host)) = run.ask.take() {
+                        entry["status"] = json!("awaiting");
+                        entry["question"] = json!(question);
+                        entry["remember"] = json!("Always on this site");
+                        record(&mut activity, &entry, false);
+                        emit(&mut tx, "tool", entry.clone());
+                        // Saved now so a reloaded page shows the question too.
+                        let _ = lifecycle::save_activity(
+                            &s.store.pool,
+                            user.id,
+                            id,
+                            generation_id,
+                            &activity,
+                        )
+                        .await;
+                        browser::ask(&s.store.pool, user.id, id, generation_id, &call.id, &host)
+                            .await
+                            .map_err(|_| "The response could not ask for approval".to_string())?;
+                        let decision =
+                            connections::wait(&s.store.pool, generation_id, &call.id).await;
+                        if decision != connections::Decision::Allow {
+                            entry["status"] = json!("declined");
+                            entry["detail"] =
+                                json!(if decision == connections::Decision::Expired {
+                                    "No answer within 15 minutes"
+                                } else {
+                                    "Declined"
+                                });
+                            record(&mut activity, &entry, false);
+                            emit(&mut tx, "tool", entry);
+                            payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":"The person declined this, so nothing was clicked or submitted. Do not try it again another way unless they ask."}));
+                            let _ = lifecycle::save_activity(
+                                &s.store.pool,
+                                user.id,
+                                id,
+                                generation_id,
+                                &activity,
+                            )
+                            .await;
+                            continue;
+                        }
+                        entry["status"] = json!("running");
+                        record(&mut activity, &entry, false);
+                        emit(&mut tx, "tool", entry.clone());
+                        ctx.approved = true;
+                        run = browser::tools::run(&ctx, &call.name, &call.arguments).await;
+                    }
+                    let outcome = run.outcome;
+                    entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
+                    entry["summary"] = json!(outcome.summary);
+                    entry["detail"] = json!(outcome.detail);
+                    entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                    if let Some(facts) = outcome.extra.as_object() {
+                        for (key, value) in facts {
+                            entry[key] = value.clone();
+                        }
+                    }
+                    record(&mut activity, &entry, false);
+                    browser::keep_recent_thumbnails(&mut activity);
+                    emit(&mut tx, "tool", entry);
+                    payload["messages"].as_array_mut().unwrap().push(
+                        json!({"role":"tool","tool_call_id":call.id,"content":outcome.output}),
+                    );
                     continue;
                 }
                 if call.name == questions::TOOL {

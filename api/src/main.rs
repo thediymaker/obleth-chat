@@ -40,6 +40,17 @@ async fn main() -> Result<()> {
     let mut state = AppState::new(auth, pool.clone(), gateway, config.max_streams);
     state.admin_gateway_url = config.admin_gateway_url;
     if let Some(sandbox_config) = obleth_chat::sandbox::SandboxConfig::from_env()? {
+        // The browser runs in the workspace namespace, under the same access rule.
+        if let Some(browser_config) = obleth_chat::browser::BrowserConfig::from_env()? {
+            let browsers = obleth_chat::browser::Browsers::new(
+                browser_config,
+                sandbox_config.clone(),
+                pool.clone(),
+            )?;
+            tokio::spawn(browsers.clone().worker(state.shutdown.clone()));
+            tracing::info!("browser enabled");
+            state.browsers = Some(browsers);
+        }
         let sandboxes = obleth_chat::sandbox::Sandboxes::new(sandbox_config, pool.clone())?;
         tokio::spawn(sandboxes.clone().worker(state.shutdown.clone()));
         tokio::spawn(obleth_chat::research::worker(

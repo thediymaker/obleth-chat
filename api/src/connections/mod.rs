@@ -1480,12 +1480,17 @@ async fn decide(
             "This step is no longer waiting for an answer".into(),
         ));
     };
-    if let (true, "allow", (Some(connection), Some(name))) =
-        (body.remember, body.decision.as_str(), tool)
-    {
-        sqlx::query("INSERT INTO tool_grants(conversation_id,connection_id,tool_name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
-            .bind(conversation).bind(connection).bind(name)
-            .execute(&mut *tx).await?;
+    match (body.remember, body.decision.as_str(), tool) {
+        (true, "allow", (Some(connection), Some(name))) => {
+            sqlx::query("INSERT INTO tool_grants(conversation_id,connection_id,tool_name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+                .bind(conversation).bind(connection).bind(name)
+                .execute(&mut *tx).await?;
+        }
+        // A browser submission: "Always on this site".
+        (true, "allow", (None, Some(name))) => {
+            crate::browser::remember_site(&mut tx, user.id, &name).await?;
+        }
+        _ => {}
     }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)

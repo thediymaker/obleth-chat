@@ -29,6 +29,8 @@ pub const MAX_AGENTS: usize = 6;
 const MAX_STEPS: usize = 30;
 const STEP_TOKENS: i32 = 8192;
 const TIMEOUT: Duration = Duration::from_secs(300);
+/// Past this, a worker's next step is its report, so a slow worker still reports.
+const WRAP_UP: Duration = Duration::from_secs(210);
 /// What the main model reads of each report, and what the reply keeps to show.
 const REPORT_CHARS: usize = 12_000;
 const SHOWN_CHARS: usize = 4_000;
@@ -377,6 +379,9 @@ async fn worker<S: Shell>(
         Err(e) => Err(e),
     };
     drop(permit);
+    if let Err(e) = &result {
+        tracing::warn!(model, conversation = %ctx.conversation, error = %e, "a worker failed");
+    }
     let tokens = usage["total_tokens"].as_i64();
     update(board, progress, i, |a| {
         a["tokens"] = json!(tokens);
@@ -489,17 +494,23 @@ async fn steps<S: Shell>(
         json!({"role":"system","content":if ctx.shell.is_some() { INSTRUCTIONS } else { ANSWER }}),
         json!({"role":"user","content":brief}),
     ];
+    let began = std::time::Instant::now();
     for step in 1..=MAX_STEPS {
         // Without files there is nothing to look up: one answer is the report.
-        let last = step == MAX_STEPS || ctx.shell.is_none();
+        let last = step == MAX_STEPS || ctx.shell.is_none() || began.elapsed() >= WRAP_UP;
         if last && ctx.shell.is_some() {
-            messages.push(json!({"role":"user","content":"That was your last step. Write your report now from what you found."}));
+            messages.push(json!({"role":"user","content":"You are out of steps and time. Write your report now from what you found, without calling a tool."}));
         }
         let mut payload = json!({"model":resolved.model,"messages":messages,"max_tokens":STEP_TOKENS,
             "temperature":resolved.parameters.temperature,"top_p":resolved.parameters.top_p,
             "stream":true,"stream_options":{"include_usage":true}});
-        if !last {
+        // The last step keeps the tools defined, since earlier steps used them, but
+        // may not call one.
+        if ctx.shell.is_some() {
             payload["tools"] = tools();
+            if last {
+                payload["tool_choice"] = json!("none");
+            }
         }
         if resolved.capabilities.supports_reasoning != Some(false) {
             payload["reasoning_effort"] = json!("low");
@@ -568,8 +579,19 @@ async fn request<S: Shell>(
             }
             let v: Value = serde_json::from_str(&event)
                 .map_err(|_| "The worker's stream was invalid".to_string())?;
-            if v.get("error").is_some() {
-                return Err("The worker model reported an error".into());
+            if let Some(error) = v.get("error") {
+                let message: String = error["message"]
+                    .as_str()
+                    .or(error.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(300)
+                    .collect();
+                return Err(if message.is_empty() {
+                    "The worker model reported an error".into()
+                } else {
+                    format!("The worker model reported an error: {message}")
+                });
             }
             if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
                 usage = Some(u.clone());

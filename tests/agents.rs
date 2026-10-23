@@ -76,6 +76,7 @@ async fn chat(
     let messages = body["messages"].as_array().unwrap().clone();
     let task = messages[1]["content"].as_str().unwrap_or("").to_owned();
     let tools = body.get("tools").is_some();
+    let wrap_up = body["tool_choice"] == "none";
     let found = messages
         .iter()
         .rev()
@@ -83,6 +84,14 @@ async fn chat(
         .and_then(|m| m["content"].as_str())
         .map(str::to_owned);
     let stream = async_stream::stream! {
+        if wrap_up {
+            yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"content":"Wrapped up what I found."}}]}).to_string()));
+            yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}]}).to_string()));
+            yield Ok(Event::default().data("[DONE]"));
+            return;
+        }
+        // A worker that never stops looking.
+        let found = if task.contains("Keep looking") { None } else { found };
         match found {
             None if !tools => {
                 // Thinking streams token by token: far more stream than answer.
@@ -263,6 +272,22 @@ async fn workers_explore_at_once_and_report(pool: PgPool) {
     )
     .await;
     assert!(!refused.ok && refused.output.contains("mini-worker"));
+
+    // A worker that keeps looking still reports on its last step, with no tool calls.
+    seen.lock().unwrap().clear();
+    let (progress, _updates) = tokio::sync::mpsc::unbounded_channel();
+    let wrapped = agents::run(
+        &ctx,
+        &json!({"tasks":[{"title":"Search","task":"Keep looking for schedules."}]}).to_string(),
+        progress,
+    )
+    .await;
+    assert!(wrapped.ok, "{}", wrapped.output);
+    assert!(wrapped.output.contains("Wrapped up what I found."));
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 30);
+    assert_eq!(requests[29]["tool_choice"], "none");
+    assert!(requests[28].get("tool_choice").is_none());
 
     // Without files a worker is a short chat of its own: no tools, one answer.
     seen.lock().unwrap().clear();

@@ -82,7 +82,8 @@ export function workOf(m) {
   return { rows: fold(rows), steps: list.filter(e => kindOf(e) === 'tool'), entries: list, reasoning, thoughtsRecorded };
 }
 
-const failed = r => r.type === 'step' && (r.e.status === 'error' || r.e.check === 'error');
+// A delegate step shows each worker's outcome itself, so it never folds away.
+const failed = r => r.type === 'step' && r.e.tool !== 'delegate' && (r.e.status === 'error' || r.e.check === 'error');
 /**
  * Folds failed exploration into one dead-end row, and a problem (a failed step or a
  * broken preview) with what fixed it into one problem row.

@@ -10,7 +10,7 @@
 <p align="center">
   A self-hosted chat app for everyone who shares your models.<br>
   Private conversations, document search with citations, workspaces that build apps with a live preview,<br>
-  and your Slurm and Kubernetes clusters as tools.
+  project code with history, worker agents, and your Slurm and Kubernetes clusters as tools.
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@ obleth-chat runs on your own servers in front of [obleth](https://github.com/the
   <tr>
     <td width="50%" valign="top">
       <h3>Everyday chat</h3>
-      Pick a model or <b>Auto</b>, set the thinking effort, attach files and images, and edit or regenerate with versions you can step through. Responses keep running on the server when you close the tab.
+      Pick a model or <b>Auto</b>, set the thinking effort, attach files and images, edit or regenerate with versions you can step through, and share a chat read-only. Responses keep running on the server when you close the tab.
       <br><a href="https://www.obleth.com/docs/chat/conversations">Conversations →</a>
     </td>
     <td width="50%" valign="top">
@@ -81,6 +81,18 @@ obleth-chat runs on your own servers in front of [obleth](https://github.com/the
       <h3>Any stack in a workspace</h3>
       Workspaces come with Node.js, Python with Jupyter and uv, Rust and Go. Any web server, from Flask or Streamlit to axum, shows in the preview.
       <br><a href="https://www.obleth.com/docs/chat/workspaces">Workspaces →</a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Project code</h3>
+      A project keeps one git history, synced from its chats' workspaces, with who changed each line. Compare versions, undo a commit, start a chat from any commit, and take the code out as a zip or to GitHub.
+      <br><a href="https://www.obleth.com/docs/chat/project-code">Project code →</a>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Worker agents</h3>
+      The model hands parts of a task to faster worker models that run at the same time, such as four explorers reading a codebase, and works from their reports.
+      <br><a href="https://www.obleth.com/docs/chat/agents">Worker agents →</a>
     </td>
   </tr>
 </table>

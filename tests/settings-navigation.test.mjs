@@ -4,16 +4,16 @@ import { canonicalSettingsHash, adminLocation, settingsTabs } from '../web/setti
 import { createAdmin } from '../web/admin.js';
 
 test('legacy infrastructure and administration links resolve inside Settings', () => {
-  assert.equal(canonicalSettingsHash('#system'), '#settings/infrastructure');
+  assert.equal(canonicalSettingsHash('#system'), '#settings');
+  assert.equal(canonicalSettingsHash('#settings/infrastructure'), '#settings');
   assert.equal(canonicalSettingsHash('#admin/models'), '#settings/admin/models');
   assert.equal(canonicalSettingsHash('#chat/abc'), '#chat/abc');
   assert.deepEqual(adminLocation('#settings/admin/groups/group-123'), { section: 'groups', groupId: 'group-123' });
   assert.deepEqual(adminLocation('#admin/groups/group-123'), { section: 'groups', groupId: 'group-123' });
 });
 
-test('ordinary Settings navigation omits Administration while retaining infrastructure', () => {
-  assert.doesNotMatch(settingsTabs('personal'), /Administration|settings\/admin/);
-  assert.match(settingsTabs('infrastructure'), /href="#settings\/infrastructure" aria-current="page"/);
+test('ordinary Settings navigation omits Administration and infrastructure', () => {
+  assert.doesNotMatch(settingsTabs('personal'), /Administration|settings\/admin|Infrastructure/);
   assert.match(settingsTabs('admin', true), /href="#settings\/admin\/users" aria-current="page"/);
   assert.doesNotMatch(settingsTabs('personal'), /settings\/mcp/);
   assert.match(settingsTabs('connections', false, true), /href="#settings\/mcp" aria-current="page"><svg[^]*MCP servers/);

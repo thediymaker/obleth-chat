@@ -104,6 +104,7 @@ pub async fn reserve_in(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
     generation: Uuid,
+    model: &str,
     max_tokens: i32,
     context_bytes: usize,
 ) -> Result<(), ApiError> {
@@ -112,7 +113,16 @@ pub async fn reserve_in(
     // Keep the admitted request in the ledger, and accept any actual usage later.
     sqlx::query(&format!("WITH preempted AS (UPDATE generation_usage SET status='interrupted',finished_at=NOW(),usage_complete=FALSE,charged_tokens={} WHERE user_id=$1 AND purpose='follow_up' AND status='reserved' RETURNING generation_id) UPDATE messages SET follow_ups_status='error',follow_ups_expires_at=NULL WHERE id IN (SELECT generation_id FROM preempted) AND follow_ups_status='pending'", charge_estimate("NULL")))
         .bind(owner).execute(&mut **tx).await?;
-    reserve_kind_in(tx, owner, generation, max_tokens, context_bytes, false).await
+    reserve_kind_in(
+        tx,
+        owner,
+        generation,
+        model,
+        max_tokens,
+        context_bytes,
+        false,
+    )
+    .await
 }
 /// Automatic suggestions are real, bounded requests charged to the same limits.
 /// The caller holds the enabled owner's users row lock, as for primary turns.
@@ -120,6 +130,7 @@ pub async fn reserve_follow_up_in(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
     generation: Uuid,
+    model: &str,
     max_tokens: i32,
     context_bytes: usize,
 ) -> Result<(), ApiError> {
@@ -128,12 +139,22 @@ pub async fn reserve_follow_up_in(
             "Follow-up output must be between 1 and 256 tokens",
         ));
     }
-    reserve_kind_in(tx, owner, generation, max_tokens, context_bytes, true).await
+    reserve_kind_in(
+        tx,
+        owner,
+        generation,
+        model,
+        max_tokens,
+        context_bytes,
+        true,
+    )
+    .await
 }
 async fn reserve_kind_in(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
     generation: Uuid,
+    model: &str,
     max_tokens: i32,
     context_bytes: usize,
     follow_up: bool,
@@ -164,7 +185,7 @@ async fn reserve_kind_in(
     }) {
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS,"Your daily token allowance cannot reserve this output budget. Lower Maximum output tokens or wait until 00:00 UTC.".into()));
     }
-    sqlx::query("INSERT INTO generation_usage(generation_id,user_id,reserved_output_tokens,context_bytes,purpose,reservation_expires)VALUES($1,$2,$3,$4,$5,CASE WHEN $6 THEN NOW()+make_interval(secs=>$7) ELSE NULL END)").bind(generation).bind(owner).bind(i64::from(max_tokens)).bind(context_bytes).bind(if follow_up { "follow_up" } else { "chat" }).bind(follow_up).bind(FOLLOW_UP_LEASE_SECONDS as f64).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO generation_usage(generation_id,user_id,reserved_output_tokens,context_bytes,purpose,reservation_expires,model)VALUES($1,$2,$3,$4,$5,CASE WHEN $6 THEN NOW()+make_interval(secs=>$7) ELSE NULL END,$8)").bind(generation).bind(owner).bind(i64::from(max_tokens)).bind(context_bytes).bind(if follow_up { "follow_up" } else { "chat" }).bind(follow_up).bind(FOLLOW_UP_LEASE_SECONDS as f64).bind(model).execute(&mut **tx).await?;
     Ok(())
 }
 /// Preserve the accepted request count but release abandoned token reservations.
@@ -265,11 +286,24 @@ struct Daily {
     #[sqlx(flatten)]
     counts: Counts,
 }
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct ByModel {
+    /// None for records from before models were recorded, whose chat is gone.
+    model: Option<String>,
+    #[serde(flatten)]
+    #[sqlx(flatten)]
+    counts: Counts,
+}
 async fn counts(pool: &PgPool, owner: Uuid, days: i32) -> Result<Counts, ApiError> {
     Ok(sqlx::query_as::<_,Counts>(&format!("SELECT {AGGREGATES} FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') - make_interval(days => $2-1)")).bind(owner).bind(days).fetch_one(pool).await?)
 }
 async fn daily(pool: &PgPool, owner: Uuid) -> Result<Vec<Daily>, ApiError> {
     Ok(sqlx::query_as::<_,Daily>(&format!("SELECT to_char(g.created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS date,{AGGREGATES} FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')-INTERVAL '29 days' GROUP BY date ORDER BY date")).bind(owner).fetch_all(pool).await?)
+}
+/// The last 30 days per model, most tokens first.
+async fn by_model(pool: &PgPool, owner: Uuid) -> Result<Vec<ByModel>, ApiError> {
+    Ok(sqlx::query_as::<_,ByModel>(&format!("SELECT g.model,{AGGREGATES} FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')-INTERVAL '29 days' GROUP BY g.model ORDER BY COALESCE(SUM(g.total_tokens),0) DESC LIMIT 20")).bind(owner).fetch_all(pool).await?)
 }
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -288,14 +322,15 @@ async fn own_usage(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let user = state.auth.require(&headers, false).await?;
-    let (today, totals, daily, limits) = tokio::try_join!(
+    let (today, totals, daily, models, limits) = tokio::try_join!(
         counts(&state.store.pool, user.id, 1),
         counts(&state.store.pool, user.id, 30),
         daily(&state.store.pool, user.id),
+        by_model(&state.store.pool, user.id),
         effective_limits(&state.store.pool, user.id)
     )?;
     Ok(Json(
-        json!({"periodDays":30,"timezone":"UTC","quotaBasis":QUOTA_BASIS,"today":today,"totals":totals,"daily":daily,"limits":limits}),
+        json!({"periodDays":30,"timezone":"UTC","quotaBasis":QUOTA_BASIS,"today":today,"totals":totals,"daily":daily,"byModel":models,"limits":limits}),
     ))
 }
 #[derive(Deserialize)]

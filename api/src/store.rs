@@ -611,8 +611,15 @@ impl Store {
             return Err(ApiError::bad("This conversation exceeds the 100 KiB context limit. Start a new conversation or branch an earlier message"));
         }
         let generation_id = Uuid::new_v4();
-        crate::operations::reserve_in(&mut tx, owner, generation_id, max_tokens, context_size)
-            .await?;
+        crate::operations::reserve_in(
+            &mut tx,
+            owner,
+            generation_id,
+            model,
+            max_tokens,
+            context_size,
+        )
+        .await?;
         let user_id = if regenerate {
             source.as_ref().unwrap().id
         } else {
@@ -762,7 +769,8 @@ impl Store {
     pub async fn set_served_model(&self, message: Uuid, model: &str) -> Result<(), ApiError> {
         validate_model(model)?;
         sqlx::query(
-            "UPDATE messages SET settings = settings || jsonb_build_object('model', $2::text, 'auto', true) WHERE id = $1",
+            "WITH served AS (UPDATE messages SET settings = settings || jsonb_build_object('model', $2::text, 'auto', true) WHERE id = $1 RETURNING generation_id)
+             UPDATE generation_usage SET model = $2 WHERE generation_id IN (SELECT generation_id FROM served)",
         )
         .bind(message)
         .bind(model)

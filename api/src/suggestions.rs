@@ -262,6 +262,7 @@ async fn generate(
         &mut tx,
         user.id,
         assistant,
+        &resolved.model,
         max_tokens,
         system.len() + context.len(),
     )

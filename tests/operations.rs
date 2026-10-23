@@ -117,7 +117,7 @@ async fn optional_follow_ups_are_visible_in_personal_usage_and_reservations(pool
         .execute(&mut *tx)
         .await
         .unwrap();
-    operations::reserve_follow_up_in(&mut tx, user.id, generation, 256, 300)
+    operations::reserve_follow_up_in(&mut tx, user.id, generation, "test-model", 256, 300)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -143,6 +143,10 @@ async fn optional_follow_ups_are_visible_in_personal_usage_and_reservations(pool
     assert_eq!(finished["today"]["activeGenerations"], 0);
     assert_eq!(finished["today"]["reservedTokens"], 0);
     assert_eq!(finished["daily"][0]["totalTokens"], 115);
+    // Usage is also broken down by the model that served it.
+    assert_eq!(finished["byModel"][0]["model"], "test-model");
+    assert_eq!(finished["byModel"][0]["totalTokens"], 115);
+    assert_eq!(finished["byModel"][0]["requests"], 1);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -489,7 +493,7 @@ async fn unreported_usage_is_charged_an_estimate_for_admission_only(pool: PgPool
         .execute(&mut *tx)
         .await
         .unwrap();
-    operations::reserve_follow_up_in(&mut tx, user.id, follow_up, 256, 300)
+    operations::reserve_follow_up_in(&mut tx, user.id, follow_up, "test-model", 256, 300)
         .await
         .unwrap();
     operations::finish_in(&mut tx, follow_up, None, "error")

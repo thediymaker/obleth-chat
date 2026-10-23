@@ -1829,3 +1829,32 @@ a.research-chip:hover{color:var(--text)}
 .browser-settings a.detail-row{text-decoration:none;color:inherit}
 .browser-settings a.detail-row:hover span:first-child{color:var(--text)}
 .tr-thumb{width:64px;height:40px;object-fit:cover;object-position:top;border-radius:var(--radius-sm);border:1px solid var(--line);flex-shrink:0;align-self:center;background:#fff}
+/* Personal usage: totals, a month of tokens per day, and where they went. */
+.usage-card{margin-bottom:18px}
+.usage-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:14px 0 18px}
+.usage-tiles>div{min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--card)}
+.usage-tiles span{display:block;font-size:var(--fs-2xs);font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.usage-tiles strong{display:block;margin-top:4px;font-size:22px;font-weight:500;font-variant-numeric:tabular-nums}
+.usage-tiles small{display:block;margin-top:2px;font-size:var(--fs-xs);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.usage-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,300px);gap:24px;align-items:start}
+.usage-trend .spread{margin-bottom:8px}
+.usage-legend{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-xs);color:var(--muted)}
+.usage-legend i{width:9px;height:9px;border-radius:2px;margin-left:8px}
+.usage-legend i.in,.usage-chart rect.in{background:var(--control-strong);fill:var(--control-strong)}
+.usage-legend i.out,.usage-chart rect.out{background:var(--text-2);fill:var(--text-2)}
+.usage-chart{display:block;width:100%;height:auto}
+.usage-chart line{stroke:var(--line);stroke-width:1}
+.usage-chart text{fill:var(--muted);font-size:10px;font-variant-numeric:tabular-nums}
+.usage-chart rect.hit{fill:transparent}
+.usage-chart g:hover rect.hit{fill:var(--secondary)}
+.usage-side{display:flex;flex-direction:column;gap:8px}
+.usage-side .eyebrow:not(:first-child){margin-top:12px}
+.usage-models{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.usage-models .spread,.usage-quota .spread{font-size:var(--fs-sm);color:var(--text-2);gap:10px}
+.usage-models .spread span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.usage-models .spread span:last-child,.usage-quota .spread span:last-child{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.usage-quota .quota-progress{margin-top:6px}
+@media(max-width:760px){
+  .usage-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .usage-body{grid-template-columns:minmax(0,1fr)}
+}

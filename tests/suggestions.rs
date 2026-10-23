@@ -330,7 +330,7 @@ async fn auxiliary_reservations_compete_with_each_other_and_expire(pool: PgPool)
         .execute(&mut *tx)
         .await
         .unwrap();
-    operations::reserve_follow_up_in(&mut tx, user.id, generation, 256, 100)
+    operations::reserve_follow_up_in(&mut tx, user.id, generation, "test-model", 256, 100)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -342,7 +342,7 @@ async fn auxiliary_reservations_compete_with_each_other_and_expire(pool: PgPool)
         .unwrap();
     operations::recover_in(&mut tx, user.id).await.unwrap();
     assert!(
-        operations::reserve_follow_up_in(&mut tx, user.id, Uuid::new_v4(), 1, 10)
+        operations::reserve_follow_up_in(&mut tx, user.id, Uuid::new_v4(), "test-model", 1, 10)
             .await
             .is_err(),
         "live auxiliary lease occupies an optional request slot"
@@ -355,7 +355,7 @@ async fn auxiliary_reservations_compete_with_each_other_and_expire(pool: PgPool)
         .execute(&mut *tx)
         .await
         .unwrap();
-    operations::reserve_follow_up_in(&mut tx, user.id, Uuid::new_v4(), 256, 10)
+    operations::reserve_follow_up_in(&mut tx, user.id, Uuid::new_v4(), "test-model", 256, 10)
         .await
         .unwrap();
     tx.commit().await.unwrap();

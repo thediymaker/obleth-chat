@@ -5,7 +5,7 @@ import { icon, esc } from './manage-ui.js';
 // When it is done: what changed and whether it works, checkpoints, and a "Show
 // work" trace in which each thought sits before the step it led to.
 
-const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', run_in_terminal: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
+const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', run_in_terminal: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', delegate: 'users', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
 const RESEARCH = new Set(['research_setup', 'research_status', 'experiment_create', 'experiment_checkout', 'experiment_run', 'experiment_wait', 'run_log']);
 const kindOf = e => e.kind || 'tool';
 const BROWSING = e => String(e.tool || '').startsWith('browser_');
@@ -157,7 +157,20 @@ export function createTurn({ state, markdown, chatPath, route }) {
   function approval(s) {
     return `<div class="approval"><span>${s.question ? esc(s.question) : `Allow ${esc(s.connection || 'this tool')} to run this?`}</span><div class="approval-actions">${[['allow', s.question ? 'Allow once' : 'Allow', 'primary'], ['chat', s.remember || 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}">${label}</button>`).join('')}</div></div>`;
   }
+  /** The workers a delegate step sent: each one's progress, then its report. */
+  function agents(s) {
+    const list = Array.isArray(s.agents) ? s.agents : [];
+    if (!list.length) return '';
+    const count = n => n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k tokens` : `${n} tokens`;
+    return `<ol class="tr-agents">${list.map(a => {
+      const mark = a.status === 'error' ? 'bad' : a.status === 'completed' ? 'ok' : a.status === 'running' ? 'now' : 'next';
+      const facts = [a.status === 'completed' ? `${a.steps} step${a.steps === 1 ? '' : 's'}` : a.doing, a.status !== 'completed' && a.steps ? `step ${a.steps}` : '', a.tokens ? count(a.tokens) : ''].filter(Boolean).join(' · ');
+      const head = `<span class="tr-agent-mark is-${mark}" aria-label="${esc(a.status || '')}"></span><span class="tr-agent-text"><strong>${esc(a.title)}</strong><small>${esc(facts)}</small></span>`;
+      return a.report ? `<li><details class="tr-more"><summary class="tr-agent-line">${head}</summary><div class="tr-thinking">${markdown(a.report)}</div></details></li>` : `<li><div class="tr-agent-line">${head}</div></li>`;
+    }).join('')}</ol>`;
+  }
   function stepText(s) {
+    if (s.tool === 'delegate') { const model = s.workerModel || s.agents?.[0]?.model; return `${esc(s.summary || 'Sent agents')}${model ? ` <span class="tr-quiet">· ${esc(model)}</span>` : ''}`; }
     if (s.path && FILE_TOOLS.has(s.tool)) return `${s.tool === 'write_file' ? 'Wrote' : 'Edited'} ${fileButton(s.path, lines(s))}`;
     if (s.tool === 'run_in_terminal' && s.command) return `Opened <code>${esc(s.command)}</code> in the terminal <button type="button" class="tr-link" data-action="turn-run-terminal" data-command="${esc(s.command)}">Run again</button>`;
     if (s.tool === 'plan' && Array.isArray(s.files)) return `Planned ${s.files.length} file${s.files.length === 1 ? '' : 's'}`;
@@ -171,7 +184,9 @@ export function createTurn({ state, markdown, chatPath, route }) {
     const thumb = s.thumb && String(s.thumb).startsWith('data:image/jpeg;base64,') ? `<img class="tr-thumb" src="${esc(s.thumb)}" alt="" loading="lazy">` : '';
     const head = `${thumb}<span class="tr-text">${stepText(s)}${s.check === 'error' ? ' <span class="tr-del">· preview broke</span>' : ''}</span><small>${esc(stepTime(s))}</small>`;
     const detail = s.detail && s.status !== 'running' && s.status !== 'awaiting' ? String(s.detail) : '';
-    const body = s.status === 'awaiting'
+    const body = s.tool === 'delegate'
+      ? `<div class="tr-line">${head}</div>${agents(s)}`
+      : s.status === 'awaiting'
       ? `<div class="tr-line">${head}</div>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}${approval(s)}`
       : detail && !(FILE_TOOLS.has(s.tool) && s.status === 'completed')
         ? `<details class="tr-more" ${s.status === 'error' ? 'open' : ''}><summary class="tr-line">${head}</summary><pre>${esc(detail)}</pre></details>`
@@ -289,7 +304,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
   function signature(m) {
     const work = Array.isArray(m.activity) ? m.activity : [];
     const id = m.id || 'live';
-    return JSON.stringify([live(m), work.map(e => [e.id, e.status, e.check]), m._draft?.lines, m._draft?.id, live(m) ? Math.floor((m.reasoningContent || '').length / 120) : 0, open.has(id), filters.get(id), (queued.get(conversation()) || []).length]);
+    return JSON.stringify([live(m), work.map(e => [e.id, e.status, e.check, e.tick]), m._draft?.lines, m._draft?.id, live(m) ? Math.floor((m.reasoningContent || '').length / 120) : 0, open.has(id), filters.get(id), (queued.get(conversation()) || []).length]);
   }
 
   const actions = {

@@ -132,6 +132,9 @@ pub struct ProfileInput {
     pub group_ids: Vec<Uuid>,
     #[serde(default)]
     pub is_default: bool,
+    /// Other models may hand tasks to this one (see agents).
+    #[serde(default)]
+    pub worker: bool,
     #[serde(default)]
     pub defaults: ParameterOverrides,
     #[serde(default = "allowed_defaults")]
@@ -211,6 +214,7 @@ struct ProfileRow {
     published: bool,
     visibility: String,
     is_default: bool,
+    worker: bool,
     defaults: Value,
     allowed_overrides: Value,
     group_ids: Vec<Uuid>,
@@ -229,6 +233,7 @@ pub struct ModelView {
     pub visibility: String,
     pub group_ids: Vec<Uuid>,
     pub is_default: bool,
+    pub worker: bool,
     pub defaults: GenerationParameters,
     pub allowed_overrides: Vec<String>,
     pub locked_parameters: Vec<String>,
@@ -285,6 +290,7 @@ impl ModelView {
                 .map(|p| p.group_ids.clone())
                 .unwrap_or_default(),
             is_default: profile.as_ref().is_some_and(|p| p.is_default),
+            worker: profile.as_ref().is_some_and(|p| p.worker),
             defaults: concrete(&defaults),
             locked_parameters: PARAMETER_NAMES
                 .iter()
@@ -369,6 +375,23 @@ pub async fn effective_catalog(
     Ok(result)
 }
 
+/// The worker models this person may use, by id and name, in catalog order. From
+/// the saved policy alone: whether the gateway still serves one is checked when a
+/// worker starts.
+pub async fn worker_models(pool: &PgPool, user: &Identity) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT p.model_id, p.name FROM model_profiles p WHERE p.worker AND p.enabled AND p.published
+         AND ($2 OR p.visibility='all' OR (p.visibility='groups' AND EXISTS(SELECT 1 FROM model_profile_groups g
+             JOIN user_group_members m ON m.group_id=g.group_id WHERE g.model_id=p.model_id AND m.user_id=$1)))
+         ORDER BY p.sort_order, LOWER(p.name), p.model_id LIMIT 12",
+    )
+    .bind(user.id)
+    .bind(user.is_admin())
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 async fn raw_preferences(pool: &PgPool, user_id: Uuid) -> Result<Value, ApiError> {
     Ok(
         sqlx::query_scalar::<_, Value>("SELECT preferences FROM user_preferences WHERE user_id=$1")
@@ -394,6 +417,7 @@ fn auto_model(models: &[ModelView]) -> Option<ModelView> {
         visibility: "all".into(),
         group_ids: vec![],
         is_default: false,
+        worker: false,
         defaults: GenerationParameters::default(),
         allowed_overrides: allowed_defaults(),
         locked_parameters: vec![],
@@ -612,8 +636,8 @@ async fn save_profile(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("INSERT INTO model_profiles (model_id,name,description,tags,sort_order,enabled,published,visibility,is_default,defaults,allowed_overrides) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(model_id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,tags=EXCLUDED.tags,sort_order=EXCLUDED.sort_order,enabled=EXCLUDED.enabled,published=EXCLUDED.published,visibility=EXCLUDED.visibility,is_default=EXCLUDED.is_default,defaults=EXCLUDED.defaults,allowed_overrides=EXCLUDED.allowed_overrides,updated_at=NOW()")
-        .bind(&id).bind(&body.name).bind(&body.description).bind(json!(body.tags)).bind(body.order).bind(body.enabled).bind(body.published).bind(&body.visibility).bind(body.is_default).bind(json!(body.defaults)).bind(json!(body.allowed_overrides)).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO model_profiles (model_id,name,description,tags,sort_order,enabled,published,visibility,is_default,defaults,allowed_overrides,worker) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(model_id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,tags=EXCLUDED.tags,sort_order=EXCLUDED.sort_order,enabled=EXCLUDED.enabled,published=EXCLUDED.published,visibility=EXCLUDED.visibility,is_default=EXCLUDED.is_default,defaults=EXCLUDED.defaults,allowed_overrides=EXCLUDED.allowed_overrides,worker=EXCLUDED.worker,updated_at=NOW()")
+        .bind(&id).bind(&body.name).bind(&body.description).bind(json!(body.tags)).bind(body.order).bind(body.enabled).bind(body.published).bind(&body.visibility).bind(body.is_default).bind(json!(body.defaults)).bind(json!(body.allowed_overrides)).bind(body.worker).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM model_profile_groups WHERE model_id=$1")
         .bind(&id)
         .execute(&mut *tx)
@@ -627,7 +651,7 @@ async fn save_profile(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.update','model',$3,$4)").bind(Uuid::new_v4()).bind(user.id).bind(&id).bind(json!({"enabled":body.enabled,"published":body.published,"visibility":body.visibility,"isDefault":body.is_default,"allowedOverrides":body.allowed_overrides})).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.update','model',$3,$4)").bind(Uuid::new_v4()).bind(user.id).bind(&id).bind(json!({"enabled":body.enabled,"published":body.published,"visibility":body.visibility,"isDefault":body.is_default,"worker":body.worker,"allowedOverrides":body.allowed_overrides})).execute(&mut *tx).await?;
     tx.commit().await?;
     // A successful local policy write must not appear to fail because a second
     // network-discovery request happened to fail after the transaction committed.
@@ -641,6 +665,7 @@ async fn save_profile(
     saved_model.visibility = body.visibility;
     saved_model.group_ids = body.group_ids;
     saved_model.is_default = body.is_default;
+    saved_model.worker = body.worker;
     saved_model.defaults = concrete(&body.defaults);
     saved_model.locked_parameters = PARAMETER_NAMES
         .iter()

@@ -120,7 +120,7 @@ pub async fn reserve_in(
         model,
         max_tokens,
         context_bytes,
-        false,
+        None,
     )
     .await
 }
@@ -146,7 +146,30 @@ pub async fn reserve_follow_up_in(
         model,
         max_tokens,
         context_bytes,
-        true,
+        Some(("follow_up", FOLLOW_UP_LEASE_SECONDS)),
+    )
+    .await
+}
+/// A worker agent's requests, on one row leased for `lease_seconds`. The caller
+/// holds the enabled owner's users row lock. Workers run inside their turn, so they
+/// count toward the daily limits but not the account's responses at once.
+pub async fn reserve_agent_in(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    generation: Uuid,
+    model: &str,
+    max_tokens: i32,
+    context_bytes: usize,
+    lease_seconds: i64,
+) -> Result<(), ApiError> {
+    reserve_kind_in(
+        tx,
+        owner,
+        generation,
+        model,
+        max_tokens,
+        context_bytes,
+        Some(("agent", lease_seconds)),
     )
     .await
 }
@@ -157,7 +180,7 @@ async fn reserve_kind_in(
     model: &str,
     max_tokens: i32,
     context_bytes: usize,
-    follow_up: bool,
+    leased: Option<(&str, i64)>,
 ) -> Result<(), ApiError> {
     if !(1..=32768).contains(&max_tokens) {
         return Err(ApiError::bad("Maximum tokens must be between 1 and 32,768"));
@@ -170,7 +193,7 @@ async fn reserve_kind_in(
     if active >= limits.concurrent_requests {
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS,format!("Your account allows {} responses at once. Stop or wait for a response before starting another.",limits.concurrent_requests)));
     }
-    let (requests,tokens,reserved):(i64,i64,i64)=sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(COALESCE(total_tokens,charged_tokens)),0)::bigint,COALESCE(SUM(CASE WHEN status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose='follow_up' AND g.reservation_expires>NOW())) THEN reserved_output_tokens ELSE 0 END),0)::bigint FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')").bind(owner).fetch_one(&mut **tx).await?;
+    let (requests,tokens,reserved):(i64,i64,i64)=sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(COALESCE(total_tokens,charged_tokens)),0)::bigint,COALESCE(SUM(CASE WHEN status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW())) THEN reserved_output_tokens ELSE 0 END),0)::bigint FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')").bind(owner).fetch_one(&mut **tx).await?;
     if limits.daily_requests.is_some_and(|limit| requests >= limit) {
         return Err(ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -185,7 +208,7 @@ async fn reserve_kind_in(
     }) {
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS,"Your daily token allowance cannot reserve this output budget. Lower Maximum output tokens or wait until 00:00 UTC.".into()));
     }
-    sqlx::query("INSERT INTO generation_usage(generation_id,user_id,reserved_output_tokens,context_bytes,purpose,reservation_expires,model)VALUES($1,$2,$3,$4,$5,CASE WHEN $6 THEN NOW()+make_interval(secs=>$7) ELSE NULL END,$8)").bind(generation).bind(owner).bind(i64::from(max_tokens)).bind(context_bytes).bind(if follow_up { "follow_up" } else { "chat" }).bind(follow_up).bind(FOLLOW_UP_LEASE_SECONDS as f64).bind(model).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO generation_usage(generation_id,user_id,reserved_output_tokens,context_bytes,purpose,reservation_expires,model)VALUES($1,$2,$3,$4,$5,CASE WHEN $6 THEN NOW()+make_interval(secs=>$7) ELSE NULL END,$8)").bind(generation).bind(owner).bind(i64::from(max_tokens)).bind(context_bytes).bind(leased.map_or("chat", |(purpose, _)| purpose)).bind(leased.is_some()).bind(leased.map_or(0, |(_, secs)| secs) as f64).bind(model).execute(&mut **tx).await?;
     Ok(())
 }
 /// Preserve the accepted request count but release abandoned token reservations.
@@ -193,7 +216,7 @@ async fn reserve_kind_in(
 /// turns are charged an estimate from their last checkpointed output.
 pub async fn recover_in(tx: &mut Transaction<'_, Postgres>, owner: Uuid) -> Result<(), ApiError> {
     let charge = charge_estimate("SELECT OCTET_LENGTH(m.content)+OCTET_LENGTH(m.reasoning_content) FROM messages m WHERE m.generation_id=g.generation_id");
-    sqlx::query(&format!("UPDATE generation_usage g SET status='interrupted',finished_at=NOW(),usage_complete=FALSE,charged_tokens={charge} WHERE user_id=$1 AND status='reserved' AND NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose='follow_up' AND g.reservation_expires>NOW()))")).bind(owner).execute(&mut **tx).await?;
+    sqlx::query(&format!("UPDATE generation_usage g SET status='interrupted',finished_at=NOW(),usage_complete=FALSE,charged_tokens={charge} WHERE user_id=$1 AND status='reserved' AND NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW()))")).bind(owner).execute(&mut **tx).await?;
     Ok(())
 }
 /// Settle a turn whose streamed output size is unknown; without reported usage,
@@ -272,11 +295,11 @@ const AGGREGATES: &str = "
     COALESCE(SUM(completion_tokens),0)::bigint AS completion_tokens,
     COALESCE(SUM(total_tokens),0)::bigint AS total_tokens,
     COUNT(*) FILTER(WHERE status IN ('error','interrupted') OR
-        (status='reserved' AND NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose='follow_up' AND g.reservation_expires>NOW())))) AS errors,
-    COUNT(*) FILTER(WHERE status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose='follow_up' AND g.reservation_expires>NOW()))) AS active_generations,
+        (status='reserved' AND NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW())))) AS errors,
+    COUNT(*) FILTER(WHERE status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW()))) AS active_generations,
     COUNT(*) FILTER(WHERE NOT usage_complete AND (status<>'reserved' OR
-        NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose='follow_up' AND g.reservation_expires>NOW())))) AS incomplete_usage,
-    COALESCE(SUM(CASE WHEN status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose='follow_up' AND g.reservation_expires>NOW()))
+        NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW())))) AS incomplete_usage,
+    COALESCE(SUM(CASE WHEN status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW()))
         THEN reserved_output_tokens ELSE 0 END),0)::bigint AS reserved_tokens";
 #[derive(Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]

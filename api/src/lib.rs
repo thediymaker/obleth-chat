@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod attachments;
 pub mod auth;
 pub mod autopilot;
@@ -644,10 +645,10 @@ const STEPS_DROPPED: &str = "[Earlier steps of this turn were dropped to save co
 const ARGUMENTS_OMITTED: &str =
     r#"{"omitted":"Earlier arguments omitted to save context. The tool result still applies."}"#;
 
-struct ToolCall {
-    id: String,
-    name: String,
-    arguments: String,
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 /// Merges streamed tool-call fragments, which arrive keyed by index.
@@ -702,7 +703,10 @@ fn partial_string(json: &str, key: &str) -> Option<String> {
     Some(out)
 }
 
-fn accumulate_tool_calls(calls: &mut Vec<ToolCall>, deltas: &[Value]) -> Result<(), String> {
+pub(crate) fn accumulate_tool_calls(
+    calls: &mut Vec<ToolCall>,
+    deltas: &[Value],
+) -> Result<(), String> {
     for (position, delta) in deltas.iter().enumerate() {
         let index = delta
             .get("index")
@@ -1029,12 +1033,21 @@ async fn run_generation(
         payload.as_object_mut().unwrap().remove("reasoning_effort");
     }
     let mut tools = vec![];
+    // Worker models the main model can hand exploration to, chosen by administrators.
+    let workers = if workspace.is_some() {
+        models::worker_models(&s.store.pool, &user).await
+    } else {
+        vec![]
+    };
     if workspace.is_some() {
         if let Value::Array(definitions) = sandbox::tools::definitions() {
             tools.extend(definitions);
         }
         if project.is_some() {
             tools.push(code::tool_definition());
+        }
+        if !workers.is_empty() {
+            tools.push(agents::definition(&workers));
         }
     }
     if let Some(toolset) = &toolset {
@@ -1663,6 +1676,54 @@ async fn run_generation(
                     continue;
                 };
                 let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
+                if call.name == agents::TOOL && !workers.is_empty() {
+                    // Workers run together; the step shows each one's progress as it goes.
+                    let mut entry = json!({"id":call.id,"tool":call.name,"summary":agents::summary(&args),"status":"running","startedAt":chrono::Utc::now()});
+                    record(&mut activity, &entry, true);
+                    emit(&mut tx, "tool", entry.clone());
+                    let began = Instant::now();
+                    let pod = code::workspace::Pod { sandboxes, sandbox };
+                    let ctx = agents::Ctx {
+                        pool: &s.store.pool,
+                        gateway: &gateway,
+                        user: &user,
+                        conversation: id,
+                        shell: &pod,
+                        workers: &workers,
+                    };
+                    let (progress, mut updates) = mpsc::unbounded_channel();
+                    let work = agents::run(&ctx, &call.arguments, progress);
+                    tokio::pin!(work);
+                    let mut tick = 0;
+                    let outcome = loop {
+                        tokio::select! {
+                            outcome = &mut work => break outcome,
+                            Some(agents) = updates.recv() => {
+                                tick += 1;
+                                entry["agents"] = agents;
+                                entry["tick"] = json!(tick);
+                                record(&mut activity, &entry, false);
+                                emit(&mut tx, "tool", entry.clone());
+                            }
+                        }
+                    };
+                    entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
+                    entry["summary"] = json!(outcome.summary);
+                    entry["detail"] = json!(outcome.detail);
+                    entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                    entry["tick"] = json!(tick + 1);
+                    if let Some(facts) = outcome.extra.as_object() {
+                        for (key, value) in facts {
+                            entry[key] = value.clone();
+                        }
+                    }
+                    record(&mut activity, &entry, false);
+                    emit(&mut tx, "tool", entry);
+                    payload["messages"].as_array_mut().unwrap().push(
+                        json!({"role":"tool","tool_call_id":call.id,"content":outcome.output}),
+                    );
+                    continue;
+                }
                 let researching = research_tools && research::tools::is_tool(&call.name);
                 let syncing = call.name == "sync_code" && project.is_some();
                 let label = if researching {

@@ -2020,3 +2020,4 @@ a.research-chip:hover{color:var(--text)}
 @media(max-width:900px){.code-split{grid-template-columns:1fr}.code-list{position:static;max-height:320px}}
 @media(max-width:560px){.code-compare-pick{grid-template-columns:1fr}.code-compare-pick .icon-btn{justify-self:center}.git-sides{grid-template-columns:1fr}.export-where{grid-template-columns:1fr}.export-where .slash{display:none}}
 .workspace-git .workspace-note{margin:40px auto}
+.code-token{margin:4px 0 8px}.code-token summary{cursor:pointer;font-size:13px;color:var(--text-2);width:max-content}.code-token[open] summary{margin-bottom:8px}

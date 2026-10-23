@@ -126,7 +126,7 @@ async fn overview(
     let pool = &s.store.pool;
     visible(pool, user.id, id).await?;
     let head = sqlx::query(
-        "SELECT pc.main, pc.commits, pc.bytes, pc.updated_at, u.display_name FROM project_code pc LEFT JOIN users u ON u.id = pc.updated_by WHERE pc.project_id = $1",
+        "SELECT pc.main, pc.commits, pc.bytes, pc.updated_at, u.display_name, pc.origin_url, pc.origin_sha, pc.origin_history FROM project_code pc LEFT JOIN users u ON u.id = pc.updated_by WHERE pc.project_id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -141,6 +141,12 @@ async fn overview(
         .as_ref()
         .map(|r| r.get::<i32, _>("commits"))
         .unwrap_or(0);
+    // Where the code started, when it began from a repository.
+    let origin = head.as_ref().and_then(|r| {
+        r.get::<Option<String>, _>("origin_url").map(|url| {
+            json!({"url":url,"sha":r.get::<Option<String>,_>("origin_sha"),"history":r.get::<Option<bool>,_>("origin_history")})
+        })
+    });
     let rows = sqlx::query(
         "SELECT cc.conversation_id, cc.synced_at, COALESCE(t.commits, 0) AS at
          FROM conversation_code cc JOIN conversations c ON c.id = cc.conversation_id AND c.project_id = cc.project_id
@@ -173,7 +179,7 @@ async fn overview(
         "at":r.get::<chrono::DateTime<chrono::Utc>,_>("created_at"),"behind":(commits - r.get::<i32,_>("at")).max(0)}))
     .collect();
     Ok(Json(
-        json!({"main":main,"chats":working,"exports":exports,"limits":{"bytes":repo::MAX_PROJECT_BYTES}}),
+        json!({"main":main,"origin":origin,"chats":working,"exports":exports,"limits":{"bytes":repo::MAX_PROJECT_BYTES}}),
     ))
 }
 

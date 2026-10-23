@@ -91,14 +91,26 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     const groups = p.scope === 'group' && p.groupId && !local.groups.some(g => g.id === p.groupId) ? [...local.groups, { id: p.groupId, name: p.groupName || 'Current group' }] : local.groups;
     const share = `<select id="project-share" name="project-share" class="form-control"><option value="">Only me</option>${groups.map(g => `<option value="${esc(g.id)}" ${p.scope === 'group' && p.groupId === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>`;
     const colors = COLORS.map(c => `<label class="color-option"><input type="radio" name="project-color" value="${c}" ${c === color ? 'checked' : ''}><span class="project-dot" data-color="${c}" aria-label="${c}"></span></label>`).join('');
-    modal(p.id ? 'Edit project' : 'New project', `<form id="project-form" data-id="${esc(p.id || '')}" ${p.fromChat ? 'data-from-chat="1"' : ''}>${field('project-name', 'Name', textInput('project-name', p.name || '', 'maxlength="120" required placeholder="Gaudi benchmarks"'))}${field('project-description', 'Description', textInput('project-description', p.description || '', 'maxlength="1000" placeholder="What is it for?"'))}${field('project-instructions', 'Instructions for every chat', `<textarea id="project-instructions" name="project-instructions" class="form-control" rows="6" maxlength="20000" placeholder="We are benchmarking LLM inference on Gaudi 3. Report tokens per second with batch size and model.">${esc(p.instructions || '')}</textarea>`, 'Added to the start of each chat in the project.')}<div class="management-field"><span class="form-label">Color</span><div class="color-options">${colors}</div></div>${field('project-share', 'Shared with', share, groups.length ? 'Group members see the project and can start their own chats in it.' : 'You are not in any groups. An administrator adds people to groups.')}${formEnd(p.id ? 'Save changes' : 'Create project')}${p.id ? `<div class="danger-zone"><div class="grow"><strong>Delete project</strong><small>Its chats and saved items are kept, outside any project.</small></div>${btn('Delete', 'project-delete', { tone: 'small danger', attrs: `data-id="${esc(p.id)}"` })}</div>` : ''}</form>`);
+    modal(p.id ? 'Edit project' : 'New project', `<form id="project-form" data-id="${esc(p.id || '')}" ${p.fromChat ? 'data-from-chat="1"' : ''}>${field('project-name', 'Name', textInput('project-name', p.name || '', 'maxlength="120" required placeholder="Gaudi benchmarks"'))}${field('project-description', 'Description', textInput('project-description', p.description || '', 'maxlength="1000" placeholder="What is it for?"'))}${field('project-instructions', 'Instructions for every chat', `<textarea id="project-instructions" name="project-instructions" class="form-control" rows="6" maxlength="20000" placeholder="We are benchmarking LLM inference on Gaudi 3. Report tokens per second with batch size and model.">${esc(p.instructions || '')}</textarea>`, 'Added to the start of each chat in the project.')}<div class="management-field"><span class="form-label">Color</span><div class="color-options">${colors}</div></div>${field('project-share', 'Shared with', share, groups.length ? 'Group members see the project and can start their own chats in it.' : 'You are not in any groups. An administrator adds people to groups.')}${!p.id && !p.fromChat && codeOn() ? code.repoFields(true) : ''}${formEnd(p.id ? 'Save changes' : 'Create project')}${p.id ? `<div class="danger-zone"><div class="grow"><strong>Delete project</strong><small>Its chats and saved items are kept, outside any project.</small></div>${btn('Delete', 'project-delete', { tone: 'small danger', attrs: `data-id="${esc(p.id)}"` })}</div>` : ''}</form>`);
   }
   async function submit(form) {
     const id = form.dataset.id, error = form.querySelector('.form-error');
     const group = getValue(form, 'project-share');
     const body = { name: getValue(form, 'project-name').trim(), description: getValue(form, 'project-description').trim(), instructions: getValue(form, 'project-instructions'), color: form.querySelector('input[name="project-color"]:checked')?.value || 'blue', scope: group ? 'group' : 'personal', ...(group ? { groupId: group } : {}) };
+    const repo = !id && form.querySelector('#code-repo-url') ? getValue(form, 'code-repo-url').trim() : '';
     try {
       const r = await api.request(id ? path(id) : '/api/projects', { method: id ? 'PATCH' : 'POST', body });
+      // Started from a repository: the project exists either way; a failed copy is
+      // offered again from its Code tab.
+      if (repo) {
+        const button = form.querySelector('[type=submit]'); if (button) { button.disabled = true; button.textContent = 'Copying the repository…'; }
+        let failed = '';
+        try { await code.importRepo(r.project.id, repo, getValue(form, 'code-repo-token').trim()); } catch (e) { failed = e.message; }
+        close(); await list(true);
+        go(`projects/${encodeURIComponent(r.project.id)}/code`);
+        if (failed) toast(`Project created, but the repository wasn’t copied: ${failed}`);
+        return;
+      }
       // Started from a chat: the chat moves into the new project and stays open.
       if (!id && form.dataset.fromChat && chat.id) { await list(true); await place(r.project.id); return; }
       close(); toast(id ? 'Saved your changes' : 'Project created');

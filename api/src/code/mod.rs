@@ -1,11 +1,12 @@
 //! Code in projects: each project has one line of history, kept by Chat, that its
 //! chats' workspaces sync with. Sync saves a workspace's changes, brings in what others
 //! synced, and shares the result; when both sides changed the same lines it pauses so
-//! the person (or the model) can combine them. The code can then leave: as a zip, or
-//! pushed to GitHub.
+//! the person (or the model) can combine them. A project can start from a repository,
+//! and the code can leave: as a zip, or pushed to GitHub.
 
 pub mod export;
 pub mod history;
+pub mod import;
 pub mod repo;
 pub mod workspace;
 
@@ -41,6 +42,7 @@ pub fn router(state: AppState) -> Router {
         )
         .merge(history::router())
         .merge(export::router())
+        .merge(import::router())
         .with_state(state)
 }
 

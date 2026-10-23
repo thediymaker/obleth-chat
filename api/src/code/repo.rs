@@ -63,7 +63,7 @@ impl Drop for Repo {
 }
 
 impl Repo {
-    async fn empty() -> Result<Self, ApiError> {
+    pub(crate) async fn empty() -> Result<Self, ApiError> {
         let dir = std::env::temp_dir().join(format!("obleth-code-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir)
             .await

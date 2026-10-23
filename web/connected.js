@@ -1014,7 +1014,7 @@ export async function startConnected(capabilities) {
       if (form.id.startsWith('knowledge-')) { await knowledgeView.submit(form); return; }
       if (form.id === 'saved-form' || form.id === 'library-search') { await libraryView.submit(form); return; }
       if (form.id === 'project-form') { await projectsView.submit(form); return; }
-      if (form.id === 'code-github-form') { await codeView.submit(form); return; }
+      if (form.id === 'code-github-form' || form.id === 'code-import-form') { await codeView.submit(form); return; }
       if (form.id === 'steer-form') { await turnView.submit(form, api, toast); render(); return; }
       if (form.id === 'connection-form' || form.id === 'connection-credential-form') { await connectionsView.submit(form); return; }
       if (form.id.startsWith('admin-')) { if (state.user?.role !== 'admin') return; await administration.submit(form); return; }

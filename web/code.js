@@ -181,6 +181,7 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
     'code-uncommit': () => { const id = currentChat(); if (!id) return; run(id, 'uncommit', () => api.request(`${chatPath(id)}/code/uncommit`, { method: 'POST' }), () => { entry(id).message = null; toast('Save undone. Its changes are back under Changes.'); }); },
     'code-terminal': () => terminal(currentChat(), 'git status'),
     'code-export': el => exportDialog(el.dataset.project, el.dataset.name),
+    'code-import': el => importDialog(el.dataset.project),
     'code-zip': el => {
       const form = el.closest('.modal-body'), history = form?.querySelector('#code-zip-history')?.checked, withChats = form?.querySelector('#code-zip-chats')?.checked;
       const a = document.createElement('a'); a.href = `${projectPath(el.dataset.project)}/export.zip?history=${!!history}&chats=${!!withChats}`; a.download = ''; document.body.append(a); a.click(); a.remove();
@@ -223,7 +224,28 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
         <div class="form-error" role="alert"></div><div class="modal-actions"><button class="btn primary" type="submit">${icon('upload')}Push to GitHub</button></div></form>
       <section class="export-part"><h3>${icon('globe')}Put a site online</h3><p class="faint">Push to GitHub first. Then import the repository in Vercel or Netlify, or turn on GitHub Pages in its settings. Each later push redeploys it.</p></section>`);
   }
+  // ---- Starting from a repository ----
+  /** The address and token fields, for the import dialog and the new-project form. */
+  const repoFields = (optional = false) => `${field('code-repo-url', optional ? 'Start from a repository (optional)' : 'Repository', textInput('code-repo-url', '', `${optional ? '' : 'required '}type="url" maxlength="300" autocomplete="off" spellcheck="false" placeholder="https://github.com/owner/name"`), 'Chat copies its default branch once, with its history, as the project’s code.')}
+    <details class="code-token"><summary>Private repository?</summary>${field('code-repo-token', 'Access token', textInput('code-repo-token', '', 'type="password" autocomplete="off" spellcheck="false" placeholder="github_pat_…"'), 'Used for this copy only and never kept. It needs read access to the repository’s contents.')}</details>`;
+  function importDialog(id) {
+    modal('Start from a repository', `<form id="code-import-form" data-project="${esc(id)}"><p class="inline-note">The repository’s history becomes the project’s, so Sync, History, Undo and research build on it. Its chats’ workspaces start with the code.</p>${repoFields()}<div class="form-error" role="alert"></div><div class="modal-actions"><button class="btn primary" type="submit">${icon('download')}Copy the repository</button></div></form>`);
+  }
+  /** Fills an empty project's code from a repository; throws with the reason it can't. */
+  async function importRepo(id, url, token) {
+    const r = await api.request(`${projectPath(id)}/import`, { method: 'POST', body: { url, ...(token ? { token } : {}) } });
+    if (project.id === id) { Object.assign(project, { overview: null, log: null, files: null }); loadProject(id); }
+    toast(r.history ? `Copied ${count(r.commits, 'commit')} from the repository` : 'Copied the repository’s latest version; its history was too big to keep');
+    return r;
+  }
   async function submit(form) {
+    if (form.id === 'code-import-form') {
+      const id = form.dataset.project, error = form.querySelector('.form-error'), button = form.querySelector('[type=submit]');
+      button.disabled = true; button.textContent = 'Copying…';
+      try { await importRepo(id, getValue(form, 'code-repo-url').trim(), getValue(form, 'code-repo-token').trim()); close(); }
+      catch (e) { button.disabled = false; button.innerHTML = `${icon('download')}Copy the repository`; if (error) error.textContent = e.message; else throw e; }
+      return;
+    }
     const id = form.dataset.project, error = form.querySelector('.form-error');
     const body = { owner: getValue(form, 'code-gh-owner').trim() || undefined, name: getValue(form, 'code-gh-name').trim(), private: !!form.querySelector('input[name="code-gh-private"]:checked')?.value, token: getValue(form, 'code-gh-token').trim() };
     form.querySelector('[type=submit]').textContent = 'Pushing…';
@@ -301,7 +323,7 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
     const exportButton = o?.main ? btn('Export', 'code-export', { icon: 'download', tone: 'small', attrs: `data-project="${esc(p.id)}" data-name="${esc(p.name)}"` }) : '';
     const top = `<div class="spread code-top">${nav}${exportButton}</div>${errorBox(project.error, 'code-project-reload')}`;
     if (!o) return `${top}<p class="inline-note" role="status">Loading the code…</p>`;
-    if (!o.main) return `${top}<section class="card project-section code-empty"><span class="tile-icon">${icon('branch')}</span><h2>No code yet</h2><p>Each chat in this project can build in its own workspace. When someone presses Sync in a chat’s Git tab, its code lands here and the other chats bring it in with their next Sync. Every change remembers the chat that made it.</p>${btn('New chat in project', 'project-chat', { icon: 'plus', tone: 'primary small', attrs: `data-id="${esc(p.id)}"` })}</section>`;
+    if (!o.main) return `${top}<section class="card project-section code-empty"><span class="tile-icon">${icon('branch')}</span><h2>No code yet</h2><p>Each chat in this project can build in its own workspace. When someone presses Sync in a chat’s Git tab, its code lands here and the other chats bring it in with their next Sync. Every change remembers the chat that made it.</p><div class="row">${btn('New chat in project', 'project-chat', { icon: 'plus', tone: 'primary small', attrs: `data-id="${esc(p.id)}"` })}${p.mine ? btn('Start from a repository', 'code-import', { icon: 'branch', tone: 'small', attrs: `data-project="${esc(p.id)}"` }) : ''}</div></section>`;
     if (here === 'history') return `${top}${historyView(p)}`;
     if (here === 'files') return `${top}${filesView(p)}`;
     if (here === 'compare') return `${top}${compareView(p)}`;
@@ -314,7 +336,7 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
     const exports = o.exports.map(e => `<div class="detail-row">${icon('upload')}<span class="grow">Pushed to <a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.target)}</a><small>${esc(ago(e.at))} · ${e.behind ? `${count(e.behind, 'commit')} since` : 'up to date'}</small></span></div>`).join('');
     const used = o.main.bytes / o.limits.bytes;
     return `<div class="project-layout"><div class="project-main">
-      <section class="card project-section"><div class="spread"><span class="eyebrow">Latest</span><a class="tr-link" href="${base(p)}/history">History${icon('right')}</a></div><p class="code-latest">${count(o.main.commits, 'commit')}${latest ? ` · latest: <a href="${base(p)}/history/${esc(latest.sha)}">${esc(latest.subject)}</a>` : ''} · ${esc(o.main.updatedBy || 'someone')}, ${esc(ago(o.main.updatedAt))}</p><ol class="code-log compact">${recent}</ol></section>
+      <section class="card project-section"><div class="spread"><span class="eyebrow">Latest</span><a class="tr-link" href="${base(p)}/history">History${icon('right')}</a></div><p class="code-latest">${count(o.main.commits, 'commit')}${latest ? ` · latest: <a href="${base(p)}/history/${esc(latest.sha)}">${esc(latest.subject)}</a>` : ''} · ${esc(o.main.updatedBy || 'someone')}, ${esc(ago(o.main.updatedAt))}</p><ol class="code-log compact">${recent}</ol>${o.origin ? `<p class="context-note">Started from <a href="${esc(o.origin.url)}" target="_blank" rel="noopener">${esc(o.origin.url.replace(/^https:\/\//, ''))}</a>${o.origin.sha ? ` at <code>${esc(short(o.origin.sha))}</code>` : ''}${o.origin.history === false ? ', its latest version without the history' : ''}.</p>` : ''}</section>
       <section class="card project-section"><span class="eyebrow">Chats working on the code</span>${working}<p class="context-note">Every chat in the project works on its own copy. Sync shares its changes with everyone; the next Sync elsewhere brings them in.</p></section>
     </div><div class="project-side">
       <section class="card project-section"><span class="eyebrow">Take it with you</span><button type="button" class="code-out" data-action="code-export" data-project="${esc(p.id)}" data-name="${esc(p.name)}">${icon('upload')}<span class="grow"><strong>Push to GitHub</strong><small>With its history</small></span></button><button type="button" class="code-out" data-action="code-export" data-project="${esc(p.id)}" data-name="${esc(p.name)}">${icon('download')}<span class="grow"><strong>Download a zip</strong><small>The code, and if you like its history and chats</small></span></button>${exports}<p class="context-note">To put a site online, push it to GitHub, then import the repository in Vercel or Netlify, or turn on GitHub Pages.</p></section>
@@ -435,7 +457,7 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
   }
 
   return {
-    enabled, load, refresh, changed, label, show, input, change, submit, actions, loadProject, projectView, composerChip, applyStart,
+    enabled, load, refresh, changed, label, show, input, change, submit, actions, loadProject, projectView, composerChip, applyStart, repoFields, importRepo,
     setStart: value => { start = value; }, resetDraft: () => { start = null; },
     attach: update => { paneUpdate = update; },
     clear: () => { chats.clear(); start = null; Object.assign(project, { id: null, overview: null, log: null, commit: null, compare: null, files: null, file: null, versions: null, error: '' }); last = ''; },

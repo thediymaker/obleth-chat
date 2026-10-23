@@ -1130,3 +1130,163 @@ mod http {
         assert!(workspace::uncommit(&f, &who).await.is_err());
     }
 }
+
+fn git_in(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_project_starts_from_a_repository(pool: PgPool) {
+    let jen = person(&pool, "Jen").await;
+    let p = project(&pool, &jen, None).await;
+    let dirs = root();
+    // Someone else's repository, with three commits on its default branch.
+    let origin = dirs.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git_in(&origin, &["init", "-q", "-b", "trunk"]);
+    for (n, text) in ["one", "two", "three"].iter().enumerate() {
+        std::fs::write(origin.join("notes.txt"), format!("{text}\n")).unwrap();
+        git_in(&origin, &["add", "."]);
+        git_in(
+            &origin,
+            &[
+                "-c",
+                "user.name=Ada",
+                "-c",
+                "user.email=ada@example.org",
+                "commit",
+                "-qm",
+                &format!("Step {}", n + 1),
+            ],
+        );
+    }
+    let source = |fetch: String| code::import::Source {
+        url: "https://example.org/ada/notes".into(),
+        fetch,
+        config: vec![],
+        secret: None,
+    };
+    let missing = code::import::start(
+        &pool,
+        p,
+        jen.id,
+        &code::author(&jen),
+        &source(format!("file://{}/gone", dirs.path().display())),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        missing.1.contains("could not read that repository"),
+        "{}",
+        missing.1
+    );
+
+    let done = code::import::start(
+        &pool,
+        p,
+        jen.id,
+        &code::author(&jen),
+        &source(format!("file://{}", origin.display())),
+    )
+    .await
+    .unwrap();
+    assert!(done.history);
+    assert_eq!(done.commits, 3);
+    // Its history is the project's, authors and all.
+    assert_eq!(
+        server_git(&pool, p, &["log", "--format=%an %s", "main"]).await,
+        "Ada Step 3\nAda Step 2\nAda Step 1\n"
+    );
+    let origin_row: (Option<String>, Option<String>, Option<bool>) = sqlx::query_as(
+        "SELECT origin_url, origin_sha, origin_history FROM project_code WHERE project_id = $1",
+    )
+    .bind(p)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        origin_row.0.as_deref(),
+        Some("https://example.org/ada/notes")
+    );
+    assert_eq!(origin_row.1.as_deref(), Some(done.main.as_str()));
+    assert_eq!(origin_row.2, Some(true));
+    // Only once: a project with code keeps it.
+    let again = code::import::start(
+        &pool,
+        p,
+        jen.id,
+        &code::author(&jen),
+        &source(format!("file://{}", origin.display())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(again.0, axum::http::StatusCode::CONFLICT);
+
+    // A chat in the project starts with that code and syncs on top of it.
+    let c = chat(&pool, &jen, p).await;
+    let f = folder(dirs.path(), "jen");
+    assert!(code::begin(&pool, &f, &jen, p, c).await.unwrap());
+    assert_eq!(f.read("notes.txt").as_deref(), Some("three\n"));
+    f.write("notes.txt", "four\n");
+    code::sync_chat(&pool, &f, &jen, p, c, Some("Step 4"))
+        .await
+        .unwrap();
+    assert_eq!(
+        server_git(&pool, p, &["log", "-1", "--format=%an %s", "main"]).await,
+        "Jen Step 4\n"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_repository_too_big_to_keep_comes_in_as_its_latest_version(pool: PgPool) {
+    let jen = person(&pool, "Jen").await;
+    let p = project(&pool, &jen, None).await;
+    let dirs = root();
+    let origin = dirs.path().join("origin");
+    std::fs::create_dir_all(origin.join("src")).unwrap();
+    git_in(&origin, &["init", "-q"]);
+    for n in 1..=3 {
+        std::fs::write(origin.join("src/lib.rs"), format!("// v{n}\n")).unwrap();
+        git_in(&origin, &["add", "."]);
+        git_in(
+            &origin,
+            &[
+                "-c",
+                "user.name=Ada",
+                "-c",
+                "user.email=a@e",
+                "commit",
+                "-qm",
+                &format!("v{n}"),
+            ],
+        );
+    }
+    let source = code::import::Source {
+        url: "https://example.org/ada/big".into(),
+        fetch: format!("file://{}", origin.display()),
+        config: vec![],
+        secret: None,
+    };
+    let done = code::import::start_within(&pool, p, jen.id, &code::author(&jen), &source, 1)
+        .await
+        .unwrap();
+    assert!(!done.history);
+    assert_eq!(done.commits, 1);
+    assert_eq!(
+        server_git(&pool, p, &["show", "main:src/lib.rs"]).await,
+        "// v3\n"
+    );
+    let log = server_git(&pool, p, &["log", "--format=%an|%s", "main"]).await;
+    assert_eq!(log, "Jen|Start from https://example.org/ada/big\n");
+}

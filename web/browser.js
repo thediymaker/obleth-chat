@@ -159,7 +159,7 @@ export function createBrowser({ api, state, route, toast, chatPath, capabilities
   function toggleButton() {
     if (!enabled()) return '';
     const id = route().id, isOn = id ? on(id) : !!state.browserDraft;
-    return `<button type="button" class="btn ghost small browser-toggle ${isOn ? 'on' : ''}" data-action="browser-toggle" aria-pressed="${isOn}" title="${isOn ? 'The model can search the web and open pages in a browser you can watch' : 'Let the model search the web and open pages in a browser you can watch'}" ${state.streaming ? 'disabled' : ''}>${icon('globe')}<span class="option-text">Browser</span></button>`;
+    return `<button type="button" class="btn ghost small browser-toggle ${isOn ? 'on' : ''} ${isOn && id && pane?.showing(id, 'browser') ? 'showing' : ''}" data-action="browser-toggle" aria-pressed="${isOn}" title="${isOn ? 'The model can search the web and open pages in a browser you can watch' : 'Let the model search the web and open pages in a browser you can watch'}" ${state.streaming ? 'disabled' : ''}>${icon('globe')}<span class="option-text">Browser</span></button>`;
   }
 
   // ---- Cards at the end of a reply ----

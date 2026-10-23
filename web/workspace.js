@@ -200,7 +200,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     if (shownId !== id) { closeTerminal(); shownId = id; frameSrc = ''; frame.removeAttribute('src'); if (space.url) { frameSrc = space.url; frame.src = space.url; } }
     // A tab that is gone (the browser turned off, details closed) falls back to the next one there.
     const tabs = available(id, space).map(([key]) => key).filter(key => key !== 'details' || space.details || !space.workspace && !browsing(id));
-    if (!tabs.includes(space.tab)) space.tab = tabs.includes('preview') ? 'preview' : tabs.includes('browser') ? 'browser' : 'details';
+    if (!tabs.includes(space.tab)) space.tab = tabs.includes('preview') ? 'preview' : space.details || !browsing(id) ? 'details' : 'browser';
     pane.querySelector('.workspace-bar').innerHTML = bar(id, space);
     const browsingTab = space.tab === 'browser', detailsTab = space.tab === 'details';
     browserEl.hidden = !browsingTab;
@@ -317,8 +317,8 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   function hasWorkspace(id) { return !!spaces.get(id)?.workspace; }
   function toggleButton() {
     if (!enabled()) return '';
-    const id = route().id, on = id ? hasWorkspace(id) : !!state.workspaceDraft;
-    return `<button type="button" class="btn ghost small workspace-toggle ${on ? 'on' : ''}" data-action="workspace-toggle" aria-pressed="${on}" title="${on ? 'This conversation has a workspace: the model can create files, run commands and show a live preview' : 'Give the model a private Linux workspace with a live preview'}" ${state.streaming ? 'disabled' : ''}>${icon('terminal')}<span class="option-text">Workspace</span></button>`;
+    const id = route().id, on = id ? hasWorkspace(id) : !!state.workspaceDraft, shown = on && id && ['preview', 'files', 'terminal'].some(tab => showing(id, tab));
+    return `<button type="button" class="btn ghost small workspace-toggle ${on ? 'on' : ''} ${shown ? 'showing' : ''}" data-action="workspace-toggle" aria-pressed="${on}" title="${on ? 'This conversation has a workspace: the model can create files, run commands and show a live preview' : 'Give the model a private Linux workspace with a live preview'}" ${state.streaming ? 'disabled' : ''}>${icon('terminal')}<span class="option-text">Workspace</span></button>`;
   }
 
   const toolIcons = { write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', start_server: 'play', server_logs: 'file' };
@@ -375,7 +375,12 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     'workspace-toggle': async () => {
       const id = route().id;
       if (!id) { state.workspaceDraft = !state.workspaceDraft; return 'render'; }
-      if (hasWorkspace(id)) { const space = spaces.get(id); space.open = !space.open; update(); return; }
+      // A press shows the workspace's tabs, or hides the pane when they are showing.
+      if (hasWorkspace(id)) {
+        const space = spaces.get(id), own = ['preview', 'files', 'terminal'];
+        if (own.some(tab => showing(id, tab))) { space.open = false; space.details = false; } else { space.open = true; if (!own.includes(space.tab)) space.tab = 'preview'; }
+        update(); return 'render';
+      }
       await create(id); toast('Workspace created. Ask for something to build.'); return 'render';
     },
     'workspace-tab': el => { const c = current(); if (!c) return; c.space.tab = el.dataset.tab; if (c.space.tab === 'details') c.space.details = true; if (c.space.tab === 'browser') browser?.reveal(c.id); c.space.file = null; if (c.space.tab === 'files') c.space.files = null; update(); },
@@ -414,7 +419,14 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     space.tab = tab; if (space.workspace) space.open = true;
     if (route().id === id) render(); else update();
   }
-  const showing = (id, tab) => !pane.hidden && shownId === id && entry(id).tab === tab;
+  // From state, not the DOM, so the composer renders the right buttons before the pane updates.
+  function visibleFor(id) {
+    const space = spaces.get(id);
+    if (!space || route().id !== id) return false;
+    if (full()) return true;
+    return route().page === 'chat' && (space.workspace ? space.open || detailing(id) : browsing(id) || detailing(id));
+  }
+  const showing = (id, tab) => visibleFor(id) && entry(id).tab === tab;
   /** Opens the chat's details in the pane, or closes them and goes back to the tab before. */
   function toggleDetails(id) {
     if (!id || !details) return;

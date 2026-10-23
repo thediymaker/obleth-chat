@@ -233,14 +233,17 @@ export async function startConnected(capabilities) {
     const usage = route().id && c ? [...(c.messages || [])].reverse().find(m => m.role === 'assistant' && m.usage)?.usage : null;
     const input = Number(usage?.prompt_tokens) || 0, output = Number(usage?.completion_tokens) || 0;
     const windowSize = Number(policyModel()?.metadata?.contextWindow) || 0, used = input + output;
-    return { input, output, used, windowSize, share: windowSize ? Math.min(1, used / windowSize) : 0 };
+    // Text runs about four bytes a token; the rest of the request is tools, instructions and page text.
+    const bytes = (c?.messages || []).filter(m => m.status === 'completed').reduce((n, m) => n + new TextEncoder().encode(m.content || '').length, new TextEncoder().encode(state.systemPrompt).length);
+    const messages = Math.round(bytes / 4);
+    return { input, output, used, windowSize, share: windowSize ? Math.min(1, used / windowSize) : 0, bytes, messages, rest: Math.max(0, input - messages) };
   }
   const tokens = n => n < 1000 ? String(n) : n < 10000 ? `${(n / 1000).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`;
   function sendButton(op, available) {
     const use = contextUse(), round = 2 * Math.PI * 17, level = use.share > .9 ? 'full' : use.share > .75 ? 'high' : '';
     const ring = `<svg class="context-ring" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="17"></circle>${use.share ? `<circle class="used" cx="20" cy="20" r="17" stroke-dasharray="${Math.max(1.5, use.share * round).toFixed(1)} ${round.toFixed(1)}"></circle>` : ''}</svg>`;
     const amount = use.windowSize ? `${tokens(use.used)} / ${tokens(use.windowSize)}` : use.used ? tokens(use.used) : '—';
-    const card = `<div class="context-card" id="context-card" role="tooltip"><div class="spread"><strong>Context</strong><span>${amount}</span></div>${use.windowSize ? `<progress class="meter" max="${use.windowSize}" value="${Math.min(use.used, use.windowSize)}" aria-label="Context used"></progress>` : ''}<p>${use.used ? `The last request and reply, with tools, instructions and page text.${use.windowSize ? '' : ' This model does not report its window.'}` : 'Shows after the first reply.'}</p>${route().id ? `<button type="button" class="context-card-link" data-action="context">Chat details${icon('right')}</button>` : ''}</div>`;
+    const card = `<div class="context-card" id="context-card" role="tooltip"><div class="spread"><strong>Context</strong><span>${amount}</span></div>${use.windowSize ? `<progress class="meter" max="${use.windowSize}" value="${Math.min(use.used, use.windowSize)}" aria-label="Context used"></progress>` : ''}${use.used ? `<div class="detail-row"><span>Messages</span><span>about ${tokens(use.messages)}</span></div><div class="detail-row"><span>Tools, instructions and pages</span><span>about ${tokens(use.rest)}</span></div><div class="detail-row"><span>Last reply</span><span>${tokens(use.output)} out</span></div>${use.windowSize ? '' : '<p>This model does not report its window.</p>'}` : '<p>Shows after the first reply.</p>'}${route().id ? `<button type="button" class="context-card-link" data-action="context">Chat details${icon('right')}</button>` : ''}</div>`;
     return `<div class="send-wrap ${level}">${ring}<button class="send-btn" type="${state.streaming ? 'button' : 'submit'}" ${state.streaming ? 'data-action="stop"' : ''} ${(state.streaming ? op?.stopRequested : state.switchingVersion || !available || attachments.busy()) ? 'disabled' : ''} aria-label="${state.streaming ? 'Stop response' : 'Send message'}" aria-describedby="context-card">${icon(state.streaming ? 'stop' : 'arrow')}</button>${card}</div>`;
   }
   function home() {
@@ -380,10 +383,7 @@ export async function startConnected(capabilities) {
   }
   /** Everything about the chat, shown in the side pane's Details tab. */
   function chatDetails(c) {
-    const use = contextUse(c), selected = modelName(state.model || c.model);
-    const bytes = (c.messages || []).filter(m => m.status === 'completed').reduce((n, m) => n + new TextEncoder().encode(m.content || '').length, new TextEncoder().encode(state.systemPrompt).length);
-    // Text runs about four bytes a token; the rest of the request is tools, instructions and page text.
-    const messages = Math.round(bytes / 4), rest = Math.max(0, use.input - messages), saved = c.messages?.length || 0;
+    const use = contextUse(c), selected = modelName(state.model || c.model), { bytes, messages, rest } = use, saved = c.messages?.length || 0;
     const resolved = [...(c.messages || [])].reverse().find(m => m.role === 'assistant' && m.settings?.resolvedModel)?.settings.resolvedModel;
     const stat = (label, value, attrs = '') => `<div><span>${label}</span><strong ${attrs}>${esc(value)}</strong></div>`;
     const contextSection = `<section class="context-section"><span class="eyebrow">Context</span>${use.used ? `<div class="details-total"><strong>${tokens(use.used)}</strong><span>${use.windowSize ? `of ${tokens(use.windowSize)} tokens` : 'tokens'}</span></div>${use.windowSize ? `<progress class="meter" max="${use.windowSize}" value="${Math.min(use.used, use.windowSize)}" aria-label="Context used"></progress>` : ''}<div class="detail-row"><span>Messages</span><span>about ${tokens(messages)}</span></div><div class="detail-row"><span>Tools, instructions and pages</span><span>about ${tokens(rest)}</span></div><div class="detail-row"><span>Last reply</span><span>${tokens(use.output)} out</span></div>` : '<p class="context-note">Shows after the first reply.</p>'}<p class="context-note">This chat holds ${(bytes / 1024).toFixed(1)} of 100 KiB of text and ${saved} of 200 messages.</p></section>`;
@@ -814,7 +814,7 @@ export async function startConnected(capabilities) {
     focus: () => savePreference({ focus: !document.body.classList.contains('collapsed') }),
     // With the side pane open there is no room to dock it, so it opens over the chat until dismissed.
     // Chat details open as a tab in the side pane, so they sit beside the chat instead of over it.
-    context: () => { closeModels(false); closeMenu(false); workspace.toggleDetails(route().id); },
+    context: () => { closeModels(false); closeMenu(false); workspace.toggleDetails(route().id); render(); },
     'project-menu': el => openListMenu(el, 'Project', `${projectsView.menuItems()}<button role="menuitem" class="menu-item" data-action="context">${icon('panel')}Chat details<kbd>⌘.</kbd></button>`),
     'composer-add': el => knowledgeView.enabled() ? openListMenu(el, 'Add to this message', `<button role="menuitem" class="menu-item" data-action="attach-files" ${attachments.full() ? 'disabled' : ''}>${icon('paperclip')}Attach files</button><button role="menuitem" class="menu-item" data-action="knowledge-picker">${icon('book')}Knowledge collections</button>`) : attachments.actions['attach-files'](),
     compact: () => savePreference({ density: state.compact ? 'comfortable' : 'compact' }),
@@ -934,6 +934,8 @@ export async function startConnected(capabilities) {
     const el = event.target.closest('[data-action]');
     if (!modelPopover.hidden && !modelPopover.contains(event.target) && el?.dataset.action !== 'models') closeModels(false);
     if (!menu.hidden && !menu.contains(event.target) && !['chat-menu', 'profile', 'project-menu', 'composer-add'].includes(el?.dataset.action)) closeMenu(false);
+    // A link in a dialog that goes to another page takes the dialog with it.
+    if (event.target.closest('#modal a[href^="#"]') && $('#modal').open) close();
     if (!el || el.disabled) return;
     if (menu.contains(el)) closeMenu(false);
     event.preventDefault();

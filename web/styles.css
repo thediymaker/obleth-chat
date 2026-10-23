@@ -245,7 +245,8 @@ code{font-size:.9em}
 .dock .btn{height:28px;min-height:28px;padding:0 9px;gap:6px;border:0;border-radius:999px;color:var(--muted);background:transparent}
 .dock .btn:hover{color:var(--text);background:var(--secondary)}
 .dock .btn .option-text{display:none}
-.dock .btn.on{color:var(--text);background:var(--secondary)}
+.dock .btn.on{color:var(--text)}
+.dock .btn.showing{background:var(--secondary)}
 .dock .btn.on .option-text{display:inline}
 .dock .btn.on::before{content:'';width:6px;height:6px;border-radius:99px;background:rgb(var(--success-rgb));box-shadow:0 0 6px rgb(var(--success-rgb) / 70%);flex-shrink:0}
 .engine-button{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:260px;height:32px;padding:0 10px;border:1px solid var(--line-strong);border-radius:999px;font-size:var(--fs-sm);font-weight:500;color:var(--text-2);background:transparent;white-space:nowrap;flex:0 1 auto}
@@ -274,6 +275,7 @@ code{font-size:.9em}
 .context-card .spread{font-size:var(--fs-sm)}
 .context-card .spread>span{font-variant-numeric:tabular-nums;color:var(--text-2)}
 .context-card p{margin:0;font-size:var(--fs-xs);line-height:1.5;color:var(--muted)}
+.context-card .detail-row{margin:0;font-size:var(--fs-xs)}
 .context-card-link{display:inline-flex;align-items:center;gap:6px;padding:0;font-size:var(--fs-sm);color:var(--text)}
 .context-card-link .icon{width:13px;height:13px}
 @container composer (max-width:640px){

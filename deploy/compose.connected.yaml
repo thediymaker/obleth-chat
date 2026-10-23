@@ -30,7 +30,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
-    image: obleth-chat:0.4.0
+    image: ghcr.io/thediymaker/obleth-chat/chat:v0.4.0
     depends_on:
       postgres:
         condition: service_healthy

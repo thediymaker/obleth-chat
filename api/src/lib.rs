@@ -1222,6 +1222,20 @@ async fn run_generation(
                                 clean.insert(key.into(), json!(previous + n));
                             }
                         }
+                        // The last step alone is what the model holds: the context meter's size.
+                        for (key, last) in [
+                            ("prompt_tokens", "last_prompt_tokens"),
+                            ("completion_tokens", "last_completion_tokens"),
+                        ] {
+                            if let Some(n) = u
+                                .get(key)
+                                .and_then(Value::as_u64)
+                                .filter(|n| *n <= 1_000_000_000)
+                            {
+                                clean.insert(last.into(), json!(n));
+                            }
+                        }
+                        clean.insert("steps".into(), json!(steps.max(1)));
                         usage = Some(Value::Object(clean));
                     }
                     if let Some(choice) = v

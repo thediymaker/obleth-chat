@@ -223,10 +223,10 @@ async fn chat(
         }
         if results.is_empty() {
             yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"tool_calls":calls}}]}).to_string()));
-            yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}).to_string()));
+            yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}).to_string()));
         } else {
             yield Ok(Event::default().data(json!({"choices":[{"delta":{"content":format!("Done: {}", results.join(" | "))}}]}).to_string()));
-            yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}]}).to_string()));
+            yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":300,"completion_tokens":20,"total_tokens":320}}).to_string()));
         }
         yield Ok(Event::default().data("[DONE]"));
     };
@@ -861,6 +861,26 @@ async fn declined_actions_do_not_run(pool: PgPool) {
     );
     assert!(text.contains("\"status\":\"declined\""));
     assert_eq!(tool_calls(&f.mcp_seen), ["lookup"]);
+    // Two requests: the totals add them up, the context meter reads the last one.
+    let usage: Value = sqlx::query_scalar(
+        "SELECT usage FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (&usage["prompt_tokens"], &usage["last_prompt_tokens"]),
+        (&json!(400), &json!(300))
+    );
+    assert_eq!(
+        (
+            &usage["completion_tokens"],
+            &usage["last_completion_tokens"],
+            &usage["steps"]
+        ),
+        (&json!(30), &json!(20), &json!(2))
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]

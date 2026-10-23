@@ -1,7 +1,8 @@
 //! The live view of a conversation's tab: Chromium's screencast frames go to the
 //! page as binary JPEG messages, and state (address, title, who has control, frame
 //! size) as JSON text. The page's mouse and keyboard events, address bar and
-//! back/forward/reload reach the tab only while the person has control.
+//! back/forward/reload reach the tab only while the person has control. The page
+//! may size the tab to fit its pane at any time.
 use super::{manager, Browsers, Page};
 use crate::{error::ApiError, AppState};
 use axum::{
@@ -21,6 +22,9 @@ use uuid::Uuid;
 
 /// Longest a live view stays open.
 const SESSION: Duration = Duration::from_secs(4 * 60 * 60);
+/// Smallest and largest tab the page may ask for, in CSS pixels.
+const MIN_VIEWPORT: (u64, u64) = (320, 240);
+const MAX_VIEWPORT: (u64, u64) = (1920, 2400);
 
 #[derive(Deserialize)]
 pub struct Wake {
@@ -85,7 +89,7 @@ async fn bridge(
         page.cdp
             .call(
                 "Page.startScreencast",
-                json!({"format":"jpeg","quality":60,"maxWidth":1280,"maxHeight":800,"everyNthFrame":1}),
+                json!({"format":"jpeg","quality":60,"maxWidth":MAX_VIEWPORT.0,"maxHeight":MAX_VIEWPORT.1,"everyNthFrame":1}),
                 Some(&session),
             )
             .await
@@ -114,6 +118,10 @@ async fn bridge(
                     params.pointer("/metadata/deviceWidth").and_then(Value::as_f64).unwrap_or(0.0) as u64,
                     params.pointer("/metadata/deviceHeight").and_then(Value::as_f64).unwrap_or(0.0) as u64,
                 );
+                // A step's thumbnail renders the tab small for a moment; that frame is not the page.
+                if frame.0 < MIN_VIEWPORT.0 || frame.1 < MIN_VIEWPORT.1 {
+                    continue;
+                }
                 if frame != size {
                     size = frame;
                     let message = json!({"t":"size","w":size.0,"h":size.1}).to_string();
@@ -128,6 +136,14 @@ async fn bridge(
                     if matches!(message, Message::Close(_)) { break; }
                     continue;
                 };
+                let Ok(input) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+                // Fitting the tab to the pane is not input: it works whoever has control.
+                if input["t"] == "viewport" {
+                    if let Err(error) = fit(&page, &input).await {
+                        tracing::debug!("could not size the browser tab: {error:#}");
+                    }
+                    continue;
+                }
                 // Take over may have just happened: ask before dropping the input.
                 if controller != "user" {
                     if let Ok(Some(tab)) = browsers.get_tab(owner, conversation).await {
@@ -135,7 +151,6 @@ async fn bridge(
                     }
                     if controller != "user" { continue; }
                 }
-                let Ok(input) = serde_json::from_str::<Value>(text.as_str()) else { continue };
                 if let Err(error) = forward(&page, &input).await {
                     tracing::debug!("browser input failed: {error:#}");
                 }
@@ -169,6 +184,26 @@ async fn bridge(
         .call("Page.stopScreencast", json!({}), Some(&session))
         .await;
     let _ = client_tx.close().await;
+}
+
+/// Sizes the tab to the pane showing it. The size lasts while this live view is
+/// connected; afterwards the tab returns to the browser's window size.
+async fn fit(page: &Page, input: &Value) -> anyhow::Result<()> {
+    let side = |key: &str, low: u64, high: u64| input[key].as_u64().map(|n| n.clamp(low, high));
+    let (Some(width), Some(height)) = (
+        side("w", MIN_VIEWPORT.0, MAX_VIEWPORT.0),
+        side("h", MIN_VIEWPORT.1, MAX_VIEWPORT.1),
+    ) else {
+        return Ok(());
+    };
+    page.cdp
+        .call(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width":width,"height":height,"deviceScaleFactor":1,"mobile":false}),
+            Some(&page.session),
+        )
+        .await?;
+    Ok(())
 }
 
 /// Replays one input event from the page on the tab, after checking its fields.

@@ -236,8 +236,19 @@ code{font-size:.9em}
 .composer textarea{width:100%;border:0;outline:0!important;background:transparent;resize:none;min-height:104px;max-height:220px;padding:18px 18px 8px;font-size:var(--fs-base);line-height:1.65;border-radius:0}
 .composer-bottom{display:flex;align-items:center;justify-content:space-between;padding:6px 10px 10px 12px;gap:8px}
 .composer-options{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
-.composer-options .btn[data-action=parameters]{width:32px;height:32px;min-height:32px;padding:6px;flex-shrink:0}
-.composer-options .btn[data-action=parameters] .option-text{display:none}
+.composer{container:composer/inline-size}
+/* Narrow composers (a side pane open, or a small window) show the chips as icons. */
+@container composer (max-width:780px){
+  .composer-options{gap:4px}
+  .composer-options .btn{flex-shrink:0}
+  .composer-options .btn .option-text{display:none}
+  .composer .model-button{max-width:180px;padding:5px 8px}
+  .effort-button{padding:5px 7px;gap:5px}
+}
+@container composer (max-width:480px){
+  .effort-button .effort-level{display:none}
+  .composer .model-button{max-width:140px}
+}
 .model-button,.effort-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-width:0;min-height:32px;border:1px solid var(--line-strong);border-radius:var(--radius-md);padding:5px 10px;font-size:var(--fs-sm);font-weight:500;color:var(--text-2);background:transparent;white-space:nowrap;transition:background .15s,border-color .15s}
 .model-button:hover,.effort-button:hover,.effort-button[aria-expanded=true]{background:var(--secondary);border-color:var(--control-border)}
 .composer .model-button{max-width:min(320px,48vw);flex-shrink:1}
@@ -310,6 +321,9 @@ code{font-size:.9em}
 .effort-labels .selected{color:var(--text);font-weight:500}
 .effort-description{font-size:var(--fs-sm);color:var(--text-2);line-height:1.6;min-height:38px}
 .effort-help{font-size:var(--fs-xs);color:var(--muted);line-height:1.5;margin-top:8px;padding-top:9px;border-top:1px solid var(--line)}
+.effort-more{display:flex;align-items:center;gap:8px;width:calc(100% + 16px);margin:10px -8px -6px;padding:8px;border-radius:var(--radius-md);font-size:var(--fs-sm);color:var(--text-2);text-align:left}
+.effort-more:hover,.effort-more:focus-visible{background:var(--secondary);color:var(--text)}
+.effort-more .icon{width:14px;height:14px;color:var(--muted)}
 .warp-streaks{display:none;position:absolute;inset:0;overflow:hidden}
 .effort-control[data-effort=high] .warp-streaks{display:block}
 .warp-streaks i{position:absolute;height:1px;top:1px;left:-35%;width:25%;background:linear-gradient(90deg,transparent,var(--primary));animation:warp-streak .85s linear infinite;opacity:.8}
@@ -322,6 +336,8 @@ code{font-size:.9em}
 /* Conversation */
 .chat-layout{display:grid;grid-template-columns:minmax(0,1fr) var(--context-w);min-height:calc(100dvh - var(--topbar-h) - var(--footer-h))}
 .chat-layout.no-context{grid-template-columns:minmax(0,1fr)}
+/* With the side pane open, Context opens over the chat's right edge instead of squeezing it. */
+.context-panel.floating{position:fixed;top:var(--topbar-h);right:var(--workspace-w);z-index:9;width:var(--context-w);height:auto;max-height:calc(100dvh - var(--topbar-h) - var(--footer-h));border:1px solid var(--line-strong);border-top:0;box-shadow:0 14px 45px var(--shadow)}
 .chat-column{min-width:0;display:flex;flex-direction:column;container-type:inline-size}
 .conversation-header{height:52px;padding:0 24px;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line-soft)}
 .conversation-header-title{display:flex;gap:9px;align-items:center;min-width:0}
@@ -1726,7 +1742,7 @@ a.research-chip:hover{color:var(--text)}
 
 /* Chat's browser: the live view of the chat's tab in the side pane. */
 .workspace-browser{flex:1;min-width:0;min-height:0;display:flex}
-.browser-view{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+.browser-view{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg)}
 .browser-banner{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line);font-size:var(--fs-sm);color:var(--muted)}
 .browser-banner>.icon{width:15px;height:15px;color:var(--text-2);flex-shrink:0}
 .browser-banner strong{color:var(--text);font-weight:500;font-size:var(--fs-md);white-space:nowrap}
@@ -1741,8 +1757,8 @@ a.research-chip:hover{color:var(--text)}
 .browser-url{flex:1;min-width:0;margin-left:6px;height:30px;padding:0 10px;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--bg);color:var(--text-2);font:inherit;font-size:var(--fs-sm)}
 .browser-url[readonly]{color:var(--muted)}
 .browser-url:focus{outline:none;border-color:var(--focus-border);color:var(--text)}
-.browser-screen{position:relative;flex:1;min-height:0;display:flex;align-items:flex-start;justify-content:center;overflow:auto;background:var(--terminal-bg)}
-.browser-screen canvas{display:none;width:100%;height:auto;max-width:1280px;background:#fff;outline:none}
+.browser-screen{position:relative;flex:1;min-height:0;display:flex;align-items:stretch;justify-content:center;overflow:hidden;background:var(--terminal-bg)}
+.browser-screen canvas{display:none;width:100%;height:100%;object-fit:contain;outline:none}
 .browser-screen.has-frame canvas{display:block}
 .browser-screen canvas.is-controlled{cursor:default;box-shadow:inset 0 0 0 2px rgb(var(--success-rgb) / 60%)}
 .browser-note{margin:auto;max-width:320px;padding:24px;text-align:center;color:var(--muted);font-size:var(--fs-md);display:flex;flex-direction:column;align-items:center;gap:8px}

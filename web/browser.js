@@ -54,6 +54,7 @@ export function createBrowser({ api, state, route, toast, chatPath, capabilities
     socket.binaryType = 'arraybuffer';
     const mine = live = { id, socket, w: 1280, h: 720, closed: false, frames: 0 };
     showNote(id, wake ? 'starting' : 'connecting');
+    socket.onopen = () => { if (live === mine) fit(true); };
     socket.onmessage = async event => {
       if (typeof event.data === 'string') {
         let message; try { message = JSON.parse(event.data); } catch { return; }
@@ -74,6 +75,17 @@ export function createBrowser({ api, state, route, toast, chatPath, capabilities
       load(id).then(() => { if (shownId === id) showNote(id, chat(id).status === 'running' ? 'closed' : null); });
     };
   }
+  // The tab takes the pane's shape, so the page fills it. Narrow panes keep a
+  // desktop-width page, scaled down, rather than a phone layout.
+  let fitted = '', fitTimer = 0;
+  function fit(force = false) {
+    const w = screen.clientWidth, h = screen.clientHeight;
+    if (!live || live.socket.readyState !== WebSocket.OPEN || w < 50 || h < 50) return;
+    const width = Math.round(Math.min(1280, Math.max(1024, w))), height = Math.round(Math.min(2400, Math.max(240, width * h / w)));
+    if (`${width}x${height}` === fitted && !force) return;
+    fitted = `${width}x${height}`; live.socket.send(JSON.stringify({ t: 'viewport', w: width, h: height }));
+  }
+  new ResizeObserver(() => { clearTimeout(fitTimer); fitTimer = setTimeout(fit, 150); }).observe(screen);
   function showNote(id, why = null) {
     const c = chat(id);
     screen.classList.remove('has-frame'); note.hidden = false;
@@ -118,7 +130,12 @@ export function createBrowser({ api, state, route, toast, chatPath, capabilities
   const controlling = () => live && live.socket.readyState === WebSocket.OPEN && chat(live.id).controller === 'user';
   const sendInput = message => { if (controlling()) live.socket.send(JSON.stringify(message)); };
   const modifiers = e => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
-  const point = e => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * (live.w / r.width), y: (e.clientY - r.top) * (live.h / r.height) }; };
+  // The frame is drawn contained in the canvas box, so allow for any letterboxing.
+  const point = e => {
+    const r = canvas.getBoundingClientRect(), scale = Math.min(r.width / canvas.width, r.height / canvas.height);
+    const left = r.left + (r.width - canvas.width * scale) / 2, top = r.top + (r.height - canvas.height * scale) / 2;
+    return { x: (e.clientX - left) / (canvas.width * scale) * live.w, y: (e.clientY - top) / (canvas.height * scale) * live.h };
+  };
   const buttonOf = e => ['left', 'middle', 'right'][e.button] || 'none';
   let moved = 0;
   canvas.addEventListener('mousedown', e => { if (!controlling()) return; canvas.focus(); e.preventDefault(); sendInput({ t: 'mouse', type: 'mousePressed', ...point(e), button: buttonOf(e), clickCount: e.detail || 1, modifiers: modifiers(e) }); });

@@ -197,6 +197,11 @@ async fn download(
             .fetch_optional(&s.store.pool)
             .await?;
     let (name, mime, data) = row.ok_or_else(ApiError::not_found)?;
+    file_response(&name, &mime, data)
+}
+
+/// An attachment as a download, never rendered in the app's origin.
+pub(crate) fn file_response(name: &str, mime: &str, data: Vec<u8>) -> Result<Response, ApiError> {
     let encoded_name: String = url::form_urlencoded::byte_serialize(name.as_bytes())
         .collect::<String>()
         .replace('+', "%20");
@@ -204,7 +209,7 @@ async fn download(
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&mime).map_err(|_| ApiError::internal())?,
+        HeaderValue::from_str(mime).map_err(|_| ApiError::internal())?,
     );
     headers.insert(
         header::CONTENT_DISPOSITION,

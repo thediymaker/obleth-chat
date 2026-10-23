@@ -1630,6 +1630,258 @@ async fn a_shared_project_shares_only_what_its_owner_may_share(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let mut people = Vec::new();
+    for name in ["ana", "ben", "cal"] {
+        call(
+            &f.app,
+            "POST",
+            "/api/admin/users",
+            json!({"username":name,"password":PASSWORD,"displayName":name,"role":"user"}),
+            &admin,
+        )
+        .await;
+        let session = login(&f.app, name).await;
+        let (_, me) = call(&f.app, "GET", "/api/session", Value::Null, &session).await;
+        people.push((session, me["user"]["id"].as_str().unwrap().to_owned()));
+    }
+    let [(ana, ana_id), (ben, ben_id), (cy, _)] = <[_; 3]>::try_from(people).ok().unwrap();
+    let (_, made) = call(
+        &f.app,
+        "POST",
+        "/api/admin/groups",
+        json!({"name":"Pairs"}),
+        &admin,
+    )
+    .await;
+    let group = made["group"]["id"].as_str().unwrap().to_owned();
+    for user in [&ana_id, &ben_id] {
+        call(
+            &f.app,
+            "PUT",
+            &format!("/api/admin/groups/{group}/members/{user}"),
+            Value::Null,
+            &admin,
+        )
+        .await;
+    }
+
+    // Ana's chat: one turn, with a file attached and an image in the reply.
+    let (_, file) = call(
+        &f.app,
+        "POST",
+        "/api/attachments",
+        json!({"name":"plan.txt","mimeType":"text/plain","dataBase64":"cGxhbg=="}),
+        &ana,
+    )
+    .await;
+    let file = file["id"].as_str().unwrap().to_owned();
+    let (_, chat) = call(
+        &f.app,
+        "POST",
+        "/api/conversations",
+        json!({"title":"Pairing","model":"fixture-model"}),
+        &ana,
+    )
+    .await;
+    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            Body::from(json!({"content":"Plan the refactor","model":"fixture-model","attachmentIds":[file]}).to_string()),
+            "application/json",
+            &ana,
+        ))
+        .await
+        .unwrap();
+    response.into_body().collect().await.unwrap();
+    let conversation: uuid::Uuid = id.parse().unwrap();
+    let ana_uuid: uuid::Uuid = ana_id.parse().unwrap();
+    let image = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO generated_images (id, owner_id, conversation_id, mime_type, size, data) VALUES ($1,$2,$3,'image/png',4,'\\x89504e47')")
+        .bind(image).bind(ana_uuid).bind(conversation).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE messages SET content = content || $2 WHERE conversation_id = $1 AND role = 'assistant'")
+        .bind(conversation).bind(format!("\n\n![chart](/api/images/{image})")).execute(&pool).await.unwrap();
+
+    // Not shared: nobody else can open it.
+    let shared = format!("/api/shared/{id}");
+    assert_eq!(
+        call(&f.app, "GET", &shared, Value::Null, &ben).await.0,
+        StatusCode::NOT_FOUND
+    );
+    // Only the owner changes who sees it.
+    let share = format!("/api/conversations/{id}/share");
+    assert_eq!(
+        call(&f.app, "PUT", &share, json!({"scope":"signed_in"}), &ben)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Shared with the group: Ben reads it, with working links; Cy does not.
+    let (status, set) = call(
+        &f.app,
+        "PUT",
+        &share,
+        json!({"scope":"group","groupId":group}),
+        &ana,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_eq!(set["share"]["groupName"], "Pairs");
+    let (status, seen) = call(&f.app, "GET", &shared, Value::Null, &ben).await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(
+        (seen["mine"].clone(), seen["share"]["ownerName"].clone()),
+        (json!(false), json!("ana"))
+    );
+    assert!(seen["conversation"].get("settings").is_none());
+    let messages = seen["conversation"]["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["content"], "Plan the refactor");
+    let link = messages[0]["attachments"][0]["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(link, format!("/api/shared/{id}/attachments/{file}"));
+    assert!(messages[1]["content"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("/api/shared/{id}/images/{image}")));
+    let get = |path: String, who: Session| {
+        let app = f.app.clone();
+        async move {
+            app.oneshot(req("GET", &path, Body::empty(), "application/json", &who))
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(get(link.clone(), ben.clone()).await, StatusCode::OK);
+    assert_eq!(
+        get(format!("/api/shared/{id}/images/{image}"), ben.clone()).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(format!("/api/attachments/{file}"), ben.clone()).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&f.app, "GET", &shared, Value::Null, &cy).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(get(link.clone(), cy.clone()).await, StatusCode::NOT_FOUND);
+    let (_, page) = call(
+        &f.app,
+        "GET",
+        &format!("/api/groups/{group}"),
+        Value::Null,
+        &ben,
+    )
+    .await;
+    assert_eq!(page["chats"][0]["title"], "Pairing");
+    // Ben still cannot write to it.
+    assert_eq!(
+        call(
+            &f.app,
+            "PATCH",
+            &format!("/api/conversations/{id}"),
+            json!({"title":"Mine"}),
+            &ben
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Anyone signed in with the link: Cy too. Ben forks it into his own chat.
+    call(&f.app, "PUT", &share, json!({"scope":"signed_in"}), &ana).await;
+    assert_eq!(
+        call(&f.app, "GET", &shared, Value::Null, &cy).await.0,
+        StatusCode::OK
+    );
+    let (status, forked) = call(&f.app, "POST", &format!("{shared}/fork"), Value::Null, &ben).await;
+    assert_eq!(status, StatusCode::CREATED, "{forked}");
+    let copy = forked["conversation"]["id"].as_str().unwrap().to_owned();
+    let (status, mine) = call(
+        &f.app,
+        "GET",
+        &format!("/api/conversations/{copy}"),
+        Value::Null,
+        &ben,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mine["conversation"]["title"], "Pairing · fork");
+    let copied = mine["conversation"]["messages"].as_array().unwrap();
+    assert_eq!(copied.len(), 2);
+    let own_file = copied[0]["attachments"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(own_file, file);
+    assert_eq!(
+        get(format!("/api/attachments/{own_file}"), ben.clone()).await,
+        StatusCode::OK
+    );
+    let text = copied[1]["content"].as_str().unwrap();
+    assert!(!text.contains(&image.to_string()), "{text}");
+    let own_image = text
+        .split("/api/images/")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(')')
+        .to_owned();
+    assert_eq!(
+        get(format!("/api/images/{own_image}"), ben.clone()).await,
+        StatusCode::OK
+    );
+
+    // Unsharing ends it for everyone else; the fork stays Ben's.
+    call(&f.app, "PUT", &share, json!({"scope":"none"}), &ana).await;
+    assert_eq!(
+        call(&f.app, "GET", &shared, Value::Null, &cy).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &f.app,
+            "GET",
+            &format!("/api/conversations/{copy}"),
+            Value::Null,
+            &ben
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Deleting the group unshares chats shared with it.
+    call(
+        &f.app,
+        "PUT",
+        &share,
+        json!({"scope":"group","groupId":group}),
+        &ana,
+    )
+    .await;
+    call(
+        &f.app,
+        "DELETE",
+        &format!("/api/admin/groups/{group}"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    let (_, after) = call(&f.app, "GET", &share, Value::Null, &ana).await;
+    assert_eq!(after["share"]["scope"], "none");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_reply_that_asks_questions_ends_at_the_card(pool: PgPool) {
     let f = fixture(pool).await;
     let admin = login(&f.app, "test-admin").await;

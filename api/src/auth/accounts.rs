@@ -386,6 +386,12 @@ async fn delete_group(
         .execute(&mut *tx)
         .await?;
     }
+    sqlx::query(
+        "UPDATE conversations SET share_scope='none', share_group_id=NULL WHERE share_group_id=$1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     if sqlx::query("DELETE FROM user_groups WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)

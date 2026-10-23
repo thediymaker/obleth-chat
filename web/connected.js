@@ -15,6 +15,7 @@ import { createKnowledge } from './knowledge.js';
 import { createLibrary } from './library.js';
 import { createProjects } from './projects.js';
 import { createGroups } from './groups.js';
+import { createSharing } from './sharing.js';
 import { createQuestions } from './questions.js';
 import { createResearch } from './research.js';
 import { createTurn } from './turn.js';
@@ -41,11 +42,11 @@ export async function startConnected(capabilities) {
     phase: 'loading', draftKey: 0, user: null, oidc: !!capabilities.integrations?.oidc?.configured,
     chats: [], models: [], model: '', draft: '', error: '', catalogError: '', chatError: '',
     active: null, loadingChat: false, streaming: false, streamController: null, streamChatId: null,
-    context: true, compact: false, users: null, busy: false, loginError: '',
+    context: true, compact: false, users: null, busy: false, loginError: '', shared: null,
     systemPrompt: '', temperature: 0.7, topP: 1, maxTokens: 2048, reasoningEffort: 'medium', preferences: null, preferenceOverrides: {}, presets: [],
     workspaceDraft: false, browserDraft: false, openActivity: new Set(),
   };
-  let toastTimer, loadSequence = 0, identityEpoch = 0, menuAnchor = null;
+  let toastTimer, loadSequence = 0, identityEpoch = 0, menuAnchor = null, sharedSignature = '';
   let effortSaveQueue = Promise.resolve(), effortSequence = 0;
   const operations = new Map(), revisions = new Map(), watches = new Map(), versionSelections = new Map();
   let operationSequence = 0;
@@ -63,6 +64,7 @@ export async function startConnected(capabilities) {
   const configured = key => !!capabilities.integrations?.[key]?.configured;
   const name = () => displayName(state.user, '');
   const initials = () => name().split(/\s+/).slice(0, 2).map(s => s[0]).join('').toUpperCase();
+  const owner = () => { const n = state.shared?.ownerName || '?'; return { name: n, initials: n.split(/\s+/).slice(0, 2).map(s => s[0]).join('').toUpperCase() }; };
   const route = () => {
     const [rawPage = 'chat', id = '', section = 'users'] = canonicalSettingsHash(location.hash).slice(1).split('/');
     if (rawPage === 'settings' && id === 'admin') return { page: 'admin', id: section };
@@ -72,6 +74,7 @@ export async function startConnected(capabilities) {
   };
   const modelName = id => state.models.find(m => m.id === id)?.name || id || 'Choose a model';
   const chatPath = id => `/api/conversations/${encodeURIComponent(id)}`;
+  const sharedPath = id => `/api/shared/${encodeURIComponent(id)}`;
   const unwrap = data => data.conversation || data;
   const close = () => $('#modal').close();
   const toast = message => {
@@ -93,6 +96,7 @@ export async function startConnected(capabilities) {
   } });
   const projectsView = createProjects({ api, state, capabilities, render, modal, close, toast: message => toast(message), go, saveTo: item => libraryView.saveFrom(item), openLibrary: id => { libraryView.filterProject(id); go('library'); }, newChat: (options = {}) => { actions['new-chat'](); if (options.auto) connectionsView.startAuto(); }, research: researchView });
   const groupsView = createGroups({ api, state, render });
+  const sharing = createSharing({ api, modal, toast: message => toast(message), onChange: (id, share) => { if (state.active?.id === id) { state.active.shareScope = share.scope; render(); } } });
   const questionsView = createQuestions({
     state, send: text => send(text),
     workspace: { has: id => workspace.hasWorkspace(id), create: id => workspace.create(id) },
@@ -124,7 +128,7 @@ export async function startConnected(capabilities) {
     for (const op of operations.values()) op.controller?.abort();
     operations.clear(); revisions.clear(); versionSelections.clear();
     for (const timer of watches.values()) clearTimeout(timer); watches.clear();
-    Object.assign(state, { user: null, usage: null, chats: [], models: [], model: '', active: null, users: null, draft: '', streaming: false, streamChatId: null, error: '', chatError: '', catalogError: '', systemPrompt: '', reasoningEffort: 'medium', temperature: 0.7, topP: 1, maxTokens: 2048, compact: false, context: true, preferences: null, preferenceOverrides: {}, presets: [], workspaceDraft: false, browserDraft: false });
+    Object.assign(state, { user: null, usage: null, chats: [], models: [], model: '', active: null, shared: null, users: null, draft: '', streaming: false, streamChatId: null, error: '', chatError: '', catalogError: '', systemPrompt: '', reasoningEffort: 'medium', temperature: 0.7, topP: 1, maxTokens: 2048, compact: false, context: true, preferences: null, preferenceOverrides: {}, presets: [], workspaceDraft: false, browserDraft: false });
     state.openActivity.clear(); workspace.reset(); browserView.reset();
     document.body.classList.remove('collapsed', 'sidebar-open');
     delete capabilities.adminGatewayUrl; delete capabilities.gatewayAdminUrl;
@@ -202,7 +206,7 @@ export async function startConnected(capabilities) {
   function shell(content) {
     const { page, id } = route();
     const section = sections[page] || page, title = pageTitles[page] || nav.find(n => n[0] === page)?.[2] || 'Settings';
-    return `<aside class="sidebar" aria-label="Main navigation">${brand()}<button class="btn primary new-chat" data-action="new-chat">${icon('plus')}New chat <kbd>⇧⌘O</kbd></button><nav class="nav">${nav.filter(([path]) => (path !== 'compute' || computeTabs().length) && (path !== 'library' || libraryView.enabled())).map(([path, i, label]) => `<a href="#${path}" class="nav-item ${section === path ? 'active' : ''}" ${section === path ? 'aria-current="page"' : ''}>${icon(i)}<span>${label}</span></a>`).join('')}</nav>${projectsView.sidebar(page === 'projects' ? id : '')}<div class="recent"><div class="recent-header spread"><span class="eyebrow">Recent</span>${iconButton('search', 'search', 'Search conversations')}</div>${state.chats.length ? state.chats.slice(0, 15).map(c => `<div class="recent-row ${id === c.id ? 'active' : ''}"><a class="recent-link" href="#chat/${encodeURIComponent(c.id)}" title="${esc(c.title)}">${esc(c.title)}</a>${iconButton('more', 'chat-menu', `Options for ${c.title}`, `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div>`).join('') : '<p class="sidebar-empty">Your next idea starts here.</p>'}${state.chats.length ? `<a class="recent-all ${page === 'history' ? 'active' : ''}" href="#history">All chats${icon('right')}</a>` : ''}</div><div class="sidebar-bottom"><a class="nav-item ${['settings','admin','connections'].includes(page) ? 'active' : ''}" href="#settings" ${['settings','admin','connections'].includes(page) ? 'aria-current="page"' : ''}>${icon('settings')}Settings</a><button class="profile" data-action="profile" aria-haspopup="menu" aria-expanded="false"><span class="avatar">${esc(initials())}</span><span class="grow"><span class="profile-name">${esc(name())}</span><span class="profile-caption">${esc(state.user.role)} · Personal</span></span>${icon('down')}</button></div></aside><div class="app-main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation">${icon('panel')}</button><span class="workspace-label">Personal workspace</span><span class="slash">/</span><span>${title}</span></div><div class="top-actions">${themeControl('header-theme')}${iconButton('search', 'search', 'Search conversations')}<button class="btn ghost small context-toggle" data-action="${page === 'chat' && id ? 'context' : 'focus'}">${icon('panel')}<span>${page === 'chat' && id ? 'Details' : 'Focus mode'}</span></button></div></header><main id="main" class="content" tabindex="-1">${alert(state.error, 'refresh')}${content}</main><footer class="bottom-bar"><div class="row">${statusMetrics()}</div><div class="row"><span>${esc(branding.siteName)}</span><button data-action="shortcuts" aria-label="Keyboard shortcuts">⌘ K</button></div></footer></div>`;
+    return `<aside class="sidebar" aria-label="Main navigation">${brand()}<button class="btn primary new-chat" data-action="new-chat">${icon('plus')}New chat <kbd>⇧⌘O</kbd></button><nav class="nav">${nav.filter(([path]) => (path !== 'compute' || computeTabs().length) && (path !== 'library' || libraryView.enabled())).map(([path, i, label]) => `<a href="#${path}" class="nav-item ${section === path ? 'active' : ''}" ${section === path ? 'aria-current="page"' : ''}>${icon(i)}<span>${label}</span></a>`).join('')}</nav>${projectsView.sidebar(page === 'projects' ? id : '')}<div class="recent"><div class="recent-header spread"><span class="eyebrow">Recent</span>${iconButton('search', 'search', 'Search conversations')}</div>${state.chats.length ? state.chats.slice(0, 15).map(c => `<div class="recent-row ${id === c.id ? 'active' : ''}"><a class="recent-link" href="#chat/${encodeURIComponent(c.id)}" title="${esc(c.title)}">${esc(c.title)}</a>${iconButton('more', 'chat-menu', `Options for ${c.title}`, `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div>`).join('') : '<p class="sidebar-empty">Your next idea starts here.</p>'}${state.chats.length ? `<a class="recent-all ${page === 'history' ? 'active' : ''}" href="#history">All chats${icon('right')}</a>` : ''}</div><div class="sidebar-bottom"><a class="nav-item ${['settings','admin','connections'].includes(page) ? 'active' : ''}" href="#settings" ${['settings','admin','connections'].includes(page) ? 'aria-current="page"' : ''}>${icon('settings')}Settings</a><button class="profile" data-action="profile" aria-haspopup="menu" aria-expanded="false"><span class="avatar">${esc(initials())}</span><span class="grow"><span class="profile-name">${esc(name())}</span><span class="profile-caption">${esc(state.user.role)} · Personal</span></span>${icon('down')}</button></div></aside><div class="app-main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation">${icon('panel')}</button><span class="workspace-label">Personal workspace</span><span class="slash">/</span><span>${title}</span></div><div class="top-actions">${themeControl('header-theme')}${iconButton('search', 'search', 'Search conversations')}<button class="btn ghost small context-toggle" data-action="${page === 'chat' && id && !state.shared ? 'context' : 'focus'}">${icon('panel')}<span>${page === 'chat' && id && !state.shared ? 'Details' : 'Focus mode'}</span></button></div></header><main id="main" class="content" tabindex="-1">${alert(state.error, 'refresh')}${content}</main><footer class="bottom-bar"><div class="row">${statusMetrics()}</div><div class="row"><span>${esc(branding.siteName)}</span><button data-action="shortcuts" aria-label="Keyboard shortcuts">⌘ K</button></div></footer></div>`;
   }
   function statusMetrics() {
     const today = state.usage?.today, limits = state.usage?.limits || {}, count = value => compactNumber.format(Number(value) || 0);
@@ -271,12 +275,12 @@ export async function startConnected(capabilities) {
   }
   function versionControls(m) {
     const versions = m.versions || [];
-    if (versions.length < 2) return '';
+    if (versions.length < 2 || state.shared) return '';
     const index = m.versionIndex || versions.findIndex(v => v.id === m.id) + 1;
     return `<div class="message-versions" role="group" aria-label="${m.role === 'user' ? 'Message' : 'Response'} versions">${iconButton('down', 'select-version', 'Previous version', `data-id="${esc(responseVersion(m,-1) || '')}" ${state.streaming || state.switchingVersion || !responseVersion(m,-1) ? 'disabled' : ''}`)}<span aria-label="Version ${index} of ${versions.length}">${index} / ${versions.length}</span>${iconButton('down', 'select-version', 'Next version', `data-id="${esc(responseVersion(m,1) || '')}" ${state.streaming || state.switchingVersion || !responseVersion(m,1) ? 'disabled' : ''}`)}</div>`;
   }
   function followUps(m, index) {
-    if (m.role !== 'assistant' || m.status !== 'completed' || index !== state.active?.messages?.length - 1) return '';
+    if (state.shared || m.role !== 'assistant' || m.status !== 'completed' || index !== state.active?.messages?.length - 1) return '';
     const questions = (m.followUps || []).map((q,i) => ({q,i})).filter(({q}) => typeof q === 'string' && q.trim());
     const heading = '<div class="eyebrow">Suggested follow-ups</div>';
     if (questions.length) return `<section class="follow-ups" aria-label="Suggested follow-up questions">${heading}<div class="follow-up-list">${questions.map(({q,i}) => `<button class="follow-up-question" data-action="follow-up" data-index="${index}" data-question="${i}" ${state.streaming || state.switchingVersion ? 'disabled' : ''}><span>${esc(q)}</span>${icon('plus')}</button>`).join('')}</div></section>`;
@@ -299,9 +303,9 @@ export async function startConnected(capabilities) {
   function message(m, index) {
     if (m.role === 'user' && String(m.content || '').startsWith(NUDGE)) return `<article class="message auto-nudge" data-message="${index}"><p>${icon('refresh')}<span><strong>Auto mode</strong> ${esc(m.content.slice(NUDGE.length))}</span></p></article>`;
     const key = m.id || `pending-${index}`, details = turnDetails(m, key);
-    const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${m.id && !state.streaming && !state.switchingVersion ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
+    const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' && !state.shared ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${m.id && !state.streaming && !state.switchingVersion && !state.shared ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
     const status = m.role === 'assistant' ? `<span class="response-meta ${isPendingMessage(m) ? 'is-generating' : ''} ${m.status === 'error' ? 'is-error' : ''}" ${isPendingMessage(m) ? 'role="status"' : ''}>${esc(responseStatus(m))}</span>` : '';
-    return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(initials())}</span>You` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) ? turnView.steerForm() : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
+    return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(state.shared ? owner().initials : initials())}</span>${state.shared ? esc(owner().name) : 'You'}` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) && !state.shared ? turnView.steerForm() : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion && !state.shared ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
   }
   function updateMessage(m, index) {
     const article = $(`[data-message="${index}"]`);
@@ -320,7 +324,7 @@ export async function startConnected(capabilities) {
         article._turn = signature;
       }
       const form = $('.steer-form', article);
-      if (turnView.live(m) && !form) $('.turn-work', article).insertAdjacentHTML('afterend', turnView.steerForm());
+      if (turnView.live(m) && !form && !state.shared) $('.turn-work', article).insertAdjacentHTML('afterend', turnView.steerForm());
       if (!turnView.live(m) && form) form.remove();
     }
     let panel = turnView.applies(m) ? null : $('.thinking-panel', article);
@@ -394,7 +398,11 @@ export async function startConnected(capabilities) {
     if (state.chatError) return `<div class="page">${alert(state.chatError, 'reload-chat')}${btn('Start a new chat', 'new-chat', { icon: 'plus', type: '' })}</div>`;
     if (!state.active || !route().id) return home();
     const c = state.active;
-    return `<div class="chat-layout"><div class="chat-column"><div class="conversation-header"><div class="conversation-header-title"><h2>${esc(c.title)}</h2>${c.archived ? badge('Archived') : ''}</div><div class="row">${iconButton('branch', 'alternatives', 'Conversation alternatives')}${iconButton('more', 'chat-menu', 'Conversation options', `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div></div><div class="chat-line">${projectsView.pill()}${knowledgeView.pill()}</div><div class="messages" id="messages">${(c.messages || []).map(message).join('')}${!c.messages?.length ? '<div class="empty">A new conversation, ready for your first idea.</div>' : ''}</div><div class="chat-composer-wrap">${alert(state.catalogError, 'refresh')}${composer()}</div></div></div>`;
+    if (state.shared) {
+      const sh = state.shared, where = sh.scope === 'group' && sh.groupName ? `shared with ${esc(sh.groupName)}` : 'shared by link';
+      return `<div class="chat-layout chat-readonly"><div class="chat-column"><div class="conversation-header"><div class="conversation-header-title"><h2>${esc(c.title)}</h2>${badge(`Shared by ${sh.ownerName}`)}</div><div class="row">${btn('Fork', 'shared-fork', { icon: 'branch', tone: 'small', type: '' })}</div></div><div class="messages" id="messages">${(c.messages || []).map(message).join('')}${!c.messages?.length ? '<div class="empty">Nothing here yet. New messages show up as they arrive.</div>' : ''}</div><div class="shared-bar">${icon('lock')}<span class="grow">You are reading ${esc(sh.ownerName)}’s chat, ${where}. It updates as they keep going.</span>${btn('Fork to continue', 'shared-fork', { icon: 'branch', tone: 'primary small', type: '' })}</div></div></div>`;
+    }
+    return `<div class="chat-layout"><div class="chat-column"><div class="conversation-header"><div class="conversation-header-title"><h2>${esc(c.title)}</h2>${c.archived ? badge('Archived') : ''}${c.shareScope && c.shareScope !== 'none' ? `<button type="button" class="badge-button" data-action="share-chat" data-id="${esc(c.id)}" title="Change who can see it">${badge('Shared', 'accent')}</button>` : ''}</div><div class="row">${iconButton('link', 'share-chat', 'Share chat', `data-id="${esc(c.id)}"`)}${iconButton('branch', 'alternatives', 'Conversation alternatives')}${iconButton('more', 'chat-menu', 'Conversation options', `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div></div><div class="chat-line">${projectsView.pill()}${knowledgeView.pill()}</div><div class="messages" id="messages">${(c.messages || []).map(message).join('')}${!c.messages?.length ? '<div class="empty">A new conversation, ready for your first idea.</div>' : ''}</div><div class="chat-composer-wrap">${alert(state.catalogError, 'refresh')}${composer()}</div></div></div>`;
   }
   function unavailable(page) {
     const copy = {
@@ -473,7 +481,7 @@ export async function startConnected(capabilities) {
     const first = { compute: computeTabs()[0]?.[0] }[page];
     if (first) { history.replaceState(null, '', `#${first}`); ({ page, id } = route()); }
     if (moved[location.hash.slice(1).split('/')[0]]) history.replaceState(null, '', `#${page}`);
-    state.chatError = ''; loadSequence++;
+    state.chatError = ''; state.shared = null; loadSequence++;
     if (page !== 'knowledge') knowledgeView.stop();
     if (page !== 'projects') researchView.stop();
     if (page !== 'chat' || !id) {
@@ -512,9 +520,45 @@ export async function startConnected(capabilities) {
     } catch (error) {
       if (sequence !== loadSequence || !state.user) return;
       state.active = null; state.chatError = error.message;
+      // Not theirs: it may be someone else's chat shared with them.
+      if (error.status === 404) {
+        const r = await api.request(sharedPath(id)).catch(() => null);
+        if (sequence !== loadSequence || !state.user) return;
+        if (r && !r.mine) openShared(r, sequence);
+        else state.chatError = 'This chat does not exist, or it is not shared with you.';
+      }
     } finally {
       if (sequence === loadSequence && state.user) { state.loadingChat = false; render(); if (state.active) scrollToEnd(); }
     }
+  }
+  /** Someone else's chat, read-only. It is fetched again while open, so it grows live. */
+  function openShared(r, sequence) {
+    Object.assign(state, { active: r.conversation, shared: r.share, chatError: '' });
+    connectionsView.loadChat(null); knowledgeView.loadChat(null); projectsView.loadChat(null);
+    sharedSignature = signatureOf(r.conversation);
+    watchShared(r.conversation.id, sequence);
+  }
+  const signatureOf = c => JSON.stringify([c.title, (c.messages || []).map(m => [m.id, m.status, m.content?.length, m.reasoningContent?.length, (m.activity || []).length])]);
+  function watchShared(id, sequence) {
+    const busy = (state.active?.messages || []).some(isPendingMessage);
+    setTimeout(async () => {
+      if (sequence !== loadSequence || !state.shared || state.active?.id !== id) return;
+      if (!document.hidden) {
+        try {
+          const r = await api.request(sharedPath(id));
+          if (sequence !== loadSequence || !state.shared) return;
+          const next = signatureOf(r.conversation);
+          if (next !== sharedSignature) {
+            const list = $('#messages'), near = !list || list.scrollHeight - list.scrollTop - list.clientHeight < 160;
+            sharedSignature = next; Object.assign(state, { active: r.conversation, shared: r.share }); render();
+            if (near) scrollToEnd();
+          }
+        } catch (e) {
+          if (e.status === 404 && sequence === loadSequence) { Object.assign(state, { active: null, shared: null, chatError: 'This chat is no longer shared with you.' }); render(); return; }
+        }
+      }
+      watchShared(id, sequence);
+    }, busy ? 1500 : 4000);
   }
   // Opening a conversation shows its latest message; a second frame catches late layout.
   function scrollToEnd() {
@@ -773,6 +817,8 @@ export async function startConnected(capabilities) {
   function saveFromChat(el, item) {
     if (!libraryView.enabled() || !state.active) return;
     const m = state.active.messages[Number(el.closest('[data-message]')?.dataset.message)];
+    // From someone else's chat it is saved as the viewer's own, without a link back.
+    if (state.shared) { libraryView.saveFrom(item); return; }
     libraryView.saveFrom({ ...item, conversationId: state.active.id, messageId: m?.id, projectId: projectsView.chatProject() });
   }
   // Selecting text in a reply offers Save, Ask about this and Copy.
@@ -785,7 +831,7 @@ export async function startConnected(capabilities) {
     if (!text || text.length < 3 || !answer || !libraryView.enabled()) { hideSelection(); return; }
     if (!selection.bar) {
       selection.bar = document.createElement('div'); selection.bar.className = 'selection-bar'; selection.bar.setAttribute('role', 'toolbar'); selection.bar.setAttribute('aria-label', 'Selected text');
-      selection.bar.innerHTML = `<button type="button" data-action="selection-save">${icon('bookmark')}Save</button><button type="button" data-action="selection-ask">${icon('chat')}Ask about this</button><button type="button" data-action="selection-copy">${icon('copy')}Copy</button>`;
+      selection.bar.innerHTML = `<button type="button" data-action="selection-save">${icon('bookmark')}Save</button>${state.shared ? '' : `<button type="button" data-action="selection-ask">${icon('chat')}Ask about this</button>`}<button type="button" data-action="selection-copy">${icon('copy')}Copy</button>`;
       selection.bar.addEventListener('mousedown', event => event.preventDefault());
       document.body.append(selection.bar);
     }
@@ -832,6 +878,12 @@ export async function startConnected(capabilities) {
     },
     'delete-chat': el => modal('Delete this conversation?', `<p>This permanently deletes this conversation from your account.</p><div class="modal-actions">${btn('Keep conversation', 'close', { type: '' })}${btn('Delete conversation', 'confirm-delete', { tone: 'danger', attrs: `data-id="${esc(el.dataset.id)}"`, type: '' })}</div>`),
     'confirm-delete': async el => { const id = el.dataset.id; await api.request(chatPath(id), { method: 'DELETE' }); state.chats = state.chats.filter(c => c.id !== id); close(); if (state.active?.id === id) { state.active = null; go('chat'); } else render(); toast('Conversation deleted'); },
+    'share-chat': el => { closeMenu(false); return sharing.open(el.dataset.id || state.active?.id); },
+    'shared-fork': async () => {
+      const id = state.active?.id; if (!id || !state.shared) return;
+      const r = await api.request(`${sharedPath(id)}/fork`, { method: 'POST' });
+      toast('Forked into a chat of your own'); await refreshSidebar(); location.hash = `#chat/${encodeURIComponent(r.conversation.id)}`;
+    },
     'export-chat': el => historyView.exportChats([el.dataset.id || state.active?.id].filter(Boolean)),
     'pin-chat': async el => { const c = state.chats.find(c => c.id === el.dataset.id) || state.active; await historyView.update(c.id, { pinned: !c.pinned }); },
     'archive-chat': async el => { const c = state.chats.find(c => c.id === el.dataset.id) || state.active; await historyView.update(c.id, { archived: !c.archived }); },
@@ -890,7 +942,7 @@ export async function startConnected(capabilities) {
     if (!id) return;
     menu.setAttribute('aria-label', 'Conversation options');
     const c = state.chats.find(c => c.id === id) || state.active;
-    menu.innerHTML = [['edit', 'Rename', 'rename-chat'], ['pin', c?.pinned ? 'Unpin' : 'Pin', 'pin-chat'], ['archive', c?.archived ? 'Restore' : 'Archive', 'archive-chat'], ['download', 'Export JSON', 'export-chat'], ['trash', 'Delete', 'delete-chat']].map(([name, label, action]) => `<button role="menuitem" data-action="${action}" data-id="${esc(id)}" class="menu-item ${action === 'delete-chat' ? 'danger' : ''}" ${action === 'delete-chat' && state.streaming && state.streamChatId === id ? 'disabled' : ''}>${icon(name)}${label}</button>`).join('');
+    menu.innerHTML = [['edit', 'Rename', 'rename-chat'], ['pin', c?.pinned ? 'Unpin' : 'Pin', 'pin-chat'], ['archive', c?.archived ? 'Restore' : 'Archive', 'archive-chat'], ['link', 'Share…', 'share-chat'], ['download', 'Export JSON', 'export-chat'], ['trash', 'Delete', 'delete-chat']].map(([name, label, action]) => `<button role="menuitem" data-action="${action}" data-id="${esc(id)}" class="menu-item ${action === 'delete-chat' ? 'danger' : ''}" ${action === 'delete-chat' && state.streaming && state.streamChatId === id ? 'disabled' : ''}>${icon(name)}${label}</button>`).join('');
     menu.hidden = false; anchor.setAttribute('aria-expanded', 'true');
     const rect = anchor.getBoundingClientRect();
     menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -935,7 +987,7 @@ export async function startConnected(capabilities) {
     if (state.phase !== 'ready' && !['retry-session', 'close', 'logout'].includes(el.dataset.action)) return;
     const workspaceAction = workspace.actions[el.dataset.action] || browserView.actions[el.dataset.action];
     if (workspaceAction) { perform(async () => { if (await workspaceAction(el) === 'render') render(); }); return; }
-    perform(() => (actions[el.dataset.action] || personal.actions[el.dataset.action] || connectionsView.actions[el.dataset.action] || clustersView.actions[el.dataset.action] || knowledgeView.actions[el.dataset.action] || libraryView.actions[el.dataset.action] || projectsView.actions[el.dataset.action] || questionsView.actions[el.dataset.action] || researchView.actions[el.dataset.action] || groupsView.actions[el.dataset.action] || turnActions[el.dataset.action] || administration.actions[el.dataset.action] || historyView.actions[el.dataset.action] || attachments.actions[el.dataset.action])?.(el));
+    perform(() => (actions[el.dataset.action] || personal.actions[el.dataset.action] || connectionsView.actions[el.dataset.action] || clustersView.actions[el.dataset.action] || knowledgeView.actions[el.dataset.action] || libraryView.actions[el.dataset.action] || sharing.actions[el.dataset.action] || projectsView.actions[el.dataset.action] || questionsView.actions[el.dataset.action] || researchView.actions[el.dataset.action] || groupsView.actions[el.dataset.action] || turnActions[el.dataset.action] || administration.actions[el.dataset.action] || historyView.actions[el.dataset.action] || attachments.actions[el.dataset.action])?.(el));
   });
   document.addEventListener('submit', async event => {
     event.preventDefault(); const form = event.target;
@@ -1035,6 +1087,7 @@ export async function startConnected(capabilities) {
     administration.input(event); historyView.input(event);
     if (event.target.id === 'message-files') { attachments.upload(event.target); return; }
     if (knowledgeView.input(event) || libraryView.input(event)) return;
+    if (event.target.closest?.('#share-form')) { sharing.input(event); return; }
     if (event.target.matches?.('[data-browser-engine]')) { browserView.input(event.target); return; }
     if (event.target.id !== 'reasoning-effort' || !state.active || state.streaming) return;
     const id = state.active.id, effort = state.reasoningEffort, epoch = identityEpoch, sequence = ++effortSequence;
@@ -1072,7 +1125,7 @@ export async function startConnected(capabilities) {
       if (event.key === 'Tab') closeMenu();
     }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); actions.search(); }
-    if ((event.metaKey || event.ctrlKey) && event.key === '.' && route().page === 'chat' && route().id) { event.preventDefault(); actions.context(); }
+    if ((event.metaKey || event.ctrlKey) && event.key === '.' && route().page === 'chat' && route().id && !state.shared) { event.preventDefault(); actions.context(); }
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'o') { event.preventDefault(); actions['new-chat'](); }
     if (event.target.id === 'prompt' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(event.target.value); }
   });

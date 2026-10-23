@@ -77,12 +77,13 @@ const MINE: &str = "SELECT g.id, g.name, g.description,
         g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $1) AS member,
         (SELECT COUNT(*) FROM user_group_members m JOIN users u ON u.id = m.user_id WHERE m.group_id = g.id AND u.enabled)::bigint AS members,
         (SELECT COUNT(*) FROM projects p WHERE p.scope = 'group' AND p.group_id = g.id)::bigint AS projects,
-        (SELECT COUNT(*) FROM knowledge_collections c WHERE c.scope = 'group' AND c.group_id = g.id)::bigint AS collections
+        (SELECT COUNT(*) FROM knowledge_collections c WHERE c.scope = 'group' AND c.group_id = g.id)::bigint AS collections,
+        (SELECT COUNT(*) FROM conversations v WHERE v.share_scope = 'group' AND v.share_group_id = g.id)::bigint AS chats
      FROM user_groups g WHERE $2 OR g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $1)";
 
 fn group_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"description":r.get::<String,_>("description"),
-        "member":r.get::<bool,_>("member"),"members":r.get::<i64,_>("members"),"projects":r.get::<i64,_>("projects"),"collections":r.get::<i64,_>("collections")})
+        "member":r.get::<bool,_>("member"),"members":r.get::<i64,_>("members"),"projects":r.get::<i64,_>("projects"),"collections":r.get::<i64,_>("collections"),"chats":r.get::<i64,_>("chats")})
 }
 
 async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
@@ -144,7 +145,20 @@ async fn detail(
     .iter()
     .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"ownerName":r.get::<String,_>("owner_name"),"documents":r.get::<i64,_>("documents")}))
     .collect();
+    let chats: Vec<Value> = sqlx::query(
+        "SELECT v.id, v.title, v.updated_at, u.display_name AS owner_name, v.owner_id = $2 AS mine
+         FROM conversations v JOIN users u ON u.id = v.owner_id AND u.enabled
+         WHERE v.share_scope = 'group' AND v.share_group_id = $1 ORDER BY v.updated_at DESC LIMIT 50",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_all(pool)
+    .await?
+    .iter()
+    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"title":r.get::<String,_>("title"),"ownerName":r.get::<String,_>("owner_name"),
+        "mine":r.get::<bool,_>("mine"),"updatedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("updated_at")}))
+    .collect();
     Ok(Json(
-        json!({"group":group_json(&row),"members":members,"projects":projects,"collections":collections,"canManage":user.role == Role::Admin}),
+        json!({"group":group_json(&row),"members":members,"projects":projects,"collections":collections,"chats":chats,"canManage":user.role == Role::Admin}),
     ))
 }

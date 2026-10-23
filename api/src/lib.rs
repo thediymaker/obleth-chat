@@ -18,6 +18,7 @@ pub mod questions;
 pub mod research;
 pub mod retention;
 pub mod sandbox;
+pub mod shares;
 pub mod steer;
 pub mod store;
 pub mod suggestions;
@@ -98,6 +99,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let images = images::router(state.clone());
     let projects = projects::router(state.clone());
     let groups = groups::router(state.clone());
+    let shares = shares::router(state.clone());
     let research = research::router(state.clone());
     let workspaces = sandbox::router(state.clone());
     let browsing = browser::router(state.clone());
@@ -149,6 +151,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(images)
         .merge(projects)
         .merge(groups)
+        .merge(shares)
         .merge(research)
         .merge(workspaces)
         .merge(browsing)

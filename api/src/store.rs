@@ -130,6 +130,8 @@ pub struct Conversation {
     pub messages: Vec<Message>,
     pub active_generation_id: Option<Uuid>,
     pub generation_cancel_requested: bool,
+    /// Who else may read it: none, group or signed_in.
+    pub share_scope: String,
 }
 
 #[derive(Clone, Debug)]
@@ -300,6 +302,97 @@ impl Store {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// A chat as someone it is shared with reads it: unlocked, and without recovering
+    /// the owner's expired generations (the owner's own reads do that).
+    pub async fn read_shared(&self, owner: Uuid, id: Uuid) -> Result<Conversation, ApiError> {
+        let mut tx = self.pool.begin().await?;
+        let conversation = read_conversation(&mut tx, owner, id).await?;
+        tx.commit().await?;
+        Ok(conversation)
+    }
+
+    /// Copies someone else's shared chat into a new chat of `viewer`'s, with its
+    /// attachments and generated images, so the copy keeps working if the original goes.
+    pub async fn fork_shared(
+        &self,
+        viewer: Uuid,
+        owner: Uuid,
+        id: Uuid,
+    ) -> Result<Conversation, ApiError> {
+        let mut tx = self.owner_transaction(viewer).await?;
+        let original = read_conversation(&mut tx, owner, id).await?;
+        require_conversation_capacity(&mut tx, viewer).await?;
+        // A reply still being written is left out; the rest of the chat is copied.
+        let selected = original
+            .messages
+            .iter()
+            .take_while(|m| m.status != "pending")
+            .map(|m| m.id)
+            .collect::<Vec<_>>();
+        let fork = Uuid::new_v4();
+        let title = format!(
+            "{} · fork",
+            original.title.chars().take(153).collect::<String>()
+        );
+        sqlx::query("INSERT INTO conversations (id, owner_id, title, model, reasoning_effort, settings) VALUES ($1,$2,$3,$4,$5,$6)")
+            .bind(fork)
+            .bind(viewer)
+            .bind(title)
+            .bind(&original.model)
+            .bind(&original.reasoning_effort)
+            .bind(&original.settings)
+            .execute(&mut *tx)
+            .await?;
+        copy_selected_messages(&mut tx, id, fork, &selected).await?;
+        // The copy's attachments become the viewer's own.
+        let linked: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT ma.attachment_id FROM message_attachments ma JOIN messages m ON m.id = ma.message_id WHERE m.conversation_id = $1",
+        )
+        .bind(fork)
+        .fetch_all(&mut *tx)
+        .await?;
+        for old in linked {
+            let new = Uuid::new_v4();
+            sqlx::query("INSERT INTO attachments (id, owner_id, name, mime_type, kind, size, data) SELECT $1, $2, name, mime_type, kind, size, data FROM attachments WHERE id = $3")
+                .bind(new)
+                .bind(viewer)
+                .bind(old)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE message_attachments ma SET attachment_id = $1 FROM messages m WHERE ma.attachment_id = $2 AND m.id = ma.message_id AND m.conversation_id = $3")
+                .bind(new)
+                .bind(old)
+                .bind(fork)
+                .execute(&mut *tx)
+                .await?;
+        }
+        // Generated images too, with the copied replies pointing at the new ones.
+        let images: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "WITH originals AS (SELECT id, gen_random_uuid() AS new_id FROM generated_images WHERE conversation_id = $1),
+             copied AS (
+               INSERT INTO generated_images (id, owner_id, conversation_id, mime_type, size, data)
+               SELECT o.new_id, $2, $3, g.mime_type, g.size, g.data FROM generated_images g JOIN originals o ON o.id = g.id
+             )
+             SELECT id, new_id FROM originals",
+        )
+        .bind(id)
+        .bind(viewer)
+        .bind(fork)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (old, new) in images {
+            sqlx::query("UPDATE messages SET content = REPLACE(content, $2, $3) WHERE conversation_id = $1 AND content LIKE '%' || $2 || '%'")
+                .bind(fork)
+                .bind(format!("/api/images/{old}"))
+                .bind(format!("/api/images/{new}"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        let conversation = read_conversation(&mut tx, viewer, fork).await?;
+        tx.commit().await?;
+        Ok(conversation)
     }
 
     pub async fn branch(
@@ -964,7 +1057,7 @@ async fn read_conversation(
     .await?
     .ok_or_else(ApiError::not_found)?;
     let messages = read_messages(tx, owner, id).await?;
-    let (active_generation_id,generation_cancel_requested):(Option<Uuid>,bool)=sqlx::query_as("SELECT active_generation,generation_cancel_requested FROM conversations WHERE id=$1 AND owner_id=$2").bind(id).bind(owner).fetch_one(&mut **tx).await?;
+    let (active_generation_id,generation_cancel_requested,share_scope):(Option<Uuid>,bool,String)=sqlx::query_as("SELECT active_generation,generation_cancel_requested,share_scope FROM conversations WHERE id=$1 AND owner_id=$2").bind(id).bind(owner).fetch_one(&mut **tx).await?;
     Ok(Conversation {
         id: row.id,
         title: row.title,
@@ -978,6 +1071,7 @@ async fn read_conversation(
         messages,
         active_generation_id,
         generation_cancel_requested,
+        share_scope,
     })
 }
 

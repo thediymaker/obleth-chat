@@ -213,11 +213,16 @@ async fn download(
             .fetch_optional(&s.store.pool)
             .await?;
     let (mime, data) = row.ok_or_else(ApiError::not_found)?;
+    image_response(&mime, data)
+}
+
+/// A stored image, sandboxed and cached privately.
+pub(crate) fn image_response(mime: &str, data: Vec<u8>) -> Result<Response, ApiError> {
     let mut response = Response::new(Body::from(data));
     let h = response.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&mime).map_err(|_| ApiError::internal())?,
+        HeaderValue::from_str(mime).map_err(|_| ApiError::internal())?,
     );
     // An image never changes once stored.
     h.insert(

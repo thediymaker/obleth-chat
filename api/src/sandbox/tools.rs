@@ -36,7 +36,7 @@ pub fn definitions() -> Value {
     json!([
         tool("list_files", "List files and directories under a path in the workspace (node_modules, .next and .git are skipped).", json!({"path":{"type":"string","description":"Directory relative to the project folder. Defaults to the project root."}}), &[]),
         tool("read_file", "Read a text file from the workspace. Each line comes back prefixed with its line number and a colon, like `12: text`; the prefix is not part of the file. Long files come back in windows: the result ends by saying which offset to read next. Read the whole window you need in one call rather than many small slices.", json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":1,"description":"First line to read, from 1. Defaults to 1."},"limit":{"type":"integer","minimum":1,"maximum":2000,"description":"Number of lines. Defaults to as many as fit."}}), &["path"]),
-        tool("write_file", "Create a file, or replace one completely, with the full new content. Parent directories are created. For a change to part of an existing file use edit_file.", json!({"path":{"type":"string"},"content":{"type":"string"}}), &["path","content"]),
+        tool("write_file", "Create a file, or replace one completely, with the full new content. Parent directories are created. For a change to part of an existing file use edit_file. Write a long file in parts: the first with write_file, each next one with append set.", json!({"path":{"type":"string"},"content":{"type":"string"},"append":{"type":"boolean","description":"Add the content to the end of the file instead of replacing it."}}), &["path","content"]),
         tool("edit_file", "Replace old_text with new_text in a file you have read. Copy old_text from the file exactly, without the line-number prefixes read_file adds, and include enough surrounding lines that it occurs only once (or set replace_all to change every occurrence). Differences in indentation or trailing spaces are tolerated.", json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"replace_all":{"type":"boolean","description":"Replace every occurrence. Defaults to false."}}), &["path","old_text","new_text"]),
         tool("run_command", "Run a shell command in the project folder and return its output. Use for installs, builds, tests and inspection. Do not use it to start or stop servers.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":300}}), &["command"]),
         tool("start_server", "Start or restart a long-running server and show it in the preview pane. Next.js and Vite dev servers, and a plain web server for an index.html site, start automatically, so only use this for other servers, or to restart after changing package.json or the framework config. It must listen on 0.0.0.0 at the given port.", json!({"command":{"type":"string","description":"For example: python3 -m http.server 3000 --bind 0.0.0.0"},"port":{"type":"integer","minimum":1024,"maximum":65535}}), &["command","port"]),
@@ -411,7 +411,10 @@ pub async fn run(sb: &Sandboxes, sandbox: &Sandbox, name: &str, raw_args: &str) 
                 let (window, shown) = numbered(&text, offset as usize, limit as usize, truncated);
                 (window, shown, None)
             }),
-        "write_file" => write(sb, sandbox, arg(&args, "path"), arg(&args, "content")).await,
+        "write_file" => {
+            let append = args.get("append").and_then(Value::as_bool) == Some(true);
+            write(sb, sandbox, arg(&args, "path"), arg(&args, "content"), append).await
+        }
         "edit_file" => edit(sb, sandbox, &args).await,
         "run_command" => command(sb, sandbox, &args).await,
         "start_server" => start_server(sb, sandbox, &args).await,
@@ -555,15 +558,27 @@ async fn list(sb: &Sandboxes, sandbox: &Sandbox, args: &Value) -> ToolResult {
     ))
 }
 
-async fn write(sb: &Sandboxes, sandbox: &Sandbox, path: &str, content: &str) -> ToolResult {
+async fn write(
+    sb: &Sandboxes,
+    sandbox: &Sandbox,
+    path: &str,
+    content: &str,
+    append: bool,
+) -> ToolResult {
     let path = clean_path(path, &sandbox.slug)?;
     if content.len() > 1024 * 1024 {
         return Err("Files are limited to 1 MB".into());
     }
+    // Appending keeps the whole file under the same limit.
+    let script = if append {
+        "mkdir -p -- \"$(dirname -- \"$1\")\" && cat >> \"$1\" && [ \"$(wc -c < \"$1\")\" -le 1048576 ] || { echo 'Files are limited to 1 MB' >&2; exit 1; }"
+    } else {
+        "mkdir -p -- \"$(dirname -- \"$1\")\" && cat > \"$1\""
+    };
     let (_, err, code) = sh(
         sb,
         sandbox,
-        "mkdir -p -- \"$(dirname -- \"$1\")\" && cat > \"$1\"",
+        script,
         &[&path],
         Some(content.as_bytes()),
         Duration::from_secs(30),
@@ -574,7 +589,11 @@ async fn write(sb: &Sandboxes, sandbox: &Sandbox, path: &str, content: &str) -> 
     }
     let lines = content.lines().count();
     Ok((
-        format!("Wrote {path} ({} bytes).", content.len()),
+        format!(
+            "{} {path} ({} bytes).",
+            if append { "Added to" } else { "Wrote" },
+            content.len()
+        ),
         format!("{lines} lines"),
         None,
     ))
@@ -597,7 +616,7 @@ async fn edit(sb: &Sandboxes, sandbox: &Sandbox, args: &Value) -> ToolResult {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let updated = replace(&text, old, new, all)?;
-    write(sb, sandbox, arg(args, "path"), &updated).await?;
+    write(sb, sandbox, arg(args, "path"), &updated, false).await?;
     let path = clean_path(arg(args, "path"), &sandbox.slug)?;
     let detail = format!(
         "-{} +{} lines",

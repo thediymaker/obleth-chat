@@ -26,7 +26,7 @@ use uuid::Uuid;
 pub const TOOL: &str = "delegate";
 pub const MAX_AGENTS: usize = 6;
 const MAX_STEPS: usize = 30;
-const STEP_TOKENS: i32 = 4096;
+const STEP_TOKENS: i32 = 8192;
 const TIMEOUT: Duration = Duration::from_secs(300);
 /// What the main model reads of each report, and what the reply keeps to show.
 const REPORT_CHARS: usize = 12_000;

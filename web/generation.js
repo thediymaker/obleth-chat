@@ -1,5 +1,5 @@
 export const generationKeys = ['systemPrompt', 'temperature', 'topP', 'maxTokens', 'reasoningEffort'];
-const fallback = { systemPrompt: '', temperature: 0.7, topP: 1, maxTokens: 2048, reasoningEffort: 'medium' };
+const fallback = { systemPrompt: '', temperature: 0.7, topP: 1, maxTokens: 0, reasoningEffort: 'medium' };
 
 // Missing personal keys inherit the published model policy. Synthesized form
 // defaults from the preferences API are deliberately not treated as overrides.

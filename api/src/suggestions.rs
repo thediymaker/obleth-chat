@@ -234,7 +234,10 @@ async fn generate(
     };
     let context =
         json!({"userQuestion":context.question,"assistantAnswer":context.answer}).to_string();
-    let max_tokens = resolved.parameters.max_tokens.min(OUTPUT_TOKENS);
+    let max_tokens = match resolved.parameters.max_tokens {
+        0 => OUTPUT_TOKENS,
+        limit => limit.min(OUTPUT_TOKENS),
+    };
     let mut tx = state.store.pool.begin().await?;
     let enabled: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM users WHERE id=$1 AND enabled AND NOT password_change_required FOR UPDATE",

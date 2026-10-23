@@ -68,6 +68,8 @@ async fn fake_chat(
     let claims = verify(&headers, &f);
     assert!(headers.get("x-obleth-session-id").is_some());
     assert_eq!(body["stream_options"]["include_usage"], true);
+    // No output limit is sent unless someone set one: the model's own applies.
+    assert!(body.get("max_tokens").is_none(), "{body}");
     let mode = body["messages"].as_array().unwrap().last().unwrap()["content"]
         .as_str()
         .unwrap()

@@ -216,7 +216,33 @@ async fn chat(
     let thinks = messages
         .iter()
         .any(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.contains("think")));
+    let cut = messages.iter().any(|m| {
+        m["role"] == "user"
+            && m["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("gets cut off"))
+    });
+    let warned = messages.iter().any(|m| {
+        m["role"] == "user"
+            && m["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("[Chat: your last step stopped"))
+    });
     let stream = async_stream::stream! {
+        if cut && !warned {
+            // The output limit stops the call half written.
+            let partial = json!([{"index":0,"id":"call_cut","type":"function","function":{"name":"fixture__lookup","arguments":"{\"job\":\"4"}}]);
+            yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"tool_calls":partial}}]}).to_string()));
+            yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"length"}]}).to_string()));
+            yield Ok(Event::default().data("[DONE]"));
+            return;
+        }
+        if cut {
+            yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"content":"Smaller this time."}}]}).to_string()));
+            yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}]}).to_string()));
+            yield Ok(Event::default().data("[DONE]"));
+            return;
+        }
         if thinks {
             let thought = if results.is_empty() { "Look the job up first." } else { "Both ran; report θ." };
             yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"reasoning_content":thought}}]}).to_string()));
@@ -1725,4 +1751,45 @@ async fn thoughts_are_placed_between_steps_and_notes_steer_the_next_step(pool: P
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_call_cut_off_at_the_output_limit_never_runs(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, created) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Fixture","url":f.mcp_url,"token":TOKEN}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (id, stream) = send(&f, &admin, "Look up job 42, but this gets cut off").await;
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Smaller this time."), "{text}");
+    // The half-written lookup never reached the server; the model was told why.
+    assert!(tool_calls(&f.mcp_seen).is_empty());
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["tool"] == "output_limit" && e["status"] == "error"));
+    let second = f.gateway_seen.lock().unwrap()[1].clone();
+    let note = second["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(note.contains("fixture__lookup, so nothing ran"), "{note}");
 }

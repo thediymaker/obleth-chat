@@ -36,6 +36,8 @@ fn visibility_all() -> String {
     "all".into()
 }
 
+/// The highest output limit anyone may set; 0 means none.
+pub const MAX_OUTPUT_TOKENS: i32 = 262_144;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ParameterOverrides {
@@ -73,8 +75,10 @@ impl ParameterOverrides {
         {
             return Err(ApiError::bad("Top P must be between 0 and 1"));
         }
-        if self.max_tokens.is_some_and(|v| !(1..=32768).contains(&v)) {
-            return Err(ApiError::bad("Maximum tokens must be between 1 and 32,768"));
+        if self.max_tokens.is_some_and(|v| !(0..=MAX_OUTPUT_TOKENS).contains(&v)) {
+            return Err(ApiError::bad(
+                "The output limit must be 0 (the model's own) or up to 262,144 tokens",
+            ));
         }
         Ok(())
     }
@@ -85,6 +89,7 @@ pub struct GenerationParameters {
     pub system_prompt: String,
     pub temperature: f64,
     pub top_p: f64,
+    /// An output limit someone chose; 0 leaves it to the model.
     pub max_tokens: i32,
     pub reasoning_effort: ReasoningEffort,
 }
@@ -94,7 +99,7 @@ impl Default for GenerationParameters {
             system_prompt: String::new(),
             temperature: 0.7,
             top_p: 1.0,
-            max_tokens: 2048,
+            max_tokens: 0,
             reasoning_effort: ReasoningEffort::Medium,
         }
     }
@@ -700,7 +705,7 @@ impl Default for Preferences {
             system_prompt: String::new(),
             temperature: 0.7,
             top_p: 1.0,
-            max_tokens: 2048,
+            max_tokens: 0,
             density: "comfortable".into(),
             focus: false,
             context: true,

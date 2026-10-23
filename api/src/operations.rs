@@ -25,6 +25,8 @@ fn charge_estimate(output_bytes: &str) -> String {
 }
 /// Both durable auxiliary leases outlast the whole task and its bounded cleanup.
 pub const FOLLOW_UP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Output held back against the daily allowance for a reply with no output limit.
+pub const UNCAPPED_RESERVATION: i32 = 8_192;
 pub const FOLLOW_UP_LEASE_SECONDS: i64 = FOLLOW_UP_TIMEOUT.as_secs() as i64 + 15;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -182,9 +184,18 @@ async fn reserve_kind_in(
     context_bytes: usize,
     leased: Option<(&str, i64)>,
 ) -> Result<(), ApiError> {
-    if !(1..=32768).contains(&max_tokens) {
-        return Err(ApiError::bad("Maximum tokens must be between 1 and 32,768"));
+    if !(0..=crate::models::MAX_OUTPUT_TOKENS).contains(&max_tokens) {
+        return Err(ApiError::bad(
+            "The output limit must be 0 (the model's own) or up to 262,144 tokens",
+        ));
     }
+    // What the daily allowance holds back until the reply settles on its real usage:
+    // its limit, or an estimate when it has none.
+    let max_tokens = if max_tokens == 0 {
+        UNCAPPED_RESERVATION
+    } else {
+        max_tokens.min(32_768)
+    };
     let context_bytes =
         i64::try_from(context_bytes).map_err(|_| ApiError::bad("Context size is too large"))?;
     recover_in(tx, owner).await?;

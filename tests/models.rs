@@ -478,7 +478,8 @@ async fn profile_defaults_locks_and_auto_obey_personal_overrides_without_bypass(
     let user = session(&pool, Role::User).await;
     profile(&f,&admin,"alpha",json!({"defaults":{"systemPrompt":"Managed instructions","temperature":0.1,"maxTokens":4096},"allowedOverrides":["topP","maxTokens","reasoningEffort"],"isDefault":true})).await;
     let (_, untouched) = call(&f.app, &user, "GET", "/api/preferences", Value::Null).await;
-    assert_eq!(untouched["preferences"]["maxTokens"], 2048);
+    // No output limit unless someone sets one.
+    assert_eq!(untouched["preferences"]["maxTokens"], 0);
     assert_eq!(untouched["overrides"], json!({}));
     let (_, appearance) = call(
         &f.app,
@@ -614,7 +615,8 @@ async fn preferences_and_presets_are_durable_validated_and_owner_scoped(pool: Pg
     for invalid in [
         json!({"temperature":3}),
         json!({"topP":-1}),
-        json!({"maxTokens":0}),
+        json!({"maxTokens":-1}),
+        json!({"maxTokens":262_145}),
         json!({"reasoningEffort":"max"}),
         json!({"density":"bad"}),
         json!({"unknown":"value"}),

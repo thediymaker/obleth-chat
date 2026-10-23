@@ -641,6 +641,8 @@ const TOOL_HISTORY_BYTES: usize = 160 * 1024;
 const TOOL_ARGUMENT_BYTES: usize = 160 * 1024;
 /// Steps of the current turn kept in the request; a longer turn drops its oldest.
 const KEPT_STEPS: usize = 150;
+/// Steps in a row that may stop at the output limit before the turn gives up.
+const MAX_CUTS: u32 = 3;
 const STEPS_DROPPED: &str = "[Earlier steps of this turn were dropped to save context:";
 const ARGUMENTS_OMITTED: &str =
     r#"{"omitted":"Earlier arguments omitted to save context. The tool result still applies."}"#;
@@ -1022,15 +1024,19 @@ async fn run_generation(
             messages[0] = json!({"role":"system","content":prompt});
         }
     }
-    // Workspace turns write whole files through tool arguments.
-    let max_tokens = if workspace.is_some() {
-        parameters.max_tokens.max(16_384)
-    } else {
-        parameters.max_tokens
+    // No output limit unless someone set one: the model's own applies. Workspace
+    // turns write whole files through tool arguments, so a set limit has a floor.
+    let max_tokens = match parameters.max_tokens {
+        0 => None,
+        limit if workspace.is_some() => Some(limit.max(16_384)),
+        limit => Some(limit),
     };
     let mut payload = json!({"model":resolved.model,"messages":messages,"temperature":parameters.temperature,"top_p":parameters.top_p,"max_tokens":max_tokens,"reasoning_effort":turn.reasoning_effort,"stream":true,"stream_options":{"include_usage":true}});
     if resolved.capabilities.supports_reasoning == Some(false) {
         payload.as_object_mut().unwrap().remove("reasoning_effort");
+    }
+    if max_tokens.is_none() {
+        payload.as_object_mut().unwrap().remove("max_tokens");
     }
     let mut tools = vec![];
     // Worker models the main model can hand exploration to, chosen by administrators.
@@ -1120,8 +1126,10 @@ async fn run_generation(
         let mut saved_at = Instant::now();
         let mut drafted = Instant::now();
         let mut checkpoints = 0;
+        let mut cuts = 0;
         loop {
             steps += 1;
+            finish_reason = None;
             let step_start = content.len();
             // Where this step's thinking starts, in UTF-16 units as the browser counts.
             let thought_from = reasoning_content.encode_utf16().count();
@@ -1321,6 +1329,48 @@ async fn run_generation(
                 let entry = json!({"id":format!("thought-{steps}"),"kind":"thought","from":thought_from,"to":thought_to,"durationMs":round_began.elapsed().as_millis() as u64,"status":"completed"});
                 record(&mut activity, &entry, true);
                 emit(&mut tx, "tool", entry);
+            }
+            // A step that stopped at the output limit: a half-written tool call never
+            // runs, and an answer cut short under a set limit carries on where it stopped.
+            if finish_reason.as_deref() == Some("length") {
+                let text = content[step_start..].to_owned();
+                let cut_call = tool_turn && !calls.is_empty();
+                let limit = max_tokens.map_or("the model's output limit".to_string(), |n| {
+                    format!("the {n}-token output limit")
+                });
+                let note = if cut_call {
+                    let names: Vec<&str> = calls
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .filter(|n| !n.is_empty())
+                        .collect();
+                    Some(format!("[Chat: your last step stopped at {limit} while you were writing a call to {}, so nothing ran. Keep each call well under the limit: write a long file in parts, the first with write_file and each next one with write_file and append set, and think less before writing.]", names.join(", ")))
+                } else if max_tokens.is_some() && text.trim().is_empty() && thought_to > thought_from {
+                    Some("[Chat: you reached the output limit while thinking. Write the answer now.]".to_string())
+                } else if max_tokens.is_some() && !text.trim().is_empty() {
+                    Some("[Chat: your answer reached the output limit. Continue exactly where it stopped, without repeating anything.]".to_string())
+                } else {
+                    None
+                };
+                if let Some(note) = note.filter(|_| cuts < MAX_CUTS) {
+                    cuts += 1;
+                    let messages = payload["messages"].as_array_mut().unwrap();
+                    if !text.is_empty() {
+                        messages.push(json!({"role":"assistant","content":text}));
+                    }
+                    messages.push(json!({"role":"user","content":note}));
+                    if cut_call {
+                        let entry = json!({"id":format!("cut-{steps}"),"tool":"output_limit","summary":"Stopped at the output limit mid-call; nothing ran","detail":format!("The step reached {limit}. Chat asked the model to write in smaller parts."),"status":"error","startedAt":chrono::Utc::now()});
+                        record(&mut activity, &entry, true);
+                        emit(&mut tx, "tool", entry);
+                    }
+                    continue;
+                }
+                if cut_call {
+                    return Err(format!("The model kept stopping at {limit} in the middle of a tool call. Raise the output limit in Parameters, or lower thinking effort."));
+                }
+            } else {
+                cuts = 0;
             }
             if calls.is_empty() || !tool_turn {
                 break;

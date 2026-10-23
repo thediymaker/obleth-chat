@@ -588,8 +588,10 @@ impl Store {
         if !temperature.is_finite() || !(0.0..=2.0).contains(&temperature) {
             return Err(ApiError::bad("Temperature must be between 0 and 2"));
         }
-        if !(1..=32_768).contains(&max_tokens) {
-            return Err(ApiError::bad("Maximum tokens must be between 1 and 32,768"));
+        if !(0..=crate::models::MAX_OUTPUT_TOKENS).contains(&max_tokens) {
+            return Err(ApiError::bad(
+                "The output limit must be 0 (the model's own) or up to 262,144 tokens",
+            ));
         }
         let mut tx = self.owner_transaction(owner).await?;
         recover_expired_in(&mut tx, owner).await?;

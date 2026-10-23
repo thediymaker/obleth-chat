@@ -162,6 +162,14 @@ export function createKnowledge({ api, state, capabilities, render, modal, close
     const n = chosen().length, label = n === 1 ? names()[0] || 'Knowledge' : 'Knowledge';
     return `<button type="button" class="btn ghost small knowledge-toggle ${n ? 'on' : ''}" data-action="knowledge-picker" title="Collections this chat searches" aria-label="Knowledge: ${n} collection${n === 1 ? '' : 's'}" ${state.streaming ? 'disabled' : ''}>${icon('book')}<span class="option-text">${esc(label.length > 28 ? `${label.slice(0, 27)}…` : label)}</span>${n > 1 ? `<span class="count">${n}</span>` : ''}</button>`;
   }
+  /** The chat line's knowledge pill: the collections this chat searches, or a way to add some. */
+  function pill(addable = true) {
+    if (!enabled() || (chat.id || null) !== (chatId() || null)) return '';
+    const list = names();
+    if (!list.length && !addable) return '';
+    const label = list.length > 2 ? `${list.slice(0, 2).join(' · ')} +${list.length - 2}` : list.join(' · ');
+    return `<button type="button" class="chat-pill ${list.length ? '' : 'add'}" data-action="knowledge-picker" title="Collections this chat searches" ${state.streaming ? 'disabled' : ''}>${icon(list.length ? 'book' : 'plus')}<span>${list.length ? esc(label) : 'Knowledge'}</span></button>`;
+  }
   function contextSection() {
     if (!enabled()) return '';
     const list = names();
@@ -257,5 +265,5 @@ export function createKnowledge({ api, state, capabilities, render, modal, close
     return false;
   }
   function clear() { local.sequence++; poll(false); Object.assign(local, { list: null, usage: null, groups: [], tab: 'all', error: '', loading: false, detail: null, query: '', results: null, searching: false, uploading: [] }); chat.id = null; chat.ids = []; chat.draft = []; }
-  return { enabled, load, page, actions, submit, input, add, clear, loadChat, composerButton, contextSection, applyDraft, resetDraft: () => { chat.draft = []; }, sources, cite, signature, stop: () => poll(false) };
+  return { enabled, load, page, actions, submit, input, add, clear, loadChat, composerButton, pill, contextSection, applyDraft, resetDraft: () => { chat.draft = []; }, sources, cite, signature, stop: () => poll(false) };
 }

@@ -279,7 +279,7 @@ export function createBrowser({ api, state, route, toast, chatPath, capabilities
   };
 
   return {
-    enabled, load, setOn, on, visible, show, hide, toggleButton, card, signature, observe, settingsCard, input, actions,
+    enabled, load, setOn, on, visible, show, hide, dismiss: id => { chat(id).shown = false; }, reveal: id => { chat(id).shown = true; }, toggleButton, card, signature, observe, settingsCard, input, actions,
     attach: hooks => { pane = hooks; },
     reset: () => { disconnect(); chats.clear(); offers.clear(); shownId = null; settings.data = null; },
   };

@@ -45,7 +45,7 @@ export async function startConnected(capabilities) {
     systemPrompt: '', temperature: 0.7, topP: 1, maxTokens: 2048, reasoningEffort: 'medium', preferences: null, preferenceOverrides: {}, presets: [],
     workspaceDraft: false, browserDraft: false, openActivity: new Set(),
   };
-  let toastTimer, loadSequence = 0, identityEpoch = 0, menuAnchor = null, effortAnchor = null;
+  let toastTimer, loadSequence = 0, identityEpoch = 0, menuAnchor = null;
   let effortSaveQueue = Promise.resolve(), effortSequence = 0;
   const operations = new Map(), revisions = new Map(), watches = new Map(), versionSelections = new Map();
   let operationSequence = 0;
@@ -54,9 +54,9 @@ export async function startConnected(capabilities) {
   const detailsOpen = new Set();
   const menu = document.createElement('div');
   menu.id = 'conversation-menu'; menu.className = 'conversation-menu'; menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', 'Conversation options'); menu.hidden = true; document.body.append(menu);
-  const effortPopover = document.createElement('div');
-  effortPopover.id = 'effort-popover'; effortPopover.className = 'effort-popover'; effortPopover.setAttribute('role', 'dialog'); effortPopover.setAttribute('aria-label', 'Thinking effort'); effortPopover.hidden = true; document.body.append(effortPopover);
   const modelPopover = document.createElement('div');
+  // Tabbing out of the model list closes it; Tab inside moves on to the effort slider.
+  modelPopover.addEventListener('focusout', event => { if (!modelPopover.hidden && event.relatedTarget && !modelPopover.contains(event.relatedTarget)) closeModels(false); });
   modelPopover.id = 'model-popover'; modelPopover.className = 'model-popover'; modelPopover.setAttribute('role', 'dialog'); modelPopover.setAttribute('aria-label', 'Choose a model'); modelPopover.hidden = true; document.body.append(modelPopover);
   let modelAnchor = null;
   const api = new ApiClient({ onUnauthorized: error => expire(error.message) });
@@ -81,7 +81,7 @@ export async function startConnected(capabilities) {
   };
   const attachments = createAttachments({ api, state, render, modal, close, toast: message => toast(message) });
   const browserView = createBrowser({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), send: text => send(text), modal: (...args) => modal(...args), close: () => close(), assistantName: () => branding.assistantName });
-  const workspace = createWorkspace({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), browser: browserView });
+  const workspace = createWorkspace({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), browser: browserView, details: id => state.active?.id === id ? chatDetails(state.active) : '' });
   browserView.attach({ update: () => workspace.update(), showTab: (id, tab) => workspace.showTab(id, tab), showing: (id, tab) => workspace.showing(id, tab) });
   const personal = createSettings({ api, state, render, modal, close, toast: message => toast(message), applyPreferences, applyPreset, workspaces: () => workspace.enabled(), browserCard: () => browserView.settingsCard() });
   const connectionsView = createConnections({ api, state, capabilities, render, modal, close, toast: message => toast(message), onChange: item => clustersView.changed(item) });
@@ -112,7 +112,7 @@ export async function startConnected(capabilities) {
   const administration = createAdmin({ api, state, capabilities, render, modal, close, toast: message => toast(message), onIdentityChanged: session, onCatalogChanged: () => applyPreferences(state.preferences) });
   const historyView = createHistory({ api, state, render, modal, close, toast: message => toast(message), refreshSidebar });
   function modal(title, body) {
-    closeMenu(false); closeEffort(false);
+    closeMenu(false); closeModels(false);
     $('#modal').innerHTML = `<div class="modal-head"><h2 id="modal-title">${esc(title)}</h2>${iconButton('x', 'close', 'Close dialog')}</div><div class="modal-body">${body}</div>`;
     if (!$('#modal').open) $('#modal').showModal();
   }
@@ -129,7 +129,7 @@ export async function startConnected(capabilities) {
     state.openActivity.clear(); workspace.reset(); browserView.reset();
     document.body.classList.remove('collapsed', 'sidebar-open');
     delete capabilities.adminGatewayUrl; delete capabilities.gatewayAdminUrl;
-    api.clearSession(); attachments.clear(); personal.clear(); connectionsView.clear(); clustersView.clear(); knowledgeView.clear(); libraryView.clear(); projectsView.clear(); groupsView.clear(); questionsView.clear(); researchView.clear(); hideSelection(); administration.clear(); historyView.clear(); thinkingOpen.clear(); detailsOpen.clear(); pendingEfforts.clear(); closeMenu(false); closeEffort(false); closeModels(false); close();
+    api.clearSession(); attachments.clear(); personal.clear(); connectionsView.clear(); clustersView.clear(); knowledgeView.clear(); libraryView.clear(); projectsView.clear(); groupsView.clear(); questionsView.clear(); researchView.clear(); hideSelection(); administration.clear(); historyView.clear(); thinkingOpen.clear(); detailsOpen.clear(); pendingEfforts.clear(); closeMenu(false); closeModels(false); close();
   }
   function expire(message) {
     clearPrivateState(); state.phase = 'login'; state.loginError = message; state.busy = false;
@@ -203,7 +203,7 @@ export async function startConnected(capabilities) {
   function shell(content) {
     const { page, id } = route();
     const section = sections[page] || page, title = pageTitles[page] || nav.find(n => n[0] === page)?.[2] || 'Settings';
-    return `<aside class="sidebar" aria-label="Main navigation">${brand()}<button class="btn primary new-chat" data-action="new-chat">${icon('plus')}New chat <kbd>⇧⌘O</kbd></button><nav class="nav">${nav.filter(([path]) => (path !== 'compute' || computeTabs().length) && (path !== 'library' || libraryView.enabled())).map(([path, i, label]) => `<a href="#${path}" class="nav-item ${section === path ? 'active' : ''}" ${section === path ? 'aria-current="page"' : ''}>${icon(i)}<span>${label}</span></a>`).join('')}</nav>${projectsView.sidebar(page === 'projects' ? id : '')}<div class="recent"><div class="recent-header spread"><span class="eyebrow">Recent</span>${iconButton('search', 'search', 'Search conversations')}</div>${state.chats.length ? state.chats.slice(0, 15).map(c => `<div class="recent-row ${id === c.id ? 'active' : ''}"><a class="recent-link" href="#chat/${encodeURIComponent(c.id)}" title="${esc(c.title)}">${esc(c.title)}</a>${iconButton('more', 'chat-menu', `Options for ${c.title}`, `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div>`).join('') : '<p class="sidebar-empty">Your next idea starts here.</p>'}${state.chats.length ? `<a class="recent-all ${page === 'history' ? 'active' : ''}" href="#history">All chats${icon('right')}</a>` : ''}</div><div class="sidebar-bottom"><a class="nav-item ${['settings','admin','system','connections'].includes(page) ? 'active' : ''}" href="#settings" ${['settings','admin','system','connections'].includes(page) ? 'aria-current="page"' : ''}>${icon('settings')}Settings</a><button class="profile" data-action="profile" aria-haspopup="menu" aria-expanded="false"><span class="avatar">${esc(initials())}</span><span class="grow"><span class="profile-name">${esc(name())}</span><span class="profile-caption">${esc(state.user.role)} · Personal</span></span>${icon('down')}</button></div></aside><div class="app-main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation">${icon('panel')}</button><span class="workspace-label">Personal workspace</span><span class="slash">/</span><span>${title}</span></div><div class="top-actions">${themeControl('header-theme')}${iconButton('search', 'search', 'Search conversations')}<button class="btn ghost small context-toggle" data-action="${page === 'chat' && id ? 'context' : 'focus'}">${icon('panel')}<span>${page === 'chat' && id ? 'Context' : 'Focus mode'}</span></button></div></header><main id="main" class="content" tabindex="-1">${alert(state.error, 'refresh')}${content}</main><footer class="bottom-bar"><div class="row">${statusMetrics()}</div><div class="row"><span>${esc(branding.siteName)}</span><button data-action="shortcuts" aria-label="Keyboard shortcuts">⌘ K</button></div></footer></div>`;
+    return `<aside class="sidebar" aria-label="Main navigation">${brand()}<button class="btn primary new-chat" data-action="new-chat">${icon('plus')}New chat <kbd>⇧⌘O</kbd></button><nav class="nav">${nav.filter(([path]) => (path !== 'compute' || computeTabs().length) && (path !== 'library' || libraryView.enabled())).map(([path, i, label]) => `<a href="#${path}" class="nav-item ${section === path ? 'active' : ''}" ${section === path ? 'aria-current="page"' : ''}>${icon(i)}<span>${label}</span></a>`).join('')}</nav>${projectsView.sidebar(page === 'projects' ? id : '')}<div class="recent"><div class="recent-header spread"><span class="eyebrow">Recent</span>${iconButton('search', 'search', 'Search conversations')}</div>${state.chats.length ? state.chats.slice(0, 15).map(c => `<div class="recent-row ${id === c.id ? 'active' : ''}"><a class="recent-link" href="#chat/${encodeURIComponent(c.id)}" title="${esc(c.title)}">${esc(c.title)}</a>${iconButton('more', 'chat-menu', `Options for ${c.title}`, `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div>`).join('') : '<p class="sidebar-empty">Your next idea starts here.</p>'}${state.chats.length ? `<a class="recent-all ${page === 'history' ? 'active' : ''}" href="#history">All chats${icon('right')}</a>` : ''}</div><div class="sidebar-bottom"><a class="nav-item ${['settings','admin','system','connections'].includes(page) ? 'active' : ''}" href="#settings" ${['settings','admin','system','connections'].includes(page) ? 'aria-current="page"' : ''}>${icon('settings')}Settings</a><button class="profile" data-action="profile" aria-haspopup="menu" aria-expanded="false"><span class="avatar">${esc(initials())}</span><span class="grow"><span class="profile-name">${esc(name())}</span><span class="profile-caption">${esc(state.user.role)} · Personal</span></span>${icon('down')}</button></div></aside><div class="app-main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation">${icon('panel')}</button><span class="workspace-label">Personal workspace</span><span class="slash">/</span><span>${title}</span></div><div class="top-actions">${themeControl('header-theme')}${iconButton('search', 'search', 'Search conversations')}<button class="btn ghost small context-toggle" data-action="${page === 'chat' && id ? 'context' : 'focus'}">${icon('panel')}<span>${page === 'chat' && id ? 'Details' : 'Focus mode'}</span></button></div></header><main id="main" class="content" tabindex="-1">${alert(state.error, 'refresh')}${content}</main><footer class="bottom-bar"><div class="row">${statusMetrics()}</div><div class="row"><span>${esc(branding.siteName)}</span><button data-action="shortcuts" aria-label="Keyboard shortcuts">⌘ K</button></div></footer></div>`;
   }
   function statusMetrics() {
     const today = state.usage?.today, limits = state.usage?.limits || {}, count = value => compactNumber.format(Number(value) || 0);
@@ -218,20 +218,40 @@ export async function startConnected(capabilities) {
   function composer(home = false) {
     const available = state.models.length > 0, op = currentOperation();
     const hint = state.switchingVersion ? 'Switching response version…' : state.streaming ? op?.stopRequested ? 'Stopping the response…' : op?.phase === 'recovering' ? 'Reconnecting to the saved response…' : op?.phase === 'sending' ? 'Sending your message…' : 'Generating a response…' : 'AI can make mistakes. Check important information.';
-    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="12000" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar()}${workspace.toggleButton()}${browserView.toggleButton()}${connectionsView.composerButton()}${knowledgeView.composerButton()}<button type="button" class="model-button" data-action="models" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-popover" aria-label="Model: ${esc(modelName(state.model))}" ${!available || state.streaming ? 'disabled' : ''}>${icon('cube')}<span>${esc(modelName(state.model))}</span>${icon('down')}</button>${effortButton()}</div><button class="send-btn" type="${state.streaming ? 'button' : 'submit'}" ${state.streaming ? 'data-action="stop"' : ''} ${(state.streaming ? op?.stopRequested : state.switchingVersion || !available || attachments.busy()) ? 'disabled' : ''} aria-label="${state.streaming ? 'Stop response' : 'Send message'}">${icon(state.streaming ? 'stop' : 'arrow')}</button></div></form><div class="composer-hint">${esc(hint)}</div>`;
+    // What the model can use sits in one dock; on ones show their names while there is room.
+    const dock = `${workspace.toggleButton()}${browserView.toggleButton()}${connectionsView.composerButton()}`;
+    const knowledge = route().id ? '' : knowledgeView.pill(false);
+    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${knowledge ? `<div class="composer-chips">${knowledge}</div>` : ''}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="12000" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar(knowledgeView.enabled())}${dock ? `<div class="dock" role="group" aria-label="What the model can use">${dock}</div>` : ''}</div>${engineButton(available)}${sendButton(op, available)}</div></form><div class="composer-hint">${esc(hint)}</div>`;
+  }
+  /** One pill for the model and its thinking effort; it opens the model list with effort and the other parameters. */
+  function engineButton(available) {
+    const name = modelName(state.model), level = efforts.indexOf(state.reasoningEffort);
+    return `<button type="button" class="engine-button" data-action="models" aria-haspopup="dialog" aria-expanded="false" aria-controls="model-popover" aria-label="Model: ${esc(name)}. Thinking effort: ${effortLabel(state.reasoningEffort)}" title="${esc(name)} · thinking ${effortLabel(state.reasoningEffort).toLowerCase()}" ${!available || state.streaming ? 'disabled' : ''}>${icon('cube')}<span class="engine-name">${esc(name)}</span><span class="effort-bars" aria-hidden="true">${[1, 2, 3].map(i => `<i class="${level >= i ? 'lit' : ''}"></i>`).join('')}</span>${icon('down')}</button>`;
+  }
+  /** How much of the model's window the chat uses: the last reply's input and output. */
+  function contextUse(c = state.active) {
+    const usage = route().id && c ? [...(c.messages || [])].reverse().find(m => m.role === 'assistant' && m.usage)?.usage : null;
+    const input = Number(usage?.prompt_tokens) || 0, output = Number(usage?.completion_tokens) || 0;
+    const windowSize = Number(policyModel()?.metadata?.contextWindow) || 0, used = input + output;
+    return { input, output, used, windowSize, share: windowSize ? Math.min(1, used / windowSize) : 0 };
+  }
+  const tokens = n => n < 1000 ? String(n) : n < 10000 ? `${(n / 1000).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`;
+  function sendButton(op, available) {
+    const use = contextUse(), round = 2 * Math.PI * 17, level = use.share > .9 ? 'full' : use.share > .75 ? 'high' : '';
+    const ring = `<svg class="context-ring" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="17"></circle>${use.share ? `<circle class="used" cx="20" cy="20" r="17" stroke-dasharray="${Math.max(1.5, use.share * round).toFixed(1)} ${round.toFixed(1)}"></circle>` : ''}</svg>`;
+    const amount = use.windowSize ? `${tokens(use.used)} / ${tokens(use.windowSize)}` : use.used ? tokens(use.used) : '—';
+    const card = `<div class="context-card" id="context-card" role="tooltip"><div class="spread"><strong>Context</strong><span>${amount}</span></div>${use.windowSize ? `<progress class="meter" max="${use.windowSize}" value="${Math.min(use.used, use.windowSize)}" aria-label="Context used"></progress>` : ''}<p>${use.used ? `The last request and reply, with tools, instructions and page text.${use.windowSize ? '' : ' This model does not report its window.'}` : 'Shows after the first reply.'}</p>${route().id ? `<button type="button" class="context-card-link" data-action="context">Chat details${icon('right')}</button>` : ''}</div>`;
+    return `<div class="send-wrap ${level}">${ring}<button class="send-btn" type="${state.streaming ? 'button' : 'submit'}" ${state.streaming ? 'data-action="stop"' : ''} ${(state.streaming ? op?.stopRequested : state.switchingVersion || !available || attachments.busy()) ? 'disabled' : ''} aria-label="${state.streaming ? 'Stop response' : 'Send message'}" aria-describedby="context-card">${icon(state.streaming ? 'stop' : 'arrow')}</button>${card}</div>`;
   }
   function home() {
     return `<div class="home"><div class="home-heading">${branding.home.eyebrow ? `<div class="greeting-mark">${brandIcon('greeting')}${brandCopy(branding.home.eyebrow)}</div>` : ''}${branding.home.title ? `<h1>${brandCopy(branding.home.title)}</h1>` : ''}${branding.home.description ? `<p>${brandCopy(branding.home.description)}</p>` : ''}</div>${alert(state.catalogError, 'refresh')}${composer(true)}<div class="shortcuts">${[...(workspace.enabled() ? [['terminal', 'Build an app', 'Describe it, then watch it run in a live preview.', 'Build me a site for ', true]] : [['code', 'Build something', 'Go from a question to working code.', 'Help me plan a small coding project. Start by asking what I want to build.']]), ['chat', 'Think it through', 'Find a fresh way into a tricky problem.', 'Help me think through a problem. Ask me what I am working on.'], ['book', 'Learn something', 'Make a complex idea feel approachable.', 'Help me learn something new. Ask what topic interests me.']].map(([i, title, copy, prompt, space]) => `<button class="shortcut" data-action="starter" data-prompt="${esc(prompt)}" ${space ? 'data-workspace="1"' : ''}>${icon(i)}<h3>${title}</h3><p>${copy}</p></button>`).join('')}</div><section class="home-recents"><div class="section-title"><h2>${state.chats.length ? 'Pick up where you left off' : 'A fresh start, just for you.'}</h2>${state.chats.length ? btn('All conversations', 'search', { icon: 'right', tone: 'ghost small', type: '' }) : ''}</div><div class="resume-list">${state.chats.slice(0, 4).map(c => `<a class="resume-row" href="#chat/${encodeURIComponent(c.id)}">${icon('chat')}<div class="grow"><div class="resume-title">${esc(c.title)}</div><div class="resume-desc">${esc(modelName(c.model))}</div></div>${icon('right')}</a>`).join('')}</div>${!state.chats.length ? '<p class="inline-note">Your conversations appear here after your first message.</p>' : ''}</section>${branding.home.footer ? `<div class="home-foot">${brandCopy(branding.home.footer)}</div>` : ''}</div>`;
-  }
-  function effortButton() {
-    return `<button type="button" class="effort-button" data-action="effort" data-effort="${state.reasoningEffort}" ${state.streaming ? 'disabled' : ''} aria-label="Thinking effort: ${effortLabel(state.reasoningEffort)}" title="${isLocked('reasoningEffort') ? 'Thinking effort is locked by the model policy' : 'Thinking effort: ' + effortLabel(state.reasoningEffort)}" aria-haspopup="dialog" aria-expanded="false" aria-controls="effort-popover">${icon('gauge')}<span class="effort-level">${effortLabel(state.reasoningEffort)}</span>${icon('down')}</button>`;
   }
   function effortDescription() {
     return { none: 'Ask for a direct answer. Some models still reason.', low: 'Quick reasoning for everyday questions.', medium: 'A balance of depth and response time.', high: 'More room to work through complex problems.' }[state.reasoningEffort];
   }
   function effortControl() {
     const value = efforts.indexOf(state.reasoningEffort);
-    return `<div class="effort-control" data-effort="${state.reasoningEffort}"><div class="effort-title"><label for="reasoning-effort">Thinking effort</label><span class="effort-mode" aria-hidden="true">${state.reasoningEffort === 'high' ? 'Warp speed' : ''}</span>${iconButton('x', 'close-effort', 'Close effort controls')}</div><div class="effort-slider"><div class="effort-track" aria-hidden="true"><span class="effort-progress"></span><span class="warp-streaks"><i></i><i></i><i></i><i></i><i></i></span><span class="effort-stops"><i></i><i></i><i></i><i></i></span></div><input id="reasoning-effort" ${state.streaming || isLocked('reasoningEffort') ? 'disabled' : ''} type="range" min="0" max="3" step="1" value="${value}" aria-valuetext="${effortLabel(state.reasoningEffort)}" aria-describedby="effort-description effort-help"><div class="effort-labels" aria-hidden="true">${efforts.map((v, i) => `<span class="${i === value ? 'selected' : ''}">${effortLabel(v)}</span>`).join('')}</div></div><p id="effort-description" class="effort-description">${effortDescription()}</p><p id="effort-help" class="effort-help">${isLocked('reasoningEffort') ? 'Thinking effort is locked by the model policy.' : 'Requested effort; model support varies.'}</p><button type="button" class="effort-more" data-action="parameters">${icon('settings')}<span class="grow">Temperature, output limit, instructions</span>${icon('right')}</button></div>`;
+    return `<div class="effort-control" data-effort="${state.reasoningEffort}"><div class="effort-title"><label for="reasoning-effort">Thinking effort</label><span class="effort-mode" aria-hidden="true">${state.reasoningEffort === 'high' ? 'Warp speed' : ''}</span></div><div class="effort-slider"><div class="effort-track" aria-hidden="true"><span class="effort-progress"></span><span class="warp-streaks"><i></i><i></i><i></i><i></i><i></i></span><span class="effort-stops"><i></i><i></i><i></i><i></i></span></div><input id="reasoning-effort" ${state.streaming || isLocked('reasoningEffort') ? 'disabled' : ''} type="range" min="0" max="3" step="1" value="${value}" aria-valuetext="${effortLabel(state.reasoningEffort)}" aria-describedby="effort-description effort-help"><div class="effort-labels" aria-hidden="true">${efforts.map((v, i) => `<span class="${i === value ? 'selected' : ''}">${effortLabel(v)}</span>`).join('')}</div></div><p id="effort-description" class="effort-description">${effortDescription()}</p><p id="effort-help" class="effort-help">${isLocked('reasoningEffort') ? 'Thinking effort is locked by the model policy.' : 'Requested effort; model support varies.'}</p><button type="button" class="effort-more" data-action="parameters">${icon('settings')}<span class="grow">Temperature, output limit, instructions</span>${icon('right')}</button></div>`;
   }
   function thinking(m, index) {
     if (!m.reasoningContent) return '';
@@ -358,23 +378,24 @@ export async function startConnected(capabilities) {
     else if (html) article.insertAdjacentHTML('beforeend', html);
     return true;
   }
-  function contextPanel(c, floating = false) {
-    const usage = [...(c.messages || [])].reverse().find(m => m.role === 'assistant' && m.usage)?.usage;
-    const bytes = (c.messages || []).filter(m => m.status === 'completed').reduce((n,m) => n + new TextEncoder().encode(m.content || '').length, new TextEncoder().encode(state.systemPrompt).length);
-    const windowSize = policyModel()?.metadata?.contextWindow;
-    const usageRows = usage ? `<div class="context-stats">${[['Input', usage.prompt_tokens], ['Output', usage.completion_tokens], ['Total', usage.total_tokens]].map(([label, value]) => `<div><span>${label}</span><strong>${value != null ? Number(value).toLocaleString() : '—'}</strong></div>`).join('')}</div>` : '<p class="context-note">Token usage appears when the provider reports it.</p>';
-    const kib = bytes / 1024, saved = c.messages?.length || 0, selected = modelName(state.model || c.model);
+  /** Everything about the chat, shown in the side pane's Details tab. */
+  function chatDetails(c) {
+    const use = contextUse(c), selected = modelName(state.model || c.model);
+    const bytes = (c.messages || []).filter(m => m.status === 'completed').reduce((n, m) => n + new TextEncoder().encode(m.content || '').length, new TextEncoder().encode(state.systemPrompt).length);
+    // Text runs about four bytes a token; the rest of the request is tools, instructions and page text.
+    const messages = Math.round(bytes / 4), rest = Math.max(0, use.input - messages), saved = c.messages?.length || 0;
     const resolved = [...(c.messages || [])].reverse().find(m => m.role === 'assistant' && m.settings?.resolvedModel)?.settings.resolvedModel;
-    const meter = (label, value, max, text) => `<div class="context-meter"><div class="spread"><span>${label}</span><span>${text}</span></div><progress class="meter" max="${max}" value="${Math.min(value, max)}" aria-label="${label}: ${text}"></progress></div>`;
-    return `<aside class="context-panel ${floating ? 'floating' : ''}" aria-label="Conversation context"><div class="context-head"><h2>Context</h2>${badge('Personal', 'accent')}</div><section class="context-section"><span class="eyebrow">Model</span><div class="context-model">${icon('cube')}<div class="grow"><strong>${esc(selected)}</strong>${resolved && modelName(resolved) !== selected ? `<small>Last answer: ${esc(modelName(resolved))}</small>` : ''}</div></div></section><section class="context-section"><span class="eyebrow">Parameters</span><div class="detail-row"><span>Thinking effort</span><span data-effort-summary>${effortLabel(state.reasoningEffort)}</span></div><div class="detail-row"><span>Temperature</span><span>${state.temperature}</span></div><div class="detail-row"><span>Output limit</span><span>${Number(state.maxTokens).toLocaleString()} tokens</span></div>${btn('Adjust parameters', 'parameters', { icon: 'settings', tone: 'small', type: '' })}</section><section class="context-section"><span class="eyebrow">Last response</span>${usageRows}</section><section class="context-section"><span class="eyebrow">Context budget</span>${meter('Text', kib, 100, `~${kib.toFixed(1)} / 100 KiB`)}${meter('Messages', saved, 200, `${saved} / 200`)}${windowSize ? `<div class="detail-row"><span>Model window</span><span>${Number(windowSize).toLocaleString()} tokens</span></div>` : ''}<p class="context-note">An estimate for the next request. Attachments and provider formatting add context.</p></section>${projectsView.contextSection()}${knowledgeView.contextSection()}${connectionsView.contextSection()}</aside>`;
+    const stat = (label, value, attrs = '') => `<div><span>${label}</span><strong ${attrs}>${esc(value)}</strong></div>`;
+    const contextSection = `<section class="context-section"><span class="eyebrow">Context</span>${use.used ? `<div class="details-total"><strong>${tokens(use.used)}</strong><span>${use.windowSize ? `of ${tokens(use.windowSize)} tokens` : 'tokens'}</span></div>${use.windowSize ? `<progress class="meter" max="${use.windowSize}" value="${Math.min(use.used, use.windowSize)}" aria-label="Context used"></progress>` : ''}<div class="detail-row"><span>Messages</span><span>about ${tokens(messages)}</span></div><div class="detail-row"><span>Tools, instructions and pages</span><span>about ${tokens(rest)}</span></div><div class="detail-row"><span>Last reply</span><span>${tokens(use.output)} out</span></div>` : '<p class="context-note">Shows after the first reply.</p>'}<p class="context-note">This chat holds ${(bytes / 1024).toFixed(1)} of 100 KiB of text and ${saved} of 200 messages.</p></section>`;
+    const engine = `<section class="context-section"><div class="spread"><span class="eyebrow">Engine</span>${btn('Adjust', 'parameters', { icon: 'settings', tone: 'ghost small', type: '' })}</div><div class="context-stats details-stats">${stat('Model', selected, `title="${esc(selected)}"`)}${stat('Thinking', effortLabel(state.reasoningEffort), 'data-effort-summary')}${stat('Temperature', String(state.temperature))}${stat('Output', Number(state.maxTokens).toLocaleString())}</div>${resolved && modelName(resolved) !== selected ? `<p class="context-note">Last answer came from ${esc(modelName(resolved))}.</p>` : ''}<p class="context-note">Instructions: ${state.systemPrompt ? 'set for this chat' : 'your defaults'}.</p></section>`;
+    return `<div class="chat-details">${contextSection}${engine}${projectsView.contextSection()}${knowledgeView.contextSection()}${connectionsView.contextSection()}</div>`;
   }
   function chatPage() {
     if (state.loadingChat) return '<div class="empty" role="status">Opening your conversation…</div>';
     if (state.chatError) return `<div class="page">${alert(state.chatError, 'reload-chat')}${btn('Start a new chat', 'new-chat', { icon: 'plus', type: '' })}</div>`;
     if (!state.active || !route().id) return home();
     const c = state.active;
-    const paneOpen = workspace.isOpen(c.id), sidePanel = state.context && !paneOpen;
-    return `<div class="chat-layout ${sidePanel ? '' : 'no-context'}"><div class="chat-column"><div class="conversation-header"><div class="conversation-header-title">${projectsView.crumb()}<h2>${esc(c.title)}</h2>${c.archived ? badge('Archived') : ''}</div><div class="row">${iconButton('branch', 'alternatives', 'Conversation alternatives')}${iconButton('more', 'chat-menu', 'Conversation options', `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div></div><div class="messages" id="messages">${(c.messages || []).map(message).join('')}${!c.messages?.length ? '<div class="empty">A new conversation, ready for your first idea.</div>' : ''}</div><div class="chat-composer-wrap">${alert(state.catalogError, 'refresh')}${composer()}</div></div>${sidePanel ? contextPanel(c) : paneOpen && state.contextFloating ? contextPanel(c, true) : ''}</div>`;
+    return `<div class="chat-layout"><div class="chat-column"><div class="conversation-header"><div class="conversation-header-title"><h2>${esc(c.title)}</h2>${c.archived ? badge('Archived') : ''}</div><div class="row">${iconButton('branch', 'alternatives', 'Conversation alternatives')}${iconButton('more', 'chat-menu', 'Conversation options', `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div></div><div class="chat-line">${projectsView.pill()}${knowledgeView.pill()}</div><div class="messages" id="messages">${(c.messages || []).map(message).join('')}${!c.messages?.length ? '<div class="empty">A new conversation, ready for your first idea.</div>' : ''}</div><div class="chat-composer-wrap">${alert(state.catalogError, 'refresh')}${composer()}</div></div></div>`;
   }
   function unavailable(page) {
     const copy = {
@@ -401,7 +422,7 @@ export async function startConnected(capabilities) {
     syncStreamingState();
     const focusedPrompt = document.activeElement?.id === 'prompt' ? { start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd, height: document.activeElement.style.height } : null;
     document.querySelectorAll('[data-thinking]').forEach(panel => thinkingOpen.set(panel.dataset.thinking, panel.open));
-    closeMenu(false); closeEffort(false); closeModels(false);
+    closeMenu(false); closeModels(false);
     const ready = state.phase === 'ready';
     $('#app').classList.toggle('auth-mode', !ready);
     document.body.classList.toggle('compact', state.compact);
@@ -449,7 +470,6 @@ export async function startConnected(capabilities) {
     await navigate();
   }
   async function navigate() {
-    state.contextFloating = false;
     const canonical = canonicalSettingsHash(location.hash);
     if (canonical !== location.hash) history.replaceState(null, '', canonical);
     if (route().page === 'activate' && route().id) { clearPrivateState(); state.phase = 'activate'; render(); return; }
@@ -793,7 +813,10 @@ export async function startConnected(capabilities) {
     menu: () => { document.body.classList.remove('collapsed'); document.body.classList.toggle('sidebar-open'); },
     focus: () => savePreference({ focus: !document.body.classList.contains('collapsed') }),
     // With the side pane open there is no room to dock it, so it opens over the chat until dismissed.
-    context: () => { if (!workspace.isOpen(route().id)) return savePreference({ context: !state.context }); state.contextFloating = !state.contextFloating; render(); },
+    // Chat details open as a tab in the side pane, so they sit beside the chat instead of over it.
+    context: () => { closeModels(false); closeMenu(false); workspace.toggleDetails(route().id); },
+    'project-menu': el => openListMenu(el, 'Project', `${projectsView.menuItems()}<button role="menuitem" class="menu-item" data-action="context">${icon('panel')}Chat details<kbd>⌘.</kbd></button>`),
+    'composer-add': el => knowledgeView.enabled() ? openListMenu(el, 'Add to this message', `<button role="menuitem" class="menu-item" data-action="attach-files" ${attachments.full() ? 'disabled' : ''}>${icon('paperclip')}Attach files</button><button role="menuitem" class="menu-item" data-action="knowledge-picker">${icon('book')}Knowledge collections</button>`) : attachments.actions['attach-files'](),
     compact: () => savePreference({ density: state.compact ? 'comfortable' : 'compact' }),
     'new-chat': () => { state.draftKey++; state.draft = ''; state.workspaceDraft = false; state.browserDraft = false; connectionsView.resetDraft(); knowledgeView.resetDraft(); projectsView.resetDraft(); attachments.clear(); applyPreferences(state.preferences); go('chat'); requestAnimationFrame(() => $('#prompt')?.focus()); },
     starter: el => { if (route().page !== 'chat') { state.draftKey++; go('chat'); } state.draft = el.dataset.prompt; if (el.dataset.workspace && !route().id) state.workspaceDraft = true; render(); const prompt = $('#prompt'); if (prompt) { prompt.focus(); prompt.setSelectionRange(prompt.value.length, prompt.value.length); } },
@@ -803,14 +826,12 @@ export async function startConnected(capabilities) {
     models: el => openModels(el),
     // The model you pick becomes your default, so new chats start with the last one you used.
     'select-model': async el => { state.model = el.dataset.value; resetGeneration(); closeModels(); render(); if (state.preferences?.defaultModel !== state.model) await savePreference({ defaultModel: state.model }); },
-    parameters: () => { closeEffort(false); modal('Generation parameters', `<p>Applies to your next message. Locked controls are managed by your administrator.</p>${state.presets.length ? btn('Use a saved preset', 'presets', { icon: 'grid', tone: 'small', type: '' }) : ''}<form id="parameters-form"><label class="form-label" for="system-prompt">System instructions ${isLocked('systemPrompt') ? badge('Locked', 'accent') : ''}</label><textarea id="system-prompt" class="form-control" rows="4" maxlength="8192" ${isLocked('systemPrompt') ? 'disabled' : ''}>${esc(state.systemPrompt)}</textarea><div class="form-columns"><div><label class="form-label" for="temperature">Temperature ${isLocked('temperature') ? badge('Locked', 'accent') : ''}</label><input id="temperature" class="form-control" type="number" min="0" max="2" step="0.1" value="${state.temperature}" ${isLocked('temperature') ? 'disabled' : ''} required></div><div><label class="form-label" for="top-p">Top P ${isLocked('topP') ? badge('Locked', 'accent') : ''}</label><input id="top-p" class="form-control" type="number" min="0.01" max="1" step="0.01" value="${state.topP}" ${isLocked('topP') ? 'disabled' : ''} required></div></div><label class="form-label" for="max-tokens">Maximum output tokens ${isLocked('maxTokens') ? badge('Locked', 'accent') : ''}</label><input id="max-tokens" class="form-control" type="number" min="1" max="32768" step="1" value="${state.maxTokens}" ${isLocked('maxTokens') ? 'disabled' : ''} required><div class="modal-actions"><button class="btn primary" type="submit">Save parameters</button></div></form>`); },
+    parameters: () => { closeModels(false); modal('Generation parameters', `<p>Applies to your next message. Locked controls are managed by your administrator.</p>${state.presets.length ? btn('Use a saved preset', 'presets', { icon: 'grid', tone: 'small', type: '' }) : ''}<form id="parameters-form"><label class="form-label" for="system-prompt">System instructions ${isLocked('systemPrompt') ? badge('Locked', 'accent') : ''}</label><textarea id="system-prompt" class="form-control" rows="4" maxlength="8192" ${isLocked('systemPrompt') ? 'disabled' : ''}>${esc(state.systemPrompt)}</textarea><div class="form-columns"><div><label class="form-label" for="temperature">Temperature ${isLocked('temperature') ? badge('Locked', 'accent') : ''}</label><input id="temperature" class="form-control" type="number" min="0" max="2" step="0.1" value="${state.temperature}" ${isLocked('temperature') ? 'disabled' : ''} required></div><div><label class="form-label" for="top-p">Top P ${isLocked('topP') ? badge('Locked', 'accent') : ''}</label><input id="top-p" class="form-control" type="number" min="0.01" max="1" step="0.01" value="${state.topP}" ${isLocked('topP') ? 'disabled' : ''} required></div></div><label class="form-label" for="max-tokens">Maximum output tokens ${isLocked('maxTokens') ? badge('Locked', 'accent') : ''}</label><input id="max-tokens" class="form-control" type="number" min="1" max="32768" step="1" value="${state.maxTokens}" ${isLocked('maxTokens') ? 'disabled' : ''} required><div class="modal-actions"><button class="btn primary" type="submit">Save parameters</button></div></form>`); },
     presets: () => modal('Saved presets', state.presets.map(p => `<button class="select-option" data-action="apply-preset" data-id="${esc(p.id)}">${icon('grid')}<span class="grow"><h3>${esc(p.name)}</h3><p>${esc(modelName(p.model))}</p></span>${icon('right')}</button>`).join('')),
     'apply-preset': el => applyPreset(state.presets.find(p => p.id === el.dataset.id)),
     search: () => { go('history'); setTimeout(() => $('#history-query')?.focus(), 150); },
     shortcuts: () => modal('Keyboard shortcuts', '<div class="detail-row"><span>Search conversations</span><span>⌘ / Ctrl K</span></div><div class="detail-row"><span>New conversation</span><span>⌘ / Ctrl Shift O</span></div><div class="detail-row"><span>Send a message</span><span>Enter</span></div><div class="detail-row"><span>New line</span><span>Shift Enter</span></div>'),
     'chat-menu': openMenu,
-    effort: openEffort,
-    'close-effort': () => closeEffort(),
     'rename-chat': el => {
       const c = state.chats.find(c => c.id === el.dataset.id) || state.active;
       modal('Rename conversation', `<form id="rename-form" data-id="${esc(c.id)}"><label class="form-label" for="chat-title">Conversation title</label><input id="chat-title" class="form-control" maxlength="80" value="${esc(c.title)}" required><div class="modal-actions"><button type="submit" class="btn primary">Save title</button></div></form>`);
@@ -852,8 +873,8 @@ export async function startConnected(capabilities) {
   function openModels(anchor) {
     if (state.streaming) return;
     if (!modelPopover.hidden) { closeModels(); return; }
-    closeMenu(false); closeEffort(false); modelAnchor = anchor;
-    modelPopover.innerHTML = `<label class="model-search">${icon('search')}<input id="model-search" aria-label="Search models" placeholder="Search models" autocomplete="off"></label><div id="model-choices" role="listbox" aria-label="Available models"></div>`;
+    closeMenu(false); modelAnchor = anchor;
+    modelPopover.innerHTML = `<label class="model-search">${icon('search')}<input id="model-search" aria-label="Search models" placeholder="Search models" autocomplete="off"></label><div id="model-choices" role="listbox" aria-label="Available models"></div><div class="engine-effort">${effortControl()}</div>`;
     modelPopover.hidden = false; modelChoices();
     anchor.setAttribute('aria-expanded', 'true');
     // Open downward like a dropdown; flip above the button only when it would not fit.
@@ -861,25 +882,6 @@ export async function startConnected(capabilities) {
     modelPopover.style.left = `${Math.max(12, Math.min(rect.left, window.innerWidth - modelPopover.offsetWidth - 12))}px`;
     modelPopover.style.top = `${fitsBelow ? rect.bottom + 8 : Math.max(12, rect.top - modelPopover.offsetHeight - 8)}px`;
     $('#model-search', modelPopover).focus({ preventScroll: true });
-  }
-  function closeFloatingContext() { state.contextFloating = false; $('.context-panel.floating')?.remove(); }
-  function closeEffort(restore = true) {
-    if (effortPopover.hidden) return;
-    effortPopover.hidden = true;
-    const anchor = effortAnchor; effortAnchor = null;
-    anchor?.setAttribute('aria-expanded', 'false');
-    if (restore && anchor?.isConnected) anchor.focus({ preventScroll: true });
-  }
-  function openEffort(anchor) {
-    if (state.streaming) return;
-    if (!effortPopover.hidden) { closeEffort(); return; }
-    closeMenu(false); effortAnchor = anchor;
-    effortPopover.innerHTML = effortControl(); effortPopover.hidden = false;
-    anchor.setAttribute('aria-expanded', 'true');
-    const rect = anchor.getBoundingClientRect(), roomAbove = rect.top - 8;
-    effortPopover.style.left = `${Math.max(12, Math.min(rect.left, window.innerWidth - effortPopover.offsetWidth - 12))}px`;
-    effortPopover.style.top = `${roomAbove >= effortPopover.offsetHeight ? rect.top - effortPopover.offsetHeight - 8 : Math.min(rect.bottom + 8, window.innerHeight - effortPopover.offsetHeight - 12)}px`;
-    ($('#reasoning-effort:not(:disabled)', effortPopover) || $('.effort-more', effortPopover)).focus({ preventScroll: true });
   }
   function closeMenu(restore = true) {
     if (menu.hidden) return;
@@ -890,7 +892,7 @@ export async function startConnected(capabilities) {
   }
   function openMenu(anchor) {
     if (!menu.hidden && menuAnchor === anchor) { closeMenu(); return; }
-    closeMenu(false); closeEffort(false); menuAnchor = anchor;
+    closeMenu(false); menuAnchor = anchor;
     const id = anchor.dataset.id || state.active?.id;
     if (!id) return;
     menu.setAttribute('aria-label', 'Conversation options');
@@ -902,9 +904,20 @@ export async function startConnected(capabilities) {
     menu.style.top = `${rect.bottom + menu.offsetHeight + 8 > window.innerHeight ? Math.max(8, rect.top - menu.offsetHeight - 5) : rect.bottom + 5}px`;
     $('button', menu)?.focus({ preventScroll: true });
   }
+  /** A small menu under its button, or above it when there is no room below. */
+  function openListMenu(anchor, label, items) {
+    if (!menu.hidden && menuAnchor === anchor) { closeMenu(); return; }
+    closeMenu(false); closeModels(false); menuAnchor = anchor;
+    menu.setAttribute('aria-label', label); menu.innerHTML = items;
+    menu.hidden = false; anchor.setAttribute('aria-expanded', 'true');
+    const rect = anchor.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${rect.bottom + menu.offsetHeight + 8 > window.innerHeight ? Math.max(8, rect.top - menu.offsetHeight - 5) : rect.bottom + 5}px`;
+    $('button:not(:disabled)', menu)?.focus({ preventScroll: true });
+  }
   function openProfileMenu(anchor) {
     if (!menu.hidden && menuAnchor === anchor) { closeMenu(); return; }
-    closeMenu(false); closeEffort(false); menuAnchor = anchor;
+    closeMenu(false); menuAnchor = anchor;
     menu.setAttribute('aria-label', 'Account');
     menu.innerHTML = `<div class="menu-head"><strong>${esc(name())}</strong><small>${esc(state.user.username)} · ${esc(state.user.role)}</small></div><button role="menuitem" data-action="go" data-path="settings" class="menu-item">${icon('settings')}Settings</button><button role="menuitem" data-action="logout" class="menu-item">${icon('right')}Sign out</button>`;
     menu.hidden = false; anchor.setAttribute('aria-expanded', 'true');
@@ -919,10 +932,8 @@ export async function startConnected(capabilities) {
   }
   document.addEventListener('click', event => {
     const el = event.target.closest('[data-action]');
-    if (!effortPopover.hidden && !effortPopover.contains(event.target) && el?.dataset.action !== 'effort') closeEffort(false);
     if (!modelPopover.hidden && !modelPopover.contains(event.target) && el?.dataset.action !== 'models') closeModels(false);
-    if (!menu.hidden && !menu.contains(event.target) && !['chat-menu', 'profile'].includes(el?.dataset.action)) closeMenu(false);
-    if (state.contextFloating && !event.target.closest('.context-panel') && el?.dataset.action !== 'context') closeFloatingContext();
+    if (!menu.hidden && !menu.contains(event.target) && !['chat-menu', 'profile', 'project-menu', 'composer-add'].includes(el?.dataset.action)) closeMenu(false);
     if (!el || el.disabled) return;
     if (menu.contains(el)) closeMenu(false);
     event.preventDefault();
@@ -994,10 +1005,10 @@ export async function startConnected(capabilities) {
       const control = event.target.closest('.effort-control'); control.dataset.effort = state.reasoningEffort;
       $('.effort-mode', control).textContent = state.reasoningEffort === 'high' ? 'Warp speed' : '';
       $('.effort-description', control).textContent = effortDescription();
-      const trigger = $('[data-action="effort"]');
-      if (trigger) {
-        $('.effort-level', trigger).textContent = effortLabel(state.reasoningEffort); trigger.dataset.effort = state.reasoningEffort;
-        trigger.setAttribute('aria-label', `Thinking effort: ${effortLabel(state.reasoningEffort)}`); trigger.title = `Thinking effort: ${effortLabel(state.reasoningEffort)}`;
+      const engine = $('.engine-button');
+      if (engine) {
+        engine.querySelectorAll('.effort-bars i').forEach((bar, i) => bar.classList.toggle('lit', Number(event.target.value) > i));
+        engine.setAttribute('aria-label', `Model: ${modelName(state.model)}. Thinking effort: ${effortLabel(state.reasoningEffort)}`); engine.title = `${modelName(state.model)} · thinking ${effortLabel(state.reasoningEffort).toLowerCase()}`;
       }
       control.querySelectorAll('.effort-labels span').forEach((label, i) => label.classList.toggle('selected', i === Number(event.target.value)));
       document.querySelectorAll('[data-effort-summary]').forEach(label => label.textContent = effortLabel(state.reasoningEffort));
@@ -1057,13 +1068,7 @@ export async function startConnected(capabilities) {
       const options = [...modelPopover.querySelectorAll('.model-option')], index = options.indexOf(document.activeElement);
       if (event.key === 'Escape') { event.preventDefault(); closeModels(); return; }
       if (event.key === 'Enter' && event.target.id === 'model-search') { event.preventDefault(); options[0]?.click(); return; }
-      if (['ArrowDown', 'ArrowUp'].includes(event.key) && options.length) { event.preventDefault(); options[index < 0 ? (event.key === 'ArrowDown' ? 0 : options.length - 1) : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length].focus(); return; }
-      if (event.key === 'Tab') closeModels(false);
-    }
-    if (state.contextFloating && event.key === 'Escape' && !document.querySelector('dialog[open]')) { event.preventDefault(); closeFloatingContext(); return; }
-    if (!effortPopover.hidden) {
-      if (event.key === 'Escape') { event.preventDefault(); closeEffort(); return; }
-      if (event.key === 'Tab') closeEffort();
+      if (['ArrowDown', 'ArrowUp'].includes(event.key) && options.length && event.target.id !== 'reasoning-effort') { event.preventDefault(); options[index < 0 ? (event.key === 'ArrowDown' ? 0 : options.length - 1) : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length].focus(); return; }
     }
     if (!menu.hidden) {
       const items = [...menu.querySelectorAll('button:not(:disabled)')], index = items.indexOf(document.activeElement);
@@ -1072,6 +1077,7 @@ export async function startConnected(capabilities) {
       if (event.key === 'Tab') closeMenu();
     }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); actions.search(); }
+    if ((event.metaKey || event.ctrlKey) && event.key === '.' && route().page === 'chat' && route().id) { event.preventDefault(); actions.context(); }
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'o') { event.preventDefault(); actions['new-chat'](); }
     if (event.target.id === 'prompt' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(event.target.value); }
   });
@@ -1082,8 +1088,8 @@ export async function startConnected(capabilities) {
     if (event.target.matches('[data-thinking]')) thinkingOpen.set(event.target.dataset.thinking, event.target.open);
     if (event.target.matches('[data-activity]') && event.target.dataset.activity) { if (event.target.open) state.openActivity.add(event.target.dataset.activity); else state.openActivity.delete(event.target.dataset.activity); }
   }, true);
-  window.addEventListener('resize', () => { closeMenu(false); closeEffort(false); closeModels(false); });
-  window.addEventListener('scroll', event => { if (modelPopover.contains(event.target)) return; closeMenu(false); closeEffort(false); closeModels(false); }, true);
+  window.addEventListener('resize', () => { closeMenu(false); closeModels(false); });
+  window.addEventListener('scroll', event => { if (modelPopover.contains(event.target)) return; closeMenu(false); closeModels(false); }, true);
   window.addEventListener('hashchange', navigate);
   await session();
 }

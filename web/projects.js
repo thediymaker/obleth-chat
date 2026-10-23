@@ -87,7 +87,7 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     const color = p.color || COLORS[(local.list?.length || 0) % COLORS.length];
     const share = `<select id="project-share" name="project-share" class="form-control"><option value="">Only me</option>${local.groups.map(g => `<option value="${esc(g.id)}" ${p.scope === 'group' && p.groupId === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>`;
     const colors = COLORS.map(c => `<label class="color-option"><input type="radio" name="project-color" value="${c}" ${c === color ? 'checked' : ''}><span class="project-dot" data-color="${c}" aria-label="${c}"></span></label>`).join('');
-    modal(p.id ? 'Edit project' : 'New project', `<form id="project-form" data-id="${esc(p.id || '')}">${field('project-name', 'Name', textInput('project-name', p.name || '', 'maxlength="120" required placeholder="Gaudi benchmarks"'))}${field('project-description', 'Description', textInput('project-description', p.description || '', 'maxlength="1000" placeholder="What is it for?"'))}${field('project-instructions', 'Instructions for every chat', `<textarea id="project-instructions" name="project-instructions" class="form-control" rows="6" maxlength="20000" placeholder="We are benchmarking LLM inference on Gaudi 3. Report tokens per second with batch size and model.">${esc(p.instructions || '')}</textarea>`, 'Added to the start of each chat in the project.')}<div class="management-field"><span class="form-label">Color</span><div class="color-options">${colors}</div></div>${field('project-share', 'Shared with', share, local.groups.length ? 'Group members see the project and can start their own chats in it.' : 'You are not in any groups. An administrator adds people to groups.')}${formEnd(p.id ? 'Save changes' : 'Create project')}${p.id ? `<div class="danger-zone"><div class="grow"><strong>Delete project</strong><small>Its chats and saved items are kept, outside any project.</small></div>${btn('Delete', 'project-delete', { tone: 'small danger', attrs: `data-id="${esc(p.id)}"` })}</div>` : ''}</form>`);
+    modal(p.id ? 'Edit project' : 'New project', `<form id="project-form" data-id="${esc(p.id || '')}" ${p.fromChat ? 'data-from-chat="1"' : ''}>${field('project-name', 'Name', textInput('project-name', p.name || '', 'maxlength="120" required placeholder="Gaudi benchmarks"'))}${field('project-description', 'Description', textInput('project-description', p.description || '', 'maxlength="1000" placeholder="What is it for?"'))}${field('project-instructions', 'Instructions for every chat', `<textarea id="project-instructions" name="project-instructions" class="form-control" rows="6" maxlength="20000" placeholder="We are benchmarking LLM inference on Gaudi 3. Report tokens per second with batch size and model.">${esc(p.instructions || '')}</textarea>`, 'Added to the start of each chat in the project.')}<div class="management-field"><span class="form-label">Color</span><div class="color-options">${colors}</div></div>${field('project-share', 'Shared with', share, local.groups.length ? 'Group members see the project and can start their own chats in it.' : 'You are not in any groups. An administrator adds people to groups.')}${formEnd(p.id ? 'Save changes' : 'Create project')}${p.id ? `<div class="danger-zone"><div class="grow"><strong>Delete project</strong><small>Its chats and saved items are kept, outside any project.</small></div>${btn('Delete', 'project-delete', { tone: 'small danger', attrs: `data-id="${esc(p.id)}"` })}</div>` : ''}</form>`);
   }
   async function submit(form) {
     const id = form.dataset.id, error = form.querySelector('.form-error');
@@ -95,6 +95,8 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     const body = { name: getValue(form, 'project-name').trim(), description: getValue(form, 'project-description').trim(), instructions: getValue(form, 'project-instructions'), color: form.querySelector('input[name="project-color"]:checked')?.value || 'blue', scope: group ? 'group' : 'personal', ...(group ? { groupId: group } : {}) };
     try {
       const r = await api.request(id ? path(id) : '/api/projects', { method: id ? 'PATCH' : 'POST', body });
+      // Started from a chat: the chat moves into the new project and stays open.
+      if (!id && form.dataset.fromChat && chat.id) { await list(true); await place(r.project.id); return; }
       close(); toast(id ? 'Saved your changes' : 'Project created');
       await list(true);
       if (id) await load(id); else go(`projects/${encodeURIComponent(r.project.id)}`);
@@ -130,6 +132,16 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     const p = current();
     return p ? `<a class="chat-project" href="#projects/${encodeURIComponent(p.id)}">${dot(p)}${esc(p.name)}</a><span class="slash">/</span>` : '';
   }
+  /** The chat line's project pill: where the chat lives, with a menu to move it. */
+  function pill() {
+    const p = current();
+    return `<button type="button" class="chat-pill" data-action="project-menu" aria-haspopup="menu" aria-expanded="false" title="${p ? `In ${esc(p.name)}` : 'Not in a project'}">${p ? dot(p) : icon('folder')}<span>${esc(p?.name || 'Personal')}</span>${icon('down')}</button>`;
+  }
+  /** Menu items for the project pill. */
+  function menuItems() {
+    const p = current(), item = (glyph, label, action, attrs = '') => `<button role="menuitem" class="menu-item" data-action="${action}" ${attrs}>${icon(glyph)}${label}</button>`;
+    return [p && item('right', `Open ${esc(p.name)}`, 'go', `data-path="projects/${esc(encodeURIComponent(p.id))}"`), item('folder', p ? 'Change project…' : 'Move to project…', 'project-move'), item('plus', 'Start a project from this chat', 'project-from-chat')].filter(Boolean).join('');
+  }
   function composerChip() {
     const p = !chat.id && chat.draft && byId(chat.draft);
     return p ? `<div class="project-chip">${dot(p)}<span>New chat in <strong>${esc(p.name)}</strong></span><button type="button" class="icon-btn" data-action="project-draft-clear" aria-label="Start outside the project" title="Start outside the project">${icon('x')}</button></div>` : '';
@@ -158,6 +170,7 @@ export function createProjects({ api, state, capabilities, render, modal, close,
 
   const actions = {
     'project-new': () => editor(),
+    'project-from-chat': () => editor({ fromChat: true }),
     'project-edit': () => local.detail && editor(local.detail.project),
     'project-reload': () => load((location.hash.split('/')[1] || '')),
     'project-delete': el => modal('Delete this project?', `<p>The project, its instructions and its collection choices are deleted. Its chats and saved items are kept, outside any project.</p><div class="modal-actions">${btn('Keep project', 'close')}${btn('Delete project', 'project-delete-confirm', { tone: 'danger', attrs: `data-id="${esc(el.dataset.id)}"` })}</div>`),
@@ -189,5 +202,5 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     render();
     return r.project;
   }
-  return { load, list, researchHome, page, sidebar, editor, submit, actions, clear, loadChat, crumb, composerChip, contextSection, applyDraft, chatProject, choices: () => local.list || [], resetDraft: () => { chat.draft = null; }, refresh: () => list(true).then(render).catch(() => {}) };
+  return { load, list, researchHome, page, sidebar, editor, submit, actions, clear, loadChat, crumb, pill, menuItems, composerChip, contextSection, applyDraft, chatProject, choices: () => local.list || [], resetDraft: () => { chat.draft = null; }, refresh: () => list(true).then(render).catch(() => {}) };
 }

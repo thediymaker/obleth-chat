@@ -236,18 +236,54 @@ code{font-size:.9em}
 .composer textarea{width:100%;border:0;outline:0!important;background:transparent;resize:none;min-height:104px;max-height:220px;padding:18px 18px 8px;font-size:var(--fs-base);line-height:1.65;border-radius:0}
 .composer-bottom{display:flex;align-items:center;justify-content:space-between;padding:6px 10px 10px 12px;gap:8px}
 .composer-options{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
-.composer{container:composer/inline-size}
-/* Narrow composers (a side pane open, or a small window) show the chips as icons. */
-@container composer (max-width:780px){
-  .composer-options{gap:4px}
-  .composer-options .btn{flex-shrink:0}
-  .composer-options .btn .option-text{display:none}
-  .composer .model-button{max-width:180px;padding:5px 8px}
-  .effort-button{padding:5px 7px;gap:5px}
+.composer{container:composer/inline-size;overflow:visible}
+.composer-bottom{flex-wrap:nowrap}
+.composer-options{flex:1 1 auto;flex-wrap:nowrap}
+.composer-chips{display:flex;gap:6px;flex-wrap:wrap;padding:12px 14px 0}
+/* What the model can use: quiet icons when off, named and lit when on. */
+.dock{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--line);border-radius:999px;background:var(--sidebar);flex-shrink:0}
+.dock .btn{height:28px;min-height:28px;padding:0 9px;gap:6px;border:0;border-radius:999px;color:var(--muted);background:transparent}
+.dock .btn:hover{color:var(--text);background:var(--secondary)}
+.dock .btn .option-text{display:none}
+.dock .btn.on{color:var(--text);background:var(--secondary)}
+.dock .btn.on .option-text{display:inline}
+.dock .btn.on::before{content:'';width:6px;height:6px;border-radius:99px;background:rgb(var(--success-rgb));box-shadow:0 0 6px rgb(var(--success-rgb) / 70%);flex-shrink:0}
+.engine-button{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:260px;height:32px;padding:0 10px;border:1px solid var(--line-strong);border-radius:999px;font-size:var(--fs-sm);font-weight:500;color:var(--text-2);background:transparent;white-space:nowrap;flex:0 1 auto}
+.engine-button:hover,.engine-button[aria-expanded=true]{background:var(--secondary);border-color:var(--control-border)}
+.engine-button .icon{width:14px;height:14px;color:var(--muted);flex-shrink:0}
+.engine-button>.icon:last-child{width:12px;height:12px}
+.engine-name{min-width:3ch;overflow:hidden;text-overflow:ellipsis}
+.effort-bars{display:inline-flex;align-items:flex-end;gap:2px;height:13px;padding-left:8px;border-left:1px solid var(--line-strong);flex-shrink:0}
+.effort-bars i{width:3px;border-radius:1px;background:var(--control-border)}
+.effort-bars i:nth-child(1){height:5px}
+.effort-bars i:nth-child(2){height:9px}
+.effort-bars i:nth-child(3){height:13px}
+.effort-bars i.lit{background:var(--text)}
+.engine-effort{border-top:1px solid var(--line)}
+/* The send button wears the context gauge; hovering it tells how much is used. */
+.send-wrap{position:relative;width:40px;height:40px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center}
+.send-wrap .send-btn{width:30px;height:30px;border-radius:999px}
+.context-ring{position:absolute;inset:0;width:40px;height:40px;transform:rotate(-90deg);pointer-events:none}
+.context-ring circle{fill:none;stroke:var(--line-strong);stroke-width:2.5}
+.context-ring circle.used{stroke:rgb(var(--success-rgb));stroke-linecap:round}
+.send-wrap.high .context-ring circle.used{stroke:var(--amber)}
+.send-wrap.full .context-ring circle.used{stroke:var(--destructive)}
+.context-card{position:absolute;right:-4px;bottom:calc(100% + 10px);z-index:20;width:260px;padding:12px 14px;border:1px solid var(--line-strong);border-radius:12px;background:var(--card);box-shadow:0 14px 45px var(--shadow);display:flex;flex-direction:column;gap:8px;text-align:left;visibility:hidden;opacity:0;transition:opacity .12s,visibility 0s .12s}
+.context-card::after{content:'';position:absolute;left:0;right:0;top:100%;height:14px}
+.send-wrap:hover .context-card,.send-wrap:has(:focus-visible) .context-card{visibility:visible;opacity:1;transition-delay:.35s,.35s}
+.context-card .spread{font-size:var(--fs-sm)}
+.context-card .spread>span{font-variant-numeric:tabular-nums;color:var(--text-2)}
+.context-card p{margin:0;font-size:var(--fs-xs);line-height:1.5;color:var(--muted)}
+.context-card-link{display:inline-flex;align-items:center;gap:6px;padding:0;font-size:var(--fs-sm);color:var(--text)}
+.context-card-link .icon{width:13px;height:13px}
+@container composer (max-width:640px){
+  .dock .btn.on .option-text{display:none}
+  .dock .btn{padding:0 8px}
+  .engine-button{max-width:170px}
 }
-@container composer (max-width:480px){
-  .effort-button .effort-level{display:none}
-  .composer .model-button{max-width:140px}
+@container composer (max-width:400px){
+  .engine-button>.icon:first-child,.engine-button>.icon:last-child{display:none}
+  .engine-button{max-width:110px;padding:0 9px}
 }
 .model-button,.effort-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-width:0;min-height:32px;border:1px solid var(--line-strong);border-radius:var(--radius-md);padding:5px 10px;font-size:var(--fs-sm);font-weight:500;color:var(--text-2);background:transparent;white-space:nowrap;transition:background .15s,border-color .15s}
 .model-button:hover,.effort-button:hover,.effort-button[aria-expanded=true]{background:var(--secondary);border-color:var(--control-border)}
@@ -334,10 +370,8 @@ code{font-size:.9em}
 @keyframes warp-streak{from{left:-35%}to{left:110%}}
 
 /* Conversation */
-.chat-layout{display:grid;grid-template-columns:minmax(0,1fr) var(--context-w);min-height:calc(100dvh - var(--topbar-h) - var(--footer-h))}
+.chat-layout{display:grid;grid-template-columns:minmax(0,1fr);min-height:calc(100dvh - var(--topbar-h) - var(--footer-h))}
 .chat-layout.no-context{grid-template-columns:minmax(0,1fr)}
-/* With the side pane open, Context opens over the chat's right edge instead of squeezing it. */
-.context-panel.floating{position:fixed;top:var(--topbar-h);right:var(--workspace-w);z-index:9;width:var(--context-w);height:auto;max-height:calc(100dvh - var(--topbar-h) - var(--footer-h));border:1px solid var(--line-strong);border-top:0;box-shadow:0 14px 45px var(--shadow)}
 .chat-column{min-width:0;display:flex;flex-direction:column;container-type:inline-size}
 .conversation-header{height:52px;padding:0 24px;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line-soft)}
 .conversation-header-title{display:flex;gap:9px;align-items:center;min-width:0}
@@ -1606,6 +1640,25 @@ body.workspace-full .workspace-resize{display:none}
 .chat-project{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:var(--fs-sm);white-space:nowrap}
 .chat-project:hover{color:var(--text)}
 .conversation-header-title .slash{color:var(--faint);margin:0 4px}
+/* Where the chat lives and what it reads, under its title. */
+.chat-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:calc(var(--chat-w) + 64px);width:100%;margin:0 auto;padding:12px 32px 0}
+.chat-pill{display:inline-flex;align-items:center;gap:6px;max-width:320px;height:28px;padding:0 10px;border:1px solid var(--line);border-radius:999px;font-size:var(--fs-sm);color:var(--muted);background:transparent}
+.chat-pill span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-pill:hover,.chat-pill[aria-expanded=true]{color:var(--text);background:var(--secondary)}
+.chat-pill.add{border-style:dashed}
+.chat-pill .icon{width:13px;height:13px;flex-shrink:0}
+.menu-item kbd{margin-left:auto;font-size:var(--fs-2xs);color:var(--faint)}
+/* The side pane's Details tab. */
+.workspace-details{flex:1;min-width:0;min-height:0;overflow-y:auto;padding:0 20px 24px}
+.workspace-details[hidden]{display:none}
+.chat-details>.context-section:first-child{margin-top:6px;border-top:0}
+.chat-details .spread .btn{width:auto;margin-top:0}
+.details-total{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
+.details-total strong{font-size:26px;font-weight:500;font-variant-numeric:tabular-nums}
+.details-total span{font-size:var(--fs-sm);color:var(--muted)}
+.chat-details .meter{width:100%;margin-bottom:6px}
+.details-stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:10px}
+body.pane-details-only{--workspace-w:min(440px,42vw)}
 .project-chip{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);color:var(--muted);padding:2px 2px 8px}
 .project-chip strong{color:var(--text);font-weight:500}
 .project-chip .icon-btn{width:24px;height:24px;margin-left:auto}

@@ -13,9 +13,10 @@ use crate::{auth::Identity, error::ApiError, sandbox::Sandbox, sandbox::Sandboxe
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
+use repo::Repo;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -31,7 +32,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/conversations/{id}/code/stop", post(stop))
         .route("/api/conversations/{id}/code/choose", post(choose))
         .route("/api/conversations/{id}/code/undo", post(undo))
+        .route("/api/conversations/{id}/code/uncommit", post(uncommit))
+        .route("/api/conversations/{id}/code/start", put(start_at))
         .route("/api/conversations/{id}/code/diff", get(diff))
+        .route(
+            "/api/projects/{id}/code/commits/{sha}/undo",
+            post(undo_commit),
+        )
         .merge(history::router())
         .merge(export::router())
         .with_state(state)
@@ -508,6 +515,173 @@ async fn undo(
     let c = chat(&s, &headers, id).await?;
     workspace::undo(&c.pod(), &author(&c.user), body.path.as_deref()).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Takes back the last save, when it has not been synced.
+async fn uncommit(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let c = chat(&s, &headers, id).await?;
+    workspace::uncommit(&c.pod(), &author(&c.user)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct StartInput {
+    sha: String,
+}
+
+/// Where a new chat's workspace begins: an earlier commit of the project's code.
+async fn start_at(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<StartInput>,
+) -> Result<Json<Value>, ApiError> {
+    history::check_sha(&body.sha)?;
+    let user = s.auth.require(&headers, true).await?;
+    let pool = &s.store.pool;
+    let (project, ..) = chat_project(pool, user.id, id)
+        .await?
+        .ok_or_else(|| ApiError::bad("Put this chat in a project first"))?;
+    let mut db = pool.acquire().await?;
+    let server = Repo::load(&mut db, project).await?;
+    drop(db);
+    let full = server
+        .resolve(&body.sha)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if !server.on_main(&full).await? {
+        return Err(ApiError::not_found());
+    }
+    sqlx::query(
+        "INSERT INTO conversation_code (conversation_id, project_id, start) VALUES ($1,$2,$3)
+         ON CONFLICT (conversation_id) DO UPDATE SET project_id = $2, start = $3, updated_at = NOW()",
+    )
+    .bind(id)
+    .bind(project)
+    .bind(&full)
+    .execute(pool)
+    .await?;
+    Ok(Json(json!({"start":full})))
+}
+
+/// Puts the project's code in a project chat's new workspace: at the commit the chat
+/// was started from, otherwise at main. Returns the running workspace when it did.
+pub async fn seed(
+    pool: &PgPool,
+    sandboxes: &Sandboxes,
+    user: &Identity,
+    chat: Uuid,
+    sandbox: &Sandbox,
+) -> Result<Option<Sandbox>, ApiError> {
+    let Some((project, ..)) = chat_project(pool, user.id, chat).await? else {
+        return Ok(None);
+    };
+    if repo::head(&mut *pool.acquire().await?, project)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let running = sandboxes
+        .ensure_running(sandbox)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    let pod = Pod {
+        sandboxes,
+        sandbox: &running,
+    };
+    Ok(begin(pool, &pod, user, project, chat)
+        .await?
+        .then_some(running))
+}
+
+/// Fills an empty chat folder with the project's code, as `seed` does once the
+/// workspace is running. Returns whether it did.
+pub async fn begin(
+    pool: &PgPool,
+    sh: &impl Shell,
+    user: &Identity,
+    project: Uuid,
+    chat: Uuid,
+) -> Result<bool, ApiError> {
+    let mut db = pool.acquire().await?;
+    let start: Option<String> = sqlx::query_scalar(
+        "SELECT start FROM conversation_code WHERE conversation_id = $1 AND project_id = $2",
+    )
+    .bind(chat)
+    .bind(project)
+    .fetch_optional(&mut *db)
+    .await?
+    .flatten();
+    let server = Repo::load(&mut db, project).await?;
+    drop(db);
+    let Some(main) = server.main.clone() else {
+        return Ok(false);
+    };
+    let rev = match start {
+        Some(start) if server.on_main(&start).await? => start,
+        _ => main.clone(),
+    };
+    let bundle = server.bundle(&["main"]).await?;
+    if !workspace::start(sh, &author(user), &bundle, &rev).await? {
+        return Ok(false);
+    }
+    // How far behind it is, for a commit that was never main itself.
+    if rev != main {
+        let commits = server.count(&rev).await?;
+        sqlx::query("INSERT INTO project_code_tips (project_id, tip, commits) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
+            .bind(project)
+            .bind(&rev)
+            .bind(commits as i32)
+            .execute(pool)
+            .await?;
+    }
+    record(pool, chat, project, &rev).await?;
+    sqlx::query("UPDATE conversation_code SET start = NULL WHERE conversation_id = $1")
+        .bind(chat)
+        .execute(pool)
+        .await?;
+    Ok(true)
+}
+
+/// Undo a commit in the project's history: a new commit on main takes back its
+/// changes, and each chat brings that in with its next Sync.
+async fn undo_commit(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path((id, sha)): Path<(Uuid, String)>,
+) -> Result<Json<Value>, ApiError> {
+    history::check_sha(&sha)?;
+    let user = s.auth.require(&headers, true).await?;
+    let pool = &s.store.pool;
+    history::visible(pool, user.id, id).await?;
+    for _ in 0..3 {
+        let mut db = pool.acquire().await?;
+        let mut server = Repo::load(&mut db, id).await?;
+        drop(db);
+        let full = server
+            .resolve(&sha)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        if !server.on_main(&full).await? {
+            return Err(ApiError::not_found());
+        }
+        let expected = server.main.clone();
+        let bundle = server.revert(&full, &author(&user)).await?;
+        match repo::advance(pool, id, user.id, expected.as_deref(), &bundle).await? {
+            repo::Advance::Moved { main, commits } => {
+                return Ok(Json(json!({"sha":main,"commits":commits})))
+            }
+            repo::Advance::Stale { .. } => continue,
+        }
+    }
+    Err(repo::conflict(
+        "Others kept syncing at the same moment. Try again",
+    ))
 }
 
 #[derive(Deserialize)]

@@ -295,6 +295,58 @@ pub async fn receive(sh: &impl Shell, author: &Author, bundle: &[u8]) -> Result<
     Ok(())
 }
 
+/// Fills a new, empty chat folder with the project's code at `rev` (in `bundle`'s
+/// history), as if it had synced there. Returns false when the folder already had
+/// files or a repository, which are left alone.
+pub async fn start(
+    sh: &impl Shell,
+    author: &Author,
+    bundle: &[u8],
+    rev: &str,
+) -> Result<bool, ApiError> {
+    let script = format!(
+        "[ -e .git ] && exit 0\n[ -z \"$(ls -A 2>/dev/null)\" ] || exit 0\n{}\nf=$(mktemp) && cat > \"$f\" && g fetch -q --no-tags \"$f\" '+refs/heads/main:{BASE}'; c=$?; rm -f \"$f\"; [ $c = 0 ] || exit $c\ng update-ref {BASE} \"$1\" && g checkout -q -B main \"$1\" || exit 14\necho started",
+        ensure()
+    );
+    let (out, err, code) = run(sh, author, &script, &[rev], Some(bundle)).await?;
+    if code != Some(0) {
+        return Err(gateway(format!(
+            "Could not put the project's code in the workspace: {}",
+            err.trim()
+        )));
+    }
+    Ok(out.contains("started"))
+}
+
+/// Takes back the workspace's last commit when it has not been synced: its changes
+/// are unsaved again, as they were before it.
+pub async fn uncommit(sh: &impl Shell, author: &Author) -> Result<(), ApiError> {
+    let script = format!(
+        r#"[ -d .git ] || exit 16
+[ -f .git/MERGE_HEAD ] && exit 12
+g rev-parse -q --verify HEAD >/dev/null || exit 16
+b=$(g rev-parse -q --verify {BASE})
+if [ -n "$b" ] && g merge-base --is-ancestor HEAD "$b"; then exit 17; fi
+[ "$(g rev-list --parents -n 1 HEAD | wc -w)" -gt 2 ] && exit 18
+if g rev-parse -q --verify HEAD^ >/dev/null; then g reset -q --soft HEAD^ || exit 13; else g update-ref -d HEAD || exit 13; fi"#
+    );
+    let (_, err, code) = run(sh, author, &script, &[], None).await?;
+    match code {
+        Some(0) => Ok(()),
+        Some(12) => Err(super::repo::conflict(
+            "Finish or stop the sync in progress first",
+        )),
+        Some(16) => Err(ApiError::bad("Nothing has been saved yet")),
+        Some(17) => Err(super::repo::conflict(
+            "That save is already in the project. Undo it from the project's history instead",
+        )),
+        Some(18) => Err(ApiError::bad(
+            "The last save combined the project's changes, so it cannot be taken back here",
+        )),
+        _ => Err(gateway(format!("Could not undo the save: {}", err.trim()))),
+    }
+}
+
 /// Moves the workspace's view of main, after a sync stored it.
 pub async fn mark(sh: &impl Shell, author: &Author, sha: &str) -> Result<(), ApiError> {
     let (_, err, code) = run(

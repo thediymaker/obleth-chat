@@ -84,7 +84,11 @@ export async function startConnected(capabilities) {
   };
   const attachments = createAttachments({ api, state, render, modal, close, toast: message => toast(message) });
   const browserView = createBrowser({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), send: text => send(text), modal: (...args) => modal(...args), close: () => close(), assistantName: () => branding.assistantName });
-  const codeView = createCode({ api, state, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), toast: message => toast(message), chatPath, send: text => send(text), terminal: (id, command) => workspace.runInTerminal(id, command), moveToProject: () => projectsView.actions['project-move']() });
+  const codeView = createCode({ api, state, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), toast: message => toast(message), chatPath, send: text => send(text), terminal: (id, command) => workspace.runInTerminal(id, command), moveToProject: () => projectsView.actions['project-move'](), startFrom: (projectId, start, prompt = '') => {
+    // A new chat in the project with a workspace, at a commit or the latest code.
+    projectsView.actions['project-chat']({ dataset: { id: projectId } }); state.workspaceDraft = true; codeView.setStart(start); state.draft = prompt;
+    render(); requestAnimationFrame(() => { const p = $('#prompt'); if (p) { p.focus(); p.setSelectionRange(p.value.length, p.value.length); } });
+  } });
   const workspace = createWorkspace({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), browser: browserView, details: id => state.active?.id === id ? chatDetails(state.active) : '', code: codeView });
   codeView.attach(() => workspace.update());
   browserView.attach({ update: () => workspace.update(), showTab: (id, tab) => workspace.showTab(id, tab), showing: (id, tab) => workspace.showing(id, tab) });
@@ -227,7 +231,7 @@ export async function startConnected(capabilities) {
     // What the model can use sits in one dock; on ones show their names while there is room.
     const dock = `${workspace.toggleButton()}${browserView.toggleButton()}${connectionsView.composerButton()}`;
     const knowledge = route().id ? '' : knowledgeView.pill(false);
-    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${knowledge ? `<div class="composer-chips">${knowledge}</div>` : ''}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="12000" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar(knowledgeView.enabled())}${dock ? `<div class="dock" role="group" aria-label="What the model can use">${dock}</div>` : ''}</div>${engineButton(available)}${sendButton(op, available)}</div></form><div class="composer-hint">${esc(hint)}</div>`;
+    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${codeView.composerChip()}${knowledge ? `<div class="composer-chips">${knowledge}</div>` : ''}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="12000" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar(knowledgeView.enabled())}${dock ? `<div class="dock" role="group" aria-label="What the model can use">${dock}</div>` : ''}</div>${engineButton(available)}${sendButton(op, available)}</div></form><div class="composer-hint">${esc(hint)}</div>`;
   }
   /** One pill for the model and its thinking effort; it opens the model list with effort and the other parameters. */
   function engineButton(available) {
@@ -754,9 +758,11 @@ export async function startConnected(capabilities) {
         if (!operationIsCurrent(op)) return;
         operations.delete(op.key); op.key = c.id; op.conversation = c; c.messages ||= []; operations.set(c.id, op); touchConversation(c.id); upsert(c);
         if (route().page === 'chat' && !route().id && state.draftKey === op.draftKey) { state.active = c; history.replaceState(null, '', `#chat/${encodeURIComponent(c.id)}`); }
+        // The project comes first: a project chat's new workspace starts with its code.
+        await projectsView.applyDraft(c.id); await codeView.applyStart(c.id); if (!operationIsCurrent(op)) return;
         if (state.workspaceDraft) { state.workspaceDraft = false; await workspace.create(c.id); if (!operationIsCurrent(op)) return; }
         if (state.browserDraft) { state.browserDraft = false; await browserView.setOn(c.id, true); if (!operationIsCurrent(op)) return; }
-        await Promise.all([connectionsView.applyDraft(c.id), knowledgeView.applyDraft(c.id), projectsView.applyDraft(c.id)]); connectionsView.loadChat(c.id); knowledgeView.loadChat(c.id); projectsView.loadChat(c.id);
+        await Promise.all([connectionsView.applyDraft(c.id), knowledgeView.applyDraft(c.id)]); connectionsView.loadChat(c.id); knowledgeView.loadChat(c.id); projectsView.loadChat(c.id);
       }
       const c = op.conversation; c.model = settings.model; c.reasoningEffort = settings.reasoningEffort; c.settings = { ...settings };
       if (kind === 'regenerate') {
@@ -860,7 +866,7 @@ export async function startConnected(capabilities) {
     'project-menu': el => openListMenu(el, 'Project', `${projectsView.menuItems()}<button role="menuitem" class="menu-item" data-action="context">${icon('panel')}Chat details<kbd>⌘.</kbd></button>`),
     'composer-add': el => knowledgeView.enabled() ? openListMenu(el, 'Add to this message', `<button role="menuitem" class="menu-item" data-action="attach-files" ${attachments.full() ? 'disabled' : ''}>${icon('paperclip')}Attach files</button><button role="menuitem" class="menu-item" data-action="knowledge-picker">${icon('book')}Knowledge collections</button>`) : attachments.actions['attach-files'](),
     compact: () => savePreference({ density: state.compact ? 'comfortable' : 'compact' }),
-    'new-chat': () => { state.draftKey++; state.draft = ''; state.workspaceDraft = false; state.browserDraft = false; connectionsView.resetDraft(); knowledgeView.resetDraft(); projectsView.resetDraft(); attachments.clear(); applyPreferences(state.preferences); go('chat'); requestAnimationFrame(() => $('#prompt')?.focus()); },
+    'new-chat': () => { state.draftKey++; state.draft = ''; state.workspaceDraft = false; state.browserDraft = false; connectionsView.resetDraft(); knowledgeView.resetDraft(); projectsView.resetDraft(); codeView.resetDraft(); attachments.clear(); applyPreferences(state.preferences); go('chat'); requestAnimationFrame(() => $('#prompt')?.focus()); },
     starter: el => { if (route().page !== 'chat') { state.draftKey++; go('chat'); } state.draft = el.dataset.prompt; if (el.dataset.workspace && !route().id) state.workspaceDraft = true; render(); const prompt = $('#prompt'); if (prompt) { prompt.focus(); prompt.setSelectionRange(prompt.value.length, prompt.value.length); } },
     stop: stopCurrent,
     profile: openProfileMenu,
@@ -1091,7 +1097,7 @@ export async function startConnected(capabilities) {
   document.addEventListener('change', event => {
     administration.input(event); historyView.input(event);
     if (event.target.id === 'message-files') { attachments.upload(event.target); return; }
-    if (knowledgeView.input(event) || libraryView.input(event)) return;
+    if (knowledgeView.input(event) || libraryView.input(event) || codeView.change(event)) return;
     if (event.target.closest?.('#share-form')) { sharing.input(event); return; }
     if (event.target.matches?.('[data-browser-engine]')) { browserView.input(event.target); return; }
     if (event.target.id !== 'reasoning-effort' || !state.active || state.streaming) return;

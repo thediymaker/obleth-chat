@@ -882,9 +882,28 @@ async fn create(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let (sandboxes, user) = manager(&s, &headers, true).await?;
-    Ok(Json(
-        json!({"workspace":sandboxes.create(user.id, id).await?}),
-    ))
+    let existed = sandboxes.get(user.id, id).await?.is_some();
+    let mut sandbox = sandboxes.create(user.id, id).await?;
+    // A project chat's new workspace starts with the project's code.
+    if !existed {
+        match crate::code::seed(&s.store.pool, &sandboxes, &user, id, &sandbox).await {
+            Ok(Some(running)) => {
+                let started = running.clone();
+                let sb = sandboxes.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = tools::ensure_dev_server(&sb, &started).await {
+                        tracing::warn!("could not start the workspace server: {error}");
+                    }
+                });
+                sandbox = running;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(chat=%id, "could not put the project's code in the workspace: {}", error.1)
+            }
+        }
+    }
+    Ok(Json(json!({"workspace":sandbox})))
 }
 
 async fn remove(

@@ -182,7 +182,7 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     'project-chat': el => { newChat(); chat.draft = el.dataset.id; render(); },
     // Research runs unattended, so its chat starts in Auto mode where that's allowed.
     'project-research': el => { newChat({ auto: true }); chat.draft = el.dataset.id; },
-    'project-draft-clear': () => { chat.draft = null; render(); },
+    'project-draft-clear': () => { chat.draft = null; code?.resetDraft(); render(); },
     'project-collections': collectionsPicker,
     'project-collection': el => toggleCollection(el.dataset.id),
     'project-move': mover,

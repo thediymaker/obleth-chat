@@ -3,6 +3,7 @@
 //! temporary folder when it needs one. Writes hold the project's row lock, so main only
 //! ever moves forward from the value a workspace merged with.
 
+use super::workspace::Author;
 use crate::error::ApiError;
 use axum::http::StatusCode;
 use sqlx::{PgConnection, Row};
@@ -204,6 +205,96 @@ impl Repo {
             .await?
             .check("read")?;
         Ok(out.text().trim().parse().unwrap_or(0))
+    }
+
+    /// Whether `sha` is in main's history.
+    pub async fn on_main(&self, sha: &str) -> Result<bool, ApiError> {
+        Ok(self.main.is_some()
+            && self
+                .git(&["merge-base", "--is-ancestor", sha, "main"])
+                .await?
+                .ok)
+    }
+
+    /// A commit on top of main that takes back what `sha` changed, as a bundle for
+    /// `advance` (this copy's main moves to it). The later history stays as it is.
+    pub async fn revert(&mut self, sha: &str, who: &Author) -> Result<Vec<u8>, ApiError> {
+        let old = self.main.clone().ok_or_else(ApiError::not_found)?;
+        let parents = self
+            .git(&["rev-list", "--parents", "-n", "1", sha])
+            .await?
+            .check("read")?
+            .text();
+        let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
+        let parent = match parents.as_slice() {
+            [one] => *one,
+            [] => {
+                return Err(ApiError::bad(
+                    "The first commit cannot be undone on its own. Undo later commits instead",
+                ))
+            }
+            _ => return Err(ApiError::bad(
+                "This commit combined two lines of work. Undo the commits it brought in instead",
+            )),
+        };
+        let merged = self
+            .git(&[
+                "merge-tree",
+                "--write-tree",
+                "--no-messages",
+                &format!("--merge-base={sha}"),
+                "main",
+                parent,
+            ])
+            .await?;
+        if !merged.ok {
+            return Err(conflict(
+                "Later commits changed the same lines, so this cannot be undone by itself",
+            ));
+        }
+        let tree = merged.text().lines().next().unwrap_or("").trim().to_owned();
+        let current = self.resolve_tree("main").await?;
+        if tree == current {
+            return Err(ApiError::bad("Its changes are already gone from the code"));
+        }
+        let subject = self
+            .git(&["show", "-s", "--format=%s", sha])
+            .await?
+            .check("read")?
+            .text();
+        let message = format!(
+            "Undo “{}”\n\nThis takes back commit {}.",
+            subject.trim(),
+            &sha[..sha.len().min(12)]
+        );
+        let env = [
+            ("GIT_AUTHOR_NAME", who.name.as_str()),
+            ("GIT_AUTHOR_EMAIL", who.email.as_str()),
+            ("GIT_COMMITTER_NAME", who.name.as_str()),
+            ("GIT_COMMITTER_EMAIL", who.email.as_str()),
+        ];
+        let commit = self
+            .git_env(&["commit-tree", &tree, "-p", &old, "-m", &message], &env)
+            .await?
+            .check("save")?
+            .text()
+            .trim()
+            .to_owned();
+        self.git(&["update-ref", "refs/heads/main", &commit, &old])
+            .await?
+            .check("save")?;
+        self.main = Some(commit);
+        self.bundle(&["HEAD", &format!("^{old}")]).await
+    }
+
+    async fn resolve_tree(&self, rev: &str) -> Result<String, ApiError> {
+        Ok(self
+            .git(&["rev-parse", &format!("{rev}^{{tree}}")])
+            .await?
+            .check("read")?
+            .text()
+            .trim()
+            .to_owned())
     }
 }
 

@@ -37,6 +37,8 @@ const paths = {
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   bolt: '<path d="m13 2-9 12h7l-1 8 10-12h-7Z"/>',
   chart: '<path d="M4 3v17h18M8 15l4-6 4 3 5-7"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+  compare: '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/>',
   branch: '<circle cx="6" cy="4" r="2"/><circle cx="6" cy="20" r="2"/><circle cx="18" cy="6" r="2"/><path d="M6 6v12m0-5c8 0 12-1 12-5"/>',
   play: '<path d="m8 4 12 8-12 8Z"/>',
   stop: '<rect x="5" y="5" width="14" height="14" rx="2"/>',

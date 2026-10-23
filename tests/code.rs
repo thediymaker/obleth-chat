@@ -939,4 +939,192 @@ mod http {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
+
+    /// The commits on main, newest first.
+    async fn shas(pool: &PgPool, project: Uuid) -> Vec<String> {
+        server_git(pool, project, &["rev-list", "main"])
+            .await
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn commits_are_undone_compared_and_started_from(pool: PgPool) {
+        let auth = Auth::new(
+            pool.clone(),
+            AuthConfig {
+                origin: ORIGIN.into(),
+                session_hours: 12,
+                bootstrap_username: Some("test-admin".into()),
+                bootstrap_password: Some(PASSWORD.into()),
+                oidc: None,
+                login_rate_per_minute: 1000,
+            },
+        )
+        .await
+        .unwrap();
+        let state = AppState::new(auth, pool.clone(), None, 4);
+        let app = router(state, "web".into());
+        let admin = login(&app, "test-admin").await;
+        for name in ["jen", "out"] {
+            json_call(
+                &app,
+                "POST",
+                "/api/admin/users",
+                json!({"username":name,"password":PASSWORD,"displayName":name,"role":"user"}),
+                &admin,
+            )
+            .await;
+        }
+        let jen = login(&app, "jen").await;
+        let out = login(&app, "out").await;
+        let (_, made) =
+            json_call(&app, "POST", "/api/projects", json!({"name":"Site"}), &jen).await;
+        let p: Uuid = made["project"]["id"].as_str().unwrap().parse().unwrap();
+        let c = chat(&pool, &jen.user, p).await;
+        let dirs = root();
+        let a = folder(dirs.path(), "jen");
+        a.write("a.txt", "1\n");
+        a.write("b.txt", "x\n");
+        code::sync_chat(&pool, &a, &jen.user, p, c, Some("Start"))
+            .await
+            .unwrap();
+        a.write("b.txt", "y\n");
+        code::sync_chat(&pool, &a, &jen.user, p, c, Some("Change b"))
+            .await
+            .unwrap();
+        a.write("c.txt", "c\n");
+        code::sync_chat(&pool, &a, &jen.user, p, c, Some("Add c"))
+            .await
+            .unwrap();
+        let log = shas(&pool, p).await;
+        let (first, change_b) = (log[2].clone(), log[1].clone());
+
+        // Undo: a new commit takes back one commit's changes and keeps the rest.
+        let undo = |sha: &str| format!("/api/projects/{p}/code/commits/{sha}/undo");
+        let (status, body) = json_call(&app, "POST", &undo(&change_b), Value::Null, &jen).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["commits"], 4);
+        assert_eq!(server_git(&pool, p, &["show", "main:b.txt"]).await, "x\n");
+        assert_eq!(server_git(&pool, p, &["show", "main:c.txt"]).await, "c\n");
+        assert_eq!(
+            server_git(&pool, p, &["log", "-1", "--format=%s%n%an", "main"]).await,
+            "Undo “Change b”\njen\n"
+        );
+        // Again: nothing left to undo. The first commit and outsiders are refused.
+        let (status, _) = json_call(&app, "POST", &undo(&change_b), Value::Null, &jen).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = json_call(&app, "POST", &undo(&first), Value::Null, &jen).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = json_call(&app, "POST", &undo(&change_b), Value::Null, &out).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Lines changed again later: undoing the earlier change alone would clash.
+        code::sync_chat(&pool, &a, &jen.user, p, c, None)
+            .await
+            .unwrap();
+        a.write("a.txt", "2\n");
+        code::sync_chat(&pool, &a, &jen.user, p, c, Some("Two"))
+            .await
+            .unwrap();
+        a.write("a.txt", "3\n");
+        code::sync_chat(&pool, &a, &jen.user, p, c, Some("Three"))
+            .await
+            .unwrap();
+        let two = shas(&pool, p).await[1].clone();
+        let (status, _) = json_call(&app, "POST", &undo(&two), Value::Null, &jen).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // Compare the first commit with now.
+        let (status, cmp) = json_call(
+            &app,
+            "GET",
+            &format!("/api/projects/{p}/code/compare?from={}", &first[..10]),
+            Value::Null,
+            &jen,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cmp}");
+        assert_eq!(cmp["from"]["subject"], "Start");
+        assert_eq!(cmp["to"]["subject"], "Three");
+        assert_eq!(cmp["total"], 5);
+        let paths: Vec<&str> = cmp["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["a.txt", "c.txt"]);
+        let (_, one) = json_call(
+            &app,
+            "GET",
+            &format!("/api/projects/{p}/code/compare?from={first}&to={change_b}&path=b.txt"),
+            Value::Null,
+            &jen,
+        )
+        .await;
+        assert_eq!(one["total"], 1);
+        assert!(one["patch"].as_str().unwrap().contains("+y"), "{one}");
+        let (status, _) = json_call(
+            &app,
+            "GET",
+            &format!("/api/projects/{p}/code/compare?from={first}"),
+            Value::Null,
+            &out,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // A new chat from the first commit: its workspace starts there and its next
+        // Sync brings in everything since.
+        let fresh = chat(&pool, &jen.user, p).await;
+        let (status, started) = json_call(
+            &app,
+            "PUT",
+            &format!("/api/conversations/{fresh}/code/start"),
+            json!({"sha":&first[..8]}),
+            &jen,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        assert_eq!(started["start"], first.as_str());
+        let f = folder(dirs.path(), "fresh");
+        assert!(code::begin(&pool, &f, &jen.user, p, fresh).await.unwrap());
+        assert_eq!(f.read("b.txt").as_deref(), Some("x\n"));
+        assert!(f.read("c.txt").is_none());
+        let who = code::author(&jen.user);
+        let view = code::report(&pool, &f, &who, p).await.unwrap();
+        assert_eq!(
+            (view["behind"].as_i64(), view["ahead"].as_i64()),
+            (Some(5), Some(0))
+        );
+        // Only an empty folder is filled.
+        assert!(!code::begin(&pool, &f, &jen.user, p, fresh).await.unwrap());
+        f.write("d.txt", "d\n");
+        code::sync_chat(&pool, &f, &jen.user, p, fresh, Some("Add d"))
+            .await
+            .unwrap();
+        assert_eq!(f.read("c.txt").as_deref(), Some("c\n"));
+        assert_eq!(f.read("a.txt").as_deref(), Some("3\n"));
+        assert_eq!(server_git(&pool, p, &["show", "main:d.txt"]).await, "d\n");
+
+        // Undo a save that was not synced: its changes are unsaved again.
+        f.write("e.txt", "e\n");
+        assert!(workspace::commit(&f, &who, "Add e").await.unwrap());
+        workspace::uncommit(&f, &who).await.unwrap();
+        let status = workspace::status(&f, &who).await.unwrap();
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.changes.len(), 1);
+        assert_eq!(
+            (
+                status.changes[0].path.as_str(),
+                status.changes[0].status.as_str()
+            ),
+            ("e.txt", "added")
+        );
+        // A synced one stays: it is in the project's history.
+        f.write("e.txt", "");
+        std::fs::remove_file(dirs.path().join("fresh/e.txt")).unwrap();
+        assert!(workspace::uncommit(&f, &who).await.is_err());
+    }
 }

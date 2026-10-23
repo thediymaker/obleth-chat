@@ -55,10 +55,13 @@ export function conflictRegions(text, limit = 3) {
 }
 
 
-export function createCode({ api, state, capabilities, render, modal, close, toast, chatPath, send, terminal, moveToProject }) {
-  const chats = new Map(), project = { id: null, overview: null, log: null, commit: null, files: null, file: null, versions: null, error: '', loading: 0 };
+export function createCode({ api, state, capabilities, render, modal, close, toast, chatPath, send, terminal, moveToProject, startFrom }) {
+  const chats = new Map(), project = { id: null, overview: null, log: null, commit: null, compare: null, files: null, file: null, versions: null, error: '', loading: 0 };
+  // Where the next new chat's workspace starts, when it was started from a commit.
+  let start = null;
   let paneUpdate = () => {};
   const enabled = () => !!capabilities.features?.code;
+  const workspaces = () => !!capabilities.features?.workspaces;
   const entry = id => { if (!chats.has(id)) chats.set(id, { data: null, loading: false, at: 0, error: '', view: null, message: null, busy: '', regions: {} }); return chats.get(id); };
   const projectPath = id => `/api/projects/${enc(id)}/code`;
 
@@ -115,7 +118,7 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
     const busy = !!c.busy;
     const form = changes.length || d.ahead || d.behind || !d.main ? `<div class="git-commit">${changes.length ? `<label class="form-label" for="code-message">What changed</label><textarea id="code-message" class="form-control" rows="2" maxlength="2000" data-code-message="${esc(id)}" placeholder="${esc(d.draft)}">${esc(message)}</textarea><small class="faint">${c.message == null ? 'Drafted from the changes. Edit it freely.' : 'Kept with the commit, along with a link to this chat.'}</small>` : ''}<div class="row">${btn(c.busy === 'sync' ? 'Syncing…' : 'Sync', 'code-sync', { icon: 'refresh', tone: 'primary small', attrs: busy ? 'disabled' : '' })}${changes.length ? btn(c.busy === 'save' ? 'Saving…' : 'Save without syncing', 'code-save', { tone: 'ghost small', attrs: busy ? 'disabled' : '' }) : ''}</div><small class="faint">${esc(say)}</small></div>` : `<p class="inline-note git-pad">${esc(say)}</p>`;
     const log = (d.log || []).slice(0, 8);
-    const history = log.length ? `<div class="git-section"><div class="spread"><span class="eyebrow">History</span><a class="tr-link" href="#projects/${enc(d.project.id)}/code/history">All${icon('right')}</a></div><ol class="git-log">${log.map((e, i) => `<li><span class="git-dot ${i < d.ahead ? 'local' : ''}"></span><span class="grow"><span class="git-subject">${esc(e.subject)}</span><small>${esc(e.author)} · ${esc(ago(e.time))}${i < d.ahead ? ' · not synced' : ''}</small></span><code>${esc(short(e.sha))}</code></li>`).join('')}</ol></div>` : '';
+    const history = log.length ? `<div class="git-section"><div class="spread"><span class="eyebrow">History</span><a class="tr-link" href="#projects/${enc(d.project.id)}/code/history">All${icon('right')}</a></div><ol class="git-log">${log.map((e, i) => `<li><span class="git-dot ${i < d.ahead ? 'local' : ''}"></span><span class="grow"><span class="git-subject">${esc(e.subject)}</span><small>${esc(e.author)} · ${esc(ago(e.time))}${i < d.ahead ? ' · not synced' : ''}</small></span>${i === 0 && d.ahead ? `<button type="button" class="tr-link" data-action="code-uncommit" title="Make this save’s changes unsaved again" ${busy ? 'disabled' : ''}>Undo</button>` : ''}<code>${esc(short(e.sha))}</code></li>`).join('')}</ol></div>` : '';
     return `${behind}<div class="git-section"><div class="spread"><span class="eyebrow">Changes${changes.length ? ` · ${count(changes.length, 'file')}` : ''}</span>${changes.length ? `<button type="button" class="tr-link" data-action="code-undo-all" ${busy ? 'disabled' : ''}>Undo all</button>` : ''}</div>${list}</div>${form}${history}<div class="git-foot"><span class="faint">Kept by Chat while the project runs</span><span class="row">${btn('Export…', 'code-export', { tone: 'small ghost', attrs: `data-project="${esc(d.project.id)}" data-name="${esc(d.project.name)}"` })}${btn('Open in terminal', 'code-terminal', { icon: 'terminal', tone: 'small ghost' })}</span></div>`;
   }
   function fileView(c) {
@@ -175,13 +178,14 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
       if (!files.length) return;
       send(`Sync paused because ${files.length === 1 ? `\`${files[0]}\` was` : `${files.map(f => `\`${f}\``).join(', ')} were`} changed both in this chat and in the project. In each file, combine the two versions between the conflict markers (<<<<<<<, =======, >>>>>>>) so that both changes still work, and remove the markers. Don't run git commands. Then tell me briefly what you kept from each side, and I'll finish the sync.`);
     },
+    'code-uncommit': () => { const id = currentChat(); if (!id) return; run(id, 'uncommit', () => api.request(`${chatPath(id)}/code/uncommit`, { method: 'POST' }), () => { entry(id).message = null; toast('Save undone. Its changes are back under Changes.'); }); },
     'code-terminal': () => terminal(currentChat(), 'git status'),
     'code-export': el => exportDialog(el.dataset.project, el.dataset.name),
     'code-zip': el => {
       const form = el.closest('.modal-body'), history = form?.querySelector('#code-zip-history')?.checked, withChats = form?.querySelector('#code-zip-chats')?.checked;
       const a = document.createElement('a'); a.href = `${projectPath(el.dataset.project)}/export.zip?history=${!!history}&chats=${!!withChats}`; a.download = ''; document.body.append(a); a.click(); a.remove();
     },
-    'code-commit-file': el => togglePatch(el.dataset.path),
+    'code-commit-file': el => togglePatch(el.dataset.path, el.dataset.kind),
     'code-lines': el => loadVersions(el.dataset.path, Number(el.dataset.start), Number(el.dataset.end)),
     'code-lines-close': () => { project.versions = null; render(); },
   };
@@ -235,7 +239,7 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
 
   // ---- The project's Code tab ----
   const parts = () => location.hash.slice(1).split('/');
-  const sub = () => ['history', 'files'].includes(parts()[3]) ? parts()[3] : 'overview';
+  const sub = () => ['history', 'files', 'compare'].includes(parts()[3]) ? parts()[3] : 'overview';
   const param = () => { try { return decodeURIComponent(parts().slice(4).join('/')); } catch { return ''; } };
   async function get(id, url, key) {
     project.loading++;
@@ -246,15 +250,23 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
   }
   async function loadProject(id) {
     if (!enabled()) return;
-    if (project.id !== id) Object.assign(project, { id, overview: null, log: null, commit: null, files: null, file: null, versions: null, error: '' });
+    if (project.id !== id) Object.assign(project, { id, overview: null, log: null, commit: null, compare: null, files: null, file: null, versions: null, error: '' });
     project.error = '';
     const here = sub(), arg = param(), jobs = [];
     if (!project.overview) jobs.push(get(id, projectPath(id), 'overview').then(r => { if (r) project.overview = r; }));
-    if ((here === 'overview' || here === 'history') && !project.log) jobs.push(get(id, `${projectPath(id)}/log?limit=200`).then(r => { if (r) project.log = r.commits; }));
+    if (here !== 'files' && !project.log) jobs.push(get(id, `${projectPath(id)}/log?limit=200`).then(r => { if (r) project.log = r.commits; }));
     if (here === 'history') {
       const sha = arg || null;
       if (sha && project.commit?.sha !== sha) { project.commit = { sha, data: null }; jobs.push(get(id, `${projectPath(id)}/commits/${enc(sha)}`).then(r => { if (r && project.commit?.sha === sha) { project.commit.data = r; if (r.files.length && r.files.length <= 3) r.files.forEach(f => togglePatch(f.path)); } })); }
       if (!sha) project.commit = null;
+    }
+    if (here === 'compare') {
+      const key = arg, [from, to = 'main'] = key.split('...');
+      if (from && project.compare?.key !== key) {
+        project.compare = { key, from, to, data: null, open: {} };
+        jobs.push(get(id, `${projectPath(id)}/compare?from=${enc(from)}&to=${enc(to)}`).then(r => { if (r && project.compare?.key === key) { project.compare.data = r; if (r.files.length && r.files.length <= 3) r.files.forEach(f => togglePatch(f.path, 'compare')); } }));
+      }
+      if (!from) project.compare = null;
     }
     if (here === 'files') {
       if (!project.files) jobs.push(get(id, `${projectPath(id)}/files`).then(r => { if (r) project.files = r.files; }));
@@ -285,19 +297,20 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
     if (!enabled()) return '';
     const o = project.id === p.id ? project.overview : null;
     const here = sub(), link = (t, label) => `<a href="${base(p)}${t === 'overview' ? '' : `/${t}`}" class="${here === t ? 'active' : ''}" ${here === t ? 'aria-current="page"' : ''}>${label}</a>`;
-    const nav = `<nav class="code-tabs" aria-label="Code">${link('overview', 'Overview')}${link('history', 'History')}${link('files', 'Files')}</nav>`;
+    const nav = `<nav class="code-tabs" aria-label="Code">${link('overview', 'Overview')}${link('history', 'History')}${link('files', 'Files')}${here === 'compare' ? link('compare', 'Compare') : ''}</nav>`;
     const exportButton = o?.main ? btn('Export', 'code-export', { icon: 'download', tone: 'small', attrs: `data-project="${esc(p.id)}" data-name="${esc(p.name)}"` }) : '';
     const top = `<div class="spread code-top">${nav}${exportButton}</div>${errorBox(project.error, 'code-project-reload')}`;
     if (!o) return `${top}<p class="inline-note" role="status">Loading the code…</p>`;
     if (!o.main) return `${top}<section class="card project-section code-empty"><span class="tile-icon">${icon('branch')}</span><h2>No code yet</h2><p>Each chat in this project can build in its own workspace. When someone presses Sync in a chat’s Git tab, its code lands here and the other chats bring it in with their next Sync. Every change remembers the chat that made it.</p>${btn('New chat in project', 'project-chat', { icon: 'plus', tone: 'primary small', attrs: `data-id="${esc(p.id)}"` })}</section>`;
     if (here === 'history') return `${top}${historyView(p)}`;
     if (here === 'files') return `${top}${filesView(p)}`;
+    if (here === 'compare') return `${top}${compareView(p)}`;
     return `${top}${overviewView(p, o)}`;
   }
   function overviewView(p, o) {
     const latest = project.log?.[0];
     const recent = (project.log || []).slice(0, 6).map(e => commitRow(p, e)).join('');
-    const working = o.chats.length ? o.chats.map(w => `<div class="detail-row code-chat"><span class="avatar small">${initial(w.chat.ownerName)}</span><span class="grow"><strong>${w.chat.readable ? `<a href="#chat/${enc(w.chat.id)}">${esc(w.chat.title || 'Untitled chat')}</a>` : `${esc(w.chat.ownerName)}’s chat`}</strong><small>${w.chat.mine ? 'You' : esc(w.chat.ownerName)} · synced ${esc(ago(w.syncedAt))}</small></span>${w.behind ? badge(`${count(w.behind, 'commit')} behind`, 'amber') : badge('Up to date')}</div>`).join('') : '<p class="context-note">No chat has synced yet.</p>';
+    const working = o.chats.length ? o.chats.map(w => `<div class="detail-row code-chat"><span class="avatar small">${initial(w.chat.ownerName)}</span><span class="grow"><strong>${w.chat.readable ? `<a href="#chat/${enc(w.chat.id)}">${esc(w.chat.title || 'Untitled chat')}</a>` : `${esc(w.chat.ownerName)}’s chat`}</strong><small>${w.chat.mine ? 'You' : esc(w.chat.ownerName)} · ${w.syncedAt ? `synced ${esc(ago(w.syncedAt))}` : 'not synced yet'}</small></span>${w.behind ? badge(`${count(w.behind, 'commit')} behind`, 'amber') : badge('Up to date')}</div>`).join('') : '<p class="context-note">No chat has synced yet.</p>';
     const exports = o.exports.map(e => `<div class="detail-row">${icon('upload')}<span class="grow">Pushed to <a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.target)}</a><small>${esc(ago(e.at))} · ${e.behind ? `${count(e.behind, 'commit')} since` : 'up to date'}</small></span></div>`).join('');
     const used = o.main.bytes / o.limits.bytes;
     return `<div class="project-layout"><div class="project-main">
@@ -319,22 +332,46 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
     const detail = !project.commit ? `<section class="card project-section"><p class="context-note">Pick a commit to see what it changed and the chat it came from.</p></section>` : !project.commit.data ? '<section class="card project-section"><p class="inline-note">Loading…</p></section>' : commitDetail(p, project.commit.data);
     return `<div class="code-split"><section class="card project-section code-list"><ol class="code-log">${log.map(e => commitRow(p, e, sha)).join('')}</ol>${log.length >= 200 ? '<p class="context-note">Showing the latest 200 commits.</p>' : ''}</section><div class="code-detail">${detail}</div></div>`;
   }
+  /** A version's changed files, each opening to its diff. */
+  function fileList(files, open, kind) {
+    return files.map(f => {
+      const patch = open[f.path];
+      return `<li><button type="button" data-action="code-commit-file" data-kind="${kind}" data-path="${esc(f.path)}" aria-expanded="${patch !== undefined}"><span class="git-letter">${icon(patch !== undefined ? 'down' : 'right')}</span><span class="grow git-path">${esc(f.path)}</span><span class="git-stat">${f.added ? `<b>+${f.added}</b>` : ''}${f.removed ? ` <i>−${f.removed}</i>` : ''}${f.added == null ? '<small>binary</small>' : ''}</span></button>${patch === undefined ? '' : patch === null ? '<p class="inline-note git-pad">Loading…</p>' : diffView(patch)}</li>`;
+    }).join('');
+  }
   function commitDetail(p, d) {
     const c = d.commit, body = d.body, open = project.commit.open || {};
     const from = c.chat ? `<div class="code-from"><span class="eyebrow">From the chat</span><p>${chatLink(c.chat, c.turn)}${c.chat.readable ? '' : '<span class="faint"> · not shared with you</span>'}</p></div>` : '';
-    const files = d.files.map(f => {
-      const patch = open[f.path];
-      return `<li><button type="button" data-action="code-commit-file" data-path="${esc(f.path)}" aria-expanded="${patch !== undefined}"><span class="git-letter">${icon(patch !== undefined ? 'down' : 'right')}</span><span class="grow git-path">${esc(f.path)}</span><span class="git-stat">${f.added ? `<b>+${f.added}</b>` : ''}${f.removed ? ` <i>−${f.removed}</i>` : ''}${f.added == null ? '<small>binary</small>' : ''}</span></button>${patch === undefined ? '' : patch === null ? '<p class="inline-note git-pad">Loading…</p>' : diffView(patch)}</li>`;
-    }).join('');
-    return `<section class="card project-section"><div class="spread"><code>${esc(short(c.sha))}</code><span class="faint">${esc(new Date(c.time * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}</span></div><h2 class="code-title">${esc(c.subject)}</h2><p class="faint">${esc(c.author)}${c.parents.length > 1 ? ' · combined two lines of work' : ''}</p>${body ? `<p class="code-body">${esc(body)}</p>` : ''}${from}<span class="eyebrow">${count(d.files.length, 'file')}</span><ul class="git-changes code-commit-files">${files}</ul></section>`;
+    const files = fileList(d.files, open, 'commit');
+    const latest = project.overview?.main?.sha === c.sha, data = `data-sha="${esc(c.sha)}" data-subject="${esc(c.subject)}"`;
+    const acts = [
+      latest ? '' : `<a class="btn small ghost" href="${base(p)}/compare/${esc(c.sha)}...main">${icon('compare')}Compare with now</a>`,
+      workspaces() ? btn('New chat from here', 'code-new-chat', { icon: 'plus', tone: 'small ghost', attrs: `${data} data-project="${esc(p.id)}"` }) : '',
+      c.parents.length === 1 ? btn('Undo this commit', 'code-undo-commit', { icon: 'undo', tone: 'small ghost', attrs: data }) : '',
+    ].join('');
+    return `<section class="card project-section"><div class="spread"><code>${esc(short(c.sha))}</code><span class="faint">${esc(new Date(c.time * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}</span></div><h2 class="code-title">${esc(c.subject)}</h2><p class="faint">${esc(c.author)}${c.parents.length > 1 ? ' · combined two lines of work' : ''}</p>${body ? `<p class="code-body">${esc(body)}</p>` : ''}${from}${acts ? `<div class="row git-wrap code-actions">${acts}</div>` : ''}<span class="eyebrow">${count(d.files.length, 'file')}</span><ul class="git-changes code-commit-files">${files}</ul></section>`;
   }
-  async function togglePatch(path) {
-    const commit = project.commit, id = project.id; if (!commit?.data) return;
-    commit.open ||= {};
-    if (commit.open[path] !== undefined) { delete commit.open[path]; render(); return; }
-    commit.open[path] = null; render();
-    const r = await get(id, `${projectPath(id)}/commits/${enc(commit.sha)}?path=${enc(path)}`);
-    if (project.commit === commit) { commit.open[path] = r?.patch ?? ''; render(); }
+  async function togglePatch(path, kind = 'commit') {
+    const target = kind === 'compare' ? project.compare : project.commit, id = project.id; if (!target?.data) return;
+    target.open ||= {};
+    if (target.open[path] !== undefined) { delete target.open[path]; render(); return; }
+    target.open[path] = null; render();
+    const url = kind === 'compare' ? `${projectPath(id)}/compare?from=${enc(target.from)}&to=${enc(target.to)}&path=${enc(path)}` : `${projectPath(id)}/commits/${enc(target.sha)}?path=${enc(path)}`;
+    const r = await get(id, url);
+    if ((kind === 'compare' ? project.compare : project.commit) === target) { target.open[path] = r?.patch ?? ''; render(); }
+  }
+  function compareView(p) {
+    const c = project.compare, log = project.log || [];
+    if (!c) return '<section class="card project-section"><p class="context-note">Pick two versions to compare.</p></section>';
+    const same = (value, e) => value === e.sha || (value.length >= 4 && e.sha.startsWith(value));
+    const choices = (side, value) => `<select class="form-control" data-code-compare="${side}" aria-label="${side === 'from' ? 'From' : 'To'}"><option value="main" ${value === 'main' ? 'selected' : ''}>Now (main)</option>${log.map(e => `<option value="${esc(e.sha)}" ${value !== 'main' && same(value, e) ? 'selected' : ''}>${esc(short(e.sha))} · ${esc(e.subject.slice(0, 60))}</option>`).join('')}</select>`;
+    const pick = `<div class="code-compare-pick"><label><span class="eyebrow">From</span>${choices('from', c.from)}</label><a class="icon-btn" href="${base(p)}/compare/${esc(c.to)}...${esc(c.from)}" title="Swap" aria-label="Swap">${icon('compare')}</a><label><span class="eyebrow">To</span>${choices('to', c.to)}</label></div>`;
+    const d = c.data;
+    if (!d) return `<section class="card project-section">${pick}<p class="inline-note">Comparing…</p></section>`;
+    const backwards = !d.total && d.files.length;
+    const summary = `<p class="code-latest">${d.files.length ? `${count(d.files.length, 'file')} changed` : 'The same code'}${d.total ? ` over ${count(d.total, 'commit')}` : ''}, from <a href="${base(p)}/history/${esc(d.from.sha)}">${esc(d.from.subject)}</a> to <a href="${base(p)}/history/${esc(d.to.sha)}">${esc(d.to.subject)}</a>.</p>${backwards ? `<p class="context-note">“To” is older than “From”, so this shows the changes taken back. <a href="${base(p)}/compare/${esc(c.to)}...${esc(c.from)}">Swap them</a>.</p>` : ''}`;
+    const commits = d.commits.length ? `<span class="eyebrow">Commits in between</span><ol class="code-log">${d.commits.map(e => commitRow(p, e)).join('')}</ol>${d.total > d.commits.length ? `<p class="context-note">Showing the latest ${d.commits.length}.</p>` : ''}` : '<p class="context-note">No commits in between.</p>';
+    return `<section class="card project-section">${pick}${summary}</section><div class="code-split"><section class="card project-section code-list">${commits}</section><div class="code-detail"><section class="card project-section">${d.files.length ? `<span class="eyebrow">Files</span><ul class="git-changes code-commit-files">${fileList(d.files, c.open, 'compare')}</ul>` : '<p class="context-note">No files differ.</p>'}</section></div></div>`;
   }
   function filesView(p) {
     const files = project.files;
@@ -358,10 +395,49 @@ export function createCode({ api, state, capabilities, render, modal, close, toa
     return `${versions}<section class="card project-section"><div class="spread">${head}</div><span class="eyebrow">Who changed each line</span><div class="blame">${groups}</div></section>`;
   }
   actions['code-project-reload'] = () => { if (project.id) { const id = project.id; project.id = null; loadProject(id); } };
+  actions['code-new-chat'] = el => startFrom(el.dataset.project, { sha: el.dataset.sha, subject: el.dataset.subject });
+  actions['code-undo-commit'] = el => modal('Undo this commit?', `<p>A new commit takes back what “${esc(el.dataset.subject)}” changed. Everything after it stays, and the history keeps both.</p><p class="faint">Each chat brings the undo in with its next Sync.</p><div class="modal-actions">${btn('Keep it', 'close')}${btn('Undo commit', 'code-undo-commit-confirm', { tone: 'danger', attrs: `data-sha="${esc(el.dataset.sha)}" data-subject="${esc(el.dataset.subject)}"` })}</div>`);
+  actions['code-undo-commit-confirm'] = async el => {
+    const id = project.id, button = el; button.disabled = true;
+    try {
+      const r = await api.request(`${projectPath(id)}/commits/${enc(el.dataset.sha)}/undo`, { method: 'POST' });
+      close(); toast('Undone. Chats get it with their next Sync.');
+      Object.assign(project, { overview: null, log: null, files: null, file: null });
+      location.hash = `#projects/${enc(id)}/code/history/${enc(r.sha)}`;
+    } catch (e) {
+      button.disabled = false;
+      if (e.status !== 409 || !/same lines/.test(e.message) || !workspaces()) { close(); toast(e.message); return; }
+      // Later commits touched the same lines: a chat can combine the undo by hand.
+      modal('Undo it in a chat?', `<p>${esc(e.message)}.</p><p>A new chat with the latest code can take it back and keep what came after; the model does the combining and you check it before syncing.</p><div class="modal-actions">${btn('Cancel', 'close')}${btn('Undo in a new chat', 'code-undo-in-chat', { tone: 'primary', attrs: `data-sha="${esc(el.dataset.sha)}" data-subject="${esc(el.dataset.subject)}"` })}</div>`);
+    }
+  };
+  actions['code-undo-in-chat'] = el => { close(); startFrom(project.id, null, `Undo commit ${short(el.dataset.sha)} (“${el.dataset.subject}”): take back what it changed, but keep the work that came after it. Run \`git show ${short(el.dataset.sha)}\` to see it. Tell me what you changed, then I’ll sync.`); };
+
+  // ---- A new chat started from a commit ----
+  /** The composer's note that the new chat starts from a commit. */
+  function composerChip() {
+    if (!start || state.active) return '';
+    return `<div class="project-chip code-start-chip">${icon('branch')}<span>Workspace starts at <code>${esc(short(start.sha))}</code> ${esc(start.subject || '')}</span><button type="button" class="icon-btn" data-action="code-start-clear" aria-label="Start from the latest code" title="Start from the latest code">${icon('x')}</button></div>`;
+  }
+  actions['code-start-clear'] = () => { start = null; render(); };
+  /** After the new chat is created and in its project: where its workspace starts. */
+  async function applyStart(id) {
+    const s = start; start = null;
+    if (!s) return;
+    await api.request(`${chatPath(id)}/code/start`, { method: 'PUT', body: { sha: s.sha } }).catch(e => toast(e.message));
+  }
+  function change(event) {
+    const side = event.target.dataset?.codeCompare, c = project.compare;
+    if (!side || !c || !project.id) return false;
+    const value = event.target.value, from = side === 'from' ? value : c.from, to = side === 'to' ? value : c.to;
+    location.hash = `#projects/${enc(project.id)}/code/compare/${enc(from)}...${enc(to)}`;
+    return true;
+  }
 
   return {
-    enabled, load, refresh, changed, label, show, input, submit, actions, loadProject, projectView,
+    enabled, load, refresh, changed, label, show, input, change, submit, actions, loadProject, projectView, composerChip, applyStart,
+    setStart: value => { start = value; }, resetDraft: () => { start = null; },
     attach: update => { paneUpdate = update; },
-    clear: () => { chats.clear(); Object.assign(project, { id: null, overview: null, log: null, commit: null, files: null, file: null, versions: null, error: '' }); last = ''; },
+    clear: () => { chats.clear(); start = null; Object.assign(project, { id: null, overview: null, log: null, commit: null, compare: null, files: null, file: null, versions: null, error: '' }); last = ''; },
   };
 }

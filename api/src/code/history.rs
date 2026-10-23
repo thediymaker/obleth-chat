@@ -21,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/projects/{id}/code", get(overview))
         .route("/api/projects/{id}/code/log", get(log))
         .route("/api/projects/{id}/code/commits/{sha}", get(commit))
+        .route("/api/projects/{id}/code/compare", get(compare))
         .route("/api/projects/{id}/code/files", get(files))
         .route("/api/projects/{id}/code/file", get(file))
         .route("/api/projects/{id}/code/blame", get(blame))
@@ -212,7 +213,7 @@ async fn log(
     ))
 }
 
-fn check_sha(sha: &str) -> Result<(), ApiError> {
+pub(crate) fn check_sha(sha: &str) -> Result<(), ApiError> {
     if sha.len() < 4 || sha.len() > 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(ApiError::bad("That is not a commit"));
     }
@@ -232,6 +233,34 @@ fn numstat(out: &str) -> Vec<Value> {
             Some(json!({"path":path,"added":a.parse::<i64>().ok(),"removed":r.parse::<i64>().ok()}))
         })
         .collect()
+}
+
+/// git's empty tree, the "before" of a first commit.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Each file's added and removed lines between two versions.
+async fn stat(repo: &Repo, from: &str, to: &str) -> Result<Vec<Value>, ApiError> {
+    let out = repo
+        .git(&["diff", "--numstat", "--no-renames", from, to])
+        .await?;
+    Ok(numstat(&out.text()))
+}
+
+/// One file's changes between two versions, as a unified diff (up to 200 KB).
+async fn patch(repo: &Repo, from: &str, to: &str, path: &str) -> Result<String, ApiError> {
+    super::check_path(path)?;
+    let out = repo
+        .git(&["diff", "--no-color", "--no-renames", from, to, "--", path])
+        .await?;
+    let mut text = out.text();
+    if text.len() > 200_000 {
+        let mut end = 200_000;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    Ok(text)
 }
 
 async fn commit(
@@ -267,55 +296,14 @@ async fn commit(
         .join("\n")
         .trim()
         .to_owned();
-    let parent = entry.parents.first().cloned();
-    let stat = match &parent {
-        Some(p) => {
-            repo.git(&["diff", "--numstat", "--no-renames", p, &full])
-                .await?
-        }
-        None => {
-            repo.git(&[
-                "show",
-                "--numstat",
-                "--format=",
-                "--no-renames",
-                "--root",
-                &full,
-            ])
-            .await?
-        }
-    };
+    let parent = entry
+        .parents
+        .first()
+        .cloned()
+        .unwrap_or_else(|| EMPTY_TREE.into());
+    let files = stat(&repo, &parent, &full).await?;
     let patch = match &q.path {
-        Some(path) => {
-            super::check_path(path)?;
-            let out = match &parent {
-                Some(p) => {
-                    repo.git(&["diff", "--no-color", "--no-renames", p, &full, "--", path])
-                        .await?
-                }
-                None => {
-                    repo.git(&[
-                        "show",
-                        "--no-color",
-                        "--format=",
-                        "--root",
-                        &full,
-                        "--",
-                        path,
-                    ])
-                    .await?
-                }
-            };
-            let mut text = out.text();
-            if text.len() > 200_000 {
-                let mut end = 200_000;
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                text.truncate(end);
-            }
-            Some(text)
-        }
+        Some(path) => Some(patch(&repo, &parent, &full, path).await?),
         None => None,
     };
     let known = chats(
@@ -325,8 +313,78 @@ async fn commit(
     )
     .await?;
     Ok(Json(
-        json!({"commit":entry_json(&entry, &known),"body":body,"files":numstat(&stat.text()),"patch":patch}),
+        json!({"commit":entry_json(&entry, &known),"body":body,"files":files,"patch":patch}),
     ))
+}
+
+#[derive(Deserialize)]
+struct CompareQuery {
+    from: String,
+    to: Option<String>,
+    path: Option<String>,
+}
+
+/// Two versions of the project's code side by side: the commits from one to the
+/// other and what each file gained and lost. `to` defaults to main.
+async fn compare(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Query(q): Query<CompareQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let to = q.to.clone().unwrap_or_else(|| "main".into());
+    for rev in [&q.from, &to] {
+        if rev != "main" {
+            check_sha(rev)?;
+        }
+    }
+    let (user, repo) = open(&s, &headers, id).await?;
+    let mut ends = Vec::new();
+    for rev in [&q.from, &to] {
+        let full = repo.resolve(rev).await?.ok_or_else(ApiError::not_found)?;
+        if !repo.on_main(&full).await? {
+            return Err(ApiError::not_found());
+        }
+        ends.push(full);
+    }
+    let (from, to) = (&ends[0], &ends[1]);
+    let range = format!("{from}..{to}");
+    let total = repo.count(&range).await?;
+    let entries = parse_log(
+        &repo
+            .git(&["log", "--topo-order", LOG_FORMAT, "-n", "100", &range])
+            .await?
+            .text(),
+    );
+    let mut both = parse_log(
+        &repo
+            .git(&["log", "--no-walk=unsorted", LOG_FORMAT, from, to])
+            .await?
+            .text(),
+    );
+    // --no-walk lists one commit once, so comparing a commit with itself has one end.
+    let end = |sha: &str, list: &[Entry]| list.iter().find(|e| e.sha == sha).cloned();
+    let (Some(first), Some(last)) = (end(from, &both), end(to, &both)) else {
+        return Err(ApiError::not_found());
+    };
+    both.extend(entries.iter().cloned());
+    let ids: Vec<Uuid> = both
+        .iter()
+        .filter_map(|e| e.chat)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let known = chats(&s.store.pool, user, &ids).await?;
+    let files = stat(&repo, from, to).await?;
+    let patch = match &q.path {
+        Some(path) => Some(patch(&repo, from, to, path).await?),
+        None => None,
+    };
+    let commits: Vec<Value> = entries.iter().map(|e| entry_json(e, &known)).collect();
+    Ok(Json(json!({
+        "from":entry_json(&first, &known),"to":entry_json(&last, &known),
+        "commits":commits,"total":total,"files":files,"patch":patch,
+    })))
 }
 
 async fn files(

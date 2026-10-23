@@ -1664,6 +1664,7 @@ body.pane-details-only{--workspace-w:min(440px,42vw)}
 .project-chip{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);color:var(--muted);padding:2px 2px 8px}
 .project-chip strong{color:var(--text);font-weight:500}
 .project-chip .icon-btn{width:24px;height:24px;margin-left:auto}
+.code-start-chip span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .color-options{display:flex;gap:8px}
 .color-option{cursor:pointer}
 .color-option input{position:absolute;opacity:0;pointer-events:none}
@@ -1935,7 +1936,7 @@ a.research-chip:hover{color:var(--text)}
 .git-sides>div:first-child pre{border-left:2px solid var(--blue)}
 .git-sides>div:last-child pre{border-left:2px solid var(--amber)}
 .workspace-git .inline-note .icon{width:13px;height:13px;vertical-align:-2px;margin-right:6px}
-.code-top{align-items:center;margin-bottom:16px;gap:12px}
+.code-top{align-items:center;margin-bottom:16px;gap:12px;flex-wrap:wrap}
 .code-tabs{display:flex;gap:4px;padding:3px;border:1px solid var(--line);border-radius:var(--radius);background:var(--raised)}
 .code-tabs a{padding:5px 12px;border-radius:var(--radius-sm);font-size:var(--fs-sm);color:var(--muted)}
 .code-tabs a:hover{color:var(--text)}
@@ -1977,6 +1978,11 @@ a.research-chip:hover{color:var(--text)}
 .code-body{white-space:pre-wrap;font-size:var(--fs-md);color:var(--text-2);line-height:1.6}
 .code-from{margin:14px 0;padding:10px 12px;border-left:2px solid var(--line-strong);background:var(--raised);border-radius:0 var(--radius-sm) var(--radius-sm) 0}
 .code-from p{margin:6px 0 0;font-size:var(--fs-md)}
+.code-actions{gap:8px;margin:4px 0 16px}
+.code-compare-pick{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:10px;align-items:end;margin-bottom:10px}
+.code-compare-pick label{display:grid;gap:6px;min-width:0}
+.code-compare-pick select{width:100%;min-width:0}
+.code-compare-pick .icon-btn{margin-bottom:3px}
 .code-commit-files li{border-top:1px solid var(--line-soft)}
 .blame{margin-top:8px;border:1px solid var(--line-soft);border-radius:var(--radius-sm);overflow:hidden}
 .blame-group{border-top:1px solid var(--line-soft)}
@@ -2000,5 +2006,5 @@ a.research-chip:hover{color:var(--text)}
 .export-where .slash{padding-bottom:10px;color:var(--faint)}
 .check-option.inline{padding:6px 14px 6px 0;align-items:center}
 @media(max-width:900px){.code-split{grid-template-columns:1fr}.code-list{position:static;max-height:320px}}
-@media(max-width:560px){.git-sides{grid-template-columns:1fr}.export-where{grid-template-columns:1fr}.export-where .slash{display:none}}
+@media(max-width:560px){.code-compare-pick{grid-template-columns:1fr}.code-compare-pick .icon-btn{justify-self:center}.git-sides{grid-template-columns:1fr}.export-where{grid-template-columns:1fr}.export-where .slash{display:none}}
 .workspace-git .workspace-note{margin:40px auto}

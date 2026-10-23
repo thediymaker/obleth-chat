@@ -1361,6 +1361,275 @@ async fn projects_give_their_chats_instructions_collections_and_saved_items(pool
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_shared_project_shares_only_what_its_owner_may_share(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let mut ids = Vec::new();
+    for name in ["jen", "kim"] {
+        call(
+            &f.app,
+            "POST",
+            "/api/admin/users",
+            json!({"username":name,"password":PASSWORD,"displayName":name,"role":"user"}),
+            &admin,
+        )
+        .await;
+        let session = login(&f.app, name).await;
+        let (_, me) = call(&f.app, "GET", "/api/session", Value::Null, &session).await;
+        ids.push((session, me["user"]["id"].as_str().unwrap().to_owned()));
+    }
+    let (_, me) = call(&f.app, "GET", "/api/session", Value::Null, &admin).await;
+    let admin_id = me["user"]["id"].as_str().unwrap().to_owned();
+    let [(jen, jen_id), (kim, kim_id)] = <[_; 2]>::try_from(ids).ok().unwrap();
+    let group = |name: &'static str, members: Vec<String>| {
+        let app = f.app.clone();
+        let admin = admin.clone();
+        async move {
+            let (_, made) = call(
+                &app,
+                "POST",
+                "/api/admin/groups",
+                json!({"name":name}),
+                &admin,
+            )
+            .await;
+            let id = made["group"]["id"].as_str().unwrap().to_owned();
+            for user in members {
+                call(
+                    &app,
+                    "PUT",
+                    &format!("/api/admin/groups/{id}/members/{user}"),
+                    Value::Null,
+                    &admin,
+                )
+                .await;
+            }
+            id
+        }
+    };
+    // Lab: Jen and Kim. Staff: Jen and the administrator.
+    let lab = group("Lab", vec![jen_id.clone(), kim_id.clone()]).await;
+    let staff = group("Staff", vec![jen_id.clone(), admin_id.clone()]).await;
+    let collection = |body: Value, who: Session| {
+        let app = f.app.clone();
+        async move {
+            let (_, made) = call(&app, "POST", "/api/knowledge/collections", body, &who).await;
+            made["collection"]["id"].as_str().unwrap().to_owned()
+        }
+    };
+    let answers = collection(
+        json!({"name":"Exam answers","scope":"group","groupId":staff}),
+        admin.clone(),
+    )
+    .await;
+    let notes = collection(json!({"name":"Jen's notes"}), jen.clone()).await;
+
+    // Jen shares a project with the lab and attaches both; she can open both.
+    let (_, project) = call(
+        &f.app,
+        "POST",
+        "/api/projects",
+        json!({"name":"Lab work","scope":"group","groupId":lab}),
+        &jen,
+    )
+    .await;
+    let project = project["project"]["id"].as_str().unwrap().to_owned();
+    let (_, set) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/projects/{project}/collections"),
+        json!({"collectionIds":[answers, notes]}),
+        &jen,
+    )
+    .await;
+    assert_eq!(set["collectionIds"].as_array().unwrap().len(), 2);
+
+    // Kim gets Jen's own collection through the project, never the staff one.
+    let (_, detail) = call(
+        &f.app,
+        "GET",
+        &format!("/api/projects/{project}"),
+        Value::Null,
+        &kim,
+    )
+    .await;
+    let names: Vec<&str> = detail["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Jen's notes"]);
+    for (id, want) in [(&notes, StatusCode::OK), (&answers, StatusCode::NOT_FOUND)] {
+        let (status, _) = call(
+            &f.app,
+            "GET",
+            &format!("/api/knowledge/collections/{id}"),
+            Value::Null,
+            &kim,
+        )
+        .await;
+        assert_eq!(status, want);
+    }
+
+    // Kim saves into the project; Jen, the owner, can take it out of the project.
+    let (_, saved) = call(
+        &f.app,
+        "POST",
+        "/api/saved",
+        json!({"kind":"note","title":"Kim's idea","body":"Try it","projectId":project}),
+        &kim,
+    )
+    .await;
+    let item = saved["item"]["id"].as_str().unwrap().to_owned();
+    let (_, seen) = call(
+        &f.app,
+        "GET",
+        &format!("/api/saved/{item}"),
+        Value::Null,
+        &jen,
+    )
+    .await;
+    assert_eq!(seen["item"]["ownerName"], "kim");
+    assert_eq!(
+        call(
+            &f.app,
+            "DELETE",
+            &format!("/api/projects/{project}/saved/{item}"),
+            Value::Null,
+            &kim
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &f.app,
+            "DELETE",
+            &format!("/api/projects/{project}/saved/{item}"),
+            Value::Null,
+            &jen
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let (status, kept) = call(
+        &f.app,
+        "GET",
+        &format!("/api/saved/{item}"),
+        Value::Null,
+        &kim,
+    )
+    .await;
+    assert_eq!(
+        (status, kept["item"]["projectId"].clone()),
+        (StatusCode::OK, Value::Null)
+    );
+
+    // After Jen leaves the lab, saving her project keeps it shared there, but she
+    // cannot share something new with it.
+    call(
+        &f.app,
+        "DELETE",
+        &format!("/api/admin/groups/{lab}/members/{jen_id}"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    let (status, renamed) = call(
+        &f.app,
+        "PATCH",
+        &format!("/api/projects/{project}"),
+        json!({"name":"Lab work 2","scope":"group","groupId":lab}),
+        &jen,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["project"]["groupId"], lab.as_str());
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        "/api/projects",
+        json!({"name":"Another","scope":"group","groupId":lab}),
+        &jen,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Administrators see every group, and may share with one they are not in.
+    let (_, all) = call(&f.app, "GET", "/api/groups", Value::Null, &admin).await;
+    let rows = all["groups"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .any(|g| g["id"] == lab.as_str() && g["member"] == false));
+    assert_eq!(
+        call(
+            &f.app,
+            "GET",
+            &format!("/api/groups/{lab}"),
+            Value::Null,
+            &admin
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        "/api/projects",
+        json!({"name":"Admin's","scope":"group","groupId":lab}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Deleting the lab un-shares what it held.
+    assert_eq!(
+        call(
+            &f.app,
+            "DELETE",
+            &format!("/api/admin/groups/{lab}"),
+            Value::Null,
+            &admin
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, mine) = call(
+        &f.app,
+        "GET",
+        &format!("/api/projects/{project}"),
+        Value::Null,
+        &jen,
+    )
+    .await;
+    assert_eq!(
+        (
+            mine["project"]["scope"].clone(),
+            mine["project"]["groupId"].clone()
+        ),
+        (json!("personal"), Value::Null)
+    );
+    assert_eq!(
+        call(
+            &f.app,
+            "GET",
+            &format!("/api/projects/{project}"),
+            Value::Null,
+            &kim
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_reply_that_asks_questions_ends_at_the_card(pool: PgPool) {
     let f = fixture(pool).await;
     let admin = login(&f.app, "test-admin").await;

@@ -208,7 +208,7 @@ struct GroupInput {
     description: String,
 }
 fn group_input(input: GroupInput) -> Result<(String, String), ApiError> {
-    let name = validate_display_name(&input.name)?;
+    let name = validate_display_name(&input.name).map_err(|_| group_name_error())?;
     let description = input.description.trim().to_owned();
     if description.chars().count() > 1000
         || description
@@ -229,6 +229,10 @@ fn group_error(error: sqlx::Error) -> ApiError {
         error => error.into(),
     }
 }
+fn group_name_error() -> ApiError {
+    ApiError::bad("Group names are 1 to 100 characters")
+}
+
 async fn groups(State(auth): State<Auth>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     auth.require_admin(&headers, false).await?;
     let groups=sqlx::query_as::<_,GroupView>("SELECT g.id,g.name,g.description,COUNT(m.user_id) AS member_count FROM user_groups g LEFT JOIN user_group_members m ON m.group_id=g.id GROUP BY g.id ORDER BY lower(g.name),g.id LIMIT 500").fetch_all(&auth.pool).await?;
@@ -335,7 +339,7 @@ async fn update_group(
     let name = input
         .name
         .as_deref()
-        .map(validate_display_name)
+        .map(|n| validate_display_name(n).map_err(|_| group_name_error()))
         .transpose()?;
     let description = input
         .description
@@ -373,6 +377,15 @@ async fn delete_group(
     let admin = auth.require_admin(&headers, true).await?;
     let mut tx = auth.pool.begin().await?;
     auth.lock_admin(&mut tx, admin.id).await?;
+    // What was shared with the group goes back to its owner alone.
+    for table in ["projects", "knowledge_collections"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET scope='personal', group_id=NULL WHERE group_id=$1"
+        ))
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
     if sqlx::query("DELETE FROM user_groups WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)

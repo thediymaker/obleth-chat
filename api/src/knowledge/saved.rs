@@ -20,7 +20,8 @@ const MAX_ITEMS: i64 = 5000;
 const MAX_BODY: usize = 65536;
 const EMBED_CHARS: usize = 6000;
 const COLUMNS: &str = "s.id, s.owner_id, s.kind, s.title, s.body, s.language, s.url, s.tags, s.searchable, s.embedding IS NOT NULL AS indexed,
-    s.source_conversation_id, s.source_message_id, c.title AS source_title, s.project_id, s.pinned, s.created_at, s.updated_at";
+    s.source_conversation_id, s.source_message_id, c.title AS source_title, s.project_id, s.pinned, s.created_at, s.updated_at,
+    (SELECT u.display_name FROM users u WHERE u.id = s.owner_id) AS owner_name";
 /// Saved items person $1 may see: their own, and those in projects shared with them.
 const SEES: &str = "(s.owner_id = $1 OR s.project_id IN (SELECT p.id FROM projects p WHERE p.scope = 'group' AND p.group_id IN (SELECT group_id FROM user_group_members WHERE user_id = $1)))";
 
@@ -68,7 +69,7 @@ pub fn clean_tags(tags: &[String]) -> Vec<String> {
 }
 
 pub(crate) fn item_json(r: &sqlx::postgres::PgRow) -> Value {
-    json!({"id":r.get::<Uuid,_>("id"),"ownerId":r.get::<Uuid,_>("owner_id"),"projectId":r.get::<Option<Uuid>,_>("project_id"),"pinned":r.get::<bool,_>("pinned"),"kind":r.get::<String,_>("kind"),"title":r.get::<String,_>("title"),"body":r.get::<String,_>("body"),
+    json!({"id":r.get::<Uuid,_>("id"),"ownerId":r.get::<Uuid,_>("owner_id"),"ownerName":r.get::<Option<String>,_>("owner_name"),"projectId":r.get::<Option<Uuid>,_>("project_id"),"pinned":r.get::<bool,_>("pinned"),"kind":r.get::<String,_>("kind"),"title":r.get::<String,_>("title"),"body":r.get::<String,_>("body"),
         "language":r.get::<String,_>("language"),"url":r.get::<Option<String>,_>("url"),"tags":r.get::<Vec<String>,_>("tags"),
         "searchable":r.get::<bool,_>("searchable"),"indexed":r.get::<bool,_>("indexed"),
         "source":r.get::<Option<Uuid>,_>("source_conversation_id").map(|id| json!({"conversationId":id,"messageId":r.get::<Option<Uuid>,_>("source_message_id"),"title":r.get::<Option<String>,_>("source_title")})),

@@ -1858,3 +1858,6 @@ a.research-chip:hover{color:var(--text)}
   .usage-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
   .usage-body{grid-template-columns:minmax(0,1fr)}
 }
+.saved-view{display:flex;flex-direction:column;gap:10px}
+.saved-view .saved-code{max-height:50vh;overflow:auto;margin-top:0}
+.saved-view-body{white-space:pre-wrap;margin:0;line-height:1.55;max-height:50vh;overflow:auto}

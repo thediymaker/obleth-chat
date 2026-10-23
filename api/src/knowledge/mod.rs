@@ -47,10 +47,11 @@ const QUERY_INSTRUCTION: &str =
 
 /// Who may see a collection, as SQL over `c` with the person's id in `$1`.
 /// Collections person $1 may read: their own, shared with everyone or with a group they
-/// are in, or used by a project shared with them (sharing a project shares what it reads).
-const VISIBLE: &str = "(c.owner_id = $1 OR c.scope = 'everyone' OR (c.scope = 'group' AND c.group_id IN (SELECT group_id FROM user_group_members WHERE user_id = $1))
+/// are in, or owned by the owner of a project shared with them (sharing a project shares
+/// the owner's own collections in it, never ones someone else shared with the owner).
+pub(crate) const VISIBLE: &str = "(c.owner_id = $1 OR c.scope = 'everyone' OR (c.scope = 'group' AND c.group_id IN (SELECT group_id FROM user_group_members WHERE user_id = $1))
     OR c.id IN (SELECT pc.collection_id FROM project_collections pc JOIN projects p ON p.id = pc.project_id
-                WHERE p.scope = 'group' AND p.group_id IN (SELECT group_id FROM user_group_members WHERE user_id = $1)))";
+                WHERE p.scope = 'group' AND p.owner_id = c.owner_id AND p.group_id IN (SELECT group_id FROM user_group_members WHERE user_id = $1)))";
 
 #[derive(Clone)]
 pub struct Knowledge {
@@ -528,13 +529,7 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     .bind(user.id)
     .fetch_one(&k.pool)
     .await?;
-    let groups: Vec<Value> = sqlx::query("SELECT g.id, g.name FROM user_groups g JOIN user_group_members m ON m.group_id=g.id WHERE m.user_id=$1 ORDER BY g.name")
-        .bind(user.id)
-        .fetch_all(&k.pool)
-        .await?
-        .iter()
-        .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name")}))
-        .collect();
+    let groups = crate::groups::shareable(&k.pool, &user).await?;
     Ok(Json(
         json!({"collections":collections,"usage":{"used":used,"limit":k.user_bytes},"groups":groups,"maxFileBytes":MAX_FILE_BYTES}),
     ))
@@ -549,12 +544,14 @@ struct CollectionInput {
     group_id: Option<Uuid>,
 }
 
-/// Checks a sharing choice: everyone needs an administrator, a group needs membership.
+/// Checks a sharing choice: everyone needs an administrator, a group needs membership
+/// (see `groups::may_share`). `current` is the group the collection is shared with now.
 async fn check_scope(
     pool: &PgPool,
     user: &Identity,
     scope: &str,
     group: Option<Uuid>,
+    current: Option<Uuid>,
 ) -> Result<(), ApiError> {
     match scope {
         "personal" => Ok(()),
@@ -565,21 +562,7 @@ async fn check_scope(
         )),
         "group" => {
             let group = group.ok_or_else(|| bad("Choose a group to share with"))?;
-            let member: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM user_group_members WHERE group_id=$1 AND user_id=$2)",
-            )
-            .bind(group)
-            .bind(user.id)
-            .fetch_one(pool)
-            .await?;
-            if member || user.is_admin() {
-                Ok(())
-            } else {
-                Err(ApiError(
-                    StatusCode::FORBIDDEN,
-                    "You can only share with groups you belong to".into(),
-                ))
-            }
+            crate::groups::may_share(pool, user, group, current).await
         }
         _ => Err(bad("Unknown sharing choice")),
     }
@@ -609,7 +592,7 @@ async fn create(
         .take(1000)
         .collect::<String>();
     let scope = body.scope.unwrap_or_else(|| "personal".into());
-    check_scope(&k.pool, &user, &scope, body.group_id).await?;
+    check_scope(&k.pool, &user, &scope, body.group_id, None).await?;
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_collections WHERE owner_id=$1")
             .bind(user.id)
@@ -709,7 +692,12 @@ async fn update(
     let k = knowledge(&s)?;
     owned(&k.pool, user.id, id).await?;
     if let Some(scope) = &body.scope {
-        check_scope(&k.pool, &user, scope, body.group_id).await?;
+        let current: Option<Uuid> =
+            sqlx::query_scalar("SELECT group_id FROM knowledge_collections WHERE id=$1")
+                .bind(id)
+                .fetch_one(&k.pool)
+                .await?;
+        check_scope(&k.pool, &user, scope, body.group_id, current).await?;
     }
     let name = body.name.as_deref().map(clean_name).transpose()?;
     let description = body

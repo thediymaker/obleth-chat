@@ -92,10 +92,21 @@ export function createLibrary({ api, state, capabilities, render, modal, close, 
     for (const t of local.tags) if (out.length < 5 && t.tag.length > 2 && text.includes(t.tag.replace(/-/g, ' ')) && !out.includes(t.tag)) out.push(t.tag);
     return out;
   }
+  const theirs = item => item.ownerId && item.ownerId !== state.user?.id;
+  /** Someone else's item in a shared project: read it, copy it or keep your own copy. */
+  function viewer(item) {
+    const [glyph, , kindLabel] = KINDS[item.kind] || KINDS.note;
+    const project = projects().find(p => p.id === item.projectId);
+    const body = item.kind === 'code' ? `<pre class="saved-code"><code>${esc(item.body)}</code></pre>` : item.body ? `<p class="saved-view-body">${esc(item.body)}</p>` : '';
+    const link = item.url ? `<p><a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${icon('external')}${esc(host(item.url))}</a></p>` : '';
+    const tags = item.tags?.length ? `<div class="saved-tags">${item.tags.map(t => `<span>#${esc(t)}</span>`).join('')}</div>` : '';
+    const remove = project?.mine ? btn('Remove from project', 'saved-unproject', { tone: 'small danger', attrs: `data-id="${esc(item.id)}" data-project="${esc(project.id)}"` }) : '';
+    modal(item.title, `<div class="saved-view"><div class="saved-kind">${icon(glyph)}${esc(kindLabel)}</div><p class="inline-note">Saved by ${esc(item.ownerName || 'someone else')}${project ? ` in ${esc(project.name)}` : ''}. Only they can change it.</p>${link}${body}${tags}<div class="modal-actions">${remove}${btn('Copy', 'saved-copy', { tone: 'small', attrs: `data-id="${esc(item.id)}"` })}${btn('Save my own copy', 'saved-keep', { tone: 'small primary', attrs: `data-id="${esc(item.id)}"` })}</div></div>`);
+  }
+  const show = item => theirs(item) ? viewer(item) : editor(item, { title: item.title });
+  const fetchItem = async id => local.items?.find(i => i.id === id) || (await api.request(path(id))).item;
   function openItem(id) {
-    const item = local.items?.find(i => i.id === id);
-    if (item) { editor(item, { title: item.title }); return; }
-    api.request(path(id)).then(r => editor(r.item, { title: r.item.title })).catch(e => toast(e.message));
+    fetchItem(id).then(show).catch(e => toast(e.message));
   }
   /** Opens the save dialog for something in a chat. */
   async function saveFrom({ kind, title = '', body = '', language = '', conversationId, messageId, projectId = '' }) {
@@ -150,7 +161,9 @@ export function createLibrary({ api, state, capabilities, render, modal, close, 
     'saved-clear': () => { local.query = ''; return load(); },
     'saved-reload': () => load(location.hash.split('/')[1] || ''),
     'saved-suggest': el => { const input = document.querySelector('#saved-tags'); if (input) input.value = `${input.value} #${el.dataset.tag}`.trim(); el.remove(); },
-    'saved-copy': async el => { const item = local.items?.find(i => i.id === el.dataset.id) || (await api.request(path(el.dataset.id))).item; await navigator.clipboard.writeText(item.kind === 'link' ? item.url || item.body : item.body); toast('Copied'); },
+    'saved-keep': async el => { const item = await fetchItem(el.dataset.id); await api.request('/api/saved', { method: 'POST', body: { kind: item.kind, title: item.title, body: item.body, language: item.language || undefined, url: item.url || undefined, tags: item.tags, searchable: item.searchable } }); close(); local.items = null; toast('Saved a copy to your Library'); },
+    'saved-unproject': async el => { await api.request(`/api/projects/${encodeURIComponent(el.dataset.project)}/saved/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' }); close(); toast('Removed from the project'); if (location.hash.startsWith('#projects/')) go(location.hash.slice(1)); else await load(); },
+    'saved-copy': async el => { const item = await fetchItem(el.dataset.id); await navigator.clipboard.writeText(item.kind === 'link' ? item.url || item.body : item.body); toast('Copied'); },
     'saved-delete': async el => { await api.request(path(el.dataset.id), { method: 'DELETE' }); close(); toast('Deleted'); if (location.hash.startsWith('#library')) await load(); else if (location.hash.startsWith('#projects/')) go(location.hash.slice(1)); },
     'saved-undo': async el => { await api.request(path(el.dataset.id), { method: 'DELETE' }).catch(e => { if (e.status !== 404) throw e; }); local.undone.add(el.dataset.id); local.items = null; render(); toast('Removed from Library'); },
     'image-remove': async el => { await api.request(`/api/images/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' }); local.images = local.images.filter(i => i.id !== el.dataset.id); render(); toast('Image deleted'); },

@@ -7,7 +7,7 @@ use crate::{auth::Identity, error::ApiError, AppState};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, put},
+    routing::{delete, get, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -79,6 +79,7 @@ pub fn router(state: AppState) -> Router {
             get(detail).patch(update).delete(remove),
         )
         .route("/api/projects/{id}/collections", put(set_collections))
+        .route("/api/projects/{id}/saved/{item}", delete(remove_saved))
         .route(
             "/api/conversations/{id}/project",
             get(conversation_project).put(set_conversation_project),
@@ -111,16 +112,6 @@ fn select() -> String {
     )
 }
 
-pub async fn groups_of(pool: &PgPool, user: Uuid) -> Result<Vec<Value>, ApiError> {
-    Ok(sqlx::query("SELECT g.id, g.name FROM user_groups g JOIN user_group_members m ON m.group_id = g.id WHERE m.user_id = $1 ORDER BY g.name")
-        .bind(user)
-        .fetch_all(pool)
-        .await?
-        .iter()
-        .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name")}))
-        .collect())
-}
-
 async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
     let rows = sqlx::query(&format!(
@@ -132,7 +123,7 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     .fetch_all(&s.store.pool)
     .await?;
     Ok(Json(
-        json!({"projects":rows.iter().map(project_json).collect::<Vec<_>>(),"groups":groups_of(&s.store.pool, user.id).await?}),
+        json!({"projects":rows.iter().map(project_json).collect::<Vec<_>>(),"groups":crate::groups::shareable(&s.store.pool, &user).await?}),
     ))
 }
 
@@ -147,30 +138,20 @@ struct Input {
     group_id: Option<Uuid>,
 }
 
-/// Checks a sharing choice: a group must be one the person belongs to.
+/// Checks a sharing choice (see `groups::may_share`); `current` is the group the
+/// project is shared with now.
 async fn check_scope(
     pool: &PgPool,
     user: &Identity,
     scope: &str,
     group: Option<Uuid>,
+    current: Option<Uuid>,
 ) -> Result<Option<Uuid>, ApiError> {
     match scope {
         "personal" => Ok(None),
         "group" => {
             let group = group.ok_or_else(|| bad("Choose a group to share it with"))?;
-            let member: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM user_group_members WHERE group_id=$1 AND user_id=$2)",
-            )
-            .bind(group)
-            .bind(user.id)
-            .fetch_one(pool)
-            .await?;
-            if !member {
-                return Err(ApiError(
-                    StatusCode::FORBIDDEN,
-                    "You can share only with a group you are in".into(),
-                ));
-            }
+            crate::groups::may_share(pool, user, group, current).await?;
             Ok(Some(group))
         }
         _ => Err(bad("Sharing must be personal or group")),
@@ -223,7 +204,7 @@ async fn create(
         .filter(|n| !n.is_empty())
         .ok_or_else(|| bad("Give the project a name"))?;
     let scope = body.scope.clone().unwrap_or_else(|| "personal".into());
-    let group = check_scope(&s.store.pool, &user, &scope, body.group_id).await?;
+    let group = check_scope(&s.store.pool, &user, &scope, body.group_id, None).await?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE owner_id=$1")
         .bind(user.id)
         .fetch_one(&s.store.pool)
@@ -267,10 +248,14 @@ async fn detail(
     let user = s.auth.require(&headers, false).await?;
     let pool = &s.store.pool;
     let project = one(pool, user.id, id).await?;
-    let collections: Vec<Value> = sqlx::query(
+    // Only collections this person can open: a member never learns the names of ones
+    // the owner was given by someone else.
+    let collections: Vec<Value> = sqlx::query(&format!(
         "SELECT c.id, c.name, (SELECT COUNT(*) FROM knowledge_documents d WHERE d.collection_id = c.id)::bigint AS documents
-         FROM project_collections pc JOIN knowledge_collections c ON c.id = pc.collection_id WHERE pc.project_id = $1 ORDER BY c.name",
-    )
+         FROM project_collections pc JOIN knowledge_collections c ON c.id = pc.collection_id WHERE pc.project_id = $2 AND {} ORDER BY c.name",
+        crate::knowledge::VISIBLE
+    ))
+    .bind(user.id)
     .bind(id)
     .fetch_all(pool)
     .await?
@@ -322,7 +307,14 @@ async fn update(
     owned(pool, user.id, id).await?;
     clean(&body)?;
     let group = match &body.scope {
-        Some(scope) => Some(check_scope(pool, &user, scope, body.group_id).await?),
+        Some(scope) => {
+            let current: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM projects WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await?;
+            Some(check_scope(pool, &user, scope, body.group_id, current).await?)
+        }
         None => None,
     };
     sqlx::query(
@@ -355,6 +347,26 @@ async fn remove(
         .bind(user.id)
         .execute(&s.store.pool)
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Takes someone's saved item out of the owner's project. The item stays in its
+/// author's Library; only the project loses it.
+async fn remove_saved(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path((id, item)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let user = s.auth.require(&headers, true).await?;
+    owned(&s.store.pool, user.id, id).await?;
+    let done = sqlx::query("UPDATE saved_items SET project_id = NULL, updated_at = NOW() WHERE id = $2 AND project_id = $1")
+        .bind(id)
+        .bind(item)
+        .execute(&s.store.pool)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

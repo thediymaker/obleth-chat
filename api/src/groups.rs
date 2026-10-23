@@ -2,16 +2,68 @@
 //! it (projects and knowledge collections). Administrators manage the groups and
 //! their members under Settings → Administration.
 
-use crate::{auth::Role, error::ApiError, AppState};
+use crate::{
+    auth::{Identity, Role},
+    error::ApiError,
+    AppState,
+};
 use axum::{
     extract::{Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     routing::get,
     Json, Router,
 };
 use serde_json::{json, Value};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+/// Groups a person may share projects and collections with: the ones they are in, or
+/// every group for an administrator.
+pub async fn shareable(pool: &PgPool, user: &Identity) -> Result<Vec<Value>, ApiError> {
+    Ok(sqlx::query(
+        "SELECT g.id, g.name FROM user_groups g
+         WHERE $2 OR g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $1) ORDER BY g.name",
+    )
+    .bind(user.id)
+    .bind(user.is_admin())
+    .fetch_all(pool)
+    .await?
+    .iter()
+    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name")}))
+    .collect())
+}
+
+/// Checks that a person may share with `group`. Keeping the group something is already
+/// shared with is always allowed, so leaving a group never forces an unshare on save.
+pub async fn may_share(
+    pool: &PgPool,
+    user: &Identity,
+    group: Uuid,
+    current: Option<Uuid>,
+) -> Result<(), ApiError> {
+    if current == Some(group) {
+        return Ok(());
+    }
+    let (exists, member): (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM user_groups WHERE id = $1),
+                EXISTS(SELECT 1 FROM user_group_members WHERE group_id = $1 AND user_id = $2)",
+    )
+    .bind(group)
+    .bind(user.id)
+    .fetch_one(pool)
+    .await?;
+    if !exists {
+        return Err(ApiError::not_found());
+    }
+    if member || user.is_admin() {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "You can share only with a group you are in".into(),
+        ))
+    }
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -20,22 +72,24 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Groups person $1 is in, with what each shares.
+/// Groups person $1 is in (every group when $2, for an administrator), with what each shares.
 const MINE: &str = "SELECT g.id, g.name, g.description,
-        (SELECT COUNT(*) FROM user_group_members m WHERE m.group_id = g.id)::bigint AS members,
+        g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $1) AS member,
+        (SELECT COUNT(*) FROM user_group_members m JOIN users u ON u.id = m.user_id WHERE m.group_id = g.id AND u.enabled)::bigint AS members,
         (SELECT COUNT(*) FROM projects p WHERE p.scope = 'group' AND p.group_id = g.id)::bigint AS projects,
         (SELECT COUNT(*) FROM knowledge_collections c WHERE c.scope = 'group' AND c.group_id = g.id)::bigint AS collections
-     FROM user_groups g WHERE g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $1)";
+     FROM user_groups g WHERE $2 OR g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $1)";
 
 fn group_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"description":r.get::<String,_>("description"),
-        "members":r.get::<i64,_>("members"),"projects":r.get::<i64,_>("projects"),"collections":r.get::<i64,_>("collections")})
+        "member":r.get::<bool,_>("member"),"members":r.get::<i64,_>("members"),"projects":r.get::<i64,_>("projects"),"collections":r.get::<i64,_>("collections")})
 }
 
 async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
-    let rows = sqlx::query(&format!("{MINE} ORDER BY g.name"))
+    let rows = sqlx::query(&format!("{MINE} ORDER BY member DESC, g.name"))
         .bind(user.id)
+        .bind(user.role == Role::Admin)
         .fetch_all(&s.store.pool)
         .await?;
     Ok(Json(
@@ -50,8 +104,9 @@ async fn detail(
 ) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
     let pool = &s.store.pool;
-    let row = sqlx::query(&format!("{MINE} AND g.id = $2"))
+    let row = sqlx::query(&format!("SELECT * FROM ({MINE}) g WHERE g.id = $3"))
         .bind(user.id)
+        .bind(user.role == Role::Admin)
         .bind(id)
         .fetch_optional(pool)
         .await?

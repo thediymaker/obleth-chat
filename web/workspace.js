@@ -280,19 +280,24 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     s.term.write('\x1b[2mConnecting to your workspace…\x1b[0m\r\n');
     const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${chatPath(s.id)}/workspace/terminal`);
     socket.binaryType = 'arraybuffer'; s.socket = socket;
-    socket.onopen = () => { try { s.fit.fit(); } catch { /* hidden */ } socket.send(JSON.stringify({ type: 'resize', cols: s.term.cols, rows: s.term.rows })); setTimeout(() => typeCommand(s), 400); };
-    socket.onmessage = event => { if (typeof event.data !== 'string') s.term.write(new Uint8Array(event.data)); };
+    socket.onopen = () => { try { s.fit.fit(); } catch { /* hidden */ } socket.send(JSON.stringify({ type: 'resize', cols: s.term.cols, rows: s.term.rows })); typeCommand(s); };
+    socket.onmessage = event => { if (typeof event.data !== 'string') { s.term.write(new Uint8Array(event.data)); s.heard = Date.now(); } };
     socket.onclose = () => { if (s.closed) return; s.socket = null; s.term.write('\r\n\x1b[2m[The terminal closed. Press Enter to reconnect.]\x1b[0m\r\n'); };
   }
 
-  // run_in_terminal: the command waits for the conversation's terminal, then is typed in,
-  // after Ctrl+C stops whatever ran there before.
-  function typeCommand(s) {
-    const space = spaces.get(s.id), command = space?.command;
-    if (!command || s.socket?.readyState !== WebSocket.OPEN) return;
-    space.command = null;
-    s.socket.send(encoder.encode('\x03'));
-    setTimeout(() => { if (s.socket?.readyState === WebSocket.OPEN) s.socket.send(encoder.encode(`${command}\r`)); }, 150);
+  // run_in_terminal: the command waits for the conversation's terminal, then is typed in
+  // once the shell has printed its prompt and gone quiet; input sent while it starts is lost.
+  // A terminal that was already open gets Ctrl+C first, to stop what ran there before.
+  async function typeCommand(s, interrupt = false) {
+    const space = spaces.get(s.id), open = () => s.socket?.readyState === WebSocket.OPEN;
+    if (!space?.command || !open() || s.typing) return;
+    const command = space.command; space.command = null; s.typing = true;
+    const settle = async () => { const began = Date.now(); while (open() && Date.now() - began < 8000 && (!s.heard || Date.now() - s.heard < 400)) await new Promise(r => setTimeout(r, 100)); };
+    try {
+      await settle();
+      if (interrupt && open()) { s.heard = 0; s.socket.send(encoder.encode('\x03')); await settle(); }
+      if (open()) s.socket.send(encoder.encode(`${command}\r`)); else space.command = command;
+    } finally { s.typing = false; }
     s.term.focus();
   }
   function runInTerminal(id, command) {
@@ -301,7 +306,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     space.command = command; space.open = true; space.tab = 'terminal';
     if (route().id !== id) return;
     render();
-    if (shell?.id === id) typeCommand(shell);
+    if (shell?.id === id && shell.socket) typeCommand(shell, true);
   }
 
   // Workspaces page: every project, and one project with its pane full width.

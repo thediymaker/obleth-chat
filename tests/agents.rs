@@ -85,6 +85,12 @@ async fn chat(
     let stream = async_stream::stream! {
         match found {
             None if !tools => {
+                // Thinking streams token by token: far more stream than answer.
+                if task.contains("Think hard") {
+                    for _ in 0..8000 {
+                        yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"reasoning_content":"mull "}}]}).to_string()));
+                    }
+                }
                 yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"content":format!("From memory: {task}")}}]}).to_string()));
                 yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}).to_string()));
             }
@@ -268,7 +274,11 @@ async fn workers_explore_at_once_and_report(pool: PgPool) {
     let (progress, _updates) = tokio::sync::mpsc::unbounded_channel();
     let answered = agents::run(
         &chatting,
-        &json!({"tasks":[{"title":"Compare","task":"Compare two queue designs."}]}).to_string(),
+        &json!({"tasks":[
+            {"title":"Compare","task":"Compare two queue designs."},
+            {"title":"Ponder","task":"Think hard about pi."}
+        ]})
+        .to_string(),
         progress,
     )
     .await;
@@ -277,7 +287,11 @@ async fn workers_explore_at_once_and_report(pool: PgPool) {
         .output
         .contains("From memory: Context from the lead.\n\nCompare two queue designs."));
     let requests = seen.lock().unwrap().clone();
-    assert_eq!(requests.len(), 1);
+    assert!(answered
+        .output
+        .contains("From memory: Context from the lead.\n\nThink hard about pi."));
+    assert_eq!(answered.summary, "2 agents reported");
+    assert_eq!(requests.len(), 2);
     assert!(requests[0].get("tools").is_none());
     assert!(requests[0]["messages"][0]["content"]
         .as_str()

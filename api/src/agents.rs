@@ -35,7 +35,11 @@ const SHOWN_CHARS: usize = 4_000;
 /// A worker's request stays under this; older tool output gives way first.
 const KEPT_BYTES: usize = 160 * 1024;
 const OUTPUT_BYTES: usize = 24 * 1024;
+/// What a worker's step may write: its text and tool arguments. The stream itself is
+/// far larger (every token arrives in its own event, thinking included), so it only
+/// has a loose limit.
 const RESPONSE_BYTES: usize = 256 * 1024;
+const STREAM_BYTES: usize = 32 * 1024 * 1024;
 /// Workers running on this replica at once, whatever turns they belong to.
 static RUNNING: Semaphore = Semaphore::const_new(24);
 
@@ -546,11 +550,13 @@ async fn request<S: Shell>(
         .map_err(|e| format!("The worker model did not answer: {}", e.1))?;
     let mut stream = response.bytes_stream();
     let mut decoder = Decoder::default();
-    let (mut content, mut calls, mut usage, mut bytes) = (String::new(), Vec::new(), None, 0usize);
+    let (mut content, mut calls, mut usage, mut bytes) =
+        (String::new(), Vec::<ToolCall>::new(), None, 0usize);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| "The worker's stream broke off".to_string())?;
         bytes += chunk.len();
-        if bytes > RESPONSE_BYTES {
+        let kept = content.len() + calls.iter().map(|c| c.arguments.len()).sum::<usize>();
+        if bytes > STREAM_BYTES || kept > RESPONSE_BYTES {
             return Err("The worker's answer was too long".into());
         }
         for event in decoder

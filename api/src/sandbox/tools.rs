@@ -40,6 +40,7 @@ pub fn definitions() -> Value {
         tool("edit_file", "Replace old_text with new_text in a file you have read. Copy old_text from the file exactly, without the line-number prefixes read_file adds, and include enough surrounding lines that it occurs only once (or set replace_all to change every occurrence). Differences in indentation or trailing spaces are tolerated.", json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"replace_all":{"type":"boolean","description":"Replace every occurrence. Defaults to false."}}), &["path","old_text","new_text"]),
         tool("run_command", "Run a shell command in the project folder and return its output. Use for installs, builds, tests and inspection. Do not use it to start or stop servers.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":300}}), &["command"]),
         tool("start_server", "Start or restart a long-running server and show it in the preview pane. Next.js and Vite dev servers, and a plain web server for an index.html site, start automatically, so only use this for other servers, or to restart after changing package.json or the framework config. It must listen on 0.0.0.0 at the given port.", json!({"command":{"type":"string","description":"For example: python3 -m http.server 3000 --bind 0.0.0.0"},"port":{"type":"integer","minimum":1024,"maximum":65535}}), &["command","port"]),
+        tool("run_in_terminal", "Open the person's Terminal tab and run a command there, for programs they use with the keyboard: terminal UIs (ratatui, crossterm, curses, Textual, bubbletea), games, REPLs and prompts. Build and test with run_command first. You do not see the output.", json!({"command":{"type":"string","description":"One line, such as `cargo run --release` or `python app.py`. A program already running in the terminal is stopped first."}}), &["command"]),
         tool("server_logs", "Show the latest output of the server started with start_server.", json!({"lines":{"type":"integer","minimum":1,"maximum":400}}), &[]),
         tool("plan", "Say which files you are about to create or change, before writing several. The user sees the list while you work. Call it again if the plan changes.", json!({"files":{"type":"array","items":{"type":"string"},"description":"Paths relative to the project folder"}}), &["files"]),
     ])
@@ -82,7 +83,8 @@ pub fn system_prompt(sandbox: &Sandbox, instructions: Option<&str>, context: &st
 - Never start, stop or kill the dev server yourself (no `npm run dev`, kill or pkill). Call start_server only for other kinds of servers (on port {port}) or to restart after changing package.json or the framework config.
 - After every file change the tool result says whether the preview still compiles, or for a plain HTML site whether the script parses. If it reports an error, fix it before replying.
 - The preview pane shows any web server, in any language: Flask, FastAPI (uvicorn), Streamlit or Gradio in Python, axum or actix in Rust, net/http in Go, and so on. It must listen on 0.0.0.0 port {port}; start it with start_server. For a Jupyter notebook, start `jupyter lab --ip 0.0.0.0 --port {port} --no-browser --IdentityProvider.token= --ServerApp.tornado_settings='{{\"headers\":{{\"Content-Security-Policy\":\"frame-ancestors *\"}}}}'` with start_server.
-- The preview pane shows only web pages, so desktop GUI toolkits (Tkinter, Qt, pygame) cannot be shown: give any app with a user interface a web UI instead.
+- Terminal apps (TUIs with ratatui, crossterm, curses, Textual or bubbletea, terminal games, REPLs, anything that reads the keyboard) run in the person's Terminal tab: build and test them with run_command, then call run_in_terminal with the command so they can use the app there. Never run them with run_command, which has no keyboard and would wait until it times out, and never rebuild a terminal app as a web page unless asked.
+- Desktop GUI windows (Tkinter, Qt, pygame) cannot be shown yet: say so, and offer a terminal or web version.
 - For scripts, data work and class assignments no web app is needed: Python 3 with numpy, pandas, matplotlib, scipy, scikit-learn, pytest, Jupyter, Flask, FastAPI and uvicorn is installed, as are uv, Rust (cargo, with rustfmt and clippy), Go, gcc, g++ and make. The system Python is read-only, so a plain `pip install` fails with Permission denied and `--user` is refused: for any other package, first create a project environment with `python3 -m venv --system-site-packages .venv`, then use `.venv/bin/pip install …` and `.venv/bin/python`. It lives in the project, so it survives the workspace sleeping. Very large packages such as PyTorch can run out of the workspace's memory while installing; say so and choose smaller ones where you can. Save plots and results as files (PNG, SVG or CSV) in the project and tell the person their names: they open them in the Files tab of the workspace pane.
 - Package downloads may be slow or unavailable; prefer what is installed. `uv pip install --python .venv/bin/python …` installs into a project environment much faster than pip. Cargo and Go download crates and modules on first build, which can take a minute; build output stays in the project.
 - Only tell the person an app is running or visible after the dev server or start_server reported success; if something failed, say what failed.
@@ -357,6 +359,10 @@ pub fn summary(name: &str, args: &Value) -> String {
             args.get("port").and_then(Value::as_u64).unwrap_or(0)
         ),
         "server_logs" => "Checked the server logs".into(),
+        "run_in_terminal" => format!(
+            "Opened {} in the terminal",
+            one_line(arg(args, "command"), 90)
+        ),
         "plan" => {
             let n = args["files"].as_array().map_or(0, Vec::len);
             format!("Planned {n} file{}", if n == 1 { "" } else { "s" })
@@ -410,6 +416,13 @@ pub async fn run(sb: &Sandboxes, sandbox: &Sandbox, name: &str, raw_args: &str) 
         "run_command" => command(sb, sandbox, &args).await,
         "start_server" => start_server(sb, sandbox, &args).await,
         "server_logs" => logs(sb, sandbox, &args).await,
+        "run_in_terminal" => terminal_command(&args).map(|_| {
+            (
+                "The command is typed into the person's Terminal tab, where they can use it with the keyboard. You cannot see what it shows: ask them if you need to know.".into(),
+                String::new(),
+                None,
+            )
+        }),
         "plan" => Ok((
             "Plan noted. Call plan again if it changes.".into(),
             String::new(),
@@ -465,6 +478,16 @@ pub async fn run(sb: &Sandboxes, sandbox: &Sandbox, name: &str, raw_args: &str) 
     }
 }
 
+/// The one-line command the person's terminal runs for run_in_terminal.
+fn terminal_command(args: &Value) -> Result<String, String> {
+    let command = arg(args, "command").trim();
+    if command.is_empty() || command.chars().count() > 1000 || command.chars().any(char::is_control)
+    {
+        return Err("Give one line of command, up to 1,000 characters.".into());
+    }
+    Ok(command.to_owned())
+}
+
 /// What the chat shows about a step besides its summary.
 fn facts(name: &str, args: &Value, slug: &str, detail: &str) -> Value {
     let lines = |text: &str| text.lines().count();
@@ -473,6 +496,9 @@ fn facts(name: &str, args: &Value, slug: &str, detail: &str) -> Value {
         "write_file" => json!({"path": path, "added": lines(arg(args, "content"))}),
         "edit_file" => {
             json!({"path": path, "added": lines(arg(args, "new_text")), "removed": lines(arg(args, "old_text")).max(1)})
+        }
+        "run_in_terminal" => {
+            terminal_command(args).map_or(json!({}), |command| json!({"command": command}))
         }
         "plan" => json!({
             "files": args["files"].as_array().into_iter().flatten().filter_map(Value::as_str)
@@ -1583,6 +1609,29 @@ mod tests {
     }
 
     #[test]
+    fn terminal_commands_are_one_line() {
+        assert_eq!(
+            terminal_command(&json!({"command":"  cargo run --release "})).unwrap(),
+            "cargo run --release"
+        );
+        assert!(terminal_command(&json!({"command":"cargo run\nrm -rf ~"})).is_err());
+        assert!(terminal_command(&json!({"command":""})).is_err());
+        assert_eq!(
+            facts(
+                "run_in_terminal",
+                &json!({"command":"python app.py"}),
+                "abc",
+                ""
+            ),
+            json!({"command":"python app.py"})
+        );
+        assert_eq!(
+            summary("run_in_terminal", &json!({"command":"cargo run"})),
+            "Opened cargo run in the terminal"
+        );
+    }
+
+    #[test]
     fn summaries_describe_each_tool() {
         assert_eq!(
             summary("write_file", &json!({"path":"/workspace/app/page.tsx"})),
@@ -1596,7 +1645,7 @@ mod tests {
             summary("plan", &json!({"files":["a.js","b.js"]})),
             "Planned 2 files"
         );
-        assert!(definitions().as_array().unwrap().len() == 8);
+        assert!(definitions().as_array().unwrap().len() == 9);
     }
 
     #[test]

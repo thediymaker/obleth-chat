@@ -5,7 +5,7 @@ import { icon, esc } from './manage-ui.js';
 // When it is done: what changed and whether it works, checkpoints, and a "Show
 // work" trace in which each thought sits before the step it led to.
 
-const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
+const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', run_in_terminal: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
 const RESEARCH = new Set(['research_setup', 'research_status', 'experiment_create', 'experiment_checkout', 'experiment_run', 'experiment_wait', 'run_log']);
 const kindOf = e => e.kind || 'tool';
 const BROWSING = e => String(e.tool || '').startsWith('browser_');
@@ -55,7 +55,7 @@ export function workOf(m) {
     if (RESEARCH.has(e.tool)) return 'Research';
     if (BROWSING(e)) return 'Browse';
     if (FILE_TOOLS.has(e.tool)) return 'Build';
-    if (e.tool === 'start_server' || e.tool === 'server_logs') return 'Run';
+    if (e.tool === 'start_server' || e.tool === 'server_logs' || e.tool === 'run_in_terminal') return 'Run';
     if (e.tool === 'run_command') return wrote ? 'Run' : 'Explore';
     return wrote ? 'Build' : 'Explore';
   };
@@ -159,6 +159,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
   }
   function stepText(s) {
     if (s.path && FILE_TOOLS.has(s.tool)) return `${s.tool === 'write_file' ? 'Wrote' : 'Edited'} ${fileButton(s.path, lines(s))}`;
+    if (s.tool === 'run_in_terminal' && s.command) return `Opened <code>${esc(s.command)}</code> in the terminal <button type="button" class="tr-link" data-action="turn-run-terminal" data-command="${esc(s.command)}">Run again</button>`;
     if (s.tool === 'plan' && Array.isArray(s.files)) return `Planned ${s.files.length} file${s.files.length === 1 ? '' : 's'}`;
     if (BROWSING(s) && s.url) { let host = ''; try { host = new URL(s.url).host; } catch { /* not a URL */ } return `${esc(s.summary || s.tool)}${host && s.tool !== 'browser_open' ? ` <span class="tr-quiet">· ${esc(host)}</span>` : ''}`; }
     return esc(s.summary || s.tool);

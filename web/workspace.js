@@ -280,9 +280,28 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     s.term.write('\x1b[2mConnecting to your workspace…\x1b[0m\r\n');
     const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${chatPath(s.id)}/workspace/terminal`);
     socket.binaryType = 'arraybuffer'; s.socket = socket;
-    socket.onopen = () => { try { s.fit.fit(); } catch { /* hidden */ } socket.send(JSON.stringify({ type: 'resize', cols: s.term.cols, rows: s.term.rows })); };
+    socket.onopen = () => { try { s.fit.fit(); } catch { /* hidden */ } socket.send(JSON.stringify({ type: 'resize', cols: s.term.cols, rows: s.term.rows })); setTimeout(() => typeCommand(s), 400); };
     socket.onmessage = event => { if (typeof event.data !== 'string') s.term.write(new Uint8Array(event.data)); };
     socket.onclose = () => { if (s.closed) return; s.socket = null; s.term.write('\r\n\x1b[2m[The terminal closed. Press Enter to reconnect.]\x1b[0m\r\n'); };
+  }
+
+  // run_in_terminal: the command waits for the conversation's terminal, then is typed in,
+  // after Ctrl+C stops whatever ran there before.
+  function typeCommand(s) {
+    const space = spaces.get(s.id), command = space?.command;
+    if (!command || s.socket?.readyState !== WebSocket.OPEN) return;
+    space.command = null;
+    s.socket.send(encoder.encode('\x03'));
+    setTimeout(() => { if (s.socket?.readyState === WebSocket.OPEN) s.socket.send(encoder.encode(`${command}\r`)); }, 150);
+    s.term.focus();
+  }
+  function runInTerminal(id, command) {
+    const space = entry(id);
+    if (!space.workspace || !command) return;
+    space.command = command; space.open = true; space.tab = 'terminal';
+    if (route().id !== id) return;
+    render();
+    if (shell?.id === id) typeCommand(shell);
   }
 
   // Workspaces page: every project, and one project with its pane full width.
@@ -348,6 +367,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
       if (event.data.tool === 'start_server' || event.data.tool === 'write_file' || event.data.tool === 'edit_file') { const space = spaces.get(conversationId); if (space) space.files = null; }
       // A plain web server has no live reload, so reload the preview after each change.
       if (event.data.reload) { clearTimeout(reloading); reloading = setTimeout(() => showPreview(conversationId), 600); }
+      if (event.data.tool === 'run_in_terminal' && event.data.status === 'completed') runInTerminal(conversationId, event.data.command);
       return true;
     }
     if (event.event === 'draft') { assistant._draft = event.data; return true; }
@@ -410,6 +430,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
       modal('Checkpoint restored', `<p>The project is back at ${esc(el.dataset.label || 'the checkpoint')}. The version you had is saved, so you can go back to it.</p><div class="modal-actions"><button class="btn" data-action="checkpoint-confirm" data-sha="${esc(result?.before || '')}" data-undo="1">Undo</button><button class="btn primary" data-action="close">Done</button></div>`);
     },
     'workspace-file': el => { const c = current(); if (c) openFile(c.id, el.dataset.path); },
+    'turn-run-terminal': el => runInTerminal(route().id, el.dataset.command),
     'workspace-file-back': () => { const c = current(); if (c) { c.space.file = null; update(); } },
   };
 

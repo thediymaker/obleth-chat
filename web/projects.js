@@ -10,7 +10,7 @@ const count = (n, one, many = `${one}s`) => `${Number(n || 0).toLocaleString()} 
 const KIND = { code: ['code', 'Function'], note: ['file', 'Note'], link: ['link', 'Link'], excerpt: ['bookmark', 'Excerpt'] };
 const MAX_COLLECTIONS = 8;
 
-export function createProjects({ api, state, capabilities, render, modal, close, toast, go, saveTo, openLibrary, newChat, research }) {
+export function createProjects({ api, state, capabilities, render, modal, close, toast, go, saveTo, openLibrary, newChat, research, code = null }) {
   const local = { list: null, groups: [], detail: null, error: '', sequence: 0, collections: null };
   const chat = { id: null, project: null, draft: null };
   const path = id => `/api/projects/${encodeURIComponent(id)}`;
@@ -28,10 +28,12 @@ export function createProjects({ api, state, capabilities, render, modal, close,
   }
   // Research runs in workspaces, so its tab exists only where they are enabled.
   const researchOn = () => !!capabilities.features?.workspaces;
-  const tab = () => researchOn() && location.hash.split('/')[2] === 'research' ? 'research' : 'overview';
+  const codeOn = () => !!code?.enabled();
+  const tab = () => { const t = location.hash.split('/')[2]; return researchOn() && t === 'research' ? 'research' : codeOn() && t === 'code' ? 'code' : 'overview'; };
   async function load(id = '') {
     const sequence = ++local.sequence; local.error = ''; render();
     if (id && tab() === 'research') research.load(id); else research.stop();
+    if (id && tab() === 'code') code.loadProject(id);
     try {
       if (id) { const r = await api.request(path(id)); if (sequence === local.sequence) local.detail = r; }
       else { await list(true); if (sequence === local.sequence) local.detail = null; }
@@ -75,9 +77,9 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     const instructions = `<section class="card project-section"><span class="eyebrow">Instructions for every chat</span>${p.instructions ? `<p class="project-instructions">${esc(p.instructions)}</p>` : `<p class="context-note">${mine ? 'Tell the model what this project is about and how to answer. Every chat here gets these instructions.' : 'No instructions.'}</p>`}${mine ? `<button type="button" class="tr-link" data-action="project-edit">${p.instructions ? 'Edit' : 'Add instructions'}</button>` : ''}</section>`;
     const starts = `<section class="card project-section"><span class="eyebrow">Chats here start with</span>${d.collections.map(c => `<div class="detail-row">${icon('book')}<a class="grow" href="#knowledge/${encodeURIComponent(c.id)}">${esc(c.name)}</a><span class="faint">${count(c.documents, 'doc')}</span></div>`).join('')}${knowledge() ? `<div class="detail-row">${icon('bookmark')}<span class="grow">Saved in this project</span><span class="faint">${count(p.saved, 'item')}</span></div>` : ''}${!d.collections.length && !knowledge() ? '<p class="context-note">Just the instructions.</p>' : ''}${mine && knowledge() ? btn('Choose collections', 'project-collections', { icon: 'book', tone: 'small' }) : ''}</section>`;
     const people = `<section class="card project-section"><span class="eyebrow">People</span><div class="detail-row"><span class="avatar small">${esc((p.ownerName || '?').slice(0, 1).toUpperCase())}</span><span class="grow">${mine ? 'You' : esc(p.ownerName)}</span><span class="faint">owner</span></div>${p.scope === 'group' ? `<p class="context-note">Shared through the group <a href="#groups/${encodeURIComponent(p.groupId)}">${esc(p.groupName || '')}</a>. Members see the instructions, collections and saved items, and can start their own chats here. Only the owner changes the project.</p>` : `<p class="context-note">Only you can see this project.${mine ? ' Share it with a group from Edit.' : ''}</p>`}</section>`;
-    const here = tab(), link = (t, label) => `<a href="#projects/${encodeURIComponent(p.id)}${t === 'research' ? '/research' : ''}" class="${here === t ? 'active' : ''}" ${here === t ? 'aria-current="page"' : ''}>${label}</a>`;
-    const tabs = researchOn() ? `<nav class="project-tabs" aria-label="Project">${link('overview', 'Overview')}${link('research', 'Research')}</nav>` : '';
-    const content = here === 'research' ? research.view(p) : `<div class="project-layout"><div class="project-main">${saved}${chats}</div><div class="project-side">${instructions}${starts}${people}</div></div>`;
+    const here = tab(), link = (t, label) => `<a href="#projects/${encodeURIComponent(p.id)}${t === 'overview' ? '' : `/${t}`}" class="${here === t ? 'active' : ''}" ${here === t ? 'aria-current="page"' : ''}>${label}</a>`;
+    const tabs = researchOn() || codeOn() ? `<nav class="project-tabs" aria-label="Project">${link('overview', 'Overview')}${codeOn() ? link('code', 'Code') : ''}${researchOn() ? link('research', 'Research') : ''}</nav>` : '';
+    const content = here === 'research' ? research.view(p) : here === 'code' ? code.projectView(p) : `<div class="project-layout"><div class="project-main">${saved}${chats}</div><div class="project-side">${instructions}${starts}${people}</div></div>`;
     return `<div class="page project-page">${head}${tabs}${errorBox(local.error, 'project-reload')}${content}</div>`;
   }
   function page(id) { return id ? detailPage() : home(); }

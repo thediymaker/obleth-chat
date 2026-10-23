@@ -16,6 +16,7 @@ import { createLibrary } from './library.js';
 import { createProjects } from './projects.js';
 import { createGroups } from './groups.js';
 import { createSharing } from './sharing.js';
+import { createCode } from './code.js';
 import { createQuestions } from './questions.js';
 import { createResearch } from './research.js';
 import { createTurn } from './turn.js';
@@ -83,7 +84,9 @@ export async function startConnected(capabilities) {
   };
   const attachments = createAttachments({ api, state, render, modal, close, toast: message => toast(message) });
   const browserView = createBrowser({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), send: text => send(text), modal: (...args) => modal(...args), close: () => close(), assistantName: () => branding.assistantName });
-  const workspace = createWorkspace({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), browser: browserView, details: id => state.active?.id === id ? chatDetails(state.active) : '' });
+  const codeView = createCode({ api, state, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), toast: message => toast(message), chatPath, send: text => send(text), terminal: (id, command) => workspace.runInTerminal(id, command), moveToProject: () => projectsView.actions['project-move']() });
+  const workspace = createWorkspace({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), browser: browserView, details: id => state.active?.id === id ? chatDetails(state.active) : '', code: codeView });
+  codeView.attach(() => workspace.update());
   browserView.attach({ update: () => workspace.update(), showTab: (id, tab) => workspace.showTab(id, tab), showing: (id, tab) => workspace.showing(id, tab) });
   const personal = createSettings({ api, state, render, modal, close, toast: message => toast(message), applyPreferences, applyPreset, workspaces: () => workspace.enabled(), browserCard: () => browserView.settingsCard() });
   const connectionsView = createConnections({ api, state, capabilities, render, modal, close, toast: message => toast(message), onChange: item => clustersView.changed(item) });
@@ -94,7 +97,7 @@ export async function startConnected(capabilities) {
     projectsView.actions['project-research']({ dataset: { id } }); state.workspaceDraft = true; state.draft = 'Let’s set up research in this project. The goal: ';
     render(); requestAnimationFrame(() => { const p = $('#prompt'); if (p) { p.focus(); p.setSelectionRange(p.value.length, p.value.length); } });
   } });
-  const projectsView = createProjects({ api, state, capabilities, render, modal, close, toast: message => toast(message), go, saveTo: item => libraryView.saveFrom(item), openLibrary: id => { libraryView.filterProject(id); go('library'); }, newChat: (options = {}) => { actions['new-chat'](); if (options.auto) connectionsView.startAuto(); }, research: researchView });
+  const projectsView = createProjects({ api, state, capabilities, render, modal, close, toast: message => toast(message), go, saveTo: item => libraryView.saveFrom(item), openLibrary: id => { libraryView.filterProject(id); go('library'); }, newChat: (options = {}) => { actions['new-chat'](); if (options.auto) connectionsView.startAuto(); }, research: researchView, code: codeView });
   const groupsView = createGroups({ api, state, render });
   const sharing = createSharing({ api, modal, toast: message => toast(message), onChange: (id, share) => { if (state.active?.id === id) { state.active.shareScope = share.scope; render(); } } });
   const questionsView = createQuestions({
@@ -132,7 +135,7 @@ export async function startConnected(capabilities) {
     state.openActivity.clear(); workspace.reset(); browserView.reset();
     document.body.classList.remove('collapsed', 'sidebar-open');
     delete capabilities.adminGatewayUrl; delete capabilities.gatewayAdminUrl;
-    api.clearSession(); attachments.clear(); personal.clear(); connectionsView.clear(); clustersView.clear(); knowledgeView.clear(); libraryView.clear(); projectsView.clear(); groupsView.clear(); questionsView.clear(); researchView.clear(); hideSelection(); administration.clear(); historyView.clear(); thinkingOpen.clear(); detailsOpen.clear(); pendingEfforts.clear(); closeMenu(false); closeModels(false); close();
+    api.clearSession(); codeView.clear(); attachments.clear(); personal.clear(); connectionsView.clear(); clustersView.clear(); knowledgeView.clear(); libraryView.clear(); projectsView.clear(); groupsView.clear(); questionsView.clear(); researchView.clear(); hideSelection(); administration.clear(); historyView.clear(); thinkingOpen.clear(); detailsOpen.clear(); pendingEfforts.clear(); closeMenu(false); closeModels(false); close();
   }
   function expire(message) {
     clearPrivateState(); state.phase = 'login'; state.loginError = message; state.busy = false;
@@ -987,7 +990,7 @@ export async function startConnected(capabilities) {
     if (state.phase !== 'ready' && !['retry-session', 'close', 'logout'].includes(el.dataset.action)) return;
     const workspaceAction = workspace.actions[el.dataset.action] || browserView.actions[el.dataset.action];
     if (workspaceAction) { perform(async () => { if (await workspaceAction(el) === 'render') render(); }); return; }
-    perform(() => (actions[el.dataset.action] || personal.actions[el.dataset.action] || connectionsView.actions[el.dataset.action] || clustersView.actions[el.dataset.action] || knowledgeView.actions[el.dataset.action] || libraryView.actions[el.dataset.action] || sharing.actions[el.dataset.action] || projectsView.actions[el.dataset.action] || questionsView.actions[el.dataset.action] || researchView.actions[el.dataset.action] || groupsView.actions[el.dataset.action] || turnActions[el.dataset.action] || administration.actions[el.dataset.action] || historyView.actions[el.dataset.action] || attachments.actions[el.dataset.action])?.(el));
+    perform(() => (actions[el.dataset.action] || personal.actions[el.dataset.action] || connectionsView.actions[el.dataset.action] || clustersView.actions[el.dataset.action] || knowledgeView.actions[el.dataset.action] || libraryView.actions[el.dataset.action] || sharing.actions[el.dataset.action] || projectsView.actions[el.dataset.action] || questionsView.actions[el.dataset.action] || researchView.actions[el.dataset.action] || groupsView.actions[el.dataset.action] || codeView.actions[el.dataset.action] || turnActions[el.dataset.action] || administration.actions[el.dataset.action] || historyView.actions[el.dataset.action] || attachments.actions[el.dataset.action])?.(el));
   });
   document.addEventListener('submit', async event => {
     event.preventDefault(); const form = event.target;
@@ -1001,6 +1004,7 @@ export async function startConnected(capabilities) {
       if (form.id.startsWith('knowledge-')) { await knowledgeView.submit(form); return; }
       if (form.id === 'saved-form' || form.id === 'library-search') { await libraryView.submit(form); return; }
       if (form.id === 'project-form') { await projectsView.submit(form); return; }
+      if (form.id === 'code-github-form') { await codeView.submit(form); return; }
       if (form.id === 'steer-form') { await turnView.submit(form, api, toast); render(); return; }
       if (form.id === 'connection-form' || form.id === 'connection-credential-form') { await connectionsView.submit(form); return; }
       if (form.id.startsWith('admin-')) { if (state.user?.role !== 'admin') return; await administration.submit(form); return; }
@@ -1043,6 +1047,7 @@ export async function startConnected(capabilities) {
   });
   document.addEventListener('input', event => {
     if (questionsView.input(event)) return;
+    if (codeView.input(event)) return;
     if (event.target.id === 'steer-text') turnView.setDraft(event.target.value);
     if (event.target.id === 'prompt') { state.draft = event.target.value; event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight, 220)}px`; }
     if (event.target.id === 'reasoning-effort') {

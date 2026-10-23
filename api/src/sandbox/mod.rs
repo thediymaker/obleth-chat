@@ -576,6 +576,20 @@ impl Sandboxes {
             .await
     }
 
+    /// Runs `argv` with optional input, keeping up to `limit` bytes per stream.
+    pub async fn exec_with(
+        &self,
+        sandbox: &Sandbox,
+        argv: &[&str],
+        stdin: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<kube::ExecOutput> {
+        self.inner
+            .kube
+            .exec_limited(&sandbox.pod_name(), argv, stdin, limit)
+            .await
+    }
+
     pub async fn touch(&self, sandbox: &Sandbox) {
         let _ = sqlx::query("WITH s AS (UPDATE sandboxes SET last_used_at=NOW() WHERE id=$1 AND last_used_at<NOW()-INTERVAL '30 seconds' RETURNING pod_id) UPDATE sandbox_pods SET last_used_at=NOW() WHERE id IN (SELECT pod_id FROM s)")
             .bind(sandbox.id)

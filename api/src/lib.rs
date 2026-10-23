@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod auth;
 pub mod autopilot;
 pub mod browser;
+pub mod code;
 pub mod config;
 pub mod connections;
 pub mod error;
@@ -100,6 +101,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let projects = projects::router(state.clone());
     let groups = groups::router(state.clone());
     let shares = shares::router(state.clone());
+    let code = code::router(state.clone());
     let research = research::router(state.clone());
     let workspaces = sandbox::router(state.clone());
     let browsing = browser::router(state.clone());
@@ -152,6 +154,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(projects)
         .merge(groups)
         .merge(shares)
+        .merge(code)
         .merge(research)
         .merge(workspaces)
         .merge(browsing)
@@ -260,6 +263,7 @@ async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Val
     }
     if let (Some(sb), Some(user)) = (&s.sandboxes, &user) {
         value["features"]["workspaces"] = json!(sb.allowed(user));
+        value["features"]["code"] = json!(sb.allowed(user));
     }
     value["features"]["browser"] = json!(match (&s.browsers, &user) {
         (Some(b), Some(user)) => b.allowed(user),
@@ -1029,6 +1033,9 @@ async fn run_generation(
         if let Value::Array(definitions) = sandbox::tools::definitions() {
             tools.extend(definitions);
         }
+        if project.is_some() {
+            tools.push(code::tool_definition());
+        }
     }
     if let Some(toolset) = &toolset {
         tools.extend(toolset.definitions());
@@ -1643,8 +1650,11 @@ async fn run_generation(
                 };
                 let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
                 let researching = research_tools && research::tools::is_tool(&call.name);
+                let syncing = call.name == "sync_code" && project.is_some();
                 let label = if researching {
                     research::tools::summary(&call.name, &args)
+                } else if syncing {
+                    code::tool_summary(&args)
                 } else {
                     sandbox::tools::summary(&call.name, &args)
                 };
@@ -1652,7 +1662,12 @@ async fn run_generation(
                 record(&mut activity, &entry, true);
                 emit(&mut tx, "tool", entry.clone());
                 let began = Instant::now();
-                let outcome = match project.as_ref().filter(|_| researching) {
+                let outcome = match project.as_ref().filter(|_| researching || syncing) {
+                    Some(project) if syncing => {
+                        let pod = code::workspace::Pod { sandboxes, sandbox };
+                        code::run_tool(&s.store.pool, &pod, &user, project.id, id, &call.arguments)
+                            .await
+                    }
                     Some(project) => {
                         let ctx = research::tools::Ctx {
                             pool: &s.store.pool,

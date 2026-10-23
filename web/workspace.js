@@ -4,11 +4,11 @@ import { icon, esc, badge, iconButton } from './manage-ui.js';
 // preview pane. The pane lives outside the re-rendered app so the running preview
 // is never reloaded by chat updates. It also holds the chat's browser tab, so a chat
 // with the browser on and no workspace gets a pane with only that tab.
-export function createWorkspace({ api, state, route, toast, chatPath, capabilities, render, modal, close, browser = null, details = null }) {
+export function createWorkspace({ api, state, route, toast, chatPath, capabilities, render, modal, close, browser = null, details = null, code = null }) {
   const spaces = new Map();
   const pane = document.createElement('aside');
   pane.className = 'workspace-pane'; pane.hidden = true; pane.setAttribute('aria-label', 'Workspace');
-  pane.innerHTML = '<div class="workspace-bar"></div><div class="workspace-body"><div class="workspace-preview"><div class="workspace-empty"></div><iframe title="Workspace preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe></div><div class="workspace-files" hidden></div><div class="workspace-terminal" hidden></div><div class="workspace-browser" hidden></div><div class="workspace-details" hidden></div></div>';
+  pane.innerHTML = '<div class="workspace-bar"></div><div class="workspace-body"><div class="workspace-preview"><div class="workspace-empty"></div><iframe title="Workspace preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe></div><div class="workspace-files" hidden></div><div class="workspace-terminal" hidden></div><div class="workspace-git" hidden></div><div class="workspace-browser" hidden></div><div class="workspace-details" hidden></div></div>';
   document.body.append(pane);
   // Drag the pane's left edge to resize it. The width is remembered in this browser;
   // double-click resets it.
@@ -51,7 +51,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   });
   addEventListener('resize', applyWidth);
   const frame = pane.querySelector('iframe'), empty = pane.querySelector('.workspace-empty');
-  const terminalEl = pane.querySelector('.workspace-terminal'), browserEl = pane.querySelector('.workspace-browser'), detailsEl = pane.querySelector('.workspace-details'), encoder = new TextEncoder();
+  const terminalEl = pane.querySelector('.workspace-terminal'), gitEl = pane.querySelector('.workspace-git'), browserEl = pane.querySelector('.workspace-browser'), detailsEl = pane.querySelector('.workspace-details'), encoder = new TextEncoder();
   let shownId = null, frameSrc = '', polling = null, shell = null, xterm = null, diskLimit = 0;
 
   const enabled = () => !!capabilities.features?.workspaces;
@@ -76,6 +76,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
       const result = await api.request(`${chatPath(id)}/workspace`);
       const appeared = !!result.workspace !== !!space.workspace;
       space.workspace = result.workspace; space.loaded = true; if (result.diskLimit) diskLimit = result.diskLimit;
+      if (space.workspace?.status === 'running') code?.refresh(id, 30000);
       watch(id);
       // The composer toggle and the side panel depend on whether a workspace exists.
       if (appeared && route().id === id) render(); else update();
@@ -134,14 +135,14 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   function bar(id, space) {
     const w = space.workspace;
     const tabs = available(id, space).map(([key, label]) => `<button class="tab ${space.tab === key ? 'active' : ''}" data-action="workspace-tab" data-tab="${key}" ${space.tab === key ? 'aria-current="true"' : ''}>${label}</button>`).join('');
-    if (space.tab === 'browser' || space.tab === 'details') return `<div class="workspace-tabs">${tabs}</div><span class="grow"></span><div class="workspace-actions">${space.tab === 'browser' ? iconButton('power', 'browser-off', 'Turn off the browser in this chat') : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide pane')}</div>`;
+    if (space.tab === 'browser' || space.tab === 'details' || space.tab === 'code') return `<div class="workspace-tabs">${tabs}</div><span class="grow"></span><div class="workspace-actions">${space.tab === 'browser' ? iconButton('power', 'browser-off', 'Turn off the browser in this chat') : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide pane')}</div>`;
     const address = space.origin ? `<span class="workspace-address" title="${esc(space.origin)}">${esc(space.origin.replace(/^https?:\/\//, ''))}</span>` : '<span class="workspace-address muted">No preview yet</span>';
     const used = w.diskBytes, diskFull = used != null && diskLimit && used > diskLimit;
     const usage = used != null && diskLimit ? `<span class="workspace-usage ${diskFull ? 'full' : ''}" title="${diskFull ? 'Your workspaces are full: delete files to keep working' : 'Disk used by all of your workspaces'}">${(used / 2 ** 30).toFixed(1)} / ${Math.round(diskLimit / 2 ** 30)} GB</span>` : '';
     return `<div class="workspace-tabs">${tabs}</div>${address}<div class="workspace-actions">${usage}${badge(statusLabel(w), w.status === 'running' ? 'accent' : w.status === 'error' ? 'amber' : '')}${iconButton('refresh', 'workspace-reload', { files: 'Refresh files', terminal: 'Restart terminal' }[space.tab] || 'Reload preview', w.previewPort || space.tab !== 'preview' ? '' : 'disabled')}${w.status !== 'starting' ? `<a class="icon-btn" href="${esc(`${chatPath(id)}/workspace/download`)}" download aria-label="Download project" title="Download project (.zip, without dependencies)">${icon('download')}</a>` : ''}${space.origin ? `<a class="icon-btn" href="${esc(space.url || space.origin)}" target="_blank" rel="noopener" aria-label="Open preview in a new tab" title="Open in a new tab">${icon('external')}</a>` : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide workspace')}</div>`;
   }
   function available(id, space) {
-    return [...(space.workspace ? [['preview', 'Preview'], ['files', 'Files'], ['terminal', 'Terminal']] : []), ...(browser?.on(id) ? [['browser', 'Browser']] : []), ...(details && route().page === 'chat' ? [['details', 'Details']] : [])];
+    return [...(space.workspace ? [['preview', 'Preview'], ['files', 'Files'], ['terminal', 'Terminal'], ...(code?.enabled() ? [['code', code.label(id)]] : [])] : []), ...(browser?.on(id) ? [['browser', 'Browser']] : []), ...(details && route().page === 'chat' ? [['details', 'Details']] : [])];
   }
   function emptyState(space) {
     const w = space.workspace;
@@ -202,9 +203,18 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     const tabs = available(id, space).map(([key]) => key).filter(key => key !== 'details' || space.details || !space.workspace && !browsing(id));
     if (!tabs.includes(space.tab)) space.tab = tabs.includes('preview') ? 'preview' : space.details || !browsing(id) ? 'details' : 'browser';
     pane.querySelector('.workspace-bar').innerHTML = bar(id, space);
-    const browsingTab = space.tab === 'browser', detailsTab = space.tab === 'details';
+    const browsingTab = space.tab === 'browser', detailsTab = space.tab === 'details', gitTab = space.tab === 'code';
     browserEl.hidden = !browsingTab;
     detailsEl.hidden = !detailsTab;
+    gitEl.hidden = !gitTab;
+    if (gitTab) {
+      pane.querySelector('.workspace-preview').hidden = true;
+      pane.querySelector('.workspace-files').hidden = true;
+      terminalEl.hidden = true;
+      browser?.hide();
+      code.show(gitEl, id);
+      return;
+    }
     if (detailsTab) {
       pane.querySelector('.workspace-preview').hidden = true;
       pane.querySelector('.workspace-files').hidden = true;
@@ -345,7 +355,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     return `<button type="button" class="btn ghost small workspace-toggle ${on ? 'on' : ''} ${shown ? 'showing' : ''}" data-action="workspace-toggle" aria-pressed="${on}" title="${on ? 'This conversation has a workspace: the model can create files, run commands and show a live preview' : 'Give the model a private Linux workspace with a live preview'}" ${state.streaming ? 'disabled' : ''}>${icon('terminal')}<span class="option-text">Workspace</span></button>`;
   }
 
-  const toolIcons = { write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', start_server: 'play', server_logs: 'file' };
+  const toolIcons = { sync_code: 'branch', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', start_server: 'play', server_logs: 'file' };
   const stepState = { running: 'Running…', awaiting: 'Needs your answer', error: 'Failed', declined: 'Declined' };
   function step(s) {
     const asking = s.status === 'awaiting';
@@ -370,6 +380,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
       const index = steps.findIndex(s => s.id === event.data.id);
       if (index >= 0) steps[index] = event.data; else steps.push(event.data);
       if (event.data.tool === 'start_server' || event.data.tool === 'write_file' || event.data.tool === 'edit_file') { const space = spaces.get(conversationId); if (space) space.files = null; }
+      if (['write_file', 'edit_file', 'run_command', 'run_in_terminal', 'sync_code'].includes(event.data.tool) && event.data.status !== 'running') code?.changed(conversationId);
       // A plain web server has no live reload, so reload the preview after each change.
       if (event.data.reload) { clearTimeout(reloading); reloading = setTimeout(() => showPreview(conversationId), 600); }
       if (event.data.tool === 'run_in_terminal' && event.data.status === 'completed') runInTerminal(conversationId, event.data.command);
@@ -467,5 +478,5 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     }
     update();
   }
-  return { load, loadList, page, create, update, toggleButton, activity, activitySignature, onEvent, actions, hasWorkspace, enabled, showTab, showing, toggleDetails, isOpen: id => (!!spaces.get(id)?.workspace && spaces.get(id).open) || browsing(id) || detailing(id), reset: () => { closeTerminal(); spaces.clear(); shownId = null; frame.removeAttribute('src'); update(); } };
+  return { load, loadList, page, create, update, runInTerminal, toggleButton, activity, activitySignature, onEvent, actions, hasWorkspace, enabled, showTab, showing, toggleDetails, isOpen: id => (!!spaces.get(id)?.workspace && spaces.get(id).open) || browsing(id) || detailing(id), reset: () => { closeTerminal(); spaces.clear(); shownId = null; frame.removeAttribute('src'); update(); } };
 }

@@ -855,6 +855,28 @@ fn emit(tx: &mut Option<mpsc::Sender<Result<Event, Infallible>>>, name: &str, da
         *tx = None;
     }
 }
+/// Turns on a chat's workspace from within a turn, as its Workspace button does: a
+/// project chat's starts with the project's code. Returns it running.
+async fn launch_workspace(
+    s: &AppState,
+    user: &Identity,
+    chat: Uuid,
+) -> Result<(sandbox::Sandbox, sandbox::Sandboxes), String> {
+    let sandboxes = s.sandboxes.clone().ok_or("Workspaces are not available")?;
+    let sandbox = sandboxes.create(user.id, chat).await.map_err(|e| e.1)?;
+    let running = match code::seed(&s.store.pool, &sandboxes, user, chat, &sandbox).await {
+        Ok(Some(running)) => running,
+        Ok(None) => sandboxes.ensure_running(&sandbox).await?,
+        Err(e) => {
+            return Err(format!(
+                "Could not put the project's code in the workspace: {}",
+                e.1
+            ))
+        }
+    };
+    Ok((running, sandboxes))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_generation(
     s: AppState,
@@ -915,8 +937,16 @@ async fn run_generation(
         }
         _ => None,
     };
+    // Worker models the main model can hand work to, chosen by administrators. Any
+    // chat can have them; files come from the workspace, which Chat turns on if needed.
+    let workers = if resolved.capabilities.supports_function_calling != Some(false) {
+        models::worker_models(&s.store.pool, &user).await
+    } else {
+        vec![]
+    };
     let tool_turn = workspace_turn
         || asks
+        || !workers.is_empty()
         || browsing.is_some()
         || toolset.is_some()
         || knowledge_turn
@@ -1002,6 +1032,9 @@ async fn run_generation(
     if let Some(toolset) = &toolset {
         preamble.push(toolset.prompt());
     }
+    if !workers.is_empty() {
+        preamble.push(agents::PROMPT.into());
+    }
     if let Some((_, engine)) = &browsing {
         preamble.push(browser::tools::prompt(engine));
     }
@@ -1039,12 +1072,6 @@ async fn run_generation(
         payload.as_object_mut().unwrap().remove("max_tokens");
     }
     let mut tools = vec![];
-    // Worker models the main model can hand exploration to, chosen by administrators.
-    let workers = if workspace.is_some() {
-        models::worker_models(&s.store.pool, &user).await
-    } else {
-        vec![]
-    };
     if workspace.is_some() {
         if let Value::Array(definitions) = sandbox::tools::definitions() {
             tools.extend(definitions);
@@ -1052,9 +1079,19 @@ async fn run_generation(
         if project.is_some() {
             tools.push(code::tool_definition());
         }
-        if !workers.is_empty() {
-            tools.push(agents::definition(&workers));
+    }
+    let may_launch = s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(&user));
+    let worker_files = if workspace.is_some() {
+        agents::Files::Workspace
+    } else if may_launch {
+        agents::Files::Launch {
+            project: project.is_some(),
         }
+    } else {
+        agents::Files::None
+    };
+    if !workers.is_empty() {
+        tools.push(agents::definition(&workers, worker_files));
     }
     if let Some(toolset) = &toolset {
         tools.extend(toolset.definitions());
@@ -1345,7 +1382,10 @@ async fn run_generation(
                         .filter(|n| !n.is_empty())
                         .collect();
                     Some(format!("[Chat: your last step stopped at {limit} while you were writing a call to {}, so nothing ran. Keep each call well under the limit: write a long file in parts, the first with write_file and each next one with write_file and append set, and think less before writing.]", names.join(", ")))
-                } else if max_tokens.is_some() && text.trim().is_empty() && thought_to > thought_from {
+                } else if max_tokens.is_some()
+                    && text.trim().is_empty()
+                    && thought_to > thought_from
+                {
                     Some("[Chat: you reached the output limit while thinking. Write the answer now.]".to_string())
                 } else if max_tokens.is_some() && !text.trim().is_empty() {
                     Some("[Chat: your answer reached the output limit. Continue exactly where it stopped, without repeating anything.]".to_string())
@@ -1393,6 +1433,7 @@ async fn run_generation(
                     && c.name != questions::RESEARCH_TOOL
                     && c.name != browser::tools::HANDOFF
                     && c.name != browser::tools::REQUEST
+                    && c.name != agents::TOOL
                     && !(browsing.is_some() && browser::tools::is_tool(&c.name))
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
             });
@@ -1721,47 +1762,119 @@ async fn run_generation(
                     );
                     continue;
                 }
-                let Some((sandbox, sandboxes)) = &running else {
-                    payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":format!("There is no tool named {}.", call.name)}));
-                    continue;
-                };
-                let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
                 if call.name == agents::TOOL && !workers.is_empty() {
                     // Workers run together; the step shows each one's progress as it goes.
+                    let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
                     let mut entry = json!({"id":call.id,"tool":call.name,"summary":agents::summary(&args),"status":"running","startedAt":chrono::Utc::now()});
                     record(&mut activity, &entry, true);
                     emit(&mut tx, "tool", entry.clone());
                     let began = Instant::now();
-                    let pod = code::workspace::Pod { sandboxes, sandbox };
-                    let ctx = agents::Ctx {
-                        pool: &s.store.pool,
-                        gateway: &gateway,
-                        user: &user,
-                        conversation: id,
-                        shell: &pod,
-                        workers: &workers,
+                    // Files come from the chat's workspace: woken if it sleeps, turned on
+                    // when the tasks need files and the chat has none.
+                    let launch = workspace.is_none() && may_launch && agents::wants_files(&args);
+                    if launch {
+                        entry["detail"] = json!("Turning on the workspace");
+                        emit(&mut tx, "tool", entry.clone());
+                    }
+                    let place = match (&running, &workspace) {
+                        (Some((sandbox, sandboxes)), _) => {
+                            Ok(Some((sandbox.clone(), (*sandboxes).clone())))
+                        }
+                        (None, Some((sandbox, sandboxes))) => sandboxes
+                            .ensure_running(sandbox)
+                            .await
+                            .map(|running| Some((running, sandboxes.clone()))),
+                        (None, None) if launch => launch_workspace(&s, &user, id).await.map(Some),
+                        (None, None) => Ok(None),
                     };
-                    let (progress, mut updates) = mpsc::unbounded_channel();
-                    let work = agents::run(&ctx, &call.arguments, progress);
-                    tokio::pin!(work);
-                    let mut tick = 0;
-                    let outcome = loop {
-                        tokio::select! {
-                            outcome = &mut work => break outcome,
-                            Some(agents) = updates.recv() => {
-                                tick += 1;
-                                entry["agents"] = agents;
-                                entry["tick"] = json!(tick);
-                                record(&mut activity, &entry, false);
-                                emit(&mut tx, "tool", entry.clone());
+                    let mut note = String::new();
+                    let place = match (
+                        place,
+                        args["repo"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|r| !r.is_empty()),
+                    ) {
+                        (Ok(Some((sandbox, sandboxes))), Some(repo)) => {
+                            entry["detail"] = json!("Checking out the repository");
+                            emit(&mut tx, "tool", entry.clone());
+                            let pod = code::workspace::Pod {
+                                sandboxes: &sandboxes,
+                                sandbox: &sandbox,
+                            };
+                            let checked = match agents::repo_url(repo) {
+                                Ok((url, name)) => agents::checkout(&pod, &url, &name)
+                                    .await
+                                    .map(|folder| format!("The repository {url} is checked out at {folder}/ in the workspace. Start there.")),
+                                Err(e) => Err(e),
+                            };
+                            checked.map(|n| {
+                                note = n;
+                                Some((sandbox, sandboxes))
+                            })
+                        }
+                        (place, _) => place,
+                    };
+                    let outcome = match place {
+                        Err(e) => sandbox::tools::Outcome {
+                            ok: false,
+                            detail: e.clone(),
+                            summary: agents::summary(&args),
+                            output: format!("Error: {e}"),
+                            preview: None,
+                            extra: json!({}),
+                        },
+                        Ok(place) => {
+                            if launch {
+                                entry["workspace"] = json!(true);
                             }
+                            entry.as_object_mut().unwrap().remove("detail");
+                            let pod =
+                                place
+                                    .as_ref()
+                                    .map(|(sandbox, sandboxes)| code::workspace::Pod {
+                                        sandboxes,
+                                        sandbox,
+                                    });
+                            let ctx = agents::Ctx {
+                                pool: &s.store.pool,
+                                gateway: &gateway,
+                                user: &user,
+                                conversation: id,
+                                shell: pod.as_ref(),
+                                workers: &workers,
+                                note: note.clone(),
+                            };
+                            let (progress, mut updates) = mpsc::unbounded_channel();
+                            let work = agents::run(&ctx, &call.arguments, progress);
+                            tokio::pin!(work);
+                            let mut tick = 0;
+                            let mut outcome = loop {
+                                tokio::select! {
+                                    outcome = &mut work => break outcome,
+                                    Some(agents) = updates.recv() => {
+                                        tick += 1;
+                                        entry["agents"] = agents;
+                                        entry["tick"] = json!(tick);
+                                        record(&mut activity, &entry, false);
+                                        emit(&mut tx, "tool", entry.clone());
+                                    }
+                                }
+                            };
+                            entry["tick"] = json!(tick + 1);
+                            if launch {
+                                outcome.output.push_str("\n\nChat turned on this chat's workspace for the workers. Its tools are yours from the person's next message.");
+                            }
+                            if !note.is_empty() {
+                                outcome.output = format!("{note}\n\n{}", outcome.output);
+                            }
+                            outcome
                         }
                     };
                     entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
                     entry["summary"] = json!(outcome.summary);
                     entry["detail"] = json!(outcome.detail);
                     entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
-                    entry["tick"] = json!(tick + 1);
                     if let Some(facts) = outcome.extra.as_object() {
                         for (key, value) in facts {
                             entry[key] = value.clone();
@@ -1774,6 +1887,11 @@ async fn run_generation(
                     );
                     continue;
                 }
+                let Some((sandbox, sandboxes)) = &running else {
+                    payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":format!("There is no tool named {}.", call.name)}));
+                    continue;
+                };
+                let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
                 let researching = research_tools && research::tools::is_tool(&call.name);
                 let syncing = call.name == "sync_code" && project.is_some();
                 let label = if researching {

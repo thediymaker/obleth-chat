@@ -228,7 +228,18 @@ async fn chat(
                 .as_str()
                 .is_some_and(|c| c.starts_with("[Chat: your last step stopped"))
     });
+    // A worker the lead sent answers its task.
+    let worker = messages[0]["content"]
+        .as_str()
+        .is_some_and(|c| c.starts_with("You are a worker"))
+        .then(|| messages[1]["content"].as_str().unwrap_or("").to_owned());
     let stream = async_stream::stream! {
+        if let Some(task) = worker {
+            yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"content":format!("Worker: {task}")}}]}).to_string()));
+            yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":5,"total_tokens":55}}).to_string()));
+            yield Ok(Event::default().data("[DONE]"));
+            return;
+        }
         if cut && !warned {
             // The output limit stops the call half written.
             let partial = json!([{"index":0,"id":"call_cut","type":"function","function":{"name":"fixture__lookup","arguments":"{\"job\":\"4"}}]);
@@ -1792,4 +1803,66 @@ async fn a_call_cut_off_at_the_output_limit_never_runs(pool: PgPool) {
         .unwrap()
         .to_owned();
     assert!(note.contains("fixture__lookup, so nothing ran"), "{note}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn any_chat_can_send_workers_without_a_workspace(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    sqlx::query("INSERT INTO model_profiles (model_id, name, worker) VALUES ('fixture-model','Fixture',TRUE)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_agents",
+        "delegate",
+        json!({"tasks":[{"title":"Queues","task":"Name a queue design."},{"title":"Stacks","task":"Name a stack design."}]}),
+    )]);
+    let (_, stream) = send(&f, &admin, "Use some sub-agents to compare designs").await;
+    let body = stream.await.unwrap();
+    assert!(
+        body.contains("Worker: Name a queue design.")
+            && body.contains("Worker: Name a stack design."),
+        "{body}"
+    );
+    let seen = f.gateway_seen.lock().unwrap().clone();
+    let lead = &seen[0];
+    // The lead hears that agents means delegate, never cluster jobs.
+    assert!(lead["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Never start cluster jobs"));
+    let delegate = lead["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["function"]["name"] == "delegate")
+        .expect("delegate is offered without a workspace");
+    // Chat has no workspaces here, so workers answer from what they know.
+    assert!(delegate["function"]["parameters"]["properties"]["repo"].is_null());
+    let workers: Vec<&Value> = seen
+        .iter()
+        .filter(|r| {
+            r["messages"][0]["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("You are a worker"))
+        })
+        .collect();
+    assert_eq!(workers.len(), 2);
+    assert!(workers.iter().all(|w| w.get("tools").is_none()));
+    // No connection or cluster was asked for anything: only the gateway's model lookups.
+    assert!(f
+        .cluster_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r["path"] == "/model/info"));
+    assert!(tool_calls(&f.mcp_seen).is_empty());
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_usage WHERE purpose='agent' AND status='completed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
 }

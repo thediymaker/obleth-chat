@@ -384,6 +384,8 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
       // A plain web server has no live reload, so reload the preview after each change.
       if (event.data.reload) { clearTimeout(reloading); reloading = setTimeout(() => showPreview(conversationId), 600); }
       if (event.data.tool === 'run_in_terminal' && event.data.status === 'completed') runInTerminal(conversationId, event.data.command);
+      // Workers that needed files turned the chat's workspace on.
+      if (event.data.tool === 'delegate' && event.data.workspace && !spaces.get(conversationId)?.workspace) load(conversationId);
       return true;
     }
     if (event.event === 'draft') { assistant._draft = event.data; return true; }

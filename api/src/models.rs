@@ -75,7 +75,10 @@ impl ParameterOverrides {
         {
             return Err(ApiError::bad("Top P must be between 0 and 1"));
         }
-        if self.max_tokens.is_some_and(|v| !(0..=MAX_OUTPUT_TOKENS).contains(&v)) {
+        if self
+            .max_tokens
+            .is_some_and(|v| !(0..=MAX_OUTPUT_TOKENS).contains(&v))
+        {
             return Err(ApiError::bad(
                 "The output limit must be 0 (the model's own) or up to 262,144 tokens",
             ));

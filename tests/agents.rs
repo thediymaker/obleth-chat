@@ -66,7 +66,8 @@ impl Shell for Local {
 
 type Seen = Arc<Mutex<Vec<Value>>>;
 
-/// The worker model: first it searches, then it reports what the search found.
+/// The worker model: first it searches, then it reports what the search found. With
+/// no tools it answers straight away.
 async fn chat(
     axum::extract::State(seen): axum::extract::State<Seen>,
     Json(body): Json<Value>,
@@ -74,6 +75,7 @@ async fn chat(
     seen.lock().unwrap().push(body.clone());
     let messages = body["messages"].as_array().unwrap().clone();
     let task = messages[1]["content"].as_str().unwrap_or("").to_owned();
+    let tools = body.get("tools").is_some();
     let found = messages
         .iter()
         .rev()
@@ -82,6 +84,10 @@ async fn chat(
         .map(str::to_owned);
     let stream = async_stream::stream! {
         match found {
+            None if !tools => {
+                yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"content":format!("From memory: {task}")}}]}).to_string()));
+                yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}).to_string()));
+            }
             None => {
                 let pattern = if task.contains("schedule") { "schedule" } else { "# Jobs" };
                 let call = json!([{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":json!({"pattern":pattern}).to_string()}}]);
@@ -148,12 +154,20 @@ async fn workers_explore_at_once_and_report(pool: PgPool) {
         .unwrap();
     let workers = models::worker_models(&pool, &jen).await;
     assert_eq!(workers, [("mini-worker".to_string(), "Mini".to_string())]);
-    let definition = agents::definition(&workers);
+    let definition = agents::definition(&workers, agents::Files::Workspace);
     assert_eq!(definition["function"]["name"], "delegate");
-    assert_eq!(
-        definition["function"]["parameters"]["properties"]["model"]["enum"],
-        json!(["mini-worker"])
-    );
+    let properties = &definition["function"]["parameters"]["properties"];
+    assert_eq!(properties["model"]["enum"], json!(["mini-worker"]));
+    assert!(properties["repo"].is_object() && properties["project_code"].is_null());
+    // A chat without a workspace still has workers; files depend on what Chat may open.
+    let plain = agents::definition(&workers, agents::Files::None);
+    assert!(plain["function"]["parameters"]["properties"]["repo"].is_null());
+    let project = agents::definition(&workers, agents::Files::Launch { project: true });
+    assert!(project["function"]["parameters"]["properties"]["project_code"].is_object());
+    assert!(project["function"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("turns on this chat's workspace"));
 
     let dir = tempfile::tempdir().unwrap();
     let folder = Local(dir.path().join("chat"));
@@ -168,8 +182,9 @@ async fn workers_explore_at_once_and_report(pool: PgPool) {
         gateway: &gateway,
         user: &jen,
         conversation: chat,
-        shell: &folder,
+        shell: Some(&folder),
         workers: &workers,
+        note: String::new(),
     };
     let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
     let outcome = agents::run(
@@ -242,6 +257,96 @@ async fn workers_explore_at_once_and_report(pool: PgPool) {
     )
     .await;
     assert!(!refused.ok && refused.output.contains("mini-worker"));
+
+    // Without files a worker is a short chat of its own: no tools, one answer.
+    seen.lock().unwrap().clear();
+    let chatting = agents::Ctx {
+        shell: None::<&Local>,
+        note: "Context from the lead.".into(),
+        ..ctx
+    };
+    let (progress, _updates) = tokio::sync::mpsc::unbounded_channel();
+    let answered = agents::run(
+        &chatting,
+        &json!({"tasks":[{"title":"Compare","task":"Compare two queue designs."}]}).to_string(),
+        progress,
+    )
+    .await;
+    assert!(answered.ok, "{}", answered.output);
+    assert!(answered
+        .output
+        .contains("From memory: Context from the lead.\n\nCompare two queue designs."));
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("tools").is_none());
+    assert!(requests[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("no tools or files"));
+}
+
+#[tokio::test]
+async fn repositories_are_checked_out_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    std::fs::write(origin.join("lib.rs"), "pub fn answer() -> u8 { 42 }\n").unwrap();
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"], &origin);
+    git(&["add", "."], &origin);
+    git(
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-qm",
+            "First",
+        ],
+        &origin,
+    );
+    // The chat's folder is itself a repository: the checkout stays out of it.
+    let folder = Local(dir.path().join("chat"));
+    std::fs::create_dir_all(&folder.0).unwrap();
+    git(&["init", "-q"], &folder.0);
+    let url = format!("file://{}", origin.display());
+    let at = agents::checkout(&folder, &url, "origin").await.unwrap();
+    assert_eq!(at, "repos/origin");
+    assert!(
+        agents::tool(&folder, "search", &json!({"pattern":"answer"}))
+            .await
+            .contains("repos/origin/lib.rs:1:")
+    );
+    let log = agents::tool(&folder, "git_log", &json!({"path":"repos/origin"})).await;
+    assert!(log.contains("First"), "{log}");
+    let exclude = std::fs::read_to_string(folder.0.join(".git/info/exclude")).unwrap();
+    assert_eq!(exclude.matches("/repos/").count(), 1);
+    // A second checkout reuses the first.
+    assert_eq!(
+        agents::checkout(&folder, &url, "origin").await.unwrap(),
+        "repos/origin"
+    );
+    let exclude = std::fs::read_to_string(folder.0.join(".git/info/exclude")).unwrap();
+    assert_eq!(exclude.matches("/repos/").count(), 1);
+    let missing = agents::checkout(&folder, &format!("{url}-gone"), "gone")
+        .await
+        .unwrap_err();
+    assert!(missing.starts_with("Could not check out"), "{missing}");
+    assert!(!folder.0.join("repos/gone.part").exists());
 }
 
 #[tokio::test]

@@ -1,9 +1,10 @@
 //! Agents: the main model hands parts of its work to worker models, which run at the
 //! same time and report back. Administrators choose which models may be workers, so
-//! the fast, efficient ones do the legwork. A worker gets only its task (not the
-//! conversation) and tools that read the chat's workspace, so several can explore a
-//! codebase at once without changing it. Each worker is charged on its own usage
-//! row, and workers cannot hand work on.
+//! the fast, efficient ones do the legwork. A worker is a short chat of its own: it
+//! gets only its task (not the conversation) and, when there are files to look at,
+//! tools that read the chat's workspace, so several can explore a codebase at once
+//! without changing it. Workers never touch connections or clusters. Each worker is
+//! charged on its own usage row, and workers cannot hand work on.
 
 use crate::{
     auth::Identity,
@@ -40,8 +41,25 @@ static RUNNING: Semaphore = Semaphore::const_new(24);
 
 const INSTRUCTIONS: &str = "You are a worker helping a lead model. The lead gave you one task, below; you do not see its conversation. Explore the project in the workspace with your tools: list_files, read_file, search and git_log. You cannot change anything. Be quick: search before you read, and read only the parts you need. When you know enough, reply with your report and no tool call. Lead with the answer, cite files as path:line, quote code only where it matters, and say what you could not find. Keep it under 600 words.";
 
+const ANSWER: &str = "You are a worker helping a lead model. The lead gave you one task, below; you do not see its conversation, and you have no tools or files. Answer from what you know. Lead with the answer, be concrete, and say plainly where you are unsure or what would need checking. Keep it under 600 words.";
+
+/// Told to the main model whenever it has workers, so a request for agents means them.
+pub const PROMPT: &str = "You can hand work to worker agents with the delegate tool: smaller, faster models that run inside Chat at the same time and report back. When the person asks for agents, sub-agents, helpers or work done in parallel, that is what they mean. Never start cluster jobs, pods or Slurm work to get agents; use a connection's jobs only when the person asks for jobs on that system.";
+
+/// What workers can read in this chat.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Files {
+    /// The chat has a workspace: workers read its files.
+    Workspace,
+    /// No workspace yet, but Chat may turn one on when a task needs files; `project`
+    /// says whether the chat's project has code to start it with.
+    Launch { project: bool },
+    /// No files: workers answer from what they know.
+    None,
+}
+
 /// The tool the main model calls, offered when the person may use a worker model.
-pub fn definition(workers: &[(String, String)]) -> Value {
+pub fn definition(workers: &[(String, String)], files: Files) -> Value {
     let ids: Vec<&str> = workers.iter().map(|(id, _)| id.as_str()).collect();
     let names = workers
         .iter()
@@ -54,14 +72,103 @@ pub fn definition(workers: &[(String, String)]) -> Value {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    json!({"type":"function","function":{"name":TOOL,"description":format!("Hand parts of the work to faster worker models that run at the same time, each on its own task, and get their reports back. Workers can read the workspace (list, read and search files, git history) but cannot change anything, and they do not see this conversation: give each a self-contained task saying what to look for and what to report. Use it to explore a codebase or answer several independent questions at once, then do the deciding and writing yourself. Up to {MAX_AGENTS} tasks. Workers: {names}."),
-        "parameters":{"type":"object","properties":{
-            "tasks":{"type":"array","minItems":1,"maxItems":MAX_AGENTS,"items":{"type":"object","properties":{
-                "title":{"type":"string","description":"A few words for the person, like \"Map the auth flow\"."},
-                "task":{"type":"string","description":"The whole task: what to find, where to start if you know, and what the report should contain."}},
-                "required":["title","task"],"additionalProperties":false}},
-            "model":{"type":"string","enum":ids,"description":format!("The worker model. Defaults to {}.", ids.first().copied().unwrap_or(""))}},
-        "required":["tasks"],"additionalProperties":false}}})
+    let reach = match files {
+        Files::Workspace => "Workers can read this chat's workspace (list, read and search files, git history) but cannot change anything. To look at a git repository that isn't in the workspace, set repo and Chat checks it out first.",
+        Files::Launch { project: true } => "Workers are short chats of their own. When the tasks need files, Chat turns on this chat's workspace first: set project_code to read this project's code, or repo to check out a git repository. Workers then list, read and search files and git history, but cannot change anything. Without either, they answer from what they know.",
+        Files::Launch { project: false } => "Workers are short chats of their own. When the tasks need code, set repo to a git repository: Chat turns on this chat's workspace and checks it out first, and workers list, read and search its files and history but cannot change anything. Without repo, they answer from what they know.",
+        Files::None => "Workers are short chats of their own with no tools or files: they answer from what they know.",
+    };
+    let mut properties = json!({
+        "tasks":{"type":"array","minItems":1,"maxItems":MAX_AGENTS,"items":{"type":"object","properties":{
+            "title":{"type":"string","description":"A few words for the person, like \"Map the auth flow\"."},
+            "task":{"type":"string","description":"The whole task: what to find, where to start if you know, and what the report should contain."}},
+            "required":["title","task"],"additionalProperties":false}},
+        "model":{"type":"string","enum":ids,"description":format!("The worker model. Defaults to {}.", ids.first().copied().unwrap_or(""))}});
+    if files != Files::None {
+        properties["repo"] = json!({"type":"string","description":"A public git repository for the workers to read, like https://github.com/owner/name. Chat checks it out into repos/ in the workspace and tells each worker where."});
+    }
+    if files == (Files::Launch { project: true }) {
+        properties["project_code"] = json!({"type":"boolean","description":"Turn on the workspace with this project's code so the workers can read it."});
+    }
+    json!({"type":"function","function":{"name":TOOL,"description":format!("Hand parts of the work to faster worker models that run at the same time, each on its own task, and get their reports back. {reach} Workers do not see this conversation: give each a self-contained task saying what to look for and what to report. Use it to explore a codebase or answer several independent questions at once, then do the deciding and writing yourself. Up to {MAX_AGENTS} tasks. Workers: {names}."),
+        "parameters":{"type":"object","properties":properties,"required":["tasks"],"additionalProperties":false}}})
+}
+
+/// Whether a delegate call asks for files the chat doesn't have open yet.
+pub fn wants_files(args: &Value) -> bool {
+    args["project_code"].as_bool() == Some(true)
+        || args["repo"].as_str().is_some_and(|r| !r.trim().is_empty())
+}
+
+/// A repository address workers may read, and the folder it goes in. Only plain
+/// https addresses without credentials; a bare host/owner/name gets https.
+pub fn repo_url(raw: &str) -> Result<(String, String), String> {
+    let raw = raw.trim();
+    let bad = || {
+        format!("{raw} is not a repository address Chat can check out. Give an https address like https://github.com/owner/name.")
+    };
+    let rest = raw
+        .strip_prefix("https://")
+        .or_else(|| (!raw.contains("://")).then_some(raw))
+        .ok_or_else(bad)?;
+    let rest = rest.trim_end_matches('/');
+    let (host, path) = rest.split_once('/').ok_or_else(bad)?;
+    let fine = |c: char| c.is_ascii_alphanumeric() || "-._~/".contains(c);
+    if raw.len() > 300
+        || host.is_empty()
+        || !host.contains('.')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-.:".contains(c))
+        || path.is_empty()
+        || !path.chars().all(fine)
+        || path
+            .split('/')
+            .any(|p| p.is_empty() || p == "." || p == "..")
+    {
+        return Err(bad());
+    }
+    let name: String = path
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(".git")
+        .trim_start_matches(['.', '-'])
+        .into();
+    if name.is_empty() {
+        return Err(bad());
+    }
+    Ok((format!("https://{host}/{path}"), name))
+}
+
+const CLONE: &str = r#"url=$1; dest=repos/$2
+if [ -d "$dest/.git" ]; then echo "$dest"; exit 0; fi
+mkdir -p repos || exit 1
+if [ -d .git ] && ! grep -qx '/repos/' .git/info/exclude 2>/dev/null; then mkdir -p .git/info && echo '/repos/' >> .git/info/exclude; fi
+rm -rf "$dest.part"
+if out=$(GIT_TERMINAL_PROMPT=0 timeout 80 git -c credential.helper= clone -q --depth 50 -- "$url" "$dest.part" 2>&1); then
+  mv "$dest.part" "$dest" && echo "$dest"
+else
+  rm -rf "$dest.part"; printf '%s\n' "$out" | tail -n 3 >&2; exit 3
+fi"#;
+
+/// Checks a repository out into repos/ in the workspace, unless it is there already.
+/// Returns the folder, relative to the workspace.
+pub async fn checkout(sh: &impl Shell, url: &str, name: &str) -> Result<String, String> {
+    let raw = sh.exec(CLONE, &[url, name], None, 4096).await?;
+    let folder = String::from_utf8_lossy(&raw.stdout).trim().to_owned();
+    if raw.code == Some(0) && !folder.is_empty() {
+        return Ok(folder);
+    }
+    let why = raw.stderr.trim();
+    Err(format!(
+        "Could not check out {url}{}",
+        if why.is_empty() {
+            ".".to_string()
+        } else {
+            format!(": {}", why.chars().take(400).collect::<String>())
+        }
+    ))
 }
 
 pub fn summary(args: &Value) -> String {
@@ -74,9 +181,12 @@ pub struct Ctx<'a, S: Shell> {
     pub gateway: &'a Gateway,
     pub user: &'a Identity,
     pub conversation: Uuid,
-    pub shell: &'a S,
+    /// The workspace workers read, or none: then they answer without tools.
+    pub shell: Option<&'a S>,
     /// The worker models this person may use, by id and name.
     pub workers: &'a [(String, String)],
+    /// Told to every worker before its task, such as where a repository was put.
+    pub note: String,
 }
 
 struct Task {
@@ -317,7 +427,7 @@ async fn reserve<S: Shell>(
             generation,
             &resolved.model,
             STEP_TOKENS,
-            INSTRUCTIONS.len() + task.task.len(),
+            INSTRUCTIONS.len() + ctx.note.len() + task.task.len(),
             TIMEOUT.as_secs() as i64 + 60,
         )
         .await?;
@@ -366,13 +476,19 @@ async fn steps<S: Shell>(
     progress: &mpsc::UnboundedSender<Value>,
     usage: &mut Value,
 ) -> Result<String, String> {
+    let brief = if ctx.note.is_empty() {
+        task.task.clone()
+    } else {
+        format!("{}\n\n{}", ctx.note, task.task)
+    };
     let mut messages = vec![
-        json!({"role":"system","content":INSTRUCTIONS}),
-        json!({"role":"user","content":task.task}),
+        json!({"role":"system","content":if ctx.shell.is_some() { INSTRUCTIONS } else { ANSWER }}),
+        json!({"role":"user","content":brief}),
     ];
     for step in 1..=MAX_STEPS {
-        let last = step == MAX_STEPS;
-        if last {
+        // Without files there is nothing to look up: one answer is the report.
+        let last = step == MAX_STEPS || ctx.shell.is_none();
+        if last && ctx.shell.is_some() {
             messages.push(json!({"role":"user","content":"That was your last step. Write your report now from what you found."}));
         }
         let mut payload = json!({"model":resolved.model,"messages":messages,"max_tokens":STEP_TOKENS,
@@ -392,7 +508,7 @@ async fn steps<S: Shell>(
             a["steps"] = json!(step);
             a["tokens"] = usage["total_tokens"].clone();
         });
-        if calls.is_empty() {
+        if calls.is_empty() || last {
             let report = content.trim();
             return if report.is_empty() {
                 Err("It ended without a report".into())
@@ -407,7 +523,10 @@ async fn steps<S: Shell>(
             update(board, progress, i, |a| {
                 a["doing"] = json!(doing(&call.name, &args))
             });
-            let output = tool(ctx.shell, &call.name, &args).await;
+            let output = match ctx.shell {
+                Some(sh) => tool(sh, &call.name, &args).await,
+                None => "You have no tools: answer from what you know.".into(),
+            };
             messages.push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
         }
         trim(&mut messages);
@@ -551,9 +670,12 @@ for n in $OB_SKIP; do set -- "$@" --exclude-dir="$n"; done
 out=$(grep "$@" -e "$p" -- "$d" 2>/dev/null | sed 's|^\./||' | cut -c1-300 | head -n 150)
 [ -n "$out" ] && printf '%s\n' "$out" || echo "No matches.""#;
 
-const LOG: &str = r#"[ -d .git ] || { echo "This project is not a git repository."; exit 0; }
-if [ -n "$2" ]; then git -c core.quotepath=off log --date=short --format='%h %ad %an  %s' -n "$1" -- "$2"
-else git -c core.quotepath=off log --date=short --format='%h %ad %an  %s' -n "$1"; fi"#;
+/// History from the repository the path is in, so a checkout under repos/ shows its own.
+const LOG: &str = r#"p=${2:-.}
+if [ -d "$p" ]; then d=$p; f=.; else d=$(dirname -- "$p"); f=$(basename -- "$p"); fi
+[ -d "$d" ] || { echo "There is no $p."; exit 0; }
+cd "$d" && git rev-parse --git-dir >/dev/null 2>&1 || { echo "This project is not a git repository."; exit 0; }
+git -c core.quotepath=off log --date=short --format='%h %ad %an  %s' -n "$1" -- "$f""#;
 
 /// Runs one of the worker's tools; anything wrong reads as text for the model.
 pub async fn tool(sh: &impl Shell, name: &str, args: &Value) -> String {
@@ -666,6 +788,32 @@ mod tests {
         assert_eq!(place(&json!("./src/")).unwrap(), "src");
         for bad in ["/etc", "../x", "a/../../b", "-rf"] {
             assert!(place(&json!(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn repositories_need_plain_https() {
+        assert_eq!(
+            repo_url("https://github.com/owner/name.git").unwrap(),
+            ("https://github.com/owner/name.git".into(), "name".into())
+        );
+        assert_eq!(
+            repo_url(" github.com/owner/name/ ").unwrap(),
+            ("https://github.com/owner/name".into(), "name".into())
+        );
+        for bad in [
+            "http://github.com/a/b",
+            "ssh://git@github.com/a/b",
+            "file:///etc",
+            "https://user:pw@github.com/a/b",
+            "https://github.com",
+            "https://localhost/a",
+            "https://github.com/a/../b",
+            "https://github.com/a/b c",
+            "https://github.com/a/$(id)",
+            "https://github.com/a/.git",
+        ] {
+            assert!(repo_url(bad).is_err(), "{bad}");
         }
     }
 

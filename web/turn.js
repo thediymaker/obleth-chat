@@ -170,7 +170,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
     }).join('')}</ol>`;
   }
   function stepText(s) {
-    if (s.tool === 'delegate') { const model = s.workerModel || s.agents?.[0]?.model; return `${esc(s.summary || 'Sent agents')}${model ? ` <span class="tr-quiet">· ${esc(model)}</span>` : ''}`; }
+    if (s.tool === 'delegate') { const model = s.workerModel || s.agents?.[0]?.model, getting = s.status === 'running' && !s.agents && s.detail; return `${esc(s.summary || 'Sent agents')}${model ? ` <span class="tr-quiet">· ${esc(model)}</span>` : ''}${getting ? ` <span class="tr-quiet">· ${esc(s.detail)}</span>` : ''}`; }
     if (s.path && FILE_TOOLS.has(s.tool)) return `${s.tool === 'write_file' ? 'Wrote' : 'Edited'} ${fileButton(s.path, lines(s))}`;
     if (s.tool === 'run_in_terminal' && s.command) return `Opened <code>${esc(s.command)}</code> in the terminal <button type="button" class="tr-link" data-action="turn-run-terminal" data-command="${esc(s.command)}">Run again</button>`;
     if (s.tool === 'plan' && Array.isArray(s.files)) return `Planned ${s.files.length} file${s.files.length === 1 ? '' : 's'}`;
@@ -185,7 +185,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
     const head = `${thumb}<span class="tr-text">${stepText(s)}${s.check === 'error' ? ' <span class="tr-del">· preview broke</span>' : ''}</span><small>${esc(stepTime(s))}</small>`;
     const detail = s.detail && s.status !== 'running' && s.status !== 'awaiting' ? String(s.detail) : '';
     const body = s.tool === 'delegate'
-      ? `<div class="tr-line">${head}</div>${agents(s)}`
+      ? `<div class="tr-line">${head}</div>${agents(s) || (s.status === 'error' && s.detail ? `<pre>${esc(s.detail)}</pre>` : '')}`
       : s.status === 'awaiting'
       ? `<div class="tr-line">${head}</div>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}${approval(s)}`
       : detail && !(FILE_TOOLS.has(s.tool) && s.status === 'completed')

@@ -1112,6 +1112,8 @@ mod http {
         f.write("e.txt", "e\n");
         assert!(workspace::commit(&f, &who, "Add e").await.unwrap());
         workspace::uncommit(&f, &who).await.unwrap();
+        // Repositories checked out to read are not the project's changes.
+        f.write("repos/lib/README.md", "lib\n");
         let status = workspace::status(&f, &who).await.unwrap();
         assert_eq!(status.ahead, 0);
         assert_eq!(status.changes.len(), 1);

@@ -109,10 +109,12 @@ async fn run(
     ))
 }
 
-/// Makes the chat's folder a git repository if it is not one yet.
+/// Makes the chat's folder a git repository if it is not one yet. repos/ holds other
+/// people's repositories checked out to read, which stay out of the project.
 const ENSURE: &str = r#"if [ ! -d .git ]; then g init -q || exit 10; fi
 mkdir -p .git/info && touch .git/info/exclude
 grep -qx 'node_modules/' .git/info/exclude 2>/dev/null || printf '%s' "$OB_EXCLUDE" >> .git/info/exclude
+grep -qx '/repos/' .git/info/exclude 2>/dev/null || echo '/repos/' >> .git/info/exclude
 "#;
 
 fn ensure() -> String {

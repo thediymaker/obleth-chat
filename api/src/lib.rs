@@ -1038,6 +1038,12 @@ async fn run_generation(
     if let Some((_, engine)) = &browsing {
         preamble.push(browser::tools::prompt(engine));
     }
+    // People who may have a workspace can be asked to turn one on for this chat.
+    let offers_workspace =
+        asks && workspace.is_none() && s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(&user));
+    if offers_workspace {
+        preamble.push(questions::WORKSPACE_PROMPT.into());
+    }
     if let Some(prompt) = knowledge_turn
         .as_ref()
         .map(|k| k.prompt())
@@ -1105,9 +1111,6 @@ async fn run_generation(
     if asks {
         tools.push(questions::definition());
     }
-    // People who may have a workspace can be asked to turn one on for this chat.
-    let offers_workspace =
-        asks && workspace.is_none() && s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(&user));
     if offers_workspace {
         tools.push(questions::workspace_definition());
     }

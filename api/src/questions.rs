@@ -102,6 +102,10 @@ pub const SHOWN: &str = "The person sees your questions now. End your reply with
 /// asks for one, and the card's button turns it on and carries on.
 pub const WORKSPACE_TOOL: &str = "request_workspace";
 
+/// Said in the system prompt while the tool is offered: from the tool list alone,
+/// models tell the person they cannot run code, or act out the program's output.
+pub const WORKSPACE_PROMPT: &str = "This chat has no workspace yet, so you cannot run code, open a terminal or keep files. One can be turned on: when the person wants something built, run, tested or previewed, or asks for the workspace or a terminal, call request_workspace. Do not say you are unable to run code, and never act out a program's output as if it had run.";
+
 pub fn workspace_definition() -> Value {
     json!({"type":"function","function":{"name":WORKSPACE_TOOL,
         "description":"Ask the person to turn on a workspace for this chat: a private Linux machine where you can write files, run commands and code, and show a live preview. Call it when the request needs that, such as building or running an app, running code or experiments, keeping files, or research, and you cannot do it well without one. Do not call it for questions you can answer in text. Your reply ends with a button that turns the workspace on; once they press it, you continue in their next message with the workspace tools.",

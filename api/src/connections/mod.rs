@@ -593,6 +593,17 @@ impl Toolset {
             tool.title.as_deref().unwrap_or(&tool.name)
         )
     }
+    /// What the reply shows of a call: the kind of service, the tool's own name and
+    /// whether it only reads.
+    pub fn describe(&self, index: usize) -> Value {
+        let offered = &self.tools[index];
+        let service = match self.servers[offered.server].backend {
+            Backend::Mcp { .. } => Kind::Mcp,
+            Backend::Slurm(_) => Kind::Slurm,
+            Backend::Kubernetes(_) => Kind::Kubernetes,
+        };
+        json!({"service":service.as_str(),"action":offered.tool.name,"readOnly":offered.tool.read_only})
+    }
     /// The connection and tool name an "Allow for this chat" grant covers.
     pub fn grant(&self, index: usize) -> (Uuid, &str) {
         let offered = &self.tools[index];

@@ -8,6 +8,14 @@ import { icon, esc } from './manage-ui.js';
 const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', run_in_terminal: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', delegate: 'users', output_limit: 'info', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
 const RESEARCH = new Set(['research_setup', 'research_status', 'experiment_create', 'experiment_checkout', 'experiment_run', 'experiment_wait', 'run_log']);
 const kindOf = e => e.kind || 'tool';
+// Work on a cluster or other service goes through its own stages: look, ask, act,
+// then check what the change did.
+const STAGES = {
+  kubernetes: { name: 'Kubernetes', icon: 'cube', look: 'Inspect', ask: 'Approve', act: 'Apply', check: 'Verify', rail: ['Inspect', 'Approve', 'Apply', 'Verify'] },
+  slurm: { name: 'Slurm', icon: 'server', look: 'Inspect', ask: 'Submit', act: 'Submit', check: 'Watch', rail: ['Inspect', 'Submit', 'Watch', 'Results'] },
+  mcp: { name: '', icon: 'link', look: 'Inspect', ask: 'Approve', act: 'Act', check: 'Check', rail: ['Inspect', 'Approve', 'Act', 'Check'] },
+};
+const stagesOf = e => STAGES[e.service] || STAGES.mcp;
 const BROWSING = e => String(e.tool || '').startsWith('browser_');
 const CARDS = new Set(['sources', 'saved', 'question', 'workspace', 'research', 'browser-handoff', 'browser-request']);
 const FILE_TOOLS = new Set(['write_file', 'edit_file']);
@@ -49,8 +57,13 @@ export function workOf(m) {
   const list = !thoughtsRecorded && reasoning.trim() ? [{ id: 'thought-all', kind: 'thought', from: 0, to: reasoning.length }, ...entries] : entries;
   const rows = [], pending = [];
   let wrote = false, phase = null;
+  const acted = new Set();
   const phaseOf = e => {
-    if (e.connection) return e.connection;
+    if (e.connection) {
+      const st = stagesOf(e);
+      if (e.readOnly === false) return e.status === 'awaiting' ? st.ask : st.act;
+      return acted.has(e.connection) ? st.check : st.look;
+    }
     if (e.tool === 'plan') return 'Plan';
     if (RESEARCH.has(e.tool)) return 'Research';
     if (BROWSING(e)) return 'Browse';
@@ -74,6 +87,7 @@ export function workOf(m) {
     }
     phase = phaseOf(e);
     if (FILE_TOOLS.has(e.tool) && e.status === 'completed') wrote = true;
+    if (e.connection && e.readOnly === false && e.status === 'completed') acted.add(e.connection);
     pending.splice(0).forEach(t => rows.push({ ...t, phase }));
     rows.push({ type: 'step', e, phase });
   }
@@ -83,6 +97,48 @@ export function workOf(m) {
 }
 
 // A delegate step shows each worker's outcome itself, so it never folds away.
+/** The last lines of a step's output. */
+const lastLines = (text, n) => String(text || '').replace(/\s+$/, '').split('\n').slice(-n).join('\n');
+const minutes = m => !m ? '' : m >= 60 && m % 60 === 0 ? `${m / 60} h` : m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`;
+/**
+ * What a change waiting for approval does, read loosely from its arguments: the
+ * resources a Kubernetes manifest applies or deletes, or the Slurm job a script
+ * submits. Null when there is nothing to read.
+ */
+export function changeOf(s) {
+  const text = String(s.detail || '');
+  const field = (src, key) => src.match(new RegExp(`^${key}:[ \\t]*["']?([^"'\\n]+?)["']?[ \\t]*$`, 'm'))?.[1];
+  if (s.service === 'kubernetes' && s.action === 'apply') {
+    const body = text.replace(/^manifest:[ \t]*\n?/, '');
+    let docs;
+    try {
+      const v = JSON.parse(body);
+      docs = (Array.isArray(v) ? v : v?.kind === 'List' ? v.items || [] : [v]).map(o => ({ kind: o?.kind, name: o?.metadata?.name, namespace: o?.metadata?.namespace, text: JSON.stringify(o) }));
+    } catch {
+      docs = body.split(/^---[ \t]*$/m).filter(d => d.trim()).map(d => {
+        const meta = d.match(/^metadata:[ \t]*\n((?:[ \t]+.*(?:\n|$))*)/m)?.[1] || '';
+        return { kind: field(d, 'kind'), name: meta.match(/^[ \t]+name:[ \t]*["']?([^"'\s]+)/m)?.[1], namespace: meta.match(/^[ \t]+namespace:[ \t]*["']?([^"'\s]+)/m)?.[1], text: d };
+      });
+    }
+    const items = docs.filter(d => d.kind).map(d => {
+      const images = [...new Set([...d.text.matchAll(/"?image"?:[ \t]*"?([^"\s,}]+)/g)].map(x => x[1]))];
+      const replicas = d.text.match(/"?replicas"?:[ \t]*(\d+)/)?.[1];
+      const ports = [...new Set([...d.text.matchAll(/"?(?:containerPort|port)"?:[ \t]*(\d+)/g)].map(x => x[1]))];
+      return { verb: 'Apply', what: `${d.kind}/${d.name || '?'}`, where: d.namespace, facts: [['Image', images.join(', ')], ['Replicas', replicas], ['Port', ports.join(', ')]].filter(f => f[1]) };
+    });
+    return items.length ? { items, raw: 'Manifest', text: body } : null;
+  }
+  if (s.service === 'kubernetes' && s.action === 'delete') return { items: [{ verb: 'Delete', what: `${field(text, 'kind') || '?'}/${field(text, 'name') || '?'}`, where: field(text, 'namespace'), facts: [] }] };
+  if (s.service === 'slurm' && s.action === 'submit') {
+    const script = text.match(/^script:[ \t]*\n([\s\S]*?)(?=^(?:cpus|memory_mb|name|nodes|output|partition|tasks|time_limit_minutes|working_directory):|$(?![\s\S]))/m)?.[1];
+    const mb = Number(field(text, 'memory_mb'));
+    const facts = [['Partition', field(text, 'partition') || 'default'], ['Time limit', minutes(Number(field(text, 'time_limit_minutes')))], ['CPUs', field(text, 'cpus')], ['Nodes', field(text, 'nodes')], ['Memory', mb ? (mb >= 1024 ? `${+(mb / 1024).toFixed(1)} GB` : `${mb} MB`) : '']].filter(f => f[1]);
+    return { items: [{ verb: 'Submit', what: field(text, 'name') || 'batch job', facts }], raw: 'Script', text: script?.trimEnd() || text };
+  }
+  if (s.service === 'slurm' && s.action === 'cancel') return { items: [{ verb: 'Cancel', what: `job ${field(text, 'job_id') || '?'}`, facts: [] }] };
+  return null;
+}
+
 const failed = r => r.type === 'step' && r.e.tool !== 'delegate' && (r.e.status === 'error' || r.e.check === 'error');
 /**
  * Folds failed exploration into one dead-end row, and a problem (a failed step or a
@@ -142,7 +198,8 @@ export function stats(work) {
 }
 
 export function createTurn({ state, markdown, chatPath, route }) {
-  const open = new Set(), filters = new Map(), queued = new Map();
+  // Which worker each delegate step shows in its detail panel.
+  const open = new Set(), filters = new Map(), queued = new Map(), chosen = new Map();
   let steerDraft = '';
   const live = m => m.status === 'pending' || m.status === 'streaming';
   const conversation = () => route().id;
@@ -234,38 +291,111 @@ export function createTurn({ state, markdown, chatPath, route }) {
   }
 
   // ---- While it works ----
+  // The card keeps one size while it runs: a fixed pane shows whatever is happening
+  // now (a file being written, a command's output, the thinking), with one line for
+  // the latest thought and three for the latest steps.
   const PHASES = ['Plan', 'Explore', 'Build', 'Run'];
+  const COMMANDS = new Set(['run_command', 'start_server', 'run_in_terminal']);
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  /** What the card is working on: the workspace, a cluster, the browser or workers. */
+  function target(s, draft) {
+    if (!s && !draft) return '';
+    if (s?.connection) { const st = stagesOf(s); return `<span class="run-target">${icon(st.icon)}<span class="run-target-name">${esc(s.connection)}</span>${st.name ? `<span class="run-target-kind">· ${esc(st.name)}</span>` : ''}</span>`; }
+    if (s && BROWSING(s)) return `<span class="run-target">${icon('globe')}Browser</span>`;
+    if (s?.tool === 'delegate') { const model = s.workerModel || s.agents?.[0]?.model; return `<span class="run-target">${icon('users')}<span class="run-target-name mono">${esc(model || 'Workers')}</span></span>`; }
+    return `<span class="run-target">${icon('terminal')}Workspace</span>`;
+  }
+  /** A change waiting for approval: what it does, read from its arguments, with the raw text folded away. */
+  function askCard(s) {
+    const change = changeOf(s), waits = Date.parse(s.startedAt) + 15 * 60000;
+    const head = s.question ? esc(s.question) : s.readOnly === false && s.service !== 'mcp' ? `Allow this change on ${esc(s.connection)}?` : `Allow ${esc(s.connection || 'this tool')} to run this?`;
+    const items = change ? `<div class="ask-change">${change.items.map(c => `<div class="ask-item"><div class="ask-what"><span class="ask-verb is-${esc(c.verb.toLowerCase())}">${esc(c.verb)}</span><span class="mono">${esc(c.what)}</span>${c.where ? `<span class="ask-where">in ${esc(c.where)}</span>` : ''}</div>${c.facts.length ? `<dl class="ask-facts">${c.facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd></div>`).join('')}</dl>` : ''}</div>`).join('')}</div>` : '';
+    const raw = s.detail ? `<details class="ask-raw"${change ? '' : ' open'}><summary>${icon('down')}${esc(change?.raw || 'Arguments')}<span>· ${plural(String(change?.text ?? s.detail).trim().split('\n').length, 'line')}</span></summary><pre>${esc(change?.text ?? s.detail)}</pre></details>` : '';
+    const buttons = [['allow', s.question ? 'Allow once' : 'Allow', 'primary'], ['chat', s.remember || 'Allow for this chat', ''], ['deny', 'Deny', '']].map(([d, label, tone]) => `<button type="button" class="btn small ${tone}" data-action="tool-decision" data-decision="${d}" data-call="${esc(s.id)}">${label}</button>`).join('');
+    return `<div class="run-ask"><div class="ask-head"><strong>${head}</strong>${s.readOnly === false ? `<span>It changes ${s.service === 'mcp' || !s.service ? 'something outside Chat' : 'the cluster'}, so it waits for you. It runs as your own account.</span>` : ''}</div>${items}${raw}<div class="ask-actions">${buttons}${Number.isFinite(waits) ? `<small>Waits <span data-until="${new Date(waits).toISOString()}">${esc(clock(waits - Date.now()))}</span> more</small>` : ''}</div></div>`;
+  }
+  /** The workers of a delegate step as a graph: the lead, each worker, and their reports coming back. */
+  function workerGraph(s, m) {
+    const list = s.agents, n = list.length;
+    const height = Math.max(200, n * 72 + 28), first = (height - (n * 72 - 12)) / 2, mid = height / 2;
+    const at = i => first + i * 72 + 30;
+    const picked = Math.min(n - 1, chosen.has(s.id) ? chosen.get(s.id) : Math.max(0, list.findIndex(a => a.status === 'running')));
+    const mark = a => a.status === 'error' ? 'bad' : a.status === 'completed' ? 'ok' : a.status === 'running' ? 'now' : 'next';
+    const edges = list.map((a, i) => `<path class="wg-edge is-${mark(a)}" d="M200 ${mid} C250 ${mid} 250 ${at(i)} 300 ${at(i)}"/><path class="wg-edge is-${mark(a) === 'now' || mark(a) === 'next' ? 'wait' : mark(a)} back" d="M700 ${at(i)} C750 ${at(i)} 750 ${mid} 800 ${mid}"/>`).join('');
+    const tokens = n => !n ? '' : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
+    const nodes = list.map((a, i) => {
+      const progress = a.status === 'completed' || a.status === 'error' ? 100 : Math.min(100, Math.round((a.steps || 0) / 30 * 100));
+      const line = a.status === 'completed' ? `Reported · ${plural(a.steps || 0, 'step')}` : a.doing || '';
+      return `<button type="button" class="wg-node is-${mark(a)}${i === picked ? ' is-picked' : ''}" style="top:${at(i) - 30}px" data-action="worker-pick" data-step="${esc(s.id)}" data-index="${i}" aria-pressed="${i === picked}"><span class="wg-node-top"><span class="wg-dot" aria-hidden="true"></span><strong>${esc(a.title)}</strong><small class="mono">${esc(tokens(a.tokens))}</small></span><span class="wg-doing">${esc(line)}</span><span class="wg-bar" style="width:${progress}%" aria-hidden="true"></span></button>`;
+    }).join('');
+    const done = list.filter(a => a.status === 'completed').length, bad = list.filter(a => a.status === 'error').length, left = n - done - bad;
+    const lead = m.settings?.resolvedModel || m.settings?.model || 'Lead model';
+    const a = list[picked];
+    const facts = [a.status === 'completed' || a.status === 'error' ? plural(a.steps || 0, 'step') : `step ${a.steps || 0} of 30`, a.tokens ? `${tokens(a.tokens)} tokens` : ''].filter(Boolean).join(' · ');
+    const status = { completed: 'Reported', error: 'Failed', running: 'Working', queued: 'Waiting to start' }[a.status] || '';
+    const body = a.report || a.status === 'error'
+      ? `<p class="wg-report">${esc(a.report ? gist(a.report, 400) : a.doing)}</p>${a.report ? `<details class="wg-full"><summary>Read the whole report</summary><div class="tr-thinking">${markdown(a.report)}</div></details>` : ''}`
+      : `<ol class="wg-steps">${(a.recent?.length ? a.recent : [a.doing]).filter(Boolean).map((t, j, all) => `<li><span class="wg-dot ${j === all.length - 1 && a.status === 'running' ? 'is-now' : 'is-ok'}" aria-hidden="true"></span><span>${esc(t)}</span></li>`).join('')}</ol>`;
+    return `<div class="wg"><div class="wg-canvas" style="height:${height}px"><svg class="wg-edges" viewBox="0 0 1000 ${height}" preserveAspectRatio="none" aria-hidden="true">${edges}</svg><div class="wg-end wg-lead" style="top:${mid - 36}px"><span>Lead</span><strong class="mono">${esc(lead)}</strong><small>${left ? `waiting on ${left}` : 'reading reports'}</small></div>${nodes}<div class="wg-end wg-reports" style="top:${mid - 36}px"><span>Reports</span><strong>${done} of ${n}</strong><small>${bad ? `${bad} failed` : left ? 'coming in' : 'all in'}</small></div></div><div class="wg-detail" aria-live="polite"><div class="wg-detail-head"><strong>${esc(a.title)}</strong><span class="is-${mark(a)}">${esc(status)}</span><small>${esc(facts)}</small></div>${a.task ? `<p class="wg-task">Task: ${esc(a.task)}</p>` : ''}${body}</div></div>`;
+  }
+  /** One of the card's three latest-step rows. */
+  const recentRow = s => s ? `<li class="run-step is-${s.status === 'error' || s.check === 'error' ? 'bad' : s.status === 'running' ? 'now' : s.status === 'declined' ? 'off' : 'ok'}"><span class="run-step-dot" aria-hidden="true"></span><span class="run-step-text">${stepText(s)}</span><small>${esc(s.status === 'running' ? 'now' : duration(s.durationMs))}</small></li>` : '<li class="run-step is-empty" aria-hidden="true"></li>';
   function runCard(m, work) {
     const s = stats(work);
     const waiting = work.steps.filter(x => x.status === 'awaiting');
     const running = [...work.steps].reverse().find(x => x.status === 'running');
+    const lastStep = work.steps.at(-1);
     const lastThought = [...work.entries].reverse().find(e => kindOf(e) === 'thought');
     const fresh = work.reasoning.slice(lastThought ? lastThought.to : 0).trim();
     const draft = m._draft && !work.steps.some(x => x.id === m._draft.id) ? m._draft : null;
-    const now = waiting[0] ? `Waiting for you: ${waiting[0].summary}` : draft ? `Writing ${draft.path || 'a file'}` : running ? running.summary : fresh ? 'Thinking' : 'Working';
+    const answering = !running && !waiting.length && !draft && !!String(m.content || '').trim();
+    const asked = waiting[0] && changeOf(waiting[0])?.items[0];
+    const now = asked ? `Waiting for you: ${asked.verb.toLowerCase()} ${asked.what}` : waiting[0] ? `Waiting for you: ${waiting[0].summary}` : draft ? `Writing ${draft.path || 'a file'}` : running ? running.summary : answering ? 'Writing the answer' : fresh ? 'Thinking' : 'Working';
     const began = s.began || Date.parse(m.createdAt || m._began || '') || Date.now();
-    const seen = work.rows.filter(r => r.type === 'step').map(r => r.phase);
-    const current = draft ? 'Build' : seen.at(-1);
-    // Workspace work goes through the usual phases; a cluster or server is its own.
-    const usual = draft || work.steps.some(x => !x.connection && !BROWSING(x)) ? PHASES.filter(p => p !== 'Plan' || seen.includes('Plan')) : [];
-    const phases = [...new Set([...usual, ...seen])];
-    const rail = phases.map(p => {
-      const at = phases.indexOf(p), cur = phases.indexOf(current);
-      const status = p === current ? 'now' : seen.includes(p) || (cur > at) ? 'done' : 'next';
-      return `<li class="run-phase is-${status}"><span></span>${esc(p)}</li>`;
+    const stepRows = work.rows.filter(r => r.type === 'step');
+    const seen = stepRows.map(r => r.phase);
+    const service = [...work.steps].reverse().find(x => x.connection);
+    const rail = service ? stagesOf(service).rail : [];
+    let current = draft ? 'Build' : waiting[0] ? stepRows.find(r => r.e === waiting[0])?.phase : seen.at(-1);
+    if (answering && rail.includes('Results') && current === stagesOf(service).check) current = 'Results';
+    // Workspace work goes through the usual phases; a cluster or service through its stages.
+    const usual = draft || work.steps.some(x => !x.connection && !BROWSING(x) && x.tool !== 'delegate') ? PHASES.filter(p => p !== 'Plan' || seen.includes('Plan')) : [];
+    const phases = [...new Set([...usual, ...rail, ...seen])];
+    const count = p => seen.filter(x => x === p).length;
+    const railHtml = phases.map((p, at) => {
+      const cur = phases.indexOf(current);
+      const status = p === current ? (waiting[0] ? 'ask' : 'now') : seen.includes(p) || cur > at ? 'done' : 'next';
+      const note = status === 'ask' ? 'your call' : status === 'now' ? (draft ? 'writing' : p === 'Results' ? 'answering' : running ? 'working' : 'thinking') : count(p) ? plural(count(p), 'step') : '';
+      return `<li class="run-phase is-${status}"><span class="run-bar" aria-hidden="true"></span><span class="run-phase-label"><span>${esc(p)}</span><small>${esc(note)}</small></span></li>`;
     }).join('');
-    const nowBlock = draft
-      ? `<div class="run-now"><div class="run-now-head">${icon('edit')}<span class="tr-file-name">${esc(draft.path || 'file')}</span><span>${draft.lines} line${draft.lines === 1 ? '' : 's'} so far</span></div><pre class="run-code">${esc(draft.tail)}<span class="run-caret">▍</span></pre></div>`
-      : '';
-    const thoughtText = fresh || (lastThought ? work.reasoning.slice(lastThought.from, lastThought.to) : '');
-    const plan = [...work.steps].reverse().find(x => x.tool === 'plan' && Array.isArray(x.files));
-    const written = new Set(work.steps.filter(x => FILE_TOOLS.has(x.tool) && x.status === 'completed' && x.path).map(x => x.path));
-    const fileList = [...new Set([...(plan?.files || []), ...written, ...(draft?.path ? [draft.path] : [])])];
-    const files = fileList.length ? `<div class="run-section"><span class="eyebrow">${plan ? 'Planned files' : 'Files so far'}</span><div class="run-files">${fileList.slice(0, 24).map(f => `<span class="run-file ${f === draft?.path ? 'is-now' : written.has(f) ? 'is-done' : 'is-next'}">${written.has(f) && f !== draft?.path ? '✓ ' : ''}${esc(f)}</span>`).join('')}${fileList.length > 24 ? `<span class="run-file is-next">+${fileList.length - 24} more</span>` : ''}</div></div>` : '';
-    const recent = work.rows.filter(r => r.type !== 'thought' && !(r.type === 'step' && r.e.status === 'awaiting')).slice(-3);
+    // The pane: what is happening now, always the same height.
+    const graph = running?.tool === 'delegate' && running.agents?.length ? workerGraph(running, m) : '';
+    const output = [...work.steps].reverse().find(x => x.status !== 'running' && x.status !== 'awaiting' && x.detail && !FILE_TOOLS.has(x.tool) && x.tool !== 'delegate');
+    let label = '', note = '', body = '';
+    if (draft) {
+      label = draft.path || 'file'; note = `${plural(draft.lines, 'line')} so far`;
+      body = `<pre class="run-code">${esc(draft.tail)}<span class="run-caret">▍</span></pre>`;
+    } else if (running && (COMMANDS.has(running.tool) || running.connection || BROWSING(running))) {
+      label = running.summary || running.tool; note = 'running';
+      body = `<pre class="run-code is-output">${output && output !== running ? `${esc(lastLines(output.detail, 6))}\n` : ''}<span class="run-prompt">›</span> ${esc(running.summary || running.tool)} <span class="run-caret">▍</span></pre>`;
+    } else if (fresh && !answering) {
+      label = 'Thinking'; note = '';
+      body = `<div class="run-think">${esc(latest(fresh, 420))}<span class="run-caret">▍</span></div>`;
+    } else if (output) {
+      label = output.summary || output.tool; note = output.status === 'error' ? 'failed' : 'output';
+      body = `<pre class="run-code is-output">${esc(lastLines(output.detail, 9))}</pre>`;
+    } else {
+      label = answering ? 'Answer' : 'Starting'; note = '';
+      body = `<div class="run-think">${answering ? 'Writing the answer…' : 'Waiting for the model…'}</div>`;
+    }
+    const pane = waiting[0] ? askCard(waiting[0]) : graph || `<div class="run-pane"><div class="run-pane-head"><span class="run-pane-label mono">${esc(label)}</span>${note ? `<span>${esc(note)}</span>` : ''}<span class="run-live"><span aria-hidden="true"></span>live</span></div><div class="run-pane-body">${body}</div></div>`;
+    const thoughtText = lastThought ? work.reasoning.slice(lastThought.from, lastThought.to) : '';
+    const ticker = fresh && label !== 'Thinking' ? latest(fresh, 200) : thoughtText ? latest(thoughtText, 200) : '';
+    const recent = work.steps.filter(x => x.status !== 'awaiting').slice(-3);
+    while (recent.length < 3) recent.push(null);
     const isOpen = open.has(m.id || 'live');
     const notes = (queued.get(conversation()) || []).filter(n => !work.entries.some(e => kindOf(e) === 'note' && e.summary === n));
-    return `<section class="run-card" aria-label="Working"><div class="run-head"><span class="run-pulse" aria-hidden="true"></span><div class="grow"><strong>${esc(now)}</strong><small><span data-since="${new Date(began).toISOString()}">${esc(clock(Date.now() - began))}</span> · ${s.steps} step${s.steps === 1 ? '' : 's'}${s.files.length ? ` · ${s.files.length} file${s.files.length === 1 ? '' : 's'} changed` : ''}</small></div></div><ol class="run-rail">${rail}</ol>${waiting.map(w => `<div class="run-ask">${approval(w)}${w.detail ? `<pre>${esc(w.detail)}</pre>` : ''}</div>`).join('')}${nowBlock}${thoughtText ? `<div class="run-thought">${icon('orbit')}<div class="grow"><span class="eyebrow">Latest thought</span><p>${esc(latest(thoughtText))}</p></div></div>` : ''}${files}${recent.length ? `<div class="run-section"><div class="spread"><span class="eyebrow">Recent steps</span><button type="button" class="tr-link" data-action="trace-toggle" data-id="${esc(m.id || 'live')}" aria-expanded="${isOpen}">${isOpen ? 'Hide steps' : `Show all ${s.steps}`}</button></div><ol class="trace-list compact">${recent.map(row).join('')}</ol></div>` : ''}${notes.map(n => `<p class="run-queued">${icon('clock')}<span><span class="run-queued-label">Queued for the next step</span>${esc(n)}</span></p>`).join('')}</section>${isOpen ? trace(m, work) : ''}`;
+    return `<section class="run-card" aria-label="Working"><div class="run-head"><span class="run-pulse${waiting[0] ? ' is-ask' : ''}" aria-hidden="true"></span><div class="grow"><strong>${esc(now)}</strong><small><span data-since="${new Date(began).toISOString()}">${esc(clock(Date.now() - began))}</span> · ${plural(s.steps, 'step')}${s.files.length ? ` · ${plural(s.files.length, 'file')} changed` : ''}</small></div>${target(lastStep, draft)}</div>${phases.length > 1 ? `<ol class="run-rail" aria-label="Stages">${railHtml}</ol>` : ''}${pane}<div class="run-thought">${icon('orbit')}<span class="run-thought-text${ticker ? '' : ' is-empty'}">${esc(ticker || 'No thinking yet')}</span></div><div class="run-section"><div class="spread"><span class="eyebrow">Recent steps</span><button type="button" class="tr-link" data-action="trace-toggle" data-id="${esc(m.id || 'live')}" aria-expanded="${isOpen}">${isOpen ? 'Hide steps' : `Show all ${s.steps}`}</button></div><ol class="run-steps">${recent.map(recentRow).join('')}</ol></div>${notes.map(n => `<p class="run-queued">${icon('clock')}<span><span class="run-queued-label">Queued for the next step</span>${esc(n)}</span></p>`).join('')}</section>${isOpen ? trace(m, work) : ''}`;
   }
   function steerForm() {
     return `<form class="steer-form" id="steer-form" data-conversation="${esc(conversation() || '')}"><label for="steer-text">Steer</label><input id="steer-text" name="steer-text" autocomplete="off" maxlength="2000" placeholder="Add a note without stopping, like “make the mane darker”" value="${esc(steerDraft)}"><button class="btn small primary" type="submit">Send at next step</button></form>`;
@@ -305,12 +435,13 @@ export function createTurn({ state, markdown, chatPath, route }) {
   function signature(m) {
     const work = Array.isArray(m.activity) ? m.activity : [];
     const id = m.id || 'live';
-    return JSON.stringify([live(m), work.map(e => [e.id, e.status, e.check, e.tick]), m._draft?.lines, m._draft?.id, live(m) ? Math.floor((m.reasoningContent || '').length / 120) : 0, open.has(id), filters.get(id), (queued.get(conversation()) || []).length]);
+    return JSON.stringify([live(m), work.map(e => [e.id, e.status, e.check, e.tick]), m._draft?.lines, m._draft?.id, live(m) ? Math.floor((m.reasoningContent || '').length / 120) : 0, open.has(id), filters.get(id), (queued.get(conversation()) || []).length, [...chosen]]);
   }
 
   const actions = {
     'trace-toggle': el => { const id = el.dataset.id; if (open.has(id)) open.delete(id); else open.add(id); return 'render'; },
     'trace-filter': el => { filters.set(el.dataset.id, el.dataset.filter); return 'render'; },
+    'worker-pick': el => { chosen.set(el.dataset.step, Number(el.dataset.index)); return 'render'; },
   };
   async function submit(form, api, toast) {
     const input = form.elements.namedItem('steer-text'), text = input.value.trim(), id = form.dataset.conversation;
@@ -329,7 +460,10 @@ export function createTurn({ state, markdown, chatPath, route }) {
     return list.filter(n => !read.has(n));
   }
   if (typeof document !== 'undefined') {
-    setInterval(() => document.querySelectorAll('[data-since]').forEach(el => { const t = Date.parse(el.dataset.since); if (Number.isFinite(t)) el.textContent = clock(Date.now() - t); }), 1000);
+    setInterval(() => {
+      document.querySelectorAll('[data-since]').forEach(el => { const t = Date.parse(el.dataset.since); if (Number.isFinite(t)) el.textContent = clock(Date.now() - t); });
+      document.querySelectorAll('[data-until]').forEach(el => { const t = Date.parse(el.dataset.until); if (Number.isFinite(t)) el.textContent = clock(t - Date.now()); });
+    }, 1000);
   }
   return { applies, before, after, signature, actions, submit, unread, steerForm, live, setDraft: v => { steerDraft = v; } };
 }

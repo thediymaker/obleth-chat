@@ -1685,6 +1685,11 @@ async fn run_generation(
                 let connection = toolset.as_ref().and_then(|t| t.find(&call.name));
                 if let (Some(index), Some(set)) = (connection, toolset.as_mut()) {
                     let mut entry = json!({"id":call.id,"tool":call.name,"connection":set.connection(index),"summary":set.label(index),"status":"running","startedAt":chrono::Utc::now()});
+                    if let (Some(entry), Value::Object(about)) =
+                        (entry.as_object_mut(), set.describe(index))
+                    {
+                        entry.extend(about);
+                    }
                     record(&mut activity, &entry, true);
                     let auto = match &s.connections {
                         Some(c) => c.auto(id).await,

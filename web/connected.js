@@ -19,7 +19,7 @@ import { createSharing } from './sharing.js';
 import { createCode } from './code.js';
 import { createQuestions } from './questions.js';
 import { createResearch } from './research.js';
-import { createTurn } from './turn.js';
+import { createTurn, duration, gist, latest } from './turn.js';
 import { generationValues } from './generation.js';
 import { canonicalSettingsHash, settingsTabs } from './settings-navigation.js';
 import { conversationBusy, isPendingMessage, mergeProgress, renderSignature, responseVersion, suggestionsPending } from './conversation-state.js';
@@ -273,9 +273,18 @@ export async function startConnected(capabilities) {
   function thinking(m, index) {
     if (!m.reasoningContent) return '';
     const key = m.id || `pending-${index}`;
-    const open = thinkingOpen.get(key) === true;
-    return `<details class="thinking-panel" data-thinking="${esc(key)}" ${open ? 'open' : ''}><summary>${brandIcon('loading')}<span class="thinking-label">${m.status === 'streaming' && !m.content ? 'Thinking' : 'Thinking process'}</span>${icon('down')}</summary><div class="thinking-content">${markdown(m.reasoningContent)}</div></details>`;
+    const open = thinkingOpen.get(key) === true, t = thinkingSummary(m);
+    const since = Date.parse(m._began || m.createdAt || '');
+    return `<details class="thinking-panel${t.now ? ' is-live' : ''}" data-thinking="${esc(key)}" ${open ? 'open' : ''}><summary>${icon('orbit')}<span class="thinking-label">${esc(t.label)}</span><span class="thinking-gist">${esc(t.line)}</span><small class="thinking-time"${t.now && Number.isFinite(since) ? ` data-since="${new Date(since).toISOString()}"` : ''}>${t.now && Number.isFinite(since) ? esc(clock(Date.now() - since)) : ''}</small>${icon('down')}</summary><div class="thinking-content">${markdown(m.reasoningContent)}</div></details>`;
   }
+  /** The thinking row, closed: while it thinks, its latest sentence; after, how long it took and where it ended up. */
+  function thinkingSummary(m) {
+    const text = m.reasoningContent || '', now = m.status === 'streaming' && !m.content;
+    const ms = (m.activity || []).filter(e => e.kind === 'thought').reduce((t, e) => t + (e.durationMs || 0), 0);
+    const last = text.trim().split(/\n\s*\n/).at(-1) || text;
+    return { now, label: now ? 'Thinking' : ms ? `Thought for ${duration(ms)}` : 'Thought', line: now ? latest(text, 140) : gist(last, 140) };
+  }
+  const clock = ms => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
   function responseStatus(m) {
     if (isPendingMessage(m)) return currentOperation()?.stopRequested ? 'Stopping…' : (m.activity || []).some(s => s.status === 'awaiting') ? 'Waiting for your answer…' : m.reasoningContent && !m.content ? 'Thinking…' : m.content ? 'Responding…' : 'Waiting for the model…';
     const status = m.status || 'completed', model = m.settings?.resolvedModel || m.settings?.model;
@@ -346,8 +355,11 @@ export async function startConnected(capabilities) {
         content.innerHTML = markdown(m.reasoningContent); content._renderedText = m.reasoningContent;
         if (atEnd) content.scrollTop = content.scrollHeight;
       }
-      const label = $('.thinking-label', panel), text = m.status === 'streaming' && !m.content ? 'Thinking' : 'Thinking process';
-      if (label.textContent !== text) label.textContent = text;
+      const t = thinkingSummary(m), label = $('.thinking-label', panel), line = $('.thinking-gist', panel);
+      if (label.textContent !== t.label) label.textContent = t.label;
+      if (line.textContent !== t.line) line.textContent = t.line;
+      panel.classList.toggle('is-live', t.now);
+      if (!t.now) { const time = $('.thinking-time', panel); time.removeAttribute('data-since'); time.textContent = ''; }
     }
     const signature = workspace.activitySignature(m);
     if (!turnView.applies(m) && article._activity !== signature) {

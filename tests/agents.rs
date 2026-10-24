@@ -237,6 +237,14 @@ async fn workers_explore_at_once_and_report(pool: PgPool) {
     assert!(snapshots
         .iter()
         .any(|s| s[0]["doing"] == "Searching for “schedule”"));
+    // Each worker shows its task and its latest steps.
+    let last = snapshots.last().unwrap();
+    assert!(last[0]["task"].as_str().is_some_and(|t| !t.is_empty()));
+    assert!(last[0]["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "Searching for “schedule”"));
     // Workers got their task alone, read-only tools, and little thinking.
     let requests = seen.lock().unwrap().clone();
     assert_eq!(requests.len(), 4);

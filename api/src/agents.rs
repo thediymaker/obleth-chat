@@ -34,6 +34,9 @@ const WRAP_UP: Duration = Duration::from_secs(210);
 /// What the main model reads of each report, and what the reply keeps to show.
 const REPORT_CHARS: usize = 12_000;
 const SHOWN_CHARS: usize = 4_000;
+/// How much of each worker's task, and how many of its latest steps, the reply shows.
+const TASK_SHOWN: usize = 280;
+const RECENT_SHOWN: usize = 3;
 /// A worker's request stays under this; older tool output gives way first.
 const KEPT_BYTES: usize = 160 * 1024;
 const OUTPUT_BYTES: usize = 24 * 1024;
@@ -292,7 +295,7 @@ pub async fn run<S: Shell>(
     let board: Board = Arc::new(Mutex::new(
         tasks
             .iter()
-            .map(|t| json!({"title":t.title,"model":name,"status":"queued","steps":0,"doing":"Waiting to start"}))
+            .map(|t| json!({"title":t.title,"task":clip(&t.task, TASK_SHOWN),"model":name,"status":"queued","steps":0,"doing":"Waiting to start","recent":[]}))
             .collect(),
     ));
     let _ = progress.send(Value::Array(board.lock().unwrap().clone()));
@@ -536,7 +539,14 @@ async fn steps<S: Shell>(
         for call in &calls {
             let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
             update(board, progress, i, |a| {
-                a["doing"] = json!(doing(&call.name, &args))
+                let now = doing(&call.name, &args);
+                if let Some(recent) = a["recent"].as_array_mut() {
+                    recent.push(json!(now));
+                    if recent.len() > RECENT_SHOWN {
+                        recent.remove(0);
+                    }
+                }
+                a["doing"] = json!(now);
             });
             let output = match ctx.shell {
                 Some(sh) => tool(sh, &call.name, &args).await,

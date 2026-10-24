@@ -660,6 +660,11 @@ async fn read_only_tools_run_and_actions_wait_for_allow(pool: PgPool) {
     assert_eq!(activity[1]["status"], "awaiting");
     assert_eq!(activity[1]["summary"], "Fixture · submit_job");
     assert!(activity[1]["detail"].as_str().unwrap().contains("run.sh"));
+    // The reply can tell a look from a change, and what kind of service it is.
+    assert_eq!(activity[0]["readOnly"], true);
+    assert_eq!(activity[1]["readOnly"], false);
+    assert_eq!(activity[1]["service"], "mcp");
+    assert_eq!(activity[1]["action"], "submit_job");
 
     let other = (admin.0.clone(), admin.1.clone());
     let (status, _) = call(

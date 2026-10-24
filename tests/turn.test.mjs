@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { workOf, stats, gist, latest, duration } from '../web/turn.js';
+import { workOf, stats, gist, latest, duration, changeOf } from '../web/turn.js';
 
 const t = s => new Date(Date.UTC(2026, 9, 19, 12, 0, s)).toISOString();
 const reasoning = 'Plan seven files. Then write them.Nothing vendored, so load three.js from a CDN.The script was deferred, so ours ran first.';
@@ -57,4 +57,38 @@ test('gists and latest thoughts are short and plain', () => {
   assert.ok(gist('x'.repeat(400)).length <= 160);
   assert.equal(latest('One. Two. Three.', 9), 'Three.');
   assert.deepEqual([duration(400), duration(12000), duration(100000)], ['0.4s', '12s', '1m 40s']);
+});
+
+test('cluster work goes through its own stages, not the cluster\'s name', () => {
+  const k8s = { service: 'kubernetes', connection: 'Lab cluster' };
+  const steps = [
+    { id: 'k1', tool: 'lab__list', action: 'list', readOnly: true, status: 'completed', ...k8s },
+    { id: 'k2', tool: 'lab__apply', action: 'apply', readOnly: false, status: 'awaiting', ...k8s },
+  ];
+  assert.deepEqual(workOf({ role: 'assistant', activity: steps }).rows.map(r => r.phase), ['Inspect', 'Approve']);
+  steps[1].status = 'completed';
+  steps.push({ id: 'k3', tool: 'lab__get', action: 'get', readOnly: true, status: 'completed', ...k8s });
+  assert.deepEqual(workOf({ role: 'assistant', activity: steps }).rows.map(r => r.phase), ['Inspect', 'Apply', 'Verify']);
+  const slurm = { service: 'slurm', connection: 'Campus HPC' };
+  const job = [
+    { id: 's1', action: 'cluster', readOnly: true, status: 'completed', ...slurm },
+    { id: 's2', action: 'submit', readOnly: false, status: 'completed', ...slurm },
+    { id: 's3', action: 'job', readOnly: true, status: 'completed', ...slurm },
+  ];
+  assert.deepEqual(workOf({ role: 'assistant', activity: job }).rows.map(r => r.phase), ['Inspect', 'Submit', 'Watch']);
+});
+
+test('a change waiting for approval says what it does', () => {
+  const yaml = 'manifest:\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello\n  namespace: default\nspec:\n  replicas: 1\n  template:\n    spec:\n      containers:\n      - name: web\n        image: nginx:1.27\n        ports:\n        - containerPort: 80\n---\nkind: Service\nmetadata:\n  name: hello\nspec:\n  ports:\n  - port: 80';
+  const applied = changeOf({ service: 'kubernetes', action: 'apply', detail: yaml });
+  assert.deepEqual(applied.items.map(i => [i.what, i.where]), [['Deployment/hello', 'default'], ['Service/hello', undefined]]);
+  assert.deepEqual(applied.items[0].facts, [['Image', 'nginx:1.27'], ['Replicas', '1'], ['Port', '80']]);
+  assert.ok(applied.text.startsWith('apiVersion'));
+  const json = changeOf({ service: 'kubernetes', action: 'apply', detail: 'manifest: {"kind":"ConfigMap","metadata":{"name":"cfg","namespace":"lab"}}' });
+  assert.deepEqual(json.items.map(i => [i.what, i.where]), [['ConfigMap/cfg', 'lab']]);
+  const job = changeOf({ service: 'slurm', action: 'submit', detail: 'cpus: 2\nmemory_mb: 4096\nname: heat-bench\npartition: long\nscript:\n#!/bin/bash\nsrun ./heat\ntime_limit_minutes: 90' });
+  assert.equal(job.items[0].what, 'heat-bench');
+  assert.deepEqual(job.items[0].facts, [['Partition', 'long'], ['Time limit', '1 h 30 min'], ['CPUs', '2'], ['Memory', '4 GB']]);
+  assert.equal(job.text, '#!/bin/bash\nsrun ./heat');
+  assert.equal(changeOf({ service: 'mcp', action: 'send', detail: 'to: x' }), null);
 });

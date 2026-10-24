@@ -273,7 +273,7 @@ export async function startConnected(capabilities) {
   function thinking(m, index) {
     if (!m.reasoningContent) return '';
     const key = m.id || `pending-${index}`;
-    const open = thinkingOpen.has(key) ? thinkingOpen.get(key) : m.status === 'streaming';
+    const open = thinkingOpen.get(key) === true;
     return `<details class="thinking-panel" data-thinking="${esc(key)}" ${open ? 'open' : ''}><summary>${brandIcon('loading')}<span class="thinking-label">${m.status === 'streaming' && !m.content ? 'Thinking' : 'Thinking process'}</span>${icon('down')}</summary><div class="thinking-content">${markdown(m.reasoningContent)}</div></details>`;
   }
   function responseStatus(m) {

@@ -1,7 +1,8 @@
 # Application hosting example only: it does not set up workspaces, Knowledge
 # storage or cluster connections. Provide an external PostgreSQL 17 database with
 # the pgvector extension created in it (CREATE EXTENSION vector, as a superuser).
-# Before applying, replace the image and ConfigMap origins, and create:
+# Before applying, replace the image and ConfigMap origins, then create the
+# namespace (kubectl create namespace obleth-chat) and in it:
 #   Secret obleth-chat-env with OBLETH_CHAT_DATABASE_URL and
 #     OBLETH_CHAT_BOOTSTRAP_PASSWORD (optional OIDC settings can go here too).
 #   Secret obleth-chat-gateway-signing-key with a gateway_signing_key PEM file.
@@ -27,6 +28,9 @@ data:
   OBLETH_CHAT_GATEWAY_ISSUER: https://chat.example.internal
   OBLETH_CHAT_GATEWAY_AUDIENCE: obleth
   OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE: /run/secrets/gateway_signing_key
+  # The addresses your ingress connects from, so sign-in limits apply per
+  # client. Check /api/admin/health -> client; see the Reverse proxies docs.
+  # OBLETH_CHAT_TRUSTED_PROXY: 10.0.0.10,10.0.0.11
   OBLETH_CHAT_MAX_STREAMS: "128"
   OBLETH_CHAT_DB_CONNECTIONS: "20"
   RUST_LOG: obleth_chat=info

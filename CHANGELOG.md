@@ -2,6 +2,28 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.4.2
+
+Keeps people's files in object storage when a bucket is configured, instead of in Postgres, and lets Knowledge use any embedding model. Migration `041` runs when Chat starts.
+
+**New**
+
+- **Files in object storage.** With `OBLETH_CHAT_S3_*` set, chat attachments and generated images go to the bucket that Knowledge uses, under `attachments/` and `images/`, and the database keeps only each file's key. Without a bucket they stay in Postgres as before. Existing files are moved into the bucket in the background, and stay readable while that happens. Chat still serves every file itself, so browsers never need to reach the bucket. See [Where files are kept](https://www.obleth.com/docs/run-chat/enable-knowledge#where-files-are-kept).
+- **Any embedding model.** `OBLETH_CHAT_EMBEDDING_QUERY_PREFIX` and `OBLETH_CHAT_EMBEDDING_DOCUMENT_PREFIX` set the text that goes before each search and each stored passage, in the form the model expects. Unset, they keep the Qwen3-Embedding defaults. Models with fewer than 1,024 dimensions, such as EmbeddingGemma, work as well: their vectors are padded with zeros. Changing the model or its prefixes needs the documents uploaded again. See [Enable Knowledge](https://www.obleth.com/docs/run-chat/enable-knowledge).
+
+**Upgrading**
+
+- With a bucket configured, back it up alongside the database: it now holds attachments and generated images as well as Knowledge documents.
+- After the move, run `VACUUM FULL attachments, generated_images;` in a quiet period to return the freed space to the disk.
+
+**Images**
+
+- `ghcr.io/thediymaker/obleth-chat/chat:v0.4.2`
+- `ghcr.io/thediymaker/obleth-chat/workspace:v0.4.2`
+- `ghcr.io/thediymaker/obleth-chat/browser:v0.4.2`
+
+Pin them by digest in production.
+
 ## v0.4.1
 
 Adds personal API tokens and an MCP endpoint, so an MCP client such as Claude Code can start and follow your chats, and fixes how replies recover from gateway and connection errors. Migration `040` runs when Chat starts.

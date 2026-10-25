@@ -70,10 +70,14 @@ async fn fake_chat(
     assert_eq!(body["stream_options"]["include_usage"], true);
     // No output limit is sent unless someone set one: the model's own applies.
     assert!(body.get("max_tokens").is_none(), "{body}");
-    let mode = body["messages"].as_array().unwrap().last().unwrap()["content"]
+    let messages = body["messages"].as_array().unwrap();
+    let mode = messages.last().unwrap()["content"]
         .as_str()
         .unwrap()
         .to_string();
+    // Chat's note after a dropped connection: the "model" carries on, or drops again.
+    let dropped = mode.starts_with("[Chat: the connection to the model dropped");
+    let always = messages.iter().any(|m| m["content"] == "always-broken");
     f.seen
         .lock()
         .unwrap()
@@ -81,6 +85,13 @@ async fn fake_chat(
     // Auto is the gateway's router: the stream names the model it chose.
     let served = (body["model"] == "auto").then_some("routed-model");
     let stream = async_stream::stream! {
+        if dropped {
+            if !always {
+                yield Ok::<_,Infallible>(Event::default().data(json!({"choices":[{"delta":{"content":" and the rest."},"finish_reason":"stop"}]}).to_string()));
+                yield Ok(Event::default().data("[DONE]"));
+            }
+            return;
+        }
         if mode == "oversized-reasoning" {
             for _ in 0..2 {
                 yield Ok::<_,Infallible>(Event::default().data(json!({"choices":[{"delta":{"reasoning":"r".repeat(512 * 1024)}}]}).to_string()));
@@ -94,7 +105,7 @@ async fn fake_chat(
         yield Ok::<_,Infallible>(Event::default().data(json!({"model":served,"choices":[{"delta":{"content":if mode=="slow"{"Partial answer"}else{"Hello α"}}}]}).to_string()));
         if mode=="slow" {tokio::time::sleep(Duration::from_secs(30)).await;}
         if mode=="background" {tokio::time::sleep(Duration::from_secs(2)).await;}
-        if mode!="broken" {yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}).to_string()));yield Ok(Event::default().data("[DONE]"));}
+        if mode!="broken" && mode!="always-broken" {yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}).to_string()));yield Ok(Event::default().data("[DONE]"));}
     };
     (
         [("x-obleth-request-id", "fixture-request")],
@@ -420,10 +431,10 @@ async fn real_gateway_identity_stream_persistence_and_user_isolation(pool: PgPoo
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn disconnect_keeps_running_explicit_stop_saves_partial_and_broken_stream_is_not_complete(
+async fn disconnect_keeps_running_explicit_stop_saves_partial_and_broken_stream_is_carried_on(
     pool: PgPool,
 ) {
-    let (app, state, _, task) = fixture(pool).await;
+    let (app, state, fake, task) = fixture(pool).await;
     let (cookie, csrf, session) = login(&app, "test-admin").await;
     let owner = Uuid::parse_str(session["user"]["id"].as_str().unwrap()).unwrap();
     let id = conversation(&app, &cookie, &csrf).await;
@@ -503,13 +514,38 @@ async fn disconnect_keeps_running_explicit_stop_saves_partial_and_broken_stream_
         .get(owner, Uuid::parse_str(&id).unwrap())
         .await
         .unwrap();
-    assert_eq!(saved.messages[3].status, "error");
-    assert!(saved.messages[3]
-        .error_message
-        .as_ref()
-        .is_some_and(|message| !message.is_empty()));
-    assert_eq!(saved.messages[3].content, "Hello α");
+    // A stream that drops once is carried on: the model is handed what it wrote.
+    assert_eq!(saved.messages[3].status, "completed");
+    assert_eq!(saved.messages[3].content, "Hello α and the rest.");
     assert_eq!(saved.messages[3].reasoning_content, "Plan α then answer.");
+    let retry = fake.seen.lock().unwrap().last().unwrap()["body"]["messages"].clone();
+    let retry = retry.as_array().unwrap();
+    assert_eq!(retry[retry.len() - 2]["role"], "assistant");
+    assert_eq!(retry[retry.len() - 2]["content"], "Hello α");
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            json!({"content":"always-broken","model":"fixture-model"}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    let _ = response.into_body().collect().await.unwrap();
+    let saved = state
+        .store
+        .get(owner, Uuid::parse_str(&id).unwrap())
+        .await
+        .unwrap();
+    // One that keeps dropping ends the reply, keeping what arrived.
+    assert_eq!(saved.messages[5].status, "error");
+    assert_eq!(
+        saved.messages[5].error_message.as_deref(),
+        Some("The connection to the model kept dropping")
+    );
+    assert_eq!(saved.messages[5].content, "Hello α");
     assert_eq!(state.metrics.streams.get(), 0);
     task.abort();
 }

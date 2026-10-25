@@ -643,6 +643,8 @@ const TOOL_ARGUMENT_BYTES: usize = 160 * 1024;
 const KEPT_STEPS: usize = 150;
 /// Steps in a row that may stop at the output limit before the turn gives up.
 const MAX_CUTS: u32 = 3;
+/// Steps in a row that may lose their connection to the model and be tried again.
+const MAX_DROPS: u32 = 2;
 const STEPS_DROPPED: &str = "[Earlier steps of this turn were dropped to save context:";
 const ARGUMENTS_OMITTED: &str =
     r#"{"omitted":"Earlier arguments omitted to save context. The tool result still applies."}"#;
@@ -1167,6 +1169,7 @@ async fn run_generation(
         let mut drafted = Instant::now();
         let mut checkpoints = 0;
         let mut cuts = 0;
+        let mut drops = 0;
         loop {
             steps += 1;
             finish_reason = None;
@@ -1234,7 +1237,7 @@ async fn run_generation(
                         continue;
                     }
                 };
-                let chunk = chunk.map_err(|_| "Gateway stream was interrupted".to_string())?;
+                let Ok(chunk) = chunk else { break };
                 for event in decoder.push(&chunk).map_err(str::to_string)? {
                     if event == "[DONE]" {
                         done = true;
@@ -1361,15 +1364,40 @@ async fn run_generation(
                     }
                 }
             }
-            if !done {
-                return Err("Gateway stream ended before completion".to_string());
-            }
             let thought_to = reasoning_content.encode_utf16().count();
             if tool_turn && thought_to > thought_from {
                 let entry = json!({"id":format!("thought-{steps}"),"kind":"thought","from":thought_from,"to":thought_to,"durationMs":round_began.elapsed().as_millis() as u64,"status":"completed"});
                 record(&mut activity, &entry, true);
                 emit(&mut tx, "tool", entry);
             }
+            // The stream broke off before the step finished. Nothing in it ran, so the
+            // model carries on from what it had written; what the person saw stays.
+            if !done {
+                if drops >= MAX_DROPS {
+                    return Err("The connection to the model kept dropping".to_string());
+                }
+                drops += 1;
+                let text = content[step_start..].to_owned();
+                let names: Vec<&str> = calls
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .filter(|n| !n.is_empty())
+                    .collect();
+                let messages = payload["messages"].as_array_mut().unwrap();
+                if !text.is_empty() {
+                    messages.push(json!({"role":"assistant","content":text}));
+                }
+                if !names.is_empty() {
+                    messages.push(json!({"role":"user","content":format!("[Chat: the connection to the model dropped while you were writing a call to {}, so nothing ran. Carry on without repeating what you already wrote. Write a long file in parts, the first with write_file and each next one with write_file and append set, so no single call takes long to write.]", names.join(", "))}));
+                } else if !text.is_empty() {
+                    messages.push(json!({"role":"user","content":"[Chat: the connection to the model dropped. Continue exactly where it stopped, without repeating anything.]"}));
+                }
+                let entry = json!({"id":format!("drop-{steps}"),"tool":"connection","summary":"The connection to the model dropped; Chat carried on","detail":"The step stopped before it finished, so nothing in it ran. Chat asked the model to continue.","status":"error","startedAt":chrono::Utc::now()});
+                record(&mut activity, &entry, true);
+                emit(&mut tx, "tool", entry);
+                continue;
+            }
+            drops = 0;
             // A step that stopped at the output limit: a half-written tool call never
             // runs, and an answer cut short under a set limit carries on where it stopped.
             if finish_reason.as_deref() == Some("length") {

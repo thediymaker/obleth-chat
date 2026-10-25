@@ -36,14 +36,34 @@ pub use storage::ObjectStore;
 
 /// Embedding width stored for every passage. Models that return more dimensions are
 /// cut to this many and renormalised (Matryoshka-trained models such as Qwen3-Embedding
-/// keep their quality when shortened).
+/// keep their quality when shortened); shorter vectors are padded with zeros, which
+/// leaves their cosine distances unchanged.
 pub const DIMENSIONS: usize = 1024;
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 const MAX_DOCUMENTS: i64 = 2000;
 const EMBED_BATCH: usize = 16;
-/// Query instruction for Qwen3-Embedding; passages are embedded without one.
+/// Query instruction for the default model, Qwen3-Embedding; passages are embedded
+/// without one.
 const QUERY_INSTRUCTION: &str =
     "Instruct: Given a question, retrieve passages from the person's documents that answer it\nQuery: ";
+
+/// Text put before searches and before stored passages, in the form the embedding
+/// model was trained on. Set with OBLETH_CHAT_EMBEDDING_QUERY_PREFIX and
+/// OBLETH_CHAT_EMBEDDING_DOCUMENT_PREFIX; the defaults suit the default model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prompts {
+    pub query: String,
+    pub document: String,
+}
+
+impl Default for Prompts {
+    fn default() -> Self {
+        Self {
+            query: QUERY_INSTRUCTION.into(),
+            document: String::new(),
+        }
+    }
+}
 
 /// Who may see a collection, as SQL over `c` with the person's id in `$1`.
 /// Collections person $1 may read: their own, shared with everyone or with a group they
@@ -59,6 +79,7 @@ pub struct Knowledge {
     store: ObjectStore,
     tools: extract::Tools,
     model: String,
+    prompts: Prompts,
     user_bytes: i64,
 }
 
@@ -73,13 +94,22 @@ impl Knowledge {
             .map(|v| v.parse())
             .transpose()?
             .unwrap_or(2048);
-        Ok(Some(Self::new(
+        let knowledge = Self::new(
             pool,
             store,
             extract::Tools::from_env(),
             var("OBLETH_CHAT_EMBEDDING_MODEL").unwrap_or_else(|| "qwen3-embedding-8b".into()),
             user_mb * 1024 * 1024,
-        )))
+        );
+        // Set but empty means no prefix.
+        let mut prompts = Prompts::default();
+        if let Ok(prefix) = env::var("OBLETH_CHAT_EMBEDDING_QUERY_PREFIX") {
+            prompts.query = prefix;
+        }
+        if let Ok(prefix) = env::var("OBLETH_CHAT_EMBEDDING_DOCUMENT_PREFIX") {
+            prompts.document = prefix;
+        }
+        Ok(Some(knowledge.with_prompts(prompts)))
     }
 
     pub fn new(
@@ -93,9 +123,25 @@ impl Knowledge {
             pool,
             store,
             tools,
+            prompts: Prompts::default(),
             model,
             user_bytes,
         }
+    }
+
+    pub fn with_prompts(mut self, prompts: Prompts) -> Self {
+        self.prompts = prompts;
+        self
+    }
+
+    /// A search as the embedding model expects it.
+    fn query_input(&self, text: &str) -> String {
+        format!("{}{text}", self.prompts.query)
+    }
+
+    /// A stored passage as the embedding model expects it.
+    fn document_input(&self, text: &str) -> String {
+        format!("{}{text}", self.prompts.document)
     }
 
     /// Processes queued documents and removes deleted files from storage until shutdown.
@@ -199,7 +245,7 @@ impl Knowledge {
             .execute(&self.pool)
             .await?;
         for (batch, chunk) in passages.chunks(EMBED_BATCH).enumerate() {
-            let input: Vec<String> = chunk.iter().map(|p| p.text.clone()).collect();
+            let input: Vec<String> = chunk.iter().map(|p| self.document_input(&p.text)).collect();
             let vectors = gateway
                 .embeddings(&owner, &self.model, &input)
                 .await
@@ -297,7 +343,7 @@ impl Knowledge {
         }
         let text: String = query.chars().take(2000).collect();
         let vector = gateway
-            .embeddings(user, &self.model, &[format!("{QUERY_INSTRUCTION}{text}")])
+            .embeddings(user, &self.model, &[self.query_input(&text)])
             .await?
             .pop()
             .map(vector_literal)
@@ -1049,6 +1095,19 @@ pub async fn set_for_conversation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_vectors_are_padded() {
+        let literal = vector_literal(vec![0.0, 3.0, 4.0]);
+        let values: Vec<f32> = literal
+            .trim_matches(['[', ']'])
+            .split(',')
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert_eq!(values.len(), DIMENSIONS);
+        assert!((values[1] - 0.6).abs() < 1e-3 && (values[2] - 0.8).abs() < 1e-3);
+        assert!(values[3..].iter().all(|v| *v == 0.0));
+    }
 
     #[test]
     fn vectors_are_cut_and_normalised() {

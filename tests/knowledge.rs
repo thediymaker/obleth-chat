@@ -14,7 +14,7 @@ use http_body_util::BodyExt;
 use obleth_chat::{
     auth::{Auth, AuthConfig},
     gateway::Gateway,
-    knowledge::{extract::Tools, Knowledge, ObjectStore},
+    knowledge::{extract::Tools, Knowledge, ObjectStore, Prompts},
     router, AppState,
 };
 use rsa::{pkcs8::EncodePrivateKey, RsaPrivateKey};
@@ -236,7 +236,12 @@ async fn fixture(pool: PgPool) -> Fixture {
         tools(),
         "fixture-embed".into(),
         4 * 1024 * 1024,
-    );
+    )
+    // Prefixes of short words, which the fixture's embeddings ignore.
+    .with_prompts(Prompts {
+        query: "q: ".into(),
+        document: "d: ".into(),
+    });
     let worker = CancellationToken::new();
     tokio::spawn(knowledge.clone().worker(gateway.clone(), worker.clone()));
     let mut state = AppState::new(auth, pool, Some(gateway), 4);
@@ -522,6 +527,20 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
         &admin,
     )
     .await;
+    // Passages and searches reach the model with their prefixes.
+    let inputs: Vec<String> = f
+        .embedded
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["input"].as_array().unwrap().clone())
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert!(inputs.iter().any(|i| i.starts_with("d: ")), "{inputs:?}");
+    assert!(inputs.iter().any(|i| i.starts_with("q: ")), "{inputs:?}");
+    assert!(inputs
+        .iter()
+        .all(|i| i.starts_with("d: ") || i.starts_with("q: ")));
     let top = &found["results"][0];
     assert_eq!(top["name"], "notes.md", "{found}");
     assert!(top["excerpt"].as_str().unwrap().contains("Carnot"));

@@ -2,7 +2,7 @@
 //! Each item is one searchable unit with its own embedding, found by `search_knowledge`
 //! alongside collection passages, and listed in Library.
 
-use super::{bad, knowledge, vector_literal, words, Hit, Knowledge, QUERY_INSTRUCTION};
+use super::{bad, knowledge, vector_literal, words, Hit, Knowledge};
 use crate::{auth::Identity, error::ApiError, gateway::Gateway, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -208,7 +208,7 @@ impl Knowledge {
 
     async fn embed_one(&self, gateway: &Gateway, user: &Identity, text: &str) -> Option<String> {
         match gateway
-            .embeddings(user, &self.model, &[text.to_owned()])
+            .embeddings(user, &self.model, &[self.document_input(text)])
             .await
         {
             Ok(mut v) => v.pop().map(vector_literal),
@@ -292,7 +292,7 @@ impl Knowledge {
             return Ok(vec![]);
         }
         let vector = gateway
-            .embeddings(user, &self.model, &[format!("{QUERY_INSTRUCTION}{text}")])
+            .embeddings(user, &self.model, &[self.query_input(&text)])
             .await?
             .pop()
             .map(vector_literal)

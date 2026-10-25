@@ -2,6 +2,27 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.4.3
+
+Lets administrators choose Knowledge's embedding model in Settings, and re-indexes everything when it changes. Migration `042` runs when Chat starts.
+
+**New**
+
+- **Embedding model in Settings.** **Settings › Administration › System › Knowledge search** chooses the embedding model, from the embedding models your gateway lists, and the text put before searches and passages. `OBLETH_CHAT_EMBEDDING_MODEL`, `OBLETH_CHAT_EMBEDDING_QUERY_PREFIX` and `OBLETH_CHAT_EMBEDDING_DOCUMENT_PREFIX` become the defaults. Every replica follows a change at once.
+- **Automatic re-indexing.** Vectors from different models can't be compared, so when the model or a prefix changes, from Settings or the environment, Chat indexes every document and saved item again. It asks before it starts and shows how much is left. Until it finishes, search finds only what has been redone.
+
+**Fixes**
+
+- A document queued again while it was being indexed is indexed once, by the newer run.
+
+**Images**
+
+- `ghcr.io/thediymaker/obleth-chat/chat:v0.4.3`
+- `ghcr.io/thediymaker/obleth-chat/workspace:v0.4.3`
+- `ghcr.io/thediymaker/obleth-chat/browser:v0.4.3`
+
+Pin them by digest in production.
+
 ## v0.4.2
 
 Keeps people's files in object storage when a bucket is configured, instead of in Postgres, and lets Knowledge use any embedding model. Migration `041` runs when Chat starts.

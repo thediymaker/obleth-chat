@@ -637,6 +637,8 @@ const STALL_SECS: u64 = 10 * 60;
 const UNATTENDED_STALL_RETRIES: usize = 2;
 const AGENT_STEP_LIMIT: &str = "The workspace agent stopped after";
 const STALLED: &str = "The model sent nothing for";
+/// What Chat tells a model that ends a reply right after changing files.
+const CHECK_NOTE: &str = "[Chat: you changed files and have not run anything since, and your draft reply was not shown. Check the work the way the person would before answering: run its tests or build, or make sure its server is running and request the page or endpoint (for example with curl), and fix what fails. Then write your full final reply. If it cannot be checked here, say why in one line.]";
 /// Bytes of tool output kept in the request history; older outputs are elided.
 const TOOL_HISTORY_BYTES: usize = 160 * 1024;
 /// Bytes of tool-call arguments kept in the request history, such as the files
@@ -1272,6 +1274,10 @@ async fn run_generation(
         let mut checkpoints = 0;
         let mut cuts = 0;
         let mut drops = 0;
+        // Files changed since the model last ran something, and whether Chat has
+        // already asked it to check its work this turn.
+        let mut unchecked = false;
+        let mut gated = false;
         loop {
             steps += 1;
             finish_reason = None;
@@ -1558,6 +1564,24 @@ async fn run_generation(
                     calls = found;
                     emit(&mut tx, "content", json!({"content":content}));
                 }
+            }
+            // A reply that changed files and ran nothing since is asked, once, to
+            // check the work first. Its draft is held back: the person sees the
+            // answer it gives after checking.
+            if calls.is_empty() && unchecked && !gated && workspace.is_some() {
+                gated = true;
+                let text = content[step_start..].to_owned();
+                content.truncate(step_start);
+                emit(&mut tx, "content", json!({"content":content}));
+                let messages = payload["messages"].as_array_mut().unwrap();
+                if !text.is_empty() {
+                    messages.push(json!({"role":"assistant","content":text}));
+                }
+                messages.push(json!({"role":"user","content":CHECK_NOTE}));
+                let entry = json!({"id":format!("check-{steps}"),"tool":"check","summary":"Chat asked the model to check its work","detail":"Files changed and nothing ran after the last change, so the model was asked to run or test the work before answering.","status":"completed","startedAt":chrono::Utc::now()});
+                record(&mut activity, &entry, true);
+                emit(&mut tx, "tool", entry);
+                continue;
             }
             if calls.is_empty() || !tool_turn {
                 break;
@@ -2089,6 +2113,12 @@ async fn run_generation(
                 }
                 if outcome.ok && matches!(call.name.as_str(), "write_file" | "edit_file") {
                     wrote = true;
+                    unchecked = true;
+                } else if matches!(
+                    call.name.as_str(),
+                    "run_command" | "run_in_terminal" | "start_server" | "experiment_run"
+                ) {
+                    unchecked = false;
                 }
                 if entry["check"] == "error" {
                     broken = true;

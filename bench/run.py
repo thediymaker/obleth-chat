@@ -125,8 +125,18 @@ def run(mcp, task, model, args):
     started = time.time()
     record = {"task": task["id"], "model": model, "account": mcp.token[4:10], "started": started}
     try:
-        chat = mcp.tool("start_chat", message=task["message"], model=model, title=f"bench {task['id']} · {model}",
-                        workspace=bool(task.get("workspace")))
+        for attempt in range(30):
+            try:
+                chat = mcp.tool("start_chat", message=task["message"], model=model,
+                                title=f"bench {task['id']} · {model}", workspace=bool(task.get("workspace")))
+                break
+            except ToolError as error:
+                # Full workspace slots or reply limits clear as other runs finish.
+                busy = "slots are in use" in str(error) or "responses at once" in str(error)
+                if not busy or attempt == 29:
+                    raise
+                time.sleep(60)
+        started = time.time()
         record.update(chat=chat["id"], url=chat["url"])
         deadline = started + args.timeout * 60
         state, timed_out = wait(mcp, chat["id"], deadline)

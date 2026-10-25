@@ -62,6 +62,8 @@ impl ReasoningEffort {
 #[derive(Clone)]
 pub struct Store {
     pub pool: PgPool,
+    /// Where attachment and generated image bytes go; Postgres unless a bucket is set.
+    pub files: crate::files::Files,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow)]
@@ -147,7 +149,16 @@ pub struct Turn {
 
 impl Store {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            files: crate::files::Files::new(pool.clone(), None),
+            pool,
+        }
+    }
+
+    /// Keeps new files' bytes in object storage instead of Postgres.
+    pub fn with_files(mut self, files: crate::files::Files) -> Self {
+        self.files = files;
+        self
     }
 
     pub async fn list(&self, owner: Uuid) -> Result<Vec<ConversationSummary>, ApiError> {
@@ -355,10 +366,27 @@ impl Store {
         .await?;
         for old in linked {
             let new = Uuid::new_v4();
-            sqlx::query("INSERT INTO attachments (id, owner_id, name, mime_type, kind, size, data) SELECT $1, $2, name, mime_type, kind, size, data FROM attachments WHERE id = $3")
+            let (mime, data, key): (String, Option<Vec<u8>>, Option<String>) =
+                sqlx::query_as("SELECT mime_type, data, object_key FROM attachments WHERE id = $1")
+                    .bind(old)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            let placed = self
+                .files
+                .copy(
+                    data,
+                    key,
+                    crate::files::attachment_key(viewer, new),
+                    &mime,
+                    attachments::MAX_IMAGE_BYTES,
+                )
+                .await?;
+            sqlx::query("INSERT INTO attachments (id, owner_id, name, mime_type, kind, size, data, object_key, sha256) SELECT $1, $2, name, mime_type, kind, size, $4, $5, sha256 FROM attachments WHERE id = $3")
                 .bind(new)
                 .bind(viewer)
                 .bind(old)
+                .bind(&placed.data)
+                .bind(&placed.key)
                 .execute(&mut *tx)
                 .await?;
             sqlx::query("UPDATE message_attachments ma SET attachment_id = $1 FROM messages m WHERE ma.attachment_id = $2 AND m.id = ma.message_id AND m.conversation_id = $3")
@@ -369,20 +397,38 @@ impl Store {
                 .await?;
         }
         // Generated images too, with the copied replies pointing at the new ones.
-        let images: Vec<(Uuid, Uuid)> = sqlx::query_as(
-            "WITH originals AS (SELECT id, gen_random_uuid() AS new_id FROM generated_images WHERE conversation_id = $1),
-             copied AS (
-               INSERT INTO generated_images (id, owner_id, conversation_id, mime_type, size, data)
-               SELECT o.new_id, $2, $3, g.mime_type, g.size, g.data FROM generated_images g JOIN originals o ON o.id = g.id
-             )
-             SELECT id, new_id FROM originals",
-        )
-        .bind(id)
-        .bind(viewer)
-        .bind(fork)
-        .fetch_all(&mut *tx)
-        .await?;
-        for (old, new) in images {
+        let images: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM generated_images WHERE conversation_id = $1")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+        for old in images {
+            let new = Uuid::new_v4();
+            let (mime, data, key): (String, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+                "SELECT mime_type, data, object_key FROM generated_images WHERE id = $1",
+            )
+            .bind(old)
+            .fetch_one(&mut *tx)
+            .await?;
+            let placed = self
+                .files
+                .copy(
+                    data,
+                    key,
+                    crate::files::image_key(viewer, new),
+                    &mime,
+                    crate::images::MAX_IMAGE_BYTES,
+                )
+                .await?;
+            sqlx::query("INSERT INTO generated_images (id, owner_id, conversation_id, mime_type, size, data, object_key) SELECT $1, $2, $3, mime_type, size, $5, $6 FROM generated_images WHERE id = $4")
+                .bind(new)
+                .bind(viewer)
+                .bind(fork)
+                .bind(old)
+                .bind(&placed.data)
+                .bind(&placed.key)
+                .execute(&mut *tx)
+                .await?;
             sqlx::query("UPDATE messages SET content = REPLACE(content, $2, $3) WHERE conversation_id = $1 AND content LIKE '%' || $2 || '%'")
                 .bind(fork)
                 .bind(format!("/api/images/{old}"))
@@ -679,9 +725,11 @@ impl Store {
                     && matches!(message.status.as_str(), "error" | "interrupted"));
             replayed && !(message.role == "assistant" && replay_content(message).is_empty())
         });
-        let files = attachments::load_owner(&mut tx, owner, attachment_ids, vision).await?;
+        let files =
+            attachments::load_owner(&mut tx, &self.files, owner, attachment_ids, vision).await?;
         let message_ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
-        let mut attached = attachments::load_messages(&mut tx, owner, &message_ids, vision).await?;
+        let mut attached =
+            attachments::load_messages(&mut tx, &self.files, owner, &message_ids, vision).await?;
         let context_files = attached.values().flatten().chain(files.iter());
         let mut text_bytes = 0usize;
         let mut image_bytes = 0usize;

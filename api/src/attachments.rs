@@ -13,12 +13,37 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::{error::ApiError, AppState};
+use crate::{
+    error::ApiError,
+    files::{attachment_key, Files, Placed},
+    AppState,
+};
 
-type MessageAttachmentRow = (Uuid, Uuid, String, String, i32, String, Vec<u8>);
+/// Name, type and stored bytes of a file to download.
+pub(crate) type DownloadRow = (String, String, Option<Vec<u8>>, Option<String>);
+type AttachmentRow = (
+    Uuid,
+    String,
+    String,
+    i32,
+    String,
+    Option<Vec<u8>>,
+    Option<String>,
+);
+type MessageAttachmentRow = (
+    Uuid,
+    Uuid,
+    String,
+    String,
+    i32,
+    String,
+    Option<Vec<u8>>,
+    Option<String>,
+);
 
 pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
@@ -123,17 +148,39 @@ async fn upload(
 ) -> Result<(StatusCode, Json<AttachmentMeta>), ApiError> {
     let user = s.auth.require(&headers, true).await?;
     let file = validate_upload(body)?;
-    let mut tx = s.store.pool.begin().await?;
-    lock_owner(&mut tx, user.id).await?;
-    insert_in(&mut tx, user.id, &file).await?;
-    tx.commit().await?;
+    let files = &s.store.files;
+    let placed = place(files, user.id, &file).await?;
+    let saved = async {
+        let mut tx = s.store.pool.begin().await?;
+        lock_owner(&mut tx, user.id).await?;
+        insert_in(&mut tx, user.id, &file, &placed).await?;
+        tx.commit().await?;
+        Ok::<_, ApiError>(())
+    }
+    .await;
+    if let Err(error) = saved {
+        files.discard(&placed).await;
+        return Err(error);
+    }
     Ok((StatusCode::CREATED, Json(file.meta)))
+}
+
+/// Stores the file's bytes before its row is written.
+async fn place(files: &Files, owner: Uuid, file: &Attachment) -> Result<Placed, ApiError> {
+    files
+        .place(
+            attachment_key(owner, file.meta.id),
+            file.data.clone(),
+            &file.meta.mime_type,
+        )
+        .await
 }
 
 async fn insert_in(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
     file: &Attachment,
+    placed: &Placed,
 ) -> Result<(), ApiError> {
     let (count, bytes): (i64, i64) = sqlx::query_as(
         "SELECT COUNT(*),COALESCE(SUM(size),0)::BIGINT FROM attachments WHERE owner_id=$1",
@@ -144,9 +191,10 @@ async fn insert_in(
     if count >= MAX_USER_FILES || bytes + i64::from(file.meta.size) > MAX_USER_BYTES {
         return Err(ApiError(StatusCode::CONFLICT,"Your file storage is full (100 files or 50 MiB). Delete unused files before uploading more.".into()));
     }
-    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)VALUES($1,$2,$3,$4,$5,$6,$7)")
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,object_key,sha256)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
         .bind(file.meta.id).bind(owner).bind(&file.meta.name).bind(&file.meta.mime_type)
-        .bind(&file.meta.kind).bind(file.meta.size).bind(&file.data).execute(&mut **tx).await?;
+        .bind(&file.meta.kind).bind(file.meta.size).bind(&placed.data).bind(&placed.key)
+        .bind(Sha256::digest(&file.data).to_vec()).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -155,6 +203,7 @@ async fn insert_in(
 /// Nothing is committed independently of the caller's conversation transaction.
 pub async fn import_in(
     tx: &mut Transaction<'_, Postgres>,
+    store: &Files,
     owner: Uuid,
     files: &[ArchivedAttachment],
 ) -> Result<Vec<Uuid>, ApiError> {
@@ -172,12 +221,16 @@ pub async fn import_in(
             mime_type: item.mime_type.clone(),
             data_base64: item.data_base64.clone(),
         })?;
-        let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM attachments WHERE owner_id=$1 AND name=$2 AND mime_type=$3 AND size=$4 AND data=$5 AND NOT(id=ANY($6)) ORDER BY created_at,id LIMIT 1")
-            .bind(owner).bind(&file.meta.name).bind(&file.meta.mime_type).bind(file.meta.size).bind(&file.data).bind(&ids).fetch_optional(&mut **tx).await?;
+        let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM attachments WHERE owner_id=$1 AND name=$2 AND mime_type=$3 AND size=$4 AND sha256=$5 AND NOT(id=ANY($6)) ORDER BY created_at,id LIMIT 1")
+            .bind(owner).bind(&file.meta.name).bind(&file.meta.mime_type).bind(file.meta.size).bind(Sha256::digest(&file.data).to_vec()).bind(&ids).fetch_optional(&mut **tx).await?;
         if let Some(id) = existing {
             ids.push(id);
         } else {
-            insert_in(tx, owner, &file).await?;
+            let placed = place(store, owner, &file).await?;
+            if let Err(error) = insert_in(tx, owner, &file, &placed).await {
+                store.discard(&placed).await;
+                return Err(error);
+            }
             ids.push(file.meta.id);
         }
     }
@@ -190,13 +243,15 @@ async fn download(
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let user = s.auth.require(&headers, false).await?;
-    let row: Option<(String, String, Vec<u8>)> =
-        sqlx::query_as("SELECT name,mime_type,data FROM attachments WHERE id=$1 AND owner_id=$2")
-            .bind(id)
-            .bind(user.id)
-            .fetch_optional(&s.store.pool)
-            .await?;
-    let (name, mime, data) = row.ok_or_else(ApiError::not_found)?;
+    let row: Option<DownloadRow> = sqlx::query_as(
+        "SELECT name,mime_type,data,object_key FROM attachments WHERE id=$1 AND owner_id=$2",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_optional(&s.store.pool)
+    .await?;
+    let (name, mime, data, key) = row.ok_or_else(ApiError::not_found)?;
+    let data = s.store.files.read(data, key, MAX_IMAGE_BYTES).await?;
     file_response(&name, &mime, data)
 }
 
@@ -296,6 +351,7 @@ fn require_vision(files: &[Attachment], vision: bool) -> Result<(), ApiError> {
 /// users' IDs are indistinguishable. Input order is retained for model context.
 pub async fn load_owner(
     tx: &mut Transaction<'_, Postgres>,
+    files: &Files,
     owner: Uuid,
     ids: &[Uuid],
     vision: bool,
@@ -304,8 +360,8 @@ pub async fn load_owner(
     if ids.is_empty() {
         return Ok(vec![]);
     }
-    let rows: Vec<(Uuid, String, String, i32, String, Vec<u8>)> = sqlx::query_as(
-        "SELECT id,name,mime_type,size,kind,data FROM attachments WHERE owner_id=$1 AND id=ANY($2)",
+    let rows: Vec<AttachmentRow> = sqlx::query_as(
+        "SELECT id,name,mime_type,size,kind,data,object_key FROM attachments WHERE owner_id=$1 AND id=ANY($2)",
     )
     .bind(owner)
     .bind(ids)
@@ -314,9 +370,17 @@ pub async fn load_owner(
     if rows.len() != ids.len() {
         return Err(ApiError::not_found());
     }
+    let (rows, stored): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .map(|(id, name, mime_type, size, kind, data, key)| {
+            ((id, name, mime_type, size, kind), (data, key))
+        })
+        .unzip();
+    let data = files.read_all(stored, MAX_IMAGE_BYTES).await?;
     let mut by_id: HashMap<_, _> = rows
         .into_iter()
-        .map(|(id, name, mime_type, size, kind, data)| {
+        .zip(data)
+        .map(|((id, name, mime_type, size, kind), data)| {
             (
                 id,
                 Attachment {
@@ -387,6 +451,7 @@ pub async fn link_message(
 /// capabilities again; switching models cannot bypass image support checks.
 pub async fn load_messages(
     tx: &mut Transaction<'_, Postgres>,
+    files: &Files,
     owner: Uuid,
     messages: &[Uuid],
     vision: bool,
@@ -407,12 +472,13 @@ pub async fn load_messages(
     {
         return Err(ApiError::bad("Attached files exceed the conversation context limit. Start a new conversation or branch an earlier message."));
     }
-    load_message_data(tx, owner, messages).await
+    load_message_data(tx, files, owner, messages).await
 }
 
 /// Export is bounded by encoded size rather than inference capabilities.
 pub async fn load_for_archive(
     tx: &mut Transaction<'_, Postgres>,
+    files: &Files,
     owner: Uuid,
     messages: &[Uuid],
     max_bytes: usize,
@@ -426,19 +492,27 @@ pub async fn load_for_archive(
     if bytes > max_bytes.min(20 * 1024 * 1024) as i64 {
         return Err(ApiError::bad("These attachments exceed the archive size limit. Export a smaller conversation branch."));
     }
-    load_message_data(tx, owner, messages).await
+    load_message_data(tx, files, owner, messages).await
 }
 
 async fn load_message_data(
     tx: &mut Transaction<'_, Postgres>,
+    files: &Files,
     owner: Uuid,
     messages: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Attachment>>, ApiError> {
     let rows: Vec<MessageAttachmentRow> = sqlx::query_as(
-        "SELECT ma.message_id,a.id,a.name,a.mime_type,a.size,a.kind,a.data FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2) ORDER BY ma.message_id,ma.position",
+        "SELECT ma.message_id,a.id,a.name,a.mime_type,a.size,a.kind,a.data,a.object_key FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2) ORDER BY ma.message_id,ma.position",
     ).bind(owner).bind(messages).fetch_all(&mut **tx).await?;
+    let (rows, stored): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .map(|(message, id, name, mime_type, size, kind, data, key)| {
+            ((message, id, name, mime_type, size, kind), (data, key))
+        })
+        .unzip();
+    let data = files.read_all(stored, MAX_IMAGE_BYTES).await?;
     let mut result: HashMap<Uuid, Vec<Attachment>> = HashMap::new();
-    for (message, id, name, mime_type, size, kind, data) in rows {
+    for ((message, id, name, mime_type, size, kind), data) in rows.into_iter().zip(data) {
         result.entry(message).or_default().push(Attachment {
             meta: AttachmentMeta {
                 id,

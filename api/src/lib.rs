@@ -7,6 +7,7 @@ pub mod code;
 pub mod config;
 pub mod connections;
 pub mod error;
+pub mod files;
 pub mod gateway;
 pub mod groups;
 pub mod images;
@@ -1718,8 +1719,7 @@ async fn run_generation(
                             // Generated images arrive inline; keep them as files and link them.
                             let stored;
                             let delta = if channel == "delta" && images::has_inline(delta) {
-                                stored =
-                                    images::store_inline(&s.store.pool, user.id, id, delta).await;
+                                stored = images::store_inline(&s.store, user.id, id, delta).await;
                                 stored.as_str()
                             } else {
                                 delta

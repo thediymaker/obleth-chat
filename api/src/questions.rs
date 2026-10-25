@@ -104,10 +104,10 @@ pub const WORKSPACE_TOOL: &str = "request_workspace";
 
 /// Said in the system prompt whenever ask_user is offered: from the tool list alone,
 /// many models write their questions into the reply, where the person cannot pick.
-pub const ASK_PROMPT: &str = "When you need the person to choose or tell you something before you can go on well, ask with ask_user instead of writing the questions in your reply: they answer by picking an option. Ask only what changes what you do; otherwise make a sensible choice, say so, and go on.";
+pub const ASK_PROMPT: &str = "When you need the person to choose or tell you something before you can go on well, ask with ask_user instead of writing the questions in your reply: they answer by picking an option. Ask only what changes what you do. To get a workspace, call request_workspace rather than asking.";
 /// Said in the system prompt while the tool is offered: from the tool list alone,
 /// models tell the person they cannot run code, or act out the program's output.
-pub const WORKSPACE_PROMPT: &str = "This chat has no workspace yet, so you cannot run code, open a terminal or keep files. One can be turned on: when the person wants something built, run, tested or previewed, or asks for the workspace or a terminal, call request_workspace. Do not say you are unable to run code, and never act out a program's output as if it had run.";
+pub const WORKSPACE_PROMPT: &str = "This chat has no workspace yet, so you cannot run code, open a terminal or keep files. One can be turned on: when the person wants something built, run, tested or previewed, or asks for the workspace or a terminal, call request_workspace. Do not say you are unable to run code, and never give a program's output that did not come from running it: not acted out, and not worked out by hand either, since hashes, random values and long calculations written out that way are wrong.";
 
 pub fn workspace_definition() -> Value {
     json!({"type":"function","function":{"name":WORKSPACE_TOOL,

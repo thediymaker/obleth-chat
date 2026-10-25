@@ -43,28 +43,7 @@ pub const DIMENSIONS: usize = 1024;
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 const MAX_DOCUMENTS: i64 = 2000;
 const EMBED_BATCH: usize = 16;
-/// Query instruction for the default model, Qwen3-Embedding; passages are embedded
-/// without one.
-const QUERY_INSTRUCTION: &str =
-    "Instruct: Given a question, retrieve passages from the person's documents that answer it\nQuery: ";
-
-/// Text put before searches and before stored passages, in the form the embedding
-/// model was trained on. Set with OBLETH_CHAT_EMBEDDING_QUERY_PREFIX and
-/// OBLETH_CHAT_EMBEDDING_DOCUMENT_PREFIX; the defaults suit the default model.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Prompts {
-    pub query: String,
-    pub document: String,
-}
-
-impl Default for Prompts {
-    fn default() -> Self {
-        Self {
-            query: QUERY_INSTRUCTION.into(),
-            document: String::new(),
-        }
-    }
-}
+pub use embedding::Prompts;
 
 /// Who may see a collection, as SQL over `c` with the person's id in `$1`.
 /// Collections person $1 may read: their own, shared with everyone or with a group they
@@ -80,7 +59,8 @@ pub struct Knowledge {
     store: ObjectStore,
     tools: extract::Tools,
     model: String,
-    prompts: Prompts,
+    /// The environment's prefixes for its model; unset ones follow the model's own.
+    env_prompts: (Option<String>, Option<String>),
     user_bytes: i64,
 }
 
@@ -95,7 +75,7 @@ impl Knowledge {
             .map(|v| v.parse())
             .transpose()?
             .unwrap_or(2048);
-        let knowledge = Self::new(
+        let mut knowledge = Self::new(
             pool,
             store,
             extract::Tools::from_env(),
@@ -103,14 +83,11 @@ impl Knowledge {
             user_mb * 1024 * 1024,
         );
         // Set but empty means no prefix.
-        let mut prompts = Prompts::default();
-        if let Ok(prefix) = env::var("OBLETH_CHAT_EMBEDDING_QUERY_PREFIX") {
-            prompts.query = prefix;
-        }
-        if let Ok(prefix) = env::var("OBLETH_CHAT_EMBEDDING_DOCUMENT_PREFIX") {
-            prompts.document = prefix;
-        }
-        Ok(Some(knowledge.with_prompts(prompts)))
+        knowledge.env_prompts = (
+            env::var("OBLETH_CHAT_EMBEDDING_QUERY_PREFIX").ok(),
+            env::var("OBLETH_CHAT_EMBEDDING_DOCUMENT_PREFIX").ok(),
+        );
+        Ok(Some(knowledge))
     }
 
     pub fn new(
@@ -124,14 +101,15 @@ impl Knowledge {
             pool,
             store,
             tools,
-            prompts: Prompts::default(),
+            env_prompts: (None, None),
             model,
             user_bytes,
         }
     }
 
+    /// Prefixes for the default model, as the environment variables give them.
     pub fn with_prompts(mut self, prompts: Prompts) -> Self {
-        self.prompts = prompts;
+        self.env_prompts = (Some(prompts.query), Some(prompts.document));
         self
     }
 

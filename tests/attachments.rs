@@ -255,7 +255,7 @@ async fn file_types_signatures_sizes_and_names_are_validated(pool: PgPool) {
 async fn simultaneous_uploads_cannot_exceed_file_or_byte_quotas(pool: PgPool) {
     let app = fixture(&pool).await;
     let alice = session(&pool).await;
-    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,sha256)SELECT gen_random_uuid(),$1,'seed.txt','text/plain','text',1,'x'::bytea,sha256('x'::bytea) FROM generate_series(1,99)")
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)SELECT gen_random_uuid(),$1,'seed.txt','text/plain','text',1,'x'::bytea FROM generate_series(1,99)")
         .bind(alice.id).execute(&pool).await.unwrap();
     let (a, b) = tokio::join!(
         call(
@@ -283,7 +283,7 @@ async fn simultaneous_uploads_cannot_exceed_file_or_byte_quotas(pool: PgPool) {
         .unwrap();
     assert_eq!(count, 100);
     let bob = session(&pool).await;
-    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,sha256)SELECT gen_random_uuid(),$1,'seed.png','image/png','image',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END,REPEAT('x',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END)::bytea,'\x00'::bytea FROM generate_series(1,10) AS g(n)")
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)SELECT gen_random_uuid(),$1,'seed.png','image/png','image',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END,REPEAT('x',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END)::bytea FROM generate_series(1,10) AS g(n)")
         .bind(bob.id).execute(&pool).await.unwrap();
     let (a, b) = tokio::join!(
         call(

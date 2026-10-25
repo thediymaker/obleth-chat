@@ -2,10 +2,10 @@
 -- the object's key instead of the bytes. Exactly one of the two is set.
 ALTER TABLE attachments ALTER COLUMN data DROP NOT NULL;
 ALTER TABLE attachments ADD COLUMN object_key TEXT UNIQUE;
--- Finds an identical upload without reading the bytes back.
+-- Finds an identical upload without reading the bytes back. Nullable so replicas
+-- of the previous release keep uploading during a rolling upgrade.
 ALTER TABLE attachments ADD COLUMN sha256 BYTEA;
 UPDATE attachments SET sha256 = sha256(data);
-ALTER TABLE attachments ALTER COLUMN sha256 SET NOT NULL;
 ALTER TABLE attachments DROP CONSTRAINT attachments_check;
 ALTER TABLE attachments ADD CONSTRAINT attachments_bytes_check CHECK (
     (data IS NOT NULL AND object_key IS NULL AND OCTET_LENGTH(data) = size)

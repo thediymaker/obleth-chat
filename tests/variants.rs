@@ -177,7 +177,7 @@ async fn edits_keep_original_prompt_versions_and_attachment_context(pool: PgPool
     let owner = user(&pool).await;
     let store = Store::new(pool.clone());
     let file = Uuid::new_v4();
-    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,sha256)VALUES($1,$2,'context.txt','text/plain','text',7,$3,sha256($3))").bind(file).bind(owner).bind(b"context".to_vec()).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)VALUES($1,$2,'context.txt','text/plain','text',7,$3)").bind(file).bind(owner).bind(b"context".to_vec()).execute(&pool).await.unwrap();
     let chat = store
         .create(owner, "With file", "fixture")
         .await

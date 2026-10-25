@@ -1137,6 +1137,9 @@ async fn run_generation(
     // People who may have a workspace can be asked to turn one on for this chat.
     let offers_workspace =
         asks && workspace.is_none() && s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(&user));
+    if asks {
+        preamble.push(questions::ASK_PROMPT.into());
+    }
     if offers_workspace {
         preamble.push(questions::WORKSPACE_PROMPT.into());
     }

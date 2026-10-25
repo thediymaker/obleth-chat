@@ -773,8 +773,13 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
     fn json_at(s: &str) -> Option<(Value, usize)> {
         let lead = s.len() - s.trim_start().len();
         let mut values = serde_json::Deserializer::from_str(&s[lead..]).into_iter::<Value>();
-        let value = values.next()?.ok()?;
-        Some((value, lead + values.byte_offset()))
+        if let Some(Ok(value)) = values.next() {
+            return Some((value, lead + values.byte_offset()));
+        }
+        // Models often put raw newlines and tabs inside strings, as in a file's content.
+        let end = balanced(&s[lead..])?;
+        let value = serde_json::from_str(&escape_controls(&s[lead..lead + end])).ok()?;
+        Some((value, lead + end))
     }
     fn named(value: &Value) -> Option<(String, Value)> {
         let name = value["name"].as_str()?.to_owned();
@@ -829,7 +834,13 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
         }
     }
     kept.push_str(rest);
-    if found.is_empty() || found.iter().any(|(name, _)| !offered.contains(name)) {
+    if found.is_empty() {
+        // Llama 4's pythonic form: [name(key="value", ...), ...]
+        let (start, end, calls) = pythonic_calls(text, offered)?;
+        kept = format!("{}{}", &text[..start], &text[end..]);
+        found = calls;
+    }
+    if found.iter().any(|(name, _)| !offered.contains(name)) {
         return None;
     }
     let calls = found
@@ -845,6 +856,228 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
         })
         .collect();
     Some((kept.trim().to_owned(), calls))
+}
+
+/// Where the JSON object or array at the start of `s` ends, counting brackets
+/// outside strings; a string may hold raw control characters.
+fn balanced(s: &str) -> Option<usize> {
+    if !s.starts_with(['{', '[']) {
+        return None;
+    }
+    let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+    for (i, c) in s.char_indices() {
+        if quoted {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// JSON text with control characters inside strings escaped.
+fn escape_controls(raw: &str) -> String {
+    let (mut out, mut quoted, mut escaped) = (String::with_capacity(raw.len()), false, false);
+    for c in raw.chars() {
+        if quoted && !escaped && c.is_control() {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other => out.push_str(&format!("\\u{:04x}", other as u32)),
+            }
+            continue;
+        }
+        if quoted {
+            escaped = !escaped && c == '\\';
+            if !escaped && c == '"' {
+                quoted = false;
+            }
+        } else if c == '"' {
+            quoted = true;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A tool's name and its arguments, as parsed from text.
+type NamedCall = (String, Value);
+
+/// The first `[name(key=value, ...), ...]` list in `text` whose calls all name
+/// offered tools, with its byte range. Values are Python literals: strings
+/// (triple-quoted too), numbers, True, False, None, lists and dicts.
+fn pythonic_calls(text: &str, offered: &[String]) -> Option<(usize, usize, Vec<NamedCall>)> {
+    struct P<'a> {
+        s: &'a str,
+        i: usize,
+    }
+    impl P<'_> {
+        fn rest(&self) -> &str {
+            &self.s[self.i..]
+        }
+        fn space(&mut self) {
+            self.i = self.s.len() - self.rest().trim_start().len();
+        }
+        fn eat(&mut self, token: &str) -> bool {
+            self.space();
+            let ok = self.rest().starts_with(token);
+            if ok {
+                self.i += token.len();
+            }
+            ok
+        }
+        fn ident(&mut self) -> Option<String> {
+            self.space();
+            let n = self
+                .rest()
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(self.rest().len());
+            if n == 0 || self.rest().starts_with(|c: char| c.is_ascii_digit()) {
+                return None;
+            }
+            let name = self.rest()[..n].to_owned();
+            self.i += n;
+            Some(name)
+        }
+        fn string(&mut self) -> Option<String> {
+            self.space();
+            let quote = ["\"\"\"", "'''", "\"", "'"]
+                .into_iter()
+                .find(|q| self.rest().starts_with(q))?;
+            self.i += quote.len();
+            let body = self.rest();
+            let mut out = String::new();
+            let mut chars = body.char_indices();
+            while let Some((at, c)) = chars.next() {
+                if body[at..].starts_with(quote) {
+                    self.i += at + quote.len();
+                    return Some(out);
+                }
+                if c == '\\' {
+                    match chars.next()?.1 {
+                        'n' => out.push('\n'),
+                        't' => out.push('\t'),
+                        'r' => out.push('\r'),
+                        '0' => out.push('\0'),
+                        other => out.push(other),
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            None
+        }
+        fn value(&mut self) -> Option<Value> {
+            self.space();
+            if self.rest().starts_with(['"', '\'']) {
+                return self.string().map(Value::String);
+            }
+            for (word, value) in [
+                ("True", json!(true)),
+                ("False", json!(false)),
+                ("None", Value::Null),
+            ] {
+                if self.rest().starts_with(word) {
+                    self.i += word.len();
+                    return Some(value);
+                }
+            }
+            if self.eat("[") {
+                let mut items = vec![];
+                while !self.eat("]") {
+                    items.push(self.value()?);
+                    if !self.eat(",") && !self.rest().trim_start().starts_with(']') {
+                        return None;
+                    }
+                }
+                return Some(Value::Array(items));
+            }
+            if self.eat("{") {
+                let mut map = serde_json::Map::new();
+                while !self.eat("}") {
+                    let key = self.string()?;
+                    if !self.eat(":") {
+                        return None;
+                    }
+                    map.insert(key, self.value()?);
+                    if !self.eat(",") && !self.rest().trim_start().starts_with('}') {
+                        return None;
+                    }
+                }
+                return Some(Value::Object(map));
+            }
+            let n = self
+                .rest()
+                .find(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E')))
+                .unwrap_or(self.rest().len());
+            let number = serde_json::from_str::<serde_json::Number>(&self.rest()[..n]).ok()?;
+            self.i += n;
+            Some(Value::Number(number))
+        }
+        fn call(&mut self) -> Option<(String, Value)> {
+            let name = self.ident()?;
+            if !self.eat("(") {
+                return None;
+            }
+            let mut args = serde_json::Map::new();
+            while !self.eat(")") {
+                let key = self.ident()?;
+                if !self.eat("=") {
+                    return None;
+                }
+                args.insert(key, self.value()?);
+                if !self.eat(",") && !self.rest().trim_start().starts_with(')') {
+                    return None;
+                }
+            }
+            Some((name, Value::Object(args)))
+        }
+    }
+    for (start, _) in text.match_indices('[') {
+        let after = text[start + 1..].trim_start();
+        if !offered.iter().any(|name| {
+            after.starts_with(name.as_str()) && after[name.len()..].trim_start().starts_with('(')
+        }) {
+            continue;
+        }
+        let mut p = P {
+            s: text,
+            i: start + 1,
+        };
+        let mut calls = vec![];
+        let parsed = loop {
+            match p.call() {
+                Some(call) => calls.push(call),
+                None => break false,
+            }
+            if p.eat("]") {
+                break true;
+            }
+            if !p.eat(",") {
+                break false;
+            }
+        };
+        if parsed && calls.iter().all(|(name, _)| offered.contains(name)) {
+            return Some((start, p.i, calls));
+        }
+    }
+    None
 }
 
 /// Lets a turn run for any number of steps: past KEPT_STEPS, the oldest step and
@@ -2471,6 +2704,34 @@ mod draft_tests {
         assert!(text_tool_calls(r#"<function=rm_rf>{}</function>"#, &offered).is_none());
         assert!(text_tool_calls("Models write <function=name> tags.", &offered).is_none());
         assert!(text_tool_calls("<tool_call>{not json</tool_call>", &offered).is_none());
+        // Raw newlines inside a JSON string, as models write file contents.
+        let (_, calls) = text_tool_calls(
+            "<function=write_file>{\"path\": \"a.py\", \"content\": \"import re\n\tx = 1\n\"}</function>",
+            &offered,
+        )
+        .unwrap();
+        assert_eq!(
+            calls[0].arguments,
+            r#"{"content":"import re\n\tx = 1\n","path":"a.py"}"#
+        );
+        // Llama 4's pythonic form, with a triple-quoted string and a nested list.
+        let (text, calls) = text_tool_calls(
+            "First the page.\n\n[write_file(path=\"index.html\", content='''<p class=\"x\">it's</p>\n'''), delegate(tasks=[{\"task\": \"a\", \"n\": 2}], wait=True)]",
+            &offered,
+        )
+        .unwrap();
+        assert_eq!(text, "First the page.");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].arguments,
+            r#"{"content":"<p class=\"x\">it's</p>\n","path":"index.html"}"#
+        );
+        assert_eq!(
+            calls[1].arguments,
+            r#"{"tasks":[{"n":2,"task":"a"}],"wait":true}"#
+        );
+        assert!(text_tool_calls("Use [write_file(path=x)] carefully", &offered).is_none());
+        assert!(text_tool_calls("See [rm(path=\"/\")]", &offered).is_none());
     }
 
     #[test]

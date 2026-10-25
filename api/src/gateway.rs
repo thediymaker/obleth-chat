@@ -411,6 +411,52 @@ impl Gateway {
         }
         Ok(models)
     }
+
+    /// Models the gateway lists as embedding models, for choosing Knowledge's model.
+    pub async fn embedding_models(&self, user: &Identity) -> Result<Vec<String>, ApiError> {
+        let (catalog, details) = tokio::try_join!(
+            self.discovery_json(user, "v1/models", false),
+            self.discovery_json(user, "model/info", true),
+        )?;
+        let catalog = catalog.ok_or_else(unavailable)?;
+        let list = catalog
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(unavailable)?;
+        let details = details
+            .as_ref()
+            .and_then(|value| value.get("data"))
+            .and_then(Value::as_array);
+        let mut models = Vec::new();
+        for entry in list.iter().take(1000) {
+            let Some(id) = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| valid_model(id))
+            else {
+                continue;
+            };
+            let info = details
+                .and_then(|list| {
+                    list.iter()
+                        .find(|detail| detail.get("model_name").and_then(Value::as_str) == Some(id))
+                })
+                .and_then(|v| v.get("model_info"));
+            let field = |key| {
+                entry
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .or_else(|| info.and_then(|v| v.get(key)).and_then(Value::as_str))
+            };
+            let embedding = field("mode") == Some("embedding")
+                || matches!(field("model_type"), Some("embedding" | "embeddings"));
+            if embedding && !models.iter().any(|m| m == id) {
+                models.push(id.to_owned());
+            }
+        }
+        models.sort();
+        Ok(models)
+    }
 }
 pub fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 160 && !model.chars().any(char::is_control)

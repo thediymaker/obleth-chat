@@ -7,6 +7,7 @@
 //! administrator shared with everyone.
 
 pub mod chat;
+pub mod embedding;
 pub mod extract;
 pub mod saved;
 pub mod storage;
@@ -134,20 +135,13 @@ impl Knowledge {
         self
     }
 
-    /// A search as the embedding model expects it.
-    fn query_input(&self, text: &str) -> String {
-        format!("{}{text}", self.prompts.query)
-    }
-
-    /// A stored passage as the embedding model expects it.
-    fn document_input(&self, text: &str) -> String {
-        format!("{}{text}", self.prompts.document)
-    }
-
     /// Processes queued documents and removes deleted files from storage until shutdown.
     pub async fn worker(self, gateway: Gateway, shutdown: CancellationToken) {
         loop {
             self.empty_trash().await;
+            if let Err(error) = self.reconcile().await {
+                tracing::warn!("could not check the embedding settings: {error:#}");
+            }
             let embedded = self.embed_saved(&gateway).await;
             let worked = embedded
                 || match self.claim().await {
@@ -194,7 +188,7 @@ impl Knowledge {
              WHERE id = (SELECT id FROM knowledge_documents
                          WHERE status='queued' OR (status='processing' AND claimed_at < NOW() - INTERVAL '10 minutes')
                          ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-             RETURNING id, owner_id, collection_id, name, mime_type, object_key, size, attempts",
+             RETURNING id, owner_id, collection_id, name, mime_type, object_key, size, attempts, claimed_at",
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -207,14 +201,16 @@ impl Knowledge {
             key: r.get("object_key"),
             size: r.get("size"),
             attempts: r.get("attempts"),
+            claimed: r.get("claimed_at"),
         }))
     }
 
-    async fn process(&self, gateway: &Gateway, job: Job) -> anyhow::Result<()> {
+    async fn process(&self, gateway: &Gateway, mut job: Job) -> anyhow::Result<()> {
         if job.attempts > 3 {
             anyhow::bail!("Processing stopped three times; delete the file and upload it again");
         }
         let owner = identity(&self.pool, job.owner).await?;
+        let embedding = self.embedding().await?;
         let kind = extract::kind(&job.name, &job.mime)
             .ok_or_else(|| anyhow::anyhow!("This file type is not supported"))?;
         let bytes = self.store.get(&job.key, job.size as usize + 1024).await?;
@@ -238,16 +234,20 @@ impl Knowledge {
             .bind(job.id)
             .execute(&self.pool)
             .await?;
-        sqlx::query("UPDATE knowledge_documents SET stage='embedding', progress_done=0, progress_total=$2, pages=$3, updated_at=NOW() WHERE id=$1")
+        let started = sqlx::query("UPDATE knowledge_documents SET stage='embedding', progress_done=0, progress_total=$2, pages=$3, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$4")
             .bind(job.id)
             .bind(passages.len() as i32)
             .bind(page_count)
+            .bind(job.claimed)
             .execute(&self.pool)
             .await?;
+        if started.rows_affected() == 0 {
+            return Ok(());
+        }
         for (batch, chunk) in passages.chunks(EMBED_BATCH).enumerate() {
-            let input: Vec<String> = chunk.iter().map(|p| self.document_input(&p.text)).collect();
+            let input: Vec<String> = chunk.iter().map(|p| embedding.document(&p.text)).collect();
             let vectors = gateway
-                .embeddings(&owner, &self.model, &input)
+                .embeddings(&owner, &embedding.model, &input)
                 .await
                 .map_err(|e| anyhow::anyhow!("The embedding model is unavailable ({})", e.1))?;
             let start = batch * EMBED_BATCH;
@@ -260,7 +260,8 @@ impl Knowledge {
             let embeddings: Vec<String> = vectors.into_iter().map(vector_literal).collect();
             let inserted = sqlx::query(
                 "INSERT INTO knowledge_passages (document_id, collection_id, ordinal, page, content, embedding)
-                 SELECT $1, $2, o, p, t, e::halfvec FROM UNNEST($3::int[], $4::int[], $5::text[], $6::text[]) AS u(o, p, t, e)",
+                 SELECT $1, $2, o, p, t, e::halfvec FROM UNNEST($3::int[], $4::int[], $5::text[], $6::text[]) AS u(o, p, t, e)
+                 WHERE EXISTS (SELECT 1 FROM knowledge_documents WHERE id=$1 AND status='processing' AND claimed_at=$7)",
             )
             .bind(job.id)
             .bind(job.collection)
@@ -268,32 +269,50 @@ impl Knowledge {
             .bind(&pages)
             .bind(&texts)
             .bind(&embeddings)
+            .bind(job.claimed)
             .execute(&self.pool)
             .await;
-            if inserted.is_err() {
-                // The document was deleted while it was being indexed.
-                let exists: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM knowledge_documents WHERE id=$1)",
-                )
-                .bind(job.id)
-                .fetch_one(&self.pool)
-                .await?;
-                if !exists {
-                    return Ok(());
+            let inserted = match inserted {
+                Ok(done) => done.rows_affected(),
+                Err(error) => {
+                    // The document was deleted while it was being indexed.
+                    let exists: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM knowledge_documents WHERE id=$1)",
+                    )
+                    .bind(job.id)
+                    .fetch_one(&self.pool)
+                    .await?;
+                    if !exists {
+                        return Ok(());
+                    }
+                    return Err(error.into());
                 }
-                inserted?;
+            };
+            // Queued again or taken over: the newer run indexes it.
+            if inserted == 0 {
+                return Ok(());
             }
-            sqlx::query("UPDATE knowledge_documents SET progress_done=$2, claimed_at=NOW(), updated_at=NOW() WHERE id=$1")
+            // Renews the claim, so a long document isn't taken over while it's indexed.
+            let Some(renewed) = sqlx::query_scalar("UPDATE knowledge_documents SET progress_done=$2, claimed_at=NOW(), updated_at=NOW() WHERE id=$1 AND claimed_at=$3 RETURNING claimed_at")
                 .bind(job.id)
                 .bind((start + chunk.len()) as i32)
-                .execute(&self.pool)
-                .await?;
+                .bind(job.claimed)
+                .fetch_optional(&self.pool)
+                .await?
+            else {
+                return Ok(());
+            };
+            job.claimed = renewed;
         }
-        sqlx::query("UPDATE knowledge_documents SET status='ready', stage='', passages=$2, updated_at=NOW() WHERE id=$1")
+        let finished = sqlx::query("UPDATE knowledge_documents SET status='ready', stage='', passages=$2, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$3")
             .bind(job.id)
             .bind(passages.len() as i32)
+            .bind(job.claimed)
             .execute(&self.pool)
             .await?;
+        if finished.rows_affected() == 0 {
+            return Ok(());
+        }
         sqlx::query("UPDATE knowledge_collections SET updated_at=NOW() WHERE id=$1")
             .bind(job.collection)
             .execute(&self.pool)
@@ -341,9 +360,10 @@ impl Knowledge {
         if allowed.is_empty() {
             return Ok(vec![]);
         }
+        let embedding = self.embedding().await?;
         let text: String = query.chars().take(2000).collect();
         let vector = gateway
-            .embeddings(user, &self.model, &[self.query_input(&text)])
+            .embeddings(user, &embedding.model, &[embedding.query(&text)])
             .await?
             .pop()
             .map(vector_literal)
@@ -411,6 +431,9 @@ struct Job {
     key: String,
     size: i64,
     attempts: i32,
+    /// Identifies this claim: a document queued again or taken over by another worker
+    /// gets a new one, and this run's writes then stop.
+    claimed: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Clone, Debug)]

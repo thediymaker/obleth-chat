@@ -207,8 +207,15 @@ impl Knowledge {
     }
 
     async fn embed_one(&self, gateway: &Gateway, user: &Identity, text: &str) -> Option<String> {
+        let embedding = match self.embedding().await {
+            Ok(embedding) => embedding,
+            Err(e) => {
+                tracing::warn!("saved item embedding deferred: {e}");
+                return None;
+            }
+        };
         match gateway
-            .embeddings(user, &self.model, &[self.document_input(text)])
+            .embeddings(user, &embedding.model, &[embedding.document(text)])
             .await
         {
             Ok(mut v) => v.pop().map(vector_literal),
@@ -237,7 +244,7 @@ impl Knowledge {
             "UPDATE saved_items SET embedding_attempts = embedding_attempts + 1 WHERE id IN (
                 SELECT id FROM saved_items WHERE embedding IS NULL AND searchable AND embedding_attempts < 3
                 ORDER BY created_at LIMIT 8 FOR UPDATE SKIP LOCKED)
-             RETURNING id, owner_id, title, tags, body",
+             RETURNING id, owner_id, title, tags, body, embedding_attempts",
         )
         .fetch_all(&self.pool)
         .await
@@ -256,9 +263,11 @@ impl Knowledge {
                 row.get::<&str, _>("body"),
             );
             if let Some(vector) = self.embed_one(gateway, &owner, &text).await {
-                let _ = sqlx::query("UPDATE saved_items SET embedding=$2::halfvec WHERE id=$1")
+                // Not if the item was edited or re-indexing started meanwhile.
+                let _ = sqlx::query("UPDATE saved_items SET embedding=$2::halfvec WHERE id=$1 AND embedding IS NULL AND embedding_attempts=$3")
                     .bind(row.get::<Uuid, _>("id"))
                     .bind(vector)
+                    .bind(row.get::<i16, _>("embedding_attempts"))
                     .execute(&self.pool)
                     .await;
             }
@@ -287,12 +296,13 @@ impl Knowledge {
         project: Option<Uuid>,
         limit: usize,
     ) -> Result<Vec<(Uuid, bool, bool)>, ApiError> {
+        let embedding = self.embedding().await?;
         let text: String = query.trim().chars().take(2000).collect();
         if text.is_empty() {
             return Ok(vec![]);
         }
         let vector = gateway
-            .embeddings(user, &self.model, &[self.query_input(&text)])
+            .embeddings(user, &embedding.model, &[embedding.query(&text)])
             .await?
             .pop()
             .map(vector_literal)

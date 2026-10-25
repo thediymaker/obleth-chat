@@ -467,7 +467,7 @@ async fn get_limits(
     state.auth.require_admin(&headers, false).await?;
     Ok(Json(limit_document(&state.store.pool).await?))
 }
-async fn admin_transaction(
+pub(crate) async fn admin_transaction(
     pool: &PgPool,
     admin: Uuid,
 ) -> Result<Transaction<'_, Postgres>, ApiError> {

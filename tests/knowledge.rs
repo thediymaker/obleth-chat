@@ -190,7 +190,13 @@ async fn fixture(pool: PgPool) -> Fixture {
         )
         .route(
             "/v1/models",
-            get(|| async { Json(json!({"data":[{"id":"fixture-model"}]})) }),
+            get(|| async {
+                Json(json!({"data":[
+                    {"id":"fixture-model"},
+                    {"id":"fixture-embed","mode":"embedding"},
+                    {"id":"fixture-embed-2","mode":"embedding"}
+                ]}))
+            }),
         )
         .route(
             "/v1/embeddings",
@@ -2061,4 +2067,186 @@ async fn a_project_shows_its_research_to_the_people_who_can_see_it(pool: PgPool)
         .await
         .unwrap();
     assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn changing_the_embedding_model_reindexes_everything(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    call(
+        &f.app,
+        "POST",
+        "/api/admin/users",
+        json!({"username":"student","password":PASSWORD,"displayName":"Student","role":"user"}),
+        &admin,
+    )
+    .await;
+    let student = login(&f.app, "student").await;
+    let (_, created) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/collections",
+        json!({"name":"Thermodynamics"}),
+        &admin,
+    )
+    .await;
+    let collection = created["collection"]["id"].as_str().unwrap().to_owned();
+    upload(
+        &f.app,
+        &collection,
+        "notes.md",
+        NOTES.as_bytes().to_vec(),
+        &admin,
+    )
+    .await;
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        "/api/saved",
+        json!({"kind":"note","title":"Carnot","body":"Efficiency limit of heat engines"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        settled(&f.app, &collection, &admin).await[0]["status"],
+        "ready"
+    );
+
+    let path = "/api/admin/knowledge/embedding";
+    assert_eq!(
+        call(&f.app, "GET", path, Value::Null, &student).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &f.app,
+            "PATCH",
+            path,
+            json!({"model":"fixture-embed-2"}),
+            &student
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, settings) = call(&f.app, "GET", path, Value::Null, &admin).await;
+    assert_eq!(status, StatusCode::OK, "{settings}");
+    assert_eq!(settings["effective"]["model"], "fixture-embed");
+    assert_eq!(settings["chosen"]["model"], Value::Null);
+    assert_eq!(
+        settings["models"],
+        json!(["fixture-embed", "fixture-embed-2"])
+    );
+    assert_eq!(settings["index"]["documents"], 1);
+    for bad in [
+        json!({"model":"fixture-model"}),
+        json!({"model":""}),
+        json!({"color":"blue"}),
+        json!({"queryPrefix":"bell\u{7}"}),
+        json!({"documentPrefix":"x".repeat(501)}),
+    ] {
+        assert_eq!(
+            call(&f.app, "PATCH", path, bad.clone(), &admin).await.0,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+
+    // A new model and passage prefix re-index every document and saved item with them.
+    let before = f.embedded.lock().unwrap().len();
+    let (status, changed) = call(
+        &f.app,
+        "PATCH",
+        path,
+        json!({"model":"fixture-embed-2","documentPrefix":"p: "}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed["reindexed"], true);
+    assert_eq!(changed["effective"]["model"], "fixture-embed-2");
+    assert_eq!(
+        changed["effective"]["queryPrefix"], "q: ",
+        "unchanged settings keep their default"
+    );
+    assert_eq!(
+        settled(&f.app, &collection, &admin).await[0]["status"],
+        "ready"
+    );
+    let mut saved_done = false;
+    for _ in 0..100 {
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM saved_items WHERE embedding IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if pending == 0 {
+            saved_done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(saved_done, "saved items are embedded again");
+    let after: Vec<Value> = f.embedded.lock().unwrap()[before..].to_vec();
+    assert!(after.iter().all(|b| b["model"] == "fixture-embed-2"));
+    let inputs: Vec<String> = after
+        .iter()
+        .flat_map(|b| b["input"].as_array().unwrap().clone())
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        inputs
+            .iter()
+            .any(|i| i.starts_with("p: ") && i.contains("Carnot engine")),
+        "{inputs:?}"
+    );
+    assert!(
+        inputs.iter().any(|i| i.starts_with("p: Carnot")),
+        "{inputs:?}"
+    );
+    let (_, found) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/search",
+        json!({"query":"Carnot efficiency limit","collectionIds":[collection]}),
+        &admin,
+    )
+    .await;
+    assert_eq!(found["results"][0]["name"], "notes.md", "{found}");
+
+    // Saving the same settings again changes nothing; it is all audited.
+    let (_, same) = call(
+        &f.app,
+        "PATCH",
+        path,
+        json!({"model":"fixture-embed-2"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(same["reindexed"], false);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE action='knowledge.embedding.update'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 2);
+
+    // Back to the defaults re-indexes again.
+    let (_, reset) = call(
+        &f.app,
+        "PATCH",
+        path,
+        json!({"model":null,"documentPrefix":null}),
+        &admin,
+    )
+    .await;
+    assert_eq!(reset["reindexed"], true);
+    assert_eq!(reset["effective"]["model"], "fixture-embed");
+    assert_eq!(reset["effective"]["documentPrefix"], "d: ");
+    assert_eq!(
+        settled(&f.app, &collection, &admin).await[0]["status"],
+        "ready"
+    );
 }

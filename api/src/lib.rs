@@ -111,6 +111,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let connections = connections::router(state.clone());
     let steering = steer::router(state.clone());
     let knowledge = knowledge::router(state.clone());
+    let embedding = knowledge::embedding::router(state.clone());
     let mcp = mcp::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
@@ -165,6 +166,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(connections)
         .merge(steering)
         .merge(knowledge)
+        .merge(embedding)
         .merge(mcp)
         .fallback_service(static_files(static_dir))
         .layer(DefaultBodyLimit::max(128 * 1024))

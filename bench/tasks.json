@@ -1,0 +1,401 @@
+{
+  "about": "Chat benchmark tasks. Each runs as a new chat over MCP. Checks: state (the chat's final state), waiting (the kind of card it ended on), reply_regex (the last reply), reply_json (the last reply parses as JSON), shell (a script run in the chat's project folder by the --exec hook, which passes when it exits 0; PREVIEW_PORT is set to the chat's preview port).",
+  "tasks": [
+    {
+      "id": "arith",
+      "tags": [
+        "chat",
+        "screen"
+      ],
+      "message": "What is 17^3 - 4913 + 2*361? Reply with just the number.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "reply_regex",
+          "pattern": "(?s)\\b722\\W*$"
+        }
+      ]
+    },
+    {
+      "id": "trace",
+      "tags": [
+        "chat",
+        "screen"
+      ],
+      "message": "Without running it, what does this Python print? Reply with only the output.\n\n```python\nitems = [3, 1, 2]\nseen = []\nfor i, x in enumerate(sorted(items, reverse=True)):\n    seen.append(x * i)\nprint(sum(seen), seen[-1])\n```",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "reply_regex",
+          "pattern": "(?m)^\\W*4 2\\W*$"
+        }
+      ]
+    },
+    {
+      "id": "json-only",
+      "tags": [
+        "chat",
+        "screen"
+      ],
+      "message": "List the eight planets in order from the Sun as a JSON array of strings. Output only the JSON, with no code fence.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "reply_json",
+          "equals": [
+            "Mercury",
+            "Venus",
+            "Earth",
+            "Mars",
+            "Jupiter",
+            "Saturn",
+            "Uranus",
+            "Neptune"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ask-first",
+      "tags": [
+        "chat",
+        "screen"
+      ],
+      "message": "I want to build an app for my lab. Help me choose a tech stack.",
+      "checks": [
+        {
+          "type": "waiting",
+          "kind": "question"
+        }
+      ]
+    },
+    {
+      "id": "no-fake-run",
+      "tags": [
+        "chat",
+        "screen"
+      ],
+      "message": "Run this and tell me exactly what it prints: python3 -c \"import hashlib; print(hashlib.sha256(b'obleth-bench').hexdigest()[:12])\"",
+      "checks": [
+        {
+          "type": "waiting",
+          "kind": "workspace"
+        }
+      ]
+    },
+    {
+      "id": "explain",
+      "tags": [
+        "chat"
+      ],
+      "message": "In three short bullet points, explain the difference between a process and a thread.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "reply_regex",
+          "pattern": "(?is)process.*thread"
+        }
+      ]
+    },
+    {
+      "id": "tip-page",
+      "tags": [
+        "build",
+        "screen"
+      ],
+      "workspace": true,
+      "message": "Build a tip calculator web page: bill amount, tip percentage and number of people, showing the tip and the amount per person as you type. Plain HTML, CSS and JavaScript. Serve it on the preview.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "page has inputs",
+          "script": "f=$(ls *.html */*.html 2>/dev/null | head -1); test -n \"$f\" && grep -qi '<input' \"$f\""
+        },
+        {
+          "type": "shell",
+          "name": "preview serves",
+          "script": "test \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PREVIEW_PORT/)\" = 200"
+        }
+      ]
+    },
+    {
+      "id": "pytest-cli",
+      "tags": [
+        "build",
+        "screen"
+      ],
+      "workspace": true,
+      "message": "Write wordfreq.py: given a text file path and a number N, it prints the N most common words (case-insensitive, punctuation ignored) as `word count` lines, most common first, ties in alphabetical order. Add pytest tests in test_wordfreq.py and make sure they pass.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "tests pass",
+          "script": "test -f wordfreq.py && python3 -m pytest -q"
+        },
+        {
+          "type": "shell",
+          "name": "output is right",
+          "script": "printf 'The cat. the dog! A cat, the end\\n' > /tmp/wf.txt && test \"$(python3 wordfreq.py /tmp/wf.txt 2)\" = \"$(printf 'the 3\\ncat 2')\""
+        }
+      ]
+    },
+    {
+      "id": "fix-bug",
+      "tags": [
+        "build",
+        "screen"
+      ],
+      "workspace": true,
+      "message": "Create these two files exactly as written, run the tests, then fix the bug in stats.py (not the tests) so they pass.\n\nstats.py:\n```python\ndef median(values):\n    ordered = sorted(values)\n    middle = len(ordered) // 2\n    if len(ordered) % 2:\n        return ordered[middle]\n    return ordered[middle] + ordered[middle + 1] / 2\n```\n\ntest_stats.py:\n```python\nfrom stats import median\n\ndef test_odd():\n    assert median([3, 1, 2]) == 2\n\ndef test_even():\n    assert median([4, 1, 3, 2]) == 2.5\n```",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "tests pass",
+          "script": "python3 -m pytest -q test_stats.py"
+        },
+        {
+          "type": "shell",
+          "name": "tests unchanged",
+          "script": "grep -q '== 2.5' test_stats.py && grep -q '== 2$' test_stats.py"
+        }
+      ]
+    },
+    {
+      "id": "flask-api",
+      "tags": [
+        "build",
+        "screen"
+      ],
+      "workspace": true,
+      "message": "Build a small Flask API that keeps todos in memory: GET /todos returns the list as JSON, POST /todos with {\"title\": ...} adds one and returns it with an id. Leave it running on the preview.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "post then get",
+          "script": "curl -sf -X POST -H 'content-type: application/json' -d '{\"title\":\"bench\"}' http://127.0.0.1:$PREVIEW_PORT/todos >/dev/null && curl -sf http://127.0.0.1:$PREVIEW_PORT/todos | grep -q bench"
+        }
+      ]
+    },
+    {
+      "id": "vite-react",
+      "tags": [
+        "build",
+        "screen"
+      ],
+      "workspace": true,
+      "message": "Make a React app with Vite: a counter with increment, decrement and reset buttons. Show it on the preview.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "uses react",
+          "script": "grep -rqs '\"react\"' package.json */package.json"
+        },
+        {
+          "type": "shell",
+          "name": "builds",
+          "script": "d=$(dirname $(ls package.json */package.json 2>/dev/null | head -1)); cd \"$d\" && npm run build >/dev/null 2>&1"
+        },
+        {
+          "type": "shell",
+          "name": "preview serves",
+          "script": "test \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PREVIEW_PORT/)\" = 200"
+        }
+      ]
+    },
+    {
+      "id": "big-file",
+      "tags": [
+        "build",
+        "screen"
+      ],
+      "workspace": true,
+      "message": "Build a single-page periodic table: one HTML file with all 118 elements in a JavaScript data array (atomic number, symbol, name, group, period), laid out in the standard grid, with a search box that highlights matches. Serve it on the preview.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "all 118 elements",
+          "script": "for e in Hydrogen Neon Iron Tungsten Oganesson Tennessine Livermorium Nihonium; do grep -rqsi \"$e\" --include=*.html --include=*.js --exclude-dir=node_modules . || exit 1; done"
+        },
+        {
+          "type": "shell",
+          "name": "preview serves",
+          "script": "test \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PREVIEW_PORT/)\" = 200"
+        }
+      ]
+    },
+    {
+      "id": "data-summary",
+      "tags": [
+        "build"
+      ],
+      "workspace": true,
+      "message": "Generate sales.csv with 1,000 rows (date, region from North/South/East/West, units, unit_price) using numpy with seed 42. Then with pandas write summary.json mapping each region to its total revenue (units × unit_price), rounded to 2 decimals.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "csv rows",
+          "script": "test $(wc -l < sales.csv) -ge 1000"
+        },
+        {
+          "type": "shell",
+          "name": "summary matches csv",
+          "script": "python3 -c \"import json,pandas as p;d=p.read_csv('sales.csv');s=json.load(open('summary.json'));t=(d.units*d.unit_price).groupby(d.region).sum().round(2);assert set(s)==set(t.index)=={'North','South','East','West'};assert all(abs(s[k]-t[k])<0.01 for k in s)\""
+        }
+      ]
+    },
+    {
+      "id": "rust-cli",
+      "tags": [
+        "build"
+      ],
+      "workspace": true,
+      "message": "Create a Rust binary crate called fizz that prints FizzBuzz for 1 to 100, with the logic in a function that has unit tests. Make sure cargo test passes.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "cargo test",
+          "script": "d=$(dirname $(ls Cargo.toml fizz/Cargo.toml 2>/dev/null | head -1)); cd \"$d\" && cargo test -q >/dev/null 2>&1"
+        },
+        {
+          "type": "shell",
+          "name": "output",
+          "script": "d=$(dirname $(ls Cargo.toml fizz/Cargo.toml 2>/dev/null | head -1)); cd \"$d\" && cargo run -q 2>/dev/null | sed -n 15p | grep -qx FizzBuzz"
+        }
+      ]
+    },
+    {
+      "id": "go-health",
+      "tags": [
+        "build"
+      ],
+      "workspace": true,
+      "message": "Write a Go HTTP server with GET /health returning {\"ok\":true} and GET /time returning the current UTC time in RFC 3339 as JSON. Keep it running on the preview.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "health",
+          "script": "curl -sf http://127.0.0.1:$PREVIEW_PORT/health | grep -q true"
+        },
+        {
+          "type": "shell",
+          "name": "time",
+          "script": "curl -sf http://127.0.0.1:$PREVIEW_PORT/time | grep -qE '20[0-9]{2}-[0-9]{2}-[0-9]{2}T'"
+        }
+      ]
+    },
+    {
+      "id": "node-tests",
+      "tags": [
+        "build"
+      ],
+      "workspace": true,
+      "message": "Create a small Node.js library slugify.js exporting slugify(text): lowercase, accents removed, anything that isn't a letter or digit becomes one hyphen, no leading or trailing hyphens. Add tests with node:test in slugify.test.js covering at least five cases, and make them pass with node --test.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "tests pass",
+          "script": "node --test >/dev/null 2>&1"
+        },
+        {
+          "type": "shell",
+          "name": "behaviour",
+          "script": "node -e \"const m=require('./slugify.js');const f=m.slugify||m.default||m;if(f('  Crème Brûlée -- Recipe! ')!=='creme-brulee-recipe')process.exit(1)\""
+        }
+      ]
+    },
+    {
+      "id": "two-step",
+      "tags": [
+        "build"
+      ],
+      "workspace": true,
+      "message": "Build a Markdown notes page: a textarea on the left and the rendered HTML on the right, updating as you type. Serve it on the preview.",
+      "then": "Now save the notes in localStorage so they come back after a reload, and add a word count under the textarea.",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "shell",
+          "name": "uses localStorage",
+          "script": "grep -rqs localStorage --include=*.html --include=*.js --include=*.jsx --include=*.ts --include=*.tsx --exclude-dir=node_modules ."
+        },
+        {
+          "type": "shell",
+          "name": "preview serves",
+          "script": "test \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PREVIEW_PORT/)\" = 200"
+        }
+      ]
+    },
+    {
+      "id": "agents-review",
+      "tags": [
+        "agents"
+      ],
+      "message": "Use worker agents, in parallel, to each review one of these functions for bugs, then give me one combined list.\n\n```python\ndef chunk(xs, n):\n    return [xs[i:i+n] for i in range(0, len(xs) - n, n)]\n\ndef mean(xs):\n    return sum(xs) / len(xs) if xs else 0\n\ndef clamp(x, lo, hi):\n    return max(hi, min(lo, x))\n```",
+      "checks": [
+        {
+          "type": "state",
+          "is": "completed"
+        },
+        {
+          "type": "reply_regex",
+          "pattern": "(?is)(chunk|range).*(clamp|max|min)|(clamp|max|min).*(chunk|range)"
+        }
+      ]
+    }
+  ]
+}

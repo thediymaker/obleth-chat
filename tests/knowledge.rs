@@ -2167,9 +2167,11 @@ async fn changing_the_embedding_model_reindexes_everything(pool: PgPool) {
     assert_eq!(changed["reindexed"], true);
     assert_eq!(changed["effective"]["model"], "fixture-embed-2");
     assert_eq!(
-        changed["effective"]["queryPrefix"], "q: ",
-        "unchanged settings keep their default"
+        changed["effective"]["queryPrefix"], "",
+        "the default model's prefix doesn't carry over to a model Chat doesn't know"
     );
+    assert_eq!(changed["prefixes"]["fixture-embed"]["queryPrefix"], "q: ");
+    assert_eq!(changed["prefixes"]["fixture-embed-2"]["documentPrefix"], "");
     assert_eq!(
         settled(&f.app, &collection, &admin).await[0]["status"],
         "ready"

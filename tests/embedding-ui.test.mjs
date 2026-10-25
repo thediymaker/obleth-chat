@@ -6,6 +6,10 @@ const defaults = { model: 'qwen3-embedding-8b', queryPrefix: 'Instruct: find\nQu
 const settings = {
   chosen: { model: null, queryPrefix: null, documentPrefix: null },
   defaults, effective: defaults, models: ['embeddinggemma-2', 'qwen3-embedding-8b'],
+  prefixes: {
+    'qwen3-embedding-8b': { queryPrefix: defaults.queryPrefix, documentPrefix: '' },
+    'embeddinggemma-2': { queryPrefix: 'task: search result | query: ', documentPrefix: 'title: none | text: ' },
+  },
   index: { documents: 12, pendingDocuments: 0, savedItems: 3, pendingSavedItems: 0 },
 };
 
@@ -33,7 +37,29 @@ test('changing the embedding model re-indexes only after confirmation', async ()
   assert.equal(f.requests.length, 0);
   assert.match(f.dialogs[0].body, /index all 12 documents and 3 saved items again with embeddinggemma-2/);
   await f.admin.actions['admin-confirm']();
-  assert.deepEqual(f.requests[0].body, { model: 'embeddinggemma-2', queryPrefix: 'task: search result | query: ', documentPrefix: 'title: none | text: ' });
+  // The model's own prefixes are stored as defaults, so they follow the model.
+  assert.deepEqual(f.requests[0].body, { model: 'embeddinggemma-2', queryPrefix: null, documentPrefix: null });
+});
+
+test('a custom prefix is kept as a choice', async () => {
+  const f = await fixture({ 'embedding-model': 'embeddinggemma-2', 'embedding-query': 'task: question answering | query: ', 'embedding-document': 'title: none | text: ' });
+  await f.admin.submit(f.form);
+  await f.admin.actions['admin-confirm']();
+  assert.deepEqual(f.requests[0].body, { model: 'embeddinggemma-2', queryPrefix: 'task: question answering | query: ', documentPrefix: null });
+});
+
+test('choosing another model fills in its prefixes unless they were edited', async () => {
+  const f = await fixture({});
+  const boxes = { 'embedding-query': { value: defaults.queryPrefix }, 'embedding-document': { value: '' } };
+  const select = { id: 'embedding-model', value: 'embeddinggemma-2', dataset: { previous: 'qwen3-embedding-8b' }, form: { elements: { namedItem: id => boxes[id] } } };
+  f.admin.input({ target: select });
+  assert.equal(boxes['embedding-query'].value, 'task: search result | query: ');
+  assert.equal(boxes['embedding-document'].value, 'title: none | text: ');
+  boxes['embedding-query'].value = 'my own: ';
+  select.value = 'qwen3-embedding-8b';
+  f.admin.input({ target: select });
+  assert.equal(boxes['embedding-query'].value, 'my own: ');
+  assert.equal(boxes['embedding-document'].value, '');
 });
 
 test('values equal to the defaults follow the defaults without a re-index warning', async () => {

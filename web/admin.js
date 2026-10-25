@@ -84,7 +84,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       : `${count(i.documents, 'document')} and ${count(i.savedItems, 'saved item')} are indexed with ${current}.`;
     const option = id => `<option value="${esc(id)}" ${id === current ? 'selected' : ''}>${esc(id)}${id === e.defaults.model ? ' (default)' : ''}</option>`;
     const prefix = (id, label, value, help) => field(id, label, `<textarea class="form-control" id="${id}" name="${id}" rows="2" maxlength="500" spellcheck="false">${esc(value)}</textarea>`, help);
-    return `<section class="setting-card card embedding-card"><div class="spread"><h2>Knowledge search</h2>${badge(i.pendingDocuments || i.pendingSavedItems ? 'Indexing' : 'Up to date')}</div><p>Chat turns documents and saved items into vectors with an embedding model, so search can find passages by meaning.</p><p class="inline-note">${esc(status)}</p><form id="admin-embedding-form">${field('embedding-model', 'Embedding model', `<select class="form-control" id="embedding-model" name="embedding-model">${models.map(option).join('')}</select>`, e.models ? 'Embedding models your gateway offers.' : 'The gateway could not list its embedding models, so only the current and default models are shown.')}${prefix('embedding-query', 'Search prefix', e.effective.queryPrefix, 'Put before each search. Use the text from the model’s documentation.')}${prefix('embedding-document', 'Passage prefix', e.effective.documentPrefix, 'Put before each passage and saved item. Often empty.')}<p class="inline-note retention-note">Changing the model or a prefix makes Chat index every document and saved item again: vectors from different models can’t be compared. Until that finishes, search finds only what has been redone, and a large library takes a while and uses the gateway’s embedding capacity.</p><div class="form-error" role="alert"></div><div class="modal-actions">${btn('Use defaults', 'admin-embedding-defaults', { tone: 'small' })}<button class="btn primary" type="submit">Save</button></div></form></section>`;
+    return `<section class="setting-card card embedding-card"><div class="spread"><h2>Knowledge search</h2>${badge(i.pendingDocuments || i.pendingSavedItems ? 'Indexing' : 'Up to date')}</div><p>Chat turns documents and saved items into vectors with an embedding model, so search can find passages by meaning.</p><p class="inline-note">${esc(status)}</p><form id="admin-embedding-form">${field('embedding-model', 'Embedding model', `<select class="form-control" id="embedding-model" name="embedding-model" data-previous="${esc(current)}">${models.map(option).join('')}</select>`, e.models ? 'Embedding models your gateway offers.' : 'The gateway could not list its embedding models, so only the current and default models are shown.')}${prefix('embedding-query', 'Search prefix', e.effective.queryPrefix, 'Put before each search. Chat fills in the prefix the model’s makers publish; change it only if the model’s documentation says otherwise.')}${prefix('embedding-document', 'Passage prefix', e.effective.documentPrefix, 'Put before each passage and saved item. Many models use none.')}<p class="inline-note retention-note">Changing the model or a prefix makes Chat index every document and saved item again: vectors from different models can’t be compared. Until that finishes, search finds only what has been redone, and a large library takes a while and uses the gateway’s embedding capacity.</p><div class="form-error" role="alert"></div><div class="modal-actions">${btn('Use defaults', 'admin-embedding-defaults', { tone: 'small' })}<button class="btn primary" type="submit">Save</button></div></form></section>`;
   }
   // Everything else about the installation is set where Chat runs, so the tab points there.
   function system() {
@@ -145,10 +145,12 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     if (form.id === 'admin-models-search-form') { local.query = getValue(form, 'query').trim(); render(); return; }
     if (form.id === 'admin-embedding-form') {
       const e = local.embedding, d = e.defaults;
-      // A value equal to the default follows the default, including later changes to it.
+      // A value equal to the default follows the default: the environment's model, and
+      // the chosen model's own prefixes.
       const pick = (value, fallback) => value === fallback ? null : value;
       const next = { model: getValue(form, 'embedding-model'), queryPrefix: getValue(form, 'embedding-query').replace(/\r\n/g, '\n'), documentPrefix: getValue(form, 'embedding-document').replace(/\r\n/g, '\n') };
-      await saveEmbedding({ model: pick(next.model, d.model), queryPrefix: pick(next.queryPrefix, d.queryPrefix), documentPrefix: pick(next.documentPrefix, d.documentPrefix) }, next);
+      const own = e.prefixes?.[next.model] || { queryPrefix: '', documentPrefix: '' };
+      await saveEmbedding({ model: pick(next.model, d.model), queryPrefix: pick(next.queryPrefix, own.queryPrefix), documentPrefix: pick(next.documentPrefix, own.documentPrefix) }, next);
       return;
     }
     if (form.id === 'admin-retention-form') {
@@ -185,6 +187,18 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       await api.request(`/api/admin/models/${encodeURIComponent(form.dataset.id)}`, { method: 'PUT', body }); const catalog = await api.request('/api/models'); state.models = catalog.models || []; onCatalogChanged?.(); close(); await load(); toast('Model policy saved');
     }
   }
-  function input(event) { if (event.target.id === 'model-visibility') document.querySelector('.model-visibility-groups').hidden = event.target.value !== 'groups'; }
+  // A new model brings its own prefixes, unless the ones shown were changed by hand.
+  function modelPrefixes(select) {
+    const prefixes = local.embedding?.prefixes || {}, before = prefixes[select.dataset.previous] || {}, after = prefixes[select.value] || { queryPrefix: '', documentPrefix: '' };
+    for (const [id, key] of [['embedding-query', 'queryPrefix'], ['embedding-document', 'documentPrefix']]) {
+      const box = select.form?.elements.namedItem(id);
+      if (box && box.value.replace(/\r\n/g, '\n') === (before[key] ?? '')) box.value = after[key];
+    }
+    select.dataset.previous = select.value;
+  }
+  function input(event) {
+    if (event.target.id === 'model-visibility') document.querySelector('.model-visibility-groups').hidden = event.target.value !== 'groups';
+    if (event.target.id === 'embedding-model') modelPrefixes(event.target);
+  }
   return { view, load, clear, actions, submit, input };
 }

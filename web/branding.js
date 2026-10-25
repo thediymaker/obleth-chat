@@ -74,8 +74,12 @@ export function normalizeBranding(value) {
   const input = plainObject(value);
   const configuredIcons = plainObject(input.icons);
   const defaultTheme = plainObject(input.appearance).defaultTheme;
+  // A line break stacks the name beside the logo; everywhere else it reads as one line.
+  const nameLines = text(input.siteName, defaults.siteName).split(/\r\n?|\n/).map(line => line.trim()).filter(Boolean);
+  const siteNameLines = nameLines.length ? nameLines : [defaults.siteName];
   return {
-    siteName: text(input.siteName, defaults.siteName).trim() || defaults.siteName,
+    siteName: siteNameLines.join(' '),
+    siteNameLines,
     siteSubtitle: text(input.siteSubtitle, defaults.siteSubtitle),
     assistantName: text(input.assistantName, defaults.assistantName).trim() || defaults.assistantName,
     description: text(input.description, defaults.description),
@@ -104,7 +108,7 @@ export function brandLogo(config = branding) {
 }
 
 export function brand(config = branding) {
-  return `<a class="brand" href="#chat" aria-label="${esc(config.siteName)} home">${brandLogo(config)}<div class="brand-name">${esc(config.siteName)}${config.siteSubtitle ? `<span>${esc(config.siteSubtitle)}</span>` : ''}</div></a>`;
+  return `<a class="brand" href="#chat" aria-label="${esc(config.siteName)} home">${brandLogo(config)}<div class="brand-name"><div class="brand-title">${config.siteNameLines.map(esc).join('<br>')}</div>${config.siteSubtitle ? `<span>${esc(config.siteSubtitle)}</span>` : ''}</div></a>`;
 }
 
 export function siteFooter(config = branding, year = new Date().getFullYear()) {

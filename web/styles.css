@@ -105,6 +105,7 @@ code{font-size:.9em}
 .brand-name{display:flex;flex-direction:column;font-size:var(--fs-base);font-weight:600;letter-spacing:-.2px;line-height:1.2}
 .brand-name span{font-size:var(--fs-2xs);font-weight:400;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .brand-name{min-width:0;overflow-wrap:anywhere}
+.brand-title{line-height:1.15}
 .brand-logo{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;max-width:72px;height:32px}
 .brand-logo img,.brand .brand-logo img{width:auto;height:32px;max-width:72px;object-fit:contain}
 .brand-logo .brand-logo-light{display:none}
@@ -603,6 +604,7 @@ dialog::backdrop{background:var(--backdrop);backdrop-filter:blur(3px)}
 .auth-layout{min-height:100dvh;display:grid;grid-template-columns:1.15fr 1fr}
 .auth-story{min-height:100dvh;padding:0 40px 0;background:radial-gradient(ellipse at 50% 65%,rgb(var(--surface-rgb) / 3%),transparent 58%),var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column}
 .auth-story .brand{padding:0;margin:0;height:72px;align-self:flex-start;border:0}
+.auth-story .brand-name{font-size:16px}
 .auth-story-copy{max-width:490px;margin:auto;position:relative;padding:60px 0;width:100%;overflow-wrap:anywhere}
 .auth-story-copy h1{font-size:56px;line-height:1.12;letter-spacing:-2.4px}
 .auth-story-copy>p{color:var(--muted);font-size:15px;margin-top:22px;line-height:1.8}

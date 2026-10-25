@@ -50,6 +50,18 @@ test('branding text is escaped and configured line breaks are preserved', () => 
   assert.equal(pageTitle('', config), 'Acme <Chat>');
 });
 
+test('a line break in the site name stacks it beside the logo and nowhere else', () => {
+  const config = normalizeBranding({ siteName: ' Research \n Computing <Lab>\n\n' });
+  assert.deepEqual(config.siteNameLines, ['Research', 'Computing <Lab>']);
+  assert.equal(config.siteName, 'Research Computing <Lab>');
+  const html = brand(config);
+  assert.match(html, /<div class="brand-title">Research<br>Computing &lt;Lab&gt;<\/div>/);
+  assert.match(html, /aria-label="Research Computing &lt;Lab&gt; home"/);
+  assert.match(siteFooter(config, 2026), /© 2026 Research Computing &lt;Lab&gt;/);
+  assert.equal(pageTitle('', config), 'Research Computing <Lab>');
+  assert.equal(normalizeBranding({ siteName: '\n \n' }).siteName, 'Obleth Chat');
+});
+
 test('logo removal and light/dark asset fallback work without a mandatory mark', () => {
   const noLogo = normalizeBranding({ logo: { light: '', dark: '' } });
   assert.equal(brandLogo(noLogo), '');

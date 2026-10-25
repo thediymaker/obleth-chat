@@ -2,6 +2,8 @@
 // This file is served to every visitor. Never put passwords or secrets here.
 // Text is plain text, not HTML. Use \n for a line break; '' hides optional copy.
 window.OblethChatConfig = {
+  // \n stacks a long name beside the logo, e.g. 'Research\nComputing'; the
+  // browser title, footer and sign-in text show it on one line.
   siteName: 'Obleth Chat',
   siteSubtitle: '',
   assistantName: 'Assistant',

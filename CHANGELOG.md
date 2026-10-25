@@ -2,6 +2,32 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.4.1
+
+Adds personal API tokens and an MCP endpoint, so an MCP client such as Claude Code can start and follow your chats, and fixes how replies recover from gateway and connection errors. Migration `040` runs when Chat starts.
+
+**New**
+
+- **API access.** In **Settings › Personal › API access**, make a token for your own MCP client. It connects to `<your Chat>/mcp` and can list models, start chats, send the next message, check on a running chat and stop it. A token is shown once, stored only as a hash, lasts up to 30 days, reaches only its owner's chats and can't change the account.
+- **Stacked site name.** A line break in `siteName` (`'Research\nComputing'`) stacks the name beside the logo. The browser title, footer and sign-in text keep it on one line. The site name is a little larger on the sign-in page.
+- **Work card.** The live card stays one size and shows the file being written, a command's output or the thinking. Cluster steps go through Inspect, Approve, Apply and Verify (Submit, Watch and Results on Slurm), and worker agents show as a graph of the lead, each worker and their reports. The thinking row stays closed until you open it.
+
+**Fixes**
+
+- A reply carries on when the connection to the model drops partway through a step, and a step is tried again when the gateway reports a server-side failure. When the gateway stops a reply with an error, Chat says why.
+- Tool calls that a model writes as text are run, including Llama 4's pythonic calls and calls whose JSON holds raw newlines.
+- A tool step that thinks for too long without writing is stopped and asked again at low effort.
+- Models ask their questions through `ask_user` rather than in the reply, and ask for a workspace instead of saying they can't run code. A workspace reply that changed files and ran nothing since checks its work before answering.
+- The Kubernetes example creates the namespace before its Secrets and shows where `OBLETH_CHAT_TRUSTED_PROXY` goes.
+
+**Images**
+
+- `ghcr.io/thediymaker/obleth-chat/chat:v0.4.1`
+- `ghcr.io/thediymaker/obleth-chat/workspace:v0.4.1`
+- `ghcr.io/thediymaker/obleth-chat/browser:v0.4.1`
+
+Pin them by digest in production.
+
 ## v0.4.0
 
 The first release of obleth-chat: a self-hosted chat app for the people who share an [obleth](https://github.com/thediymaker/obleth-gateway) gateway. Each person signs in with their own account, their chats are stored in your Postgres, and every request reaches the gateway as that person, so fair share, budgets and usage apply per person without a shared API key.

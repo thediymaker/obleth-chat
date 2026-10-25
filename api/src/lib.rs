@@ -650,6 +650,12 @@ const KEPT_STEPS: usize = 150;
 const MAX_CUTS: u32 = 3;
 /// Steps in a row that may lose their connection to the model and be tried again.
 const MAX_DROPS: u32 = 2;
+/// Bytes a tool step may think before it writes anything. Past it, the step is
+/// stopped and tried again at low effort, up to MAX_OVERTHINKS times in a row:
+/// some models plan a whole program in their thinking and never start writing it.
+const STEP_THINKING_BYTES: usize = 64 * 1024;
+const MAX_OVERTHINKS: u32 = 2;
+const OVERTHOUGHT: &str = "[Chat: you thought for a long time without writing anything, so that step was stopped. Stop planning everything up front. Take the next small step now, such as writing the first part of a file with write_file, then continue in parts and check as you go.]";
 const STEPS_DROPPED: &str = "[Earlier steps of this turn were dropped to save context:";
 const ARGUMENTS_OMITTED: &str =
     r#"{"omitted":"Earlier arguments omitted to save context. The tool result still applies."}"#;
@@ -1277,6 +1283,7 @@ async fn run_generation(
         let mut checkpoints = 0;
         let mut cuts = 0;
         let mut drops = 0;
+        let mut overthinks = 0;
         // Files changed since the model last ran something, and whether Chat has
         // already asked it to check its work this turn.
         let mut unchecked = false;
@@ -1287,6 +1294,8 @@ async fn run_generation(
             let step_start = content.len();
             // Where this step's thinking starts, in UTF-16 units as the browser counts.
             let thought_from = reasoning_content.encode_utf16().count();
+            let reasoning_start = reasoning_content.len();
+            let mut overthought = false;
             let round_began = Instant::now();
             if steps > 1 && tool_turn {
                 // Notes the person sent while the model worked, read at the step boundary.
@@ -1467,6 +1476,16 @@ async fn run_generation(
                             }
                             if channel == "reasoning" {
                                 reasoning_content.push_str(delta);
+                                if tool_turn
+                                    && reasoning_content.len() - reasoning_start
+                                        > STEP_THINKING_BYTES
+                                    && content.len() == step_start
+                                    && calls.is_empty()
+                                {
+                                    emit(&mut tx, channel, json!({"content":delta}));
+                                    overthought = true;
+                                    break 'outer;
+                                }
                             } else {
                                 content.push_str(delta);
                             }
@@ -1480,6 +1499,23 @@ async fn run_generation(
                 let entry = json!({"id":format!("thought-{steps}"),"kind":"thought","from":thought_from,"to":thought_to,"durationMs":round_began.elapsed().as_millis() as u64,"status":"completed"});
                 record(&mut activity, &entry, true);
                 emit(&mut tx, "tool", entry);
+            }
+            if overthought {
+                if overthinks >= MAX_OVERTHINKS {
+                    return Err("The model kept thinking without writing anything. Try a lower thinking effort or another model.".to_string());
+                }
+                overthinks += 1;
+                if payload.get("reasoning_effort").is_some() {
+                    payload["reasoning_effort"] = json!("low");
+                }
+                payload["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"role":"user","content":OVERTHOUGHT}));
+                let entry = json!({"id":format!("overthought-{steps}"),"tool":"thinking_limit","summary":"Thought too long without writing; Chat asked for a smaller step","detail":format!("The step thought for over {} KB without writing anything, so Chat stopped it and asked again at low effort.", STEP_THINKING_BYTES / 1024),"status":"error","startedAt":chrono::Utc::now()});
+                record(&mut activity, &entry, true);
+                emit(&mut tx, "tool", entry);
+                continue;
             }
             // The stream broke off before the step finished. Nothing in it ran, so the
             // model carries on from what it had written; what the person saw stays.
@@ -1586,6 +1622,7 @@ async fn run_generation(
                 emit(&mut tx, "tool", entry);
                 continue;
             }
+            overthinks = 0;
             if calls.is_empty() || !tool_turn {
                 break;
             }

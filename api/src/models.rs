@@ -400,6 +400,25 @@ pub async fn worker_models(pool: &PgPool, user: &Identity) -> Vec<(String, Strin
     .unwrap_or_default()
 }
 
+/// The person's saved defaults, for a chat started from outside the browser.
+pub async fn preferences(pool: &PgPool, user_id: Uuid) -> Preferences {
+    raw_preferences(pool, user_id)
+        .await
+        .ok()
+        .and_then(|raw| preferences_value(raw).ok())
+        .unwrap_or_default()
+}
+/// The models a person may pick, Auto first, as the model chooser lists them.
+pub async fn choices(
+    pool: &PgPool,
+    gateway: &Gateway,
+    user: &Identity,
+) -> Result<Vec<ModelView>, ApiError> {
+    let models = effective_catalog(pool, gateway, user, false).await?;
+    let mut result: Vec<ModelView> = auto_model(&models).into_iter().collect();
+    result.extend(models);
+    Ok(result)
+}
 async fn raw_preferences(pool: &PgPool, user_id: Uuid) -> Result<Value, ApiError> {
     Ok(
         sqlx::query_scalar::<_, Value>("SELECT preferences FROM user_preferences WHERE user_id=$1")
@@ -578,9 +597,7 @@ async fn catalog(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let user = state.auth.require(&headers, false).await?;
-    let models = effective_catalog(&state.store.pool, gateway(&state)?, &user, false).await?;
-    let mut result: Vec<ModelView> = auto_model(&models).into_iter().collect();
-    result.extend(models.iter().cloned());
+    let result = choices(&state.store.pool, gateway(&state)?, &user).await?;
     Ok(Json(json!({"models":result})))
 }
 async fn admin_catalog(

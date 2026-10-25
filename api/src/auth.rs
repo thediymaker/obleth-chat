@@ -45,6 +45,7 @@ mod group_policy;
 mod oidc;
 #[cfg(test)]
 mod tests;
+pub mod tokens;
 
 #[derive(Clone)]
 pub struct AuthConfig {
@@ -348,6 +349,7 @@ impl Auth {
             .route("/api/auth/oidc/login", get(oidc::login))
             .route("/api/auth/oidc/callback", get(oidc::callback))
             .merge(accounts::router())
+            .merge(tokens::router())
             .with_state(self.clone())
     }
 
@@ -1082,6 +1084,7 @@ async fn change_password(
         .bind(identity.id)
         .execute(&mut *tx)
         .await?;
+    tokens::revoke_all(&mut tx, identity.id).await?;
     let token = random_token();
     let lifetime = auth.config.session_hours as i64 * 3600;
     auth.insert_session(&mut tx, identity.id, &token, lifetime, &headers)
@@ -1250,6 +1253,7 @@ async fn update_user(
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        tokens::revoke_all(&mut tx, id).await?;
         sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
             .bind(id)
             .execute(&mut *tx)
@@ -1289,6 +1293,7 @@ async fn reset_password(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    tokens::revoke_all(&mut tx, id).await?;
     sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
         .bind(id)
         .execute(&mut *tx)

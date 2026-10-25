@@ -171,6 +171,7 @@ async fn admin_revoke_sessions(
         .execute(&mut *tx)
         .await?
         .rows_affected();
+    super::tokens::revoke_all(&mut tx, id).await?;
     record_audit(
         &mut tx,
         Some(admin.id),

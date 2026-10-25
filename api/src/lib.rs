@@ -12,6 +12,7 @@ pub mod groups;
 pub mod images;
 pub mod knowledge;
 pub mod lifecycle;
+pub mod mcp;
 pub mod metrics;
 pub mod models;
 pub mod operations;
@@ -109,6 +110,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let connections = connections::router(state.clone());
     let steering = steer::router(state.clone());
     let knowledge = knowledge::router(state.clone());
+    let mcp = mcp::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
     let _ = CSP.set(content_security_policy(sandboxes.as_ref()));
@@ -162,6 +164,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(connections)
         .merge(steering)
         .merge(knowledge)
+        .merge(mcp)
         .fallback_service(static_files(static_dir))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn(security_headers))
@@ -275,7 +278,7 @@ async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Val
 async fn jwks(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(s.gateway.as_ref().ok_or_else(not_configured)?.jwks()))
 }
-fn not_configured() -> ApiError {
+pub(crate) fn not_configured() -> ApiError {
     ApiError(
         StatusCode::SERVICE_UNAVAILABLE,
         "Gateway integration is not configured".into(),
@@ -859,7 +862,7 @@ fn emit(tx: &mut Option<mpsc::Sender<Result<Event, Infallible>>>, name: &str, da
 }
 /// Turns on a chat's workspace from within a turn, as its Workspace button does: a
 /// project chat's starts with the project's code. Returns it running.
-async fn launch_workspace(
+pub(crate) async fn launch_workspace(
     s: &AppState,
     user: &Identity,
     chat: Uuid,

@@ -650,6 +650,17 @@ const KEPT_STEPS: usize = 150;
 const MAX_CUTS: u32 = 3;
 /// Steps in a row that may lose their connection to the model and be tried again.
 const MAX_DROPS: u32 = 2;
+
+/// Whether a stream's error event reports a server-side failure (a 5xx code),
+/// which is worth trying again, rather than a problem with the request.
+fn server_failure(error: &Value) -> bool {
+    let code = match &error["code"] {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    };
+    code.is_some_and(|c| (500..600).contains(&c))
+}
 /// Bytes a tool step may think before it writes anything. Past it, the step is
 /// stopped and tried again at low effort, up to MAX_OVERTHINKS times in a row:
 /// some models plan a whole program in their thinking and never start writing it.
@@ -1600,6 +1611,15 @@ async fn run_generation(
                         .map_err(|_| "Gateway returned an invalid stream event".to_string())?;
                     if v.get("error").is_some() {
                         let why = gateway::reason(event.as_bytes());
+                        // A server-side failure partway through, such as the upstream
+                        // connection breaking, is a drop: the step is tried again.
+                        if server_failure(&v["error"]) {
+                            tracing::warn!(
+                                reason = why.as_deref().unwrap_or(""),
+                                "gateway stream broke off"
+                            );
+                            break 'outer;
+                        }
                         tracing::warn!(
                             reason = why.as_deref().unwrap_or(""),
                             "gateway reported an error during generation"
@@ -2685,6 +2705,21 @@ async fn run_generation(
 #[cfg(test)]
 mod draft_tests {
     use super::*;
+
+    #[test]
+    fn only_server_side_stream_errors_are_tried_again() {
+        assert!(server_failure(
+            &json!({"message":"upstream stream ended","code":502})
+        ));
+        assert!(server_failure(
+            &json!({"message":"overloaded","code":"503"})
+        ));
+        assert!(!server_failure(
+            &json!({"message":"bad tool schema","code":400})
+        ));
+        assert!(!server_failure(&json!({"message":"no code"})));
+        assert!(!server_failure(&json!("boom")));
+    }
 
     #[test]
     fn tool_calls_written_as_text_run_when_they_name_offered_tools() {

@@ -165,7 +165,7 @@ impl Gateway {
             .await
             .map_err(|_| unavailable())?;
         if !response.status().is_success() {
-            return Err(upstream_error(response.status()));
+            return Err(upstream_error(response).await);
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -212,7 +212,7 @@ impl Gateway {
             .await
             .map_err(|_| unavailable())?;
         if !response.status().is_success() {
-            return Err(upstream_error(response.status()));
+            return Err(upstream_error(response).await);
         }
         let data: Value = response.json().await.map_err(|_| unavailable())?;
         let mut rows: Vec<(u64, Vec<f32>)> = data["data"]
@@ -256,7 +256,7 @@ impl Gateway {
             .await
             .map_err(|_| unavailable())?;
         if !response.status().is_success() {
-            return Err(upstream_error(response.status()));
+            return Err(upstream_error(response).await);
         }
         if !response
             .headers()
@@ -290,7 +290,7 @@ impl Gateway {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(upstream_error(response.status()));
+            return Err(upstream_error(response).await);
         }
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
@@ -421,7 +421,10 @@ pub fn unavailable() -> ApiError {
         "The gateway could not complete this request".into(),
     )
 }
-fn upstream_error(status: StatusCode) -> ApiError {
+/// The gateway's reason, when it gave one, follows Chat's own words, so a person can
+/// tell a retired model from a bad request. It is cut short and kept to one line.
+async fn upstream_error(response: Response) -> ApiError {
+    let status = response.status();
     tracing::warn!(status = status.as_u16(), "gateway request failed");
     let message = match status.as_u16() {
         401 => "Gateway rejected the Chat identity. Check its trusted issuer configuration.",
@@ -429,14 +432,39 @@ fn upstream_error(status: StatusCode) -> ApiError {
         429 => "Your gateway quota or queue limit was reached. Try again later.",
         _ => "The gateway could not complete this request",
     };
+    let reason = match status.as_u16() {
+        401 | 403 => None,
+        _ => tokio::time::timeout(Duration::from_secs(5), response.bytes())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|body| reason(&body)),
+    };
     ApiError(
         if status.as_u16() == 429 {
             StatusCode::TOO_MANY_REQUESTS
         } else {
             StatusCode::BAD_GATEWAY
         },
-        message.into(),
+        match reason {
+            Some(reason) => format!("{message}: {reason}"),
+            None => message.into(),
+        },
     )
+}
+/// `error.message` (or a string `error`) from an OpenAI-style error body.
+fn reason(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(&body[..body.len().min(64 * 1024)]).ok()?;
+    let text = value["error"]["message"]
+        .as_str()
+        .or_else(|| value["error"].as_str())
+        .or_else(|| value["message"].as_str())?;
+    let line: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(300)
+        .collect();
+    Some(line.trim().trim_end_matches('.').to_owned()).filter(|l| !l.is_empty())
 }
 
 /// Only provider-supplied text belongs in the visible reasoning channel. Prefer

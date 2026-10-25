@@ -1164,7 +1164,8 @@ pub const RECORD: &str = "[Chat's record, not part of the reply: tool steps";
 /// Removes copies of replay notes, current or older wording, that the model wrote itself.
 pub fn strip_records(content: &str) -> String {
     let markers = [
-        RECORD,
+        // Also catches a model's own variations, such as "...: tool call ...".
+        "[Chat's record, not part of the reply",
         "[Tool steps in this reply",
         "[This reply stopped before finishing",
     ];

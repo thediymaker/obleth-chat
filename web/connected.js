@@ -806,6 +806,8 @@ export async function startConnected(capabilities) {
         // Auto: the gateway says which model it chose once the reply starts.
         if (event.event === 'model') { assistant.settings = { ...assistant.settings, resolvedModel: event.data.model, auto: true }; }
         if (event.event === 'delta') { assistant.content += event.data.content || ''; assistant.status = 'streaming'; }
+        // Chat took tool calls the model wrote as text out of the reply.
+        if (event.event === 'content') { assistant.content = event.data.content || ''; }
         if (event.event === 'reasoning') { assistant.reasoningContent += event.data.content || ''; assistant.status = 'streaming'; assistant._draft = null; }
         browserView.observe(event, c.id);
         if (workspace.onEvent(event, assistant, c.id)) assistant.status = 'streaming';

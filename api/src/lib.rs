@@ -750,6 +750,95 @@ pub(crate) fn accumulate_tool_calls(
     Ok(())
 }
 
+/// Tool calls a model wrote as text because its server passed them through
+/// unparsed: Llama's `<function=name>{…}</function>`, Hermes and Qwen's
+/// `<tool_call>{…}</tool_call>`, Mistral's `[TOOL_CALLS][…]` and Llama 3's
+/// `<|python_tag|>{…}`. They count only when every one names an offered tool;
+/// returns the text without them, and the calls.
+pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String, Vec<ToolCall>)> {
+    const MARKERS: [&str; 4] = [
+        "<function=",
+        "<tool_call>",
+        "[TOOL_CALLS]",
+        "<|python_tag|>",
+    ];
+    fn json_at(s: &str) -> Option<(Value, usize)> {
+        let lead = s.len() - s.trim_start().len();
+        let mut values = serde_json::Deserializer::from_str(&s[lead..]).into_iter::<Value>();
+        let value = values.next()?.ok()?;
+        Some((value, lead + values.byte_offset()))
+    }
+    fn named(value: &Value) -> Option<(String, Value)> {
+        let name = value["name"].as_str()?.to_owned();
+        let arguments = value
+            .get("arguments")
+            .or_else(|| value.get("parameters"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        Some((name, arguments))
+    }
+    let mut found: Vec<(String, Value)> = vec![];
+    let mut kept = String::new();
+    let mut rest = text;
+    while let Some((at, marker)) = MARKERS
+        .iter()
+        .filter_map(|m| rest.find(m).map(|i| (i, *m)))
+        .min_by_key(|(i, _)| *i)
+    {
+        let after = &rest[at + marker.len()..];
+        let parsed = match marker {
+            "<function=" => after.find('>').and_then(|close| {
+                let name = after[..close].trim().to_owned();
+                json_at(&after[close + 1..])
+                    .map(|(args, used)| (vec![(name, args)], close + 1 + used, Some("</function>")))
+            }),
+            "[TOOL_CALLS]" => json_at(after).map(|(value, used)| {
+                let items = match value {
+                    Value::Array(items) => items,
+                    one => vec![one],
+                };
+                (items.iter().filter_map(named).collect(), used, None)
+            }),
+            _ => json_at(after).map(|(value, used)| {
+                let closing = (marker == "<tool_call>").then_some("</tool_call>");
+                (named(&value).into_iter().collect(), used, closing)
+            }),
+        };
+        match parsed.filter(|(calls, _, _)| !calls.is_empty()) {
+            Some((calls, used, closing)) => {
+                kept.push_str(&rest[..at]);
+                let mut tail = &after[used..];
+                if let Some(end) = closing.and_then(|c| tail.trim_start().strip_prefix(c)) {
+                    tail = end;
+                }
+                found.extend(calls);
+                rest = tail;
+            }
+            None => {
+                kept.push_str(&rest[..at + marker.len()]);
+                rest = after;
+            }
+        }
+    }
+    kept.push_str(rest);
+    if found.is_empty() || found.iter().any(|(name, _)| !offered.contains(name)) {
+        return None;
+    }
+    let calls = found
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, arguments))| ToolCall {
+            id: format!("text_call_{i}"),
+            name,
+            arguments: match arguments {
+                Value::String(raw) => raw,
+                other => other.to_string(),
+            },
+        })
+        .collect();
+    Some((kept.trim().to_owned(), calls))
+}
+
 /// Lets a turn run for any number of steps: past KEPT_STEPS, the oldest step and
 /// the tool results and notes after it leave the request, and one note says so.
 fn drop_old_steps(payload: &mut Value) {
@@ -1056,8 +1145,18 @@ async fn run_generation(
     {
         preamble.push(prompt);
     }
-    if !preamble.is_empty() {
+    // Described only when the history holds one: some models otherwise write a note
+    // of their own in place of calling a tool.
+    let recalled = messages.iter().any(|m| {
+        m["role"] == "assistant"
+            && m["content"]
+                .as_str()
+                .is_some_and(|c| c.contains(store::RECORD))
+    });
+    if recalled {
         preamble.push(format!("Earlier replies in this conversation may end with a bracketed note that starts with \"{}\". Chat adds it so you remember which tools ran; you did not write it and the person does not see it. Never write such a note yourself: your tools report their own results.", store::RECORD));
+    }
+    if !preamble.is_empty() {
         if !parameters.system_prompt.is_empty() {
             preamble.push(parameters.system_prompt.clone());
         }
@@ -1445,6 +1544,20 @@ async fn run_generation(
                 }
             } else {
                 cuts = 0;
+            }
+            if calls.is_empty() && tool_turn {
+                let offered: Vec<String> = payload["tools"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t.pointer("/function/name")?.as_str().map(str::to_owned))
+                    .collect();
+                if let Some((text, found)) = text_tool_calls(&content[step_start..], &offered) {
+                    content.truncate(step_start);
+                    content.push_str(&text);
+                    calls = found;
+                    emit(&mut tx, "content", json!({"content":content}));
+                }
             }
             if calls.is_empty() || !tool_turn {
                 break;
@@ -2259,6 +2372,36 @@ async fn run_generation(
 #[cfg(test)]
 mod draft_tests {
     use super::*;
+
+    #[test]
+    fn tool_calls_written_as_text_run_when_they_name_offered_tools() {
+        let offered = vec!["delegate".to_string(), "write_file".to_string()];
+        let (text, calls) = text_tool_calls(
+            "Let me split this.\n<function=delegate>{\"tasks\": [{\"task\": \"a\"}]}</function>",
+            &offered,
+        )
+        .unwrap();
+        assert_eq!(text, "Let me split this.");
+        assert_eq!(calls[0].name, "delegate");
+        assert_eq!(calls[0].arguments, r#"{"tasks":[{"task":"a"}]}"#);
+        let (text, calls) = text_tool_calls(
+            "<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.txt\"}}\n</tool_call>",
+            &offered,
+        )
+        .unwrap();
+        assert_eq!((text.as_str(), calls.len()), ("", 1));
+        let (_, calls) = text_tool_calls(
+            r#"[TOOL_CALLS][{"name":"write_file","arguments":{"path":"a"}},{"name":"delegate","arguments":"{}"}]"#,
+            &offered,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].arguments, "{}");
+        // An unknown tool, prose that mentions the syntax, or broken JSON stays text.
+        assert!(text_tool_calls(r#"<function=rm_rf>{}</function>"#, &offered).is_none());
+        assert!(text_tool_calls("Models write <function=name> tags.", &offered).is_none());
+        assert!(text_tool_calls("<tool_call>{not json</tool_call>", &offered).is_none());
+    }
 
     #[test]
     fn a_long_turn_keeps_its_requests_bounded() {

@@ -1599,7 +1599,17 @@ async fn run_generation(
                     let v: Value = serde_json::from_str(&event)
                         .map_err(|_| "Gateway returned an invalid stream event".to_string())?;
                     if v.get("error").is_some() {
-                        return Err("Gateway reported an error during generation".to_string());
+                        let why = gateway::reason(event.as_bytes());
+                        tracing::warn!(
+                            reason = why.as_deref().unwrap_or(""),
+                            "gateway reported an error during generation"
+                        );
+                        return Err(match why {
+                            Some(why) => {
+                                format!("Gateway reported an error during generation: {why}")
+                            }
+                            None => "Gateway reported an error during generation".to_string(),
+                        });
                     }
                     if resolved.model == "auto" && served.is_none() {
                         if let Some(model) = v

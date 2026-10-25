@@ -453,7 +453,7 @@ async fn upstream_error(response: Response) -> ApiError {
     )
 }
 /// `error.message` (or a string `error`) from an OpenAI-style error body.
-fn reason(body: &[u8]) -> Option<String> {
+pub(crate) fn reason(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(&body[..body.len().min(64 * 1024)]).ok()?;
     let text = value["error"]["message"]
         .as_str()

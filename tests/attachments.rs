@@ -12,6 +12,7 @@ use http_body_util::BodyExt;
 use obleth_chat::{
     attachments::{self, ArchivedAttachment},
     auth::{Auth, AuthConfig},
+    files::Files,
     AppState,
 };
 use serde_json::{json, Value};
@@ -254,7 +255,7 @@ async fn file_types_signatures_sizes_and_names_are_validated(pool: PgPool) {
 async fn simultaneous_uploads_cannot_exceed_file_or_byte_quotas(pool: PgPool) {
     let app = fixture(&pool).await;
     let alice = session(&pool).await;
-    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)SELECT gen_random_uuid(),$1,'seed.txt','text/plain','text',1,'x'::bytea FROM generate_series(1,99)")
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,sha256)SELECT gen_random_uuid(),$1,'seed.txt','text/plain','text',1,'x'::bytea,sha256('x'::bytea) FROM generate_series(1,99)")
         .bind(alice.id).execute(&pool).await.unwrap();
     let (a, b) = tokio::join!(
         call(
@@ -282,7 +283,7 @@ async fn simultaneous_uploads_cannot_exceed_file_or_byte_quotas(pool: PgPool) {
         .unwrap();
     assert_eq!(count, 100);
     let bob = session(&pool).await;
-    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)SELECT gen_random_uuid(),$1,'seed.png','image/png','image',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END,REPEAT('x',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END)::bytea FROM generate_series(1,10) AS g(n)")
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,sha256)SELECT gen_random_uuid(),$1,'seed.png','image/png','image',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END,REPEAT('x',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END)::bytea,'\x00'::bytea FROM generate_series(1,10) AS g(n)")
         .bind(bob.id).execute(&pool).await.unwrap();
     let (a, b) = tokio::join!(
         call(
@@ -332,24 +333,42 @@ async fn references_enforce_ownership_capabilities_and_safe_deletion(pool: PgPoo
     let (conversation, message) = message(&pool, alice.id).await;
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
-        attachments::load_owner(&mut tx, bob.id, &[text], true)
-            .await
-            .unwrap_err()
-            .0,
+        attachments::load_owner(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            bob.id,
+            &[text],
+            true
+        )
+        .await
+        .unwrap_err()
+        .0,
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        attachments::load_owner(&mut tx, alice.id, &[text, text], true)
-            .await
-            .unwrap_err()
-            .0,
+        attachments::load_owner(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            alice.id,
+            &[text, text],
+            true
+        )
+        .await
+        .unwrap_err()
+        .0,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        attachments::load_owner(&mut tx, alice.id, &[image], false)
-            .await
-            .unwrap_err()
-            .0,
+        attachments::load_owner(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            alice.id,
+            &[image],
+            false
+        )
+        .await
+        .unwrap_err()
+        .0,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
@@ -373,15 +392,27 @@ async fn references_enforce_ownership_capabilities_and_safe_deletion(pool: PgPoo
     );
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
-        attachments::load_messages(&mut tx, alice.id, &[message], false)
-            .await
-            .unwrap_err()
-            .0,
+        attachments::load_messages(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            alice.id,
+            &[message],
+            false
+        )
+        .await
+        .unwrap_err()
+        .0,
         StatusCode::BAD_REQUEST
     );
-    let files = attachments::load_messages(&mut tx, alice.id, &[message], true)
-        .await
-        .unwrap();
+    let files = attachments::load_messages(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &[message],
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(files[&message][0].meta.id, image);
     assert_eq!(files[&message][1].meta.id, text);
     assert!(files[&message][0].content_part()["image_url"]["url"]
@@ -456,30 +487,55 @@ async fn portable_archives_preserve_private_bytes_and_import_atomically(pool: Pg
         .unwrap();
     tx.commit().await.unwrap();
     let mut tx = pool.begin().await.unwrap();
-    let files = attachments::load_for_archive(&mut tx, alice.id, &[message], 1024)
-        .await
-        .unwrap();
+    let files = attachments::load_for_archive(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &[message],
+        1024,
+    )
+    .await
+    .unwrap();
     let archive = files[&message][0].archive();
-    assert!(
-        attachments::load_for_archive(&mut tx, alice.id, &[message], 10)
-            .await
-            .is_err()
-    );
+    assert!(attachments::load_for_archive(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &[message],
+        10
+    )
+    .await
+    .is_err());
     tx.commit().await.unwrap();
     let mut tx = pool.begin().await.unwrap();
-    let ids = attachments::import_in(&mut tx, bob.id, std::slice::from_ref(&archive))
-        .await
-        .unwrap();
+    let ids = attachments::import_in(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        bob.id,
+        std::slice::from_ref(&archive),
+    )
+    .await
+    .unwrap();
     assert_ne!(ids[0], id);
     assert_eq!(
-        attachments::import_in(&mut tx, bob.id, std::slice::from_ref(&archive))
-            .await
-            .unwrap(),
+        attachments::import_in(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            bob.id,
+            std::slice::from_ref(&archive)
+        )
+        .await
+        .unwrap(),
         ids
     );
-    let duplicates = attachments::import_in(&mut tx, bob.id, &[archive.clone(), archive.clone()])
-        .await
-        .unwrap();
+    let duplicates = attachments::import_in(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        bob.id,
+        &[archive.clone(), archive.clone()],
+    )
+    .await
+    .unwrap();
     assert_ne!(duplicates[0], duplicates[1]);
     tx.commit().await.unwrap();
     let (_, _, alice_bytes) = raw(
@@ -515,9 +571,14 @@ async fn portable_archives_preserve_private_bytes_and_import_atomically(pool: Pg
         mime_type: "image/svg+xml".into(),
         data_base64: STANDARD.encode(b"<svg/>"),
     };
-    assert!(attachments::import_in(&mut tx, bob.id, &[new, bad])
-        .await
-        .is_err());
+    assert!(attachments::import_in(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        bob.id,
+        &[new, bad]
+    )
+    .await
+    .is_err());
     tx.rollback().await.unwrap();
     let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE owner_id=$1")
         .bind(bob.id)
@@ -555,23 +616,37 @@ async fn replayed_context_is_bounded_before_loading_file_bytes(pool: PgPool) {
     tx.commit().await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
-        attachments::load_messages(&mut tx, alice.id, &[first, second], true)
-            .await
-            .unwrap_err()
-            .0,
+        attachments::load_messages(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            alice.id,
+            &[first, second],
+            true
+        )
+        .await
+        .unwrap_err()
+        .0,
         StatusCode::BAD_REQUEST
     );
-    assert!(
-        attachments::load_for_archive(&mut tx, alice.id, &[first, second], 200 * 1024)
-            .await
-            .is_ok()
-    );
+    assert!(attachments::load_for_archive(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &[first, second],
+        200 * 1024
+    )
+    .await
+    .is_ok());
     let oversized = vec![Uuid::new_v4(); 201];
-    assert!(
-        attachments::load_messages(&mut tx, alice.id, &oversized, true)
-            .await
-            .is_err()
-    );
+    assert!(attachments::load_messages(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &oversized,
+        true
+    )
+    .await
+    .is_err());
     assert!(
         attachments::metadata_for_messages(&mut tx, alice.id, &oversized)
             .await

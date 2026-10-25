@@ -107,7 +107,7 @@ async fn conversation(pool: &PgPool, owner: Uuid, days: i32) -> Uuid {
 }
 async fn file(pool: &PgPool, owner: Uuid, days: i32) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,created_at)VALUES($1,$2,'file.txt','text/plain','text',1,$3,NOW()-make_interval(days=>$4))")
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,sha256,created_at)VALUES($1,$2,'file.txt','text/plain','text',1,$3,sha256($3),NOW()-make_interval(days=>$4))")
         .bind(id).bind(owner).bind(b"x".to_vec()).bind(days).execute(pool).await.unwrap();
     id
 }

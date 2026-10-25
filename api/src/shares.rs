@@ -182,8 +182,8 @@ async fn attachment(
 ) -> Result<Response, ApiError> {
     let user = s.auth.require(&headers, false).await?;
     let owner = readable(&s.store.pool, user.id, id).await?;
-    let row: Option<(String, String, Vec<u8>)> = sqlx::query_as(
-        "SELECT a.name, a.mime_type, a.data FROM attachments a
+    let row: Option<crate::attachments::DownloadRow> = sqlx::query_as(
+        "SELECT a.name, a.mime_type, a.data, a.object_key FROM attachments a
          WHERE a.id = $1 AND a.owner_id = $2
            AND EXISTS (SELECT 1 FROM message_attachments ma JOIN messages m ON m.id = ma.message_id WHERE ma.attachment_id = a.id AND m.conversation_id = $3)",
     )
@@ -192,7 +192,12 @@ async fn attachment(
     .bind(id)
     .fetch_optional(&s.store.pool)
     .await?;
-    let (name, mime, data) = row.ok_or_else(ApiError::not_found)?;
+    let (name, mime, data, key) = row.ok_or_else(ApiError::not_found)?;
+    let data = s
+        .store
+        .files
+        .read(data, key, crate::attachments::MAX_IMAGE_BYTES)
+        .await?;
     crate::attachments::file_response(&name, &mime, data)
 }
 
@@ -203,13 +208,18 @@ async fn image(
 ) -> Result<Response, ApiError> {
     let user = s.auth.require(&headers, false).await?;
     readable(&s.store.pool, user.id, id).await?;
-    let row: Option<(String, Vec<u8>)> = sqlx::query_as(
-        "SELECT mime_type, data FROM generated_images WHERE id = $1 AND conversation_id = $2",
+    let row: Option<(String, Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
+        "SELECT mime_type, data, object_key FROM generated_images WHERE id = $1 AND conversation_id = $2",
     )
     .bind(image)
     .bind(id)
     .fetch_optional(&s.store.pool)
     .await?;
-    let (mime, data) = row.ok_or_else(ApiError::not_found)?;
+    let (mime, data, key) = row.ok_or_else(ApiError::not_found)?;
+    let data = s
+        .store
+        .files
+        .read(data, key, crate::images::MAX_IMAGE_BYTES)
+        .await?;
     crate::images::image_response(&mime, data)
 }

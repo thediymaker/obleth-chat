@@ -39,6 +39,14 @@ async fn main() -> Result<()> {
     };
     let mut state = AppState::new(auth, pool.clone(), gateway, config.max_streams);
     state.admin_gateway_url = config.admin_gateway_url;
+    // One bucket holds Knowledge documents and, when set, every other file's bytes.
+    let objects = obleth_chat::knowledge::ObjectStore::from_env()?;
+    if objects.is_some() {
+        let files = obleth_chat::files::Files::new(pool.clone(), objects.clone());
+        state.store = state.store.clone().with_files(files.clone());
+        tokio::spawn(files.worker(state.shutdown.clone()));
+        tracing::info!("files kept in object storage");
+    }
     if let Some(sandbox_config) = obleth_chat::sandbox::SandboxConfig::from_env()? {
         // The browser runs in the workspace namespace, under the same access rule.
         if let Some(browser_config) = obleth_chat::browser::BrowserConfig::from_env()? {
@@ -81,7 +89,7 @@ async fn main() -> Result<()> {
             "connections enabled"
         );
     }
-    if let Some(knowledge) = obleth_chat::knowledge::Knowledge::from_env(pool.clone())? {
+    if let Some(knowledge) = obleth_chat::knowledge::Knowledge::from_env(pool.clone(), objects)? {
         if let Some(gateway) = state.gateway.clone() {
             tokio::spawn(knowledge.clone().worker(gateway, state.shutdown.clone()));
         }

@@ -64,8 +64,8 @@ pub struct Knowledge {
 
 impl Knowledge {
     /// Enabled when object storage is configured.
-    pub fn from_env(pool: PgPool) -> anyhow::Result<Option<Self>> {
-        let Some(store) = ObjectStore::from_env()? else {
+    pub fn from_env(pool: PgPool, store: Option<ObjectStore>) -> anyhow::Result<Option<Self>> {
+        let Some(store) = store else {
             return Ok(None);
         };
         let var = |key: &str| env::var(key).ok().filter(|v| !v.trim().is_empty());
@@ -138,26 +138,7 @@ impl Knowledge {
     }
 
     async fn empty_trash(&self) {
-        let keys: Vec<String> = sqlx::query_scalar(
-            "SELECT object_key FROM knowledge_object_trash ORDER BY created_at LIMIT 20",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-        for key in keys {
-            match self.store.delete(&key).await {
-                Ok(()) => {
-                    let _ = sqlx::query("DELETE FROM knowledge_object_trash WHERE object_key=$1")
-                        .bind(&key)
-                        .execute(&self.pool)
-                        .await;
-                }
-                Err(error) => {
-                    tracing::warn!("could not delete a stored file: {error:#}");
-                    return;
-                }
-            }
-        }
+        crate::files::empty_trash(&self.pool, &self.store).await;
     }
 
     /// Takes the oldest queued document, or one whose worker stopped mid-way.

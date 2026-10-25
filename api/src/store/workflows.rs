@@ -362,6 +362,7 @@ impl Store {
             let ids = chat.messages.iter().map(|m| m.id).collect::<Vec<_>>();
             let mut files = attachments::load_for_archive(
                 &mut tx,
+                &self.files,
                 owner,
                 &ids,
                 ARCHIVE_BYTES.saturating_sub(bytes),
@@ -526,7 +527,8 @@ impl Store {
                 .bind(id).bind(owner).bind(chat.title.trim()).bind(&chat.model).bind(chat.reasoning_effort.as_str()).bind(json!(chat.settings)).execute(&mut *tx).await?;
             for (ordinal, m) in chat.messages.into_iter().enumerate() {
                 let message_id = Uuid::new_v4();
-                let file_ids = attachments::import_in(&mut tx, owner, &m.attachments).await?;
+                let file_ids =
+                    attachments::import_in(&mut tx, &self.files, owner, &m.attachments).await?;
                 sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,usage,finish_reason,error_message) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
                     .bind(message_id).bind(id).bind(ordinal as i32).bind(&m.role).bind(m.content).bind(m.reasoning_content).bind(m.status)
                     .bind(if m.role=="assistant"{Some(Uuid::new_v4())}else{None}).bind(m.settings).bind(m.usage).bind(m.finish_reason).bind(m.error_message).execute(&mut *tx).await?;

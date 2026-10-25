@@ -13,10 +13,9 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{error::ApiError, AppState};
+use crate::{error::ApiError, files::image_key, store::Store, AppState};
 
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Generated images kept per person; past it, new ones are not saved.
@@ -37,13 +36,13 @@ pub fn has_inline(text: &str) -> bool {
 
 /// Replaces every `![alt](data:image/...;base64,...)` in `text` with a link to the
 /// stored image. An image that cannot be kept becomes a short note instead.
-pub async fn store_inline(pool: &PgPool, owner: Uuid, conversation: Uuid, text: &str) -> String {
+pub async fn store_inline(store: &Store, owner: Uuid, conversation: Uuid, text: &str) -> String {
     let mut out = String::with_capacity(text.len().min(4096));
     let mut rest = text;
     while let Some((before, alt, url, after)) = next_image(rest) {
         out.push_str(before);
         let alt = clean_alt(alt);
-        match save(pool, owner, conversation, url).await {
+        match save(store, owner, conversation, url).await {
             Ok(id) => out.push_str(&format!("![{alt}](/api/images/{id})")),
             Err(reason) => {
                 tracing::warn!("generated image not saved: {reason}");
@@ -129,33 +128,45 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
 }
 
 async fn save(
-    pool: &PgPool,
+    store: &Store,
     owner: Uuid,
     conversation: Uuid,
     url: &str,
 ) -> Result<Uuid, &'static str> {
     let (mime, bytes) = decode(url)?;
     let id = Uuid::new_v4();
+    let size = bytes.len() as i32;
+    let placed = store
+        .files
+        .place(image_key(owner, id), bytes, mime)
+        .await
+        .map_err(|_| "storage is unavailable")?;
     // The insert checks the person's total in the same statement.
     let inserted = sqlx::query(
-        "INSERT INTO generated_images(id, owner_id, conversation_id, mime_type, size, data)
-         SELECT $1, $2, $3, $4, $5, $6
-         WHERE (SELECT COALESCE(SUM(size), 0) FROM generated_images WHERE owner_id = $2) + $5 <= $7",
+        "INSERT INTO generated_images(id, owner_id, conversation_id, mime_type, size, data, object_key)
+         SELECT $1, $2, $3, $4, $5, $6, $7
+         WHERE (SELECT COALESCE(SUM(size), 0) FROM generated_images WHERE owner_id = $2) + $5 <= $8",
     )
     .bind(id)
     .bind(owner)
     .bind(conversation)
     .bind(mime)
-    .bind(bytes.len() as i32)
-    .bind(&bytes)
+    .bind(size)
+    .bind(&placed.data)
+    .bind(&placed.key)
     .bind(MAX_USER_BYTES)
-    .execute(pool)
-    .await
-    .map_err(|e| {
-        tracing::warn!("storing a generated image failed: {e}");
-        "storage is unavailable"
-    })?;
-    if inserted.rows_affected() == 0 {
+    .execute(&store.pool)
+    .await;
+    let inserted = match inserted {
+        Ok(done) => done.rows_affected() > 0,
+        Err(e) => {
+            tracing::warn!("storing a generated image failed: {e}");
+            store.files.discard(&placed).await;
+            return Err("storage is unavailable");
+        }
+    };
+    if !inserted {
+        store.files.discard(&placed).await;
         return Err("your 512 MB of generated images is full; delete older chats to make room");
     }
     Ok(id)
@@ -206,13 +217,15 @@ async fn download(
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let user = s.auth.require(&headers, false).await?;
-    let row: Option<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT mime_type, data FROM generated_images WHERE id=$1 AND owner_id=$2")
-            .bind(id)
-            .bind(user.id)
-            .fetch_optional(&s.store.pool)
-            .await?;
-    let (mime, data) = row.ok_or_else(ApiError::not_found)?;
+    let row: Option<(String, Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
+        "SELECT mime_type, data, object_key FROM generated_images WHERE id=$1 AND owner_id=$2",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_optional(&s.store.pool)
+    .await?;
+    let (mime, data, key) = row.ok_or_else(ApiError::not_found)?;
+    let data = s.store.files.read(data, key, MAX_IMAGE_BYTES).await?;
     image_response(&mime, data)
 }
 

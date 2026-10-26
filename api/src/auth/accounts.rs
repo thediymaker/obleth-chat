@@ -166,12 +166,7 @@ async fn admin_revoke_sessions(
     let mut tx = auth.pool.begin().await?;
     auth.lock_admin(&mut tx, admin.id).await?;
     require_user(&mut tx, id).await?;
-    let count = sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    super::tokens::revoke_all(&mut tx, id).await?;
+    let count = super::end_sign_ins(&mut tx, id).await?;
     record_audit(
         &mut tx,
         Some(admin.id),
@@ -720,10 +715,8 @@ async fn activate(
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1")
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
+    // A reset ends every session and personal token made with the old password.
+    super::end_sign_ins(&mut tx, user.id).await?;
     // The browser's previous session, possibly another user's, is replaced too.
     if let Some(old_token) = auth.session_token(&headers) {
         sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")

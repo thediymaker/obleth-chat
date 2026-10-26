@@ -294,7 +294,7 @@ impl Store {
             .iter()
             .map(|m| m.id)
             .collect::<Vec<_>>();
-        copy_selected_messages(&mut tx, id, new_id, &selected).await?;
+        copy_selected_messages(&mut tx, id, new_id, &selected, None).await?;
         let conversation = read_conversation(&mut tx, owner, new_id).await?;
         tx.commit().await?;
         Ok(ForkResult {

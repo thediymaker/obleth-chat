@@ -24,7 +24,7 @@ export function createSharing({ api, modal, toast, onChange = () => {} }) {
     }).join('');
     const select = options.length && scope === 'group' ? `<select id="share-group" class="form-control" aria-label="Group">${options.map(g => `<option value="${esc(g.id)}" ${g.id === share.groupId ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>` : '';
     const copy = scope === 'none' ? '' : `<div class="share-link"><input class="form-control" readonly value="${esc(link(id))}" aria-label="Link to this chat">${btn('Copy link', 'share-copy', { icon: 'link', tone: 'small primary', attrs: `data-id="${esc(id)}"` })}</div>`;
-    return `<form id="share-form" class="share-form" data-id="${esc(id)}"><div class="knowledge-sharing">${radios}${select}</div>${copy}<p class="inline-note">${icon('lock')}People see the chat as it grows, read-only, and can fork it into their own copy. They see its messages, attachments and images, not your workspace, browser or connections.</p><div class="modal-actions"><button class="btn primary" type="button" data-action="close">Done</button></div></form>`;
+    return `<form id="share-form" class="share-form" data-id="${esc(id)}"><div class="knowledge-sharing">${radios}${select}</div>${copy}<p class="inline-note">${icon('lock')}People see the chat as it grows, read-only, and can fork it into their own copy. They see its messages, attachments and images, and the steps tools took with what they returned, but not your instructions for the chat. They can’t use your workspace, browser or connections.</p><div class="modal-actions"><button class="btn primary" type="button" data-action="close">Done</button></div></form>`;
   }
 
   async function open(id) {

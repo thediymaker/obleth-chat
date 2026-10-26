@@ -96,12 +96,16 @@ fn browser(method: &str, path: &str, body: Value, cookie: &str, csrf: &str) -> R
 }
 
 async fn login(app: &Router) -> (String, String) {
+    login_as(app, "test-admin", PASSWORD).await
+}
+
+async fn login_as(app: &Router, username: &str, password: &str) -> (String, String) {
     let response = app
         .clone()
         .oneshot(browser(
             "POST",
             "/api/auth/login",
-            json!({"username":"test-admin","password":PASSWORD}),
+            json!({"username":username,"password":password}),
             "",
             "",
         ))
@@ -398,7 +402,7 @@ async fn a_token_runs_chats_over_mcp_and_reaches_nothing_else(pool: PgPool) {
         send(&app, rpc(&reader, "ping", json!({}))).await.0,
         StatusCode::UNAUTHORIZED
     );
-    sqlx::query("UPDATE auth_sessions SET created_at=NOW() - INTERVAL '13 hours'")
+    sqlx::query("UPDATE auth_sessions SET created_at=NOW() - INTERVAL '16 minutes'")
         .execute(&pool)
         .await
         .unwrap();
@@ -425,6 +429,63 @@ async fn changing_the_password_ends_the_tokens(pool: PgPool) {
             json!({"currentPassword":PASSWORD,"newPassword":"another-fixture-password-43"}),
             &cookie,
             &csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        send(&app, rpc(&token, "ping", json!({}))).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test(migrator = "obleth_chat::MIGRATOR")]
+async fn redeeming_a_reset_link_ends_the_tokens(pool: PgPool) {
+    let app = fixture(pool.clone()).await;
+    let (admin, admin_csrf) = login(&app).await;
+    let (status, _, user) = send(
+        &app,
+        browser(
+            "POST",
+            "/api/admin/users",
+            json!({"username":"ana","password":PASSWORD,"role":"user"}),
+            &admin,
+            &admin_csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{user}");
+    let id = user["id"].as_str().unwrap().to_owned();
+    let (cookie, csrf) = login_as(&app, "ana", PASSWORD).await;
+    let (_, created) = create_token(&app, &cookie, &csrf, json!({"name":"Laptop","days":30})).await;
+    let token = created["token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        send(&app, rpc(&token, "ping", json!({}))).await.0,
+        StatusCode::OK
+    );
+
+    // A reset link, redeemed, ends the tokens made with the old password too.
+    let (status, _, link) = send(
+        &app,
+        browser(
+            "POST",
+            &format!("/api/admin/users/{id}/access-link"),
+            json!({"kind":"reset"}),
+            &admin,
+            &admin_csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{link}");
+    let secret = link["url"].as_str().unwrap().rsplit('/').next().unwrap();
+    let (status, _, body) = send(
+        &app,
+        browser(
+            "POST",
+            "/api/auth/activate",
+            json!({"token":secret,"newPassword":"another-fixture-password-43"}),
+            "",
+            "",
         ),
     )
     .await;

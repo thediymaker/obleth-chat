@@ -1,5 +1,6 @@
 use axum::{
     extract::{MatchedPath, Request, State},
+    http::{header, HeaderMap},
     middleware::Next,
     response::Response,
 };
@@ -9,12 +10,15 @@ use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
     Opts, Registry, TextEncoder,
 };
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Instant,
 };
+use subtle::ConstantTimeEq;
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -27,6 +31,8 @@ pub struct Metrics {
     pub missing_usage: IntCounter,
     pub first_token: Histogram,
     pub generation_duration: Histogram,
+    /// The SHA-256 of the bearer token `/metrics` requires, when one is set.
+    token: Option<Arc<[u8]>>,
 }
 impl Metrics {
     pub fn new() -> Self {
@@ -111,7 +117,34 @@ impl Metrics {
             missing_usage,
             first_token,
             generation_duration,
+            token: None,
         }
+    }
+    /// Makes `/metrics` require `Authorization: Bearer <token>`.
+    pub fn require_token(&mut self, token: &str) {
+        self.token = Some(Sha256::digest(token.as_bytes()).to_vec().into());
+    }
+    /// Whether a request may read `/metrics`: always without a token set, otherwise
+    /// only with that token as its one bearer credential. The comparison takes the
+    /// same time whatever the token sent.
+    pub fn allows(&self, headers: &HeaderMap) -> bool {
+        let Some(expected) = &self.token else {
+            return true;
+        };
+        let mut values = headers.get_all(header::AUTHORIZATION).iter();
+        let (Some(value), None) = (values.next(), values.next()) else {
+            return false;
+        };
+        let Some(sent) = value
+            .to_str()
+            .ok()
+            .and_then(|v| v.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .map(|(_, token)| token.trim())
+        else {
+            return false;
+        };
+        bool::from(Sha256::digest(sent.as_bytes()).ct_eq(expected))
     }
     /// Exposes the management host's backup status ConfigMap, mounted at `dir`.
     pub fn register_backup_status(&self, dir: PathBuf) -> prometheus::Result<()> {

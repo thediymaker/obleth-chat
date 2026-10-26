@@ -58,6 +58,10 @@ impl Database {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/040_api_tokens.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         Some(Self {
             pool,
             admin,
@@ -2296,13 +2300,67 @@ async fn concurrent_attempts_cannot_overrun_the_account_limits() {
         .map(|_| Client("attacker".into()))
         .collect();
     assert_eq!(passed(one_client).await, CLIENT_ACCOUNT_FAILURES);
-    let many_clients = (0..2 * ACCOUNT_FAILURES)
-        .map(|index| Client(format!("bot-{index}")))
+    // Each client's first attempt gets past the all-client limit, and is counted...
+    let bots = || {
+        (0..2 * ACCOUNT_FAILURES)
+            .map(|index| Client(format!("bot-{index}")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(passed(bots()).await, 2 * ACCOUNT_FAILURES);
+    // ...but once failing there, none of them gets another.
+    assert_eq!(passed(bots()).await, 0);
+    // A client with no failures gets exactly one attempt past the limit, however
+    // many it sends at once.
+    let fresh = (0..3 * CLIENT_ACCOUNT_FAILURES)
+        .map(|_| Client("fresh".into()))
         .collect();
-    assert_eq!(
-        passed(many_clients).await,
-        ACCOUNT_FAILURES - CLIENT_ACCOUNT_FAILURES
-    );
+    assert_eq!(passed(fresh).await, 1);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn failing_clients_cannot_lock_out_a_client_that_is_not_failing() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let mut cfg = config();
+    cfg.login_rate_per_minute = 1000;
+    let auth = Auth::new(db.pool.clone(), cfg).await.unwrap();
+    avoid_minute_boundary().await;
+    let limited = |result: Result<(), ApiError>| {
+        result.is_err_and(|error| error.0 == StatusCode::TOO_MANY_REQUESTS)
+    };
+    // A few addresses spend the account's whole budget for this minute, each
+    // staying under its own per-client limit.
+    let per_bot = CLIENT_ACCOUNT_FAILURES / 2;
+    let bots = (0..ACCOUNT_FAILURES / per_bot)
+        .map(|index| Client(format!("bot-{index}")))
+        .collect::<Vec<_>>();
+    for bot in &bots {
+        for _ in 0..per_bot {
+            auth.throttle("login", bot, Some("admin")).await.unwrap();
+        }
+    }
+    // The failing clients are stopped by the account-wide limit...
+    for bot in &bots {
+        assert!(limited(auth.throttle("login", bot, Some("admin")).await));
+    }
+    // ...but the real person, from an address that has not been failing, still
+    // signs in.
+    sign_in(&auth.router(), "admin", PASSWORD).await;
+    // A wrong guess from a new address is let through once, then that address is
+    // failing too and the account limit applies to it.
+    let newcomer = Client("newcomer".into());
+    auth.throttle("login", &newcomer, Some("admin"))
+        .await
+        .unwrap();
+    assert!(limited(
+        auth.throttle("login", &newcomer, Some("admin")).await
+    ));
+    // Being stopped keeps it failing: it does not get another free attempt.
+    assert!(limited(
+        auth.throttle("login", &newcomer, Some("admin")).await
+    ));
     db.close().await;
 }
 

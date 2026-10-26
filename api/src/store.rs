@@ -39,6 +39,33 @@ pub const MAX_CONVERSATIONS_PER_USER: i64 = 1_000;
 /// becomes recoverable on the next read within 45 seconds.
 pub const GENERATION_LEASE_SECONDS: i32 = 45;
 
+/// Chat and reply settings that other people may see and take into a fork: the
+/// model and how it samples. Instructions such as the system prompt stay private
+/// to the chat's owner.
+const SHAREABLE_SETTINGS: [&str; 7] = [
+    "model",
+    "resolvedModel",
+    "auto",
+    "temperature",
+    "topP",
+    "maxTokens",
+    "reasoningEffort",
+];
+
+/// The part of a chat's or reply's settings that is shown to, or copied for,
+/// someone other than its owner.
+pub fn shareable_settings(settings: &Value) -> Value {
+    Value::Object(
+        settings
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| SHAREABLE_SETTINGS.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -326,6 +353,8 @@ impl Store {
 
     /// Copies someone else's shared chat into a new chat of `viewer`'s, with its
     /// attachments and generated images, so the copy keeps working if the original goes.
+    /// Only the shareable settings come along: the owner's instructions would
+    /// otherwise steer the viewer's chat, and their tools, unseen.
     pub async fn fork_shared(
         &self,
         viewer: Uuid,
@@ -353,10 +382,10 @@ impl Store {
             .bind(title)
             .bind(&original.model)
             .bind(&original.reasoning_effort)
-            .bind(&original.settings)
+            .bind(shareable_settings(&original.settings))
             .execute(&mut *tx)
             .await?;
-        copy_selected_messages(&mut tx, id, fork, &selected).await?;
+        copy_selected_messages(&mut tx, id, fork, &selected, Some(&SHAREABLE_SETTINGS[..])).await?;
         // The copy's attachments become the viewer's own.
         let linked: Vec<Uuid> = sqlx::query_scalar(
             "SELECT DISTINCT ma.attachment_id FROM message_attachments ma JOIN messages m ON m.id = ma.message_id WHERE m.conversation_id = $1",
@@ -484,7 +513,7 @@ impl Store {
             .iter()
             .map(|m| m.id)
             .collect::<Vec<_>>();
-        copy_selected_messages(&mut tx, id, branch_id, &selected).await?;
+        copy_selected_messages(&mut tx, id, branch_id, &selected, None).await?;
         let conversation = read_conversation(&mut tx, owner, branch_id).await?;
         tx.commit().await?;
         Ok(conversation)
@@ -1183,17 +1212,22 @@ fn conflict(message: &str) -> ApiError {
     ApiError(StatusCode::CONFLICT, message.into())
 }
 
+/// Copies messages into another chat. With `settings`, each reply keeps only those
+/// settings keys, for a copy made for someone else.
 async fn copy_selected_messages(
     tx: &mut Transaction<'_, Postgres>,
     source: Uuid,
     destination: Uuid,
     ids: &[Uuid],
+    settings: Option<&[&str]>,
 ) -> Result<(), ApiError> {
     let copies = ids.iter().map(|_| Uuid::new_v4()).collect::<Vec<_>>();
     sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,usage,request_id,finish_reason,error_message,created_at,follow_ups,follow_ups_status,activity)
-      SELECT mapping.new_id,$2,(mapping.position-1)::integer,m.role,m.content,m.reasoning_content,m.status,CASE WHEN m.role='assistant' THEN gen_random_uuid() ELSE NULL END,m.settings,m.usage,m.request_id,m.finish_reason,m.error_message,m.created_at,m.follow_ups,CASE WHEN m.follow_ups_status='pending' THEN 'idle' ELSE m.follow_ups_status END,m.activity
+      SELECT mapping.new_id,$2,(mapping.position-1)::integer,m.role,m.content,m.reasoning_content,m.status,CASE WHEN m.role='assistant' THEN gen_random_uuid() ELSE NULL END,
+        CASE WHEN $5::text[] IS NULL THEN m.settings WHEN jsonb_typeof(m.settings)='object' THEN (SELECT COALESCE(jsonb_object_agg(e.key,e.value),'{}'::jsonb) FROM jsonb_each(m.settings) e WHERE e.key=ANY($5)) END,
+        m.usage,m.request_id,m.finish_reason,m.error_message,m.created_at,m.follow_ups,CASE WHEN m.follow_ups_status='pending' THEN 'idle' ELSE m.follow_ups_status END,m.activity
       FROM unnest($3::uuid[],$4::uuid[]) WITH ORDINALITY mapping(old_id,new_id,position) JOIN messages m ON m.id=mapping.old_id WHERE m.conversation_id=$1")
-        .bind(source).bind(destination).bind(ids).bind(&copies).execute(&mut **tx).await?;
+        .bind(source).bind(destination).bind(ids).bind(&copies).bind(settings).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO message_attachments(message_id,attachment_id,position) SELECT mapping.new_id,ma.attachment_id,ma.position FROM unnest($1::uuid[],$2::uuid[]) mapping(old_id,new_id) JOIN message_attachments ma ON ma.message_id=mapping.old_id")
         .bind(ids).bind(&copies).execute(&mut **tx).await?;
     Ok(())

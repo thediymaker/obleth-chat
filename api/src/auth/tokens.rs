@@ -10,8 +10,9 @@ const MARKER: &str = "obc_";
 const MAX_ACTIVE: i64 = 10;
 const CALLS_PER_MINUTE: i32 = 120;
 const LIFETIMES: [i32; 3] = [1, 7, 30];
-/// Making a token needs a sign-in this recent, so an old session cookie cannot mint one.
-const RECENT_SIGN_IN_HOURS: i32 = 12;
+/// Making a token needs a sign-in this recent, so a borrowed or stolen session
+/// cookie cannot mint one: sessions last much longer than this.
+const RECENT_SIGN_IN_MINUTES: i32 = 15;
 
 pub(super) fn router() -> Router<Auth> {
     Router::new()
@@ -133,10 +134,10 @@ async fn create(
         .session_token(&headers)
         .ok_or_else(ApiError::unauthorized)?;
     let recent: bool = sqlx::query_scalar(
-        "SELECT created_at > NOW() - make_interval(hours => $2) FROM auth_sessions WHERE token_hash=$1",
+        "SELECT created_at > NOW() - make_interval(mins => $2) FROM auth_sessions WHERE token_hash=$1",
     )
     .bind(digest(&session))
-    .bind(RECENT_SIGN_IN_HOURS)
+    .bind(RECENT_SIGN_IN_MINUTES)
     .fetch_optional(&auth.pool)
     .await?
     .unwrap_or(false);
@@ -236,9 +237,9 @@ async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Ends a person's tokens wherever their sign-ins are reset: a password change or
-/// reset, an administrator revoking their sessions, or a change to their account.
-pub(crate) async fn revoke_all(
+/// Ends a person's tokens. Reset paths call it through `end_sign_ins`, which also
+/// ends their sessions.
+pub(super) async fn revoke_all(
     tx: &mut Transaction<'_, Postgres>,
     user: Uuid,
 ) -> Result<(), ApiError> {

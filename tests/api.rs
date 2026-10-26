@@ -959,3 +959,31 @@ async fn background_completion_and_same_chat_regeneration_restore_selected_conte
     assert_eq!(state.store.list(owner).await.unwrap().len(), 1);
     task.abort();
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn metrics_need_the_configured_token(pool: PgPool) {
+    let (app, mut state, _, task) = fixture(pool).await;
+    // Without a token, metrics are open as before.
+    assert_eq!(fetch(&app, "/metrics", &[]).await.status(), StatusCode::OK);
+    state.metrics.require_token("scrape-fixture-token");
+    let app = router(state, "web".into());
+    for headers in [
+        vec![],
+        vec![("authorization", "Bearer wrong-token")],
+        vec![("authorization", "Basic scrape-fixture-token")],
+        vec![("authorization", "Bearer scrape-fixture-token-and-more")],
+    ] {
+        let response = fetch(&app, "/metrics", &headers).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{headers:?}");
+    }
+    let response = fetch(
+        &app,
+        "/metrics",
+        &[("authorization", "Bearer scrape-fixture-token")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("obleth_chat_http_requests_total"));
+    task.abort();
+}

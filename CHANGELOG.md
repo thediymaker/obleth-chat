@@ -4,6 +4,14 @@ Each release's section is also its GitHub Release notes.
 
 ## Unreleased
 
+**New**
+
+- **`/metrics` can require a token.** Set `OBLETH_CHAT_METRICS_TOKEN` and `/metrics` answers only requests with `Authorization: Bearer <token>`; others get 401. Unset, it stays open as before.
+
+**Changed**
+
+- **Making a personal API token needs a sign-in from the last 15 minutes** (was 12 hours, as long as a session lasts), so a borrowed or stolen session cannot turn into a 30-day token. Otherwise the web app offers to sign out and back in.
+
 **Fixed**
 
 - **Previews only reach the workspace's own pod.** Before proxying, Chat checks with the API server (at most every few seconds per pod) that the workspace pod is still running at the address on record. A pod that was evicted, deleted or lost with its node is marked stopped instead of its old address being used, which another pod may have been given. The reconciler does the same every minute.
@@ -14,6 +22,10 @@ Each release's section is also its GitHub Release notes.
 - **Research runs stop when their owner loses workspace access** or the account is disabled, instead of running on in the workspace.
 - **Uploaded files never open as web pages.** Knowledge files, attachments, generated images and workspace files open in the browser only when they are PDFs or PNG, JPEG, GIF or WebP images. Anything else downloads, with text of any kind (HTML, XML, JSON, code) sent as plain text. Knowledge files are stored with a type taken from their name, never the one the browser sent, and documents stored as HTML by earlier versions are served the same way. Workspace SVGs still show in the file viewer but download when opened directly.
 - **A document that expands enormously no longer exhausts memory.** Word and PDF text is read as the extractor produces it, and the extractor is stopped as soon as its output passes the 64 MiB limit, so a small compressed file that inflates to gigabytes fails with "more text than Chat can index" instead of taking down the server.
+- **Redeeming a password reset link ends personal API tokens**, as changing or resetting a password already did. Every path that resets someone's sign-ins (password change or reset, reset link, an administrator revoking sessions, changing the role or disabling the account) now ends sessions and tokens together.
+- **Forking a shared chat no longer copies its owner's instructions.** The fork keeps the model and sampling settings; the owner's system prompt, which the viewer never saw, no longer steers the viewer's chat and tools.
+- **Shared chats no longer show the owner's instructions on each reply.** Viewers see the model and sampling settings and the tools' steps, not the system prompt. The share dialog now says that tool steps and what they returned are visible.
+- **Failed sign-ins from other addresses can no longer lock someone out.** The per-account limit of 50 failures a minute now stops only addresses that are failing on that account themselves; an address with no failures there in the last 10 minutes still gets one try past it. Each address keeps its own limit of 10, and Chat logs when an account reaches its limit.
 
 **Upgrading**
 

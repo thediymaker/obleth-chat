@@ -1789,7 +1789,7 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
         .oneshot(req(
             "POST",
             &format!("/api/conversations/{id}/messages"),
-            Body::from(json!({"content":"Plan the refactor","model":"fixture-model","attachmentIds":[file]}).to_string()),
+            Body::from(json!({"content":"Plan the refactor","model":"fixture-model","attachmentIds":[file],"systemPrompt":"Ana's private instructions","temperature":0.3}).to_string()),
             "application/json",
             &ana,
         ))
@@ -1803,6 +1803,32 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
         .bind(image).bind(ana_uuid).bind(conversation).execute(&pool).await.unwrap();
     sqlx::query("UPDATE messages SET content = content || $2 WHERE conversation_id = $1 AND role = 'assistant'")
         .bind(conversation).bind(format!("\n\n![chart](/api/images/{image})")).execute(&pool).await.unwrap();
+    let activity = json!([{"kind":"tool","title":"Read the plan"}]);
+    sqlx::query(
+        "UPDATE messages SET activity = $2 WHERE conversation_id = $1 AND role = 'assistant'",
+    )
+    .bind(conversation)
+    .bind(&activity)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Ana's own view keeps her instructions, on the chat and on the reply.
+    let (_, own) = call(
+        &f.app,
+        "GET",
+        &format!("/api/conversations/{id}"),
+        Value::Null,
+        &ana,
+    )
+    .await;
+    assert_eq!(
+        own["conversation"]["settings"]["systemPrompt"],
+        "Ana's private instructions"
+    );
+    assert_eq!(
+        own["conversation"]["messages"][1]["settings"]["systemPrompt"],
+        "Ana's private instructions"
+    );
 
     // Not shared: nobody else can open it.
     let shared = format!("/api/shared/{id}");
@@ -1837,6 +1863,16 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
         (json!(false), json!("ana"))
     );
     assert!(seen["conversation"].get("settings").is_none());
+    // Nor do the instructions show on any reply; the model, its sampling and the
+    // reply's tool activity do.
+    assert!(
+        !seen.to_string().contains("Ana's private instructions"),
+        "{seen}"
+    );
+    let reply = &seen["conversation"]["messages"][1];
+    assert_eq!(reply["settings"]["model"], "fixture-model");
+    assert_eq!(reply["settings"]["temperature"], 0.3);
+    assert_eq!(reply["activity"], activity);
     let messages = seen["conversation"]["messages"].as_array().unwrap();
     assert_eq!(messages[0]["content"], "Plan the refactor");
     let link = messages[0]["attachments"][0]["url"]
@@ -1913,8 +1949,21 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(mine["conversation"]["title"], "Pairing · fork");
+    // The fork does not take Ana's instructions, which would steer Ben's chat
+    // unseen; it keeps her model and sampling.
+    assert!(
+        !mine.to_string().contains("Ana's private instructions"),
+        "{mine}"
+    );
+    assert!(mine["conversation"]["settings"]
+        .get("systemPrompt")
+        .is_none());
+    assert_eq!(mine["conversation"]["settings"]["temperature"], 0.3);
+    assert_eq!(mine["conversation"]["model"], "fixture-model");
     let copied = mine["conversation"]["messages"].as_array().unwrap();
     assert_eq!(copied.len(), 2);
+    assert_eq!(copied[1]["settings"]["temperature"], 0.3);
+    assert_eq!(copied[1]["activity"], activity);
     let own_file = copied[0]["attachments"][0]["id"]
         .as_str()
         .unwrap()

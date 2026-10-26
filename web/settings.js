@@ -73,6 +73,9 @@ ${u.daily?.length ? `<details class="daily-usage"><summary>Show as a table</summ
     const row = t => `<div class="session-row"><div class="grow"><h3>${esc(t.name)} ${t.scopes.includes('chats:write') ? '' : badge('Read only')}</h3><p class="mono">obc_${esc(t.prefix)}…</p><small>Created ${esc(when(t.createdAt))} · expires ${esc(when(t.expiresAt))}<br>${t.lastUsedAt ? `Last used ${esc(when(t.lastUsedAt))}` : 'Not used yet'}</small></div>${btn('Revoke', 'personal-revoke-token', { tone: 'small', attrs: `data-id="${esc(t.id)}" data-name="${esc(t.name)}"` })}</div>`;
     return `<section class="setting-card card"><div class="spread"><div><h2>API access</h2><p class="inline-note">Let an MCP client such as Claude Code start chats, check on them and answer them for you. The chats show up here as yours. A token works only for the MCP endpoint, lasts up to 30 days, and can’t change your account.</p></div>${btn('New token', 'personal-new-token', { icon: 'plus', tone: 'small' })}</div>${local.tokens.length ? `<div class="session-list">${local.tokens.map(row).join('')}</div>` : '<p class="inline-note">No tokens yet.</p>'}</section>`;
   }
+  function signInAgain(message) {
+    modal('Sign in again', `<p>${esc(message)}. For your security, Chat asks for a fresh sign-in before it makes a token. Sign out, sign back in, and create the token within 15 minutes.</p><div class="modal-actions">${btn('Not now', 'close')}${btn('Sign out to sign in again', 'logout', { tone: 'primary' })}</div>`);
+  }
   function tokenCreated(token) {
     modal('Copy your token now', `<p>This is the only time Chat shows it. Anyone with the token can read and run your chats until it expires or you revoke it.</p>${field('new-token', 'Token', `<input class="form-control mono" id="new-token" readonly value="${esc(token)}">`)}${field('new-token-setup', 'Add it to Claude Code', `<textarea class="form-control mono" id="new-token-setup" rows="4" readonly>${esc(setup(token))}</textarea>`, `Other MCP clients connect to ${mcpUrl()} with the header Authorization: Bearer and the token.`)}<div class="modal-actions">${btn('Copy token', 'personal-copy-token', { icon: 'copy', attrs: 'data-from="new-token"' })}${btn('Copy command', 'personal-copy-token', { icon: 'copy', attrs: 'data-from="new-token-setup"' })}${btn('Done', 'close', { tone: 'primary' })}</div>`);
   }
@@ -104,7 +107,16 @@ ${u.daily?.length ? `<details class="daily-usage"><summary>Show as a table</summ
     if (form.id === 'personal-agent-form') { const text = getValue(form, 'agent-instructions').trim(); await savePreferences({ agentInstructions: !text || text === (state.defaultAgentInstructions || '').trim() ? null : text }); }
     if (form.id === 'personal-appearance-form') await savePreferences({ density: isChecked(form, 'appearance-compact') ? 'compact' : 'comfortable', focus: isChecked(form, 'appearance-focus'), context: isChecked(form, 'appearance-context') });
     if (form.id === 'personal-favorites-form') await savePreferences({ favorites: state.models.filter(m => m.id !== 'auto' && isChecked(form, `favorite-${m.id}`)).map(m => m.id) });
-    if (form.id === 'personal-token-form') { const r = await api.request('/api/auth/tokens', { method: 'POST', body: { name: getValue(form, 'token-name').trim(), days: Number(getValue(form, 'token-days')), readOnly: isChecked(form, 'token-read-only') } }); tokenCreated(r.token); await load(); }
+    if (form.id === 'personal-token-form') {
+      let r;
+      try { r = await api.request('/api/auth/tokens', { method: 'POST', body: { name: getValue(form, 'token-name').trim(), days: Number(getValue(form, 'token-days')), readOnly: isChecked(form, 'token-read-only') } }); }
+      catch (error) {
+        // Making a token needs a sign-in from the last few minutes: offer one instead of a dead end.
+        if (error.status === 403) { signInAgain(error.message); return; }
+        throw error;
+      }
+      tokenCreated(r.token); await load();
+    }
     if (form.id === 'personal-preset-form') { const id = form.dataset.id; await api.request(`/api/presets${id ? '/' + encodeURIComponent(id) : ''}`, { method: id ? 'PATCH' : 'POST', body: { name: getValue(form, 'preset-name').trim(), model: getValue(form, 'preset-model'), parameters: parameters(form, 'preset') } }); await refreshPresets(); close(); render(); toast(id ? 'Preset updated' : 'Preset created'); }
   }
   function clear() { local.sequence++; local.sessions = []; local.tokens = []; local.usage = null; local.error = ''; local.loading = false; }

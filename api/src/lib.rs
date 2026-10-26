@@ -257,14 +257,25 @@ async fn ready(State(s): State<AppState>) -> impl IntoResponse {
         ),
     }
 }
-async fn metrics_endpoint(State(s): State<AppState>) -> impl IntoResponse {
-    (
+/// Prometheus metrics. With OBLETH_CHAT_METRICS_TOKEN set, only a scraper sending
+/// that token as a bearer credential may read them.
+async fn metrics_endpoint(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    if !s.metrics.allows(&headers) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Metrics need the configured bearer token".into(),
+        ));
+    }
+    Ok((
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         s.metrics.render(),
-    )
+    ))
 }
 async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Value> {
     let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":true,"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});

@@ -47,27 +47,45 @@ async fn main() -> Result<()> {
         tokio::spawn(files.worker(state.shutdown.clone()));
         tracing::info!("files kept in object storage");
     }
-    if let Some(sandbox_config) = obleth_chat::sandbox::SandboxConfig::from_env()? {
-        // The browser runs in the workspace namespace, under the same access rule.
-        if let Some(browser_config) = obleth_chat::browser::BrowserConfig::from_env()? {
-            let browsers = obleth_chat::browser::Browsers::new(
-                browser_config,
-                sandbox_config.clone(),
-                pool.clone(),
-            )?;
-            tokio::spawn(browsers.clone().worker(state.shutdown.clone()));
-            tracing::info!("browser enabled");
-            state.browsers = Some(browsers);
+    match obleth_chat::sandbox::SandboxConfig::from_env()? {
+        Ok(sandbox_config) => {
+            let sandboxes =
+                obleth_chat::sandbox::Sandboxes::new(sandbox_config.clone(), pool.clone())?;
+            // Missing permissions turn workspaces off and say why; an API that doesn't
+            // answer yet leaves them on, to fail with its own error when used.
+            match sandboxes.check_access().await {
+                Ok(Err(reason)) => {
+                    tracing::warn!("workspaces are off: {reason}");
+                    state.workspaces_off = Some(reason);
+                }
+                Err(error) => {
+                    tracing::warn!("could not check workspace permissions: {error:#}");
+                }
+                Ok(Ok(())) => {}
+            }
+            if state.workspaces_off.is_none() {
+                // The browser runs in the workspace namespace, under the same access rule.
+                if let Some(browser_config) = obleth_chat::browser::BrowserConfig::from_env()? {
+                    let browsers = obleth_chat::browser::Browsers::new(
+                        browser_config,
+                        sandbox_config.clone(),
+                        pool.clone(),
+                    )?;
+                    tokio::spawn(browsers.clone().worker(state.shutdown.clone()));
+                    tracing::info!("browser enabled");
+                    state.browsers = Some(browsers);
+                }
+                tokio::spawn(sandboxes.clone().worker(state.shutdown.clone()));
+                tokio::spawn(obleth_chat::research::worker(
+                    pool.clone(),
+                    sandboxes.clone(),
+                    state.shutdown.clone(),
+                ));
+                tracing::info!(namespace = %sandbox_config.namespace, "workspaces enabled");
+                state.sandboxes = Some(sandboxes);
+            }
         }
-        let sandboxes = obleth_chat::sandbox::Sandboxes::new(sandbox_config, pool.clone())?;
-        tokio::spawn(sandboxes.clone().worker(state.shutdown.clone()));
-        tokio::spawn(obleth_chat::research::worker(
-            pool.clone(),
-            sandboxes.clone(),
-            state.shutdown.clone(),
-        ));
-        tracing::info!("workspaces enabled");
-        state.sandboxes = Some(sandboxes);
+        Err(reason) => state.workspaces_off = Some(reason),
     }
     // Connections need the gateway; their token key is derived from its signing key.
     if let (Some(path), true) = (

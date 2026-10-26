@@ -1,18 +1,27 @@
-# Application hosting example only: it does not set up workspaces, Knowledge
-# storage or cluster connections. Provide an external PostgreSQL 17 database with
-# the pgvector extension created in it (CREATE EXTENSION vector, as a superuser).
-# Before applying, replace the image and ConfigMap origins, then create the
-# namespace (kubectl create namespace obleth-chat) and in it:
+# Chat on Kubernetes, with workspaces and each person's browser. Provide an
+# external PostgreSQL 17 database with the pgvector extension created in it
+# (CREATE EXTENSION vector, as a superuser). Before applying, replace the
+# ConfigMap origins, then create the namespace (kubectl create namespace
+# obleth-chat) and in it:
 #   Secret obleth-chat-env with OBLETH_CHAT_DATABASE_URL and
 #     OBLETH_CHAT_BOOTSTRAP_PASSWORD (optional OIDC settings can go here too).
 #   Secret obleth-chat-gateway-signing-key with a gateway_signing_key PEM file.
 # Use the same signing key, origin, issuer, database, and OIDC config on all replicas.
 # Expose the ClusterIP service through your existing HTTPS ingress. Permit metrics
 # access only from monitoring, and configure ingress SSE buffering/timeouts.
+#
+# Workspaces need nothing else: Chat runs them as pods in this namespace with
+# its service account, behind the NetworkPolicies below. Set
+# OBLETH_CHAT_WORKSPACES=off to leave them out (the Role can then go too).
 apiVersion: v1
 kind: Namespace
 metadata:
   name: obleth-chat
+  # The API server refuses privileged, root or host-network pods here, so even
+  # a compromised Chat can't start one.
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -27,13 +36,94 @@ data:
   OBLETH_CHAT_GATEWAY_URL: http://obleth-gateway.obleth.svc.cluster.local:8080
   OBLETH_CHAT_GATEWAY_ISSUER: https://chat.example.internal
   OBLETH_CHAT_GATEWAY_AUDIENCE: obleth
-  OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE: /run/secrets/gateway_signing_key
+  OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE: /run/secrets/obleth-chat/gateway_signing_key
   # The addresses your ingress connects from, so sign-in limits apply per
   # client. Check /api/admin/health -> client; see the Reverse proxies docs.
   # OBLETH_CHAT_TRUSTED_PROXY: 10.0.0.10,10.0.0.11
   OBLETH_CHAT_MAX_STREAMS: "128"
   OBLETH_CHAT_DB_CONNECTIONS: "20"
   RUST_LOG: obleth_chat=info
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: obleth-chat
+  namespace: obleth-chat
+automountServiceAccountToken: false
+---
+# Chat's only cluster permissions: manage pods and volumes in its namespace and
+# exec into those pods. No Secrets, Services, RBAC or other namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: obleth-chat-workspaces
+  namespace: obleth-chat
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [get, create]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: obleth-chat-workspaces
+  namespace: obleth-chat
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: obleth-chat-workspaces
+subjects:
+  - kind: ServiceAccount
+    name: obleth-chat
+    namespace: obleth-chat
+---
+# Only Chat reaches a workspace (the preview proxy and the readiness check) or a
+# browser (DevTools on port 9222).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workspaces-ingress
+  namespace: obleth-chat
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: obleth-sandbox}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: obleth-chat}
+---
+# DNS, and HTTP(S) to public addresses for package installs. Private ranges (the
+# LAN, nodes, the API server and every cluster service) are unreachable. Replace
+# the public rule with a package mirror before opening workspaces to students.
+# These policies hold only if the cluster's network plugin enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workspaces-egress
+  namespace: obleth-chat
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: obleth-sandbox}
+  policyTypes: [Egress]
+  egress:
+    # DNS to any resolver: cluster DNS, whatever it runs as, or a node-local cache.
+    - ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, 224.0.0.0/4]
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 80}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -56,7 +146,9 @@ spec:
       labels:
         app: obleth-chat
     spec:
-      automountServiceAccountToken: false
+      # Its token is how Chat starts workspace and browser pods.
+      serviceAccountName: obleth-chat
+      automountServiceAccountToken: true
       terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
@@ -109,8 +201,10 @@ spec:
             periodSeconds: 15
             timeoutSeconds: 3
           volumeMounts:
+            # Not /run/secrets itself: the service account token is mounted
+            # under /var/run/secrets, and /var/run is /run in the image.
             - name: gateway-key
-              mountPath: /run/secrets
+              mountPath: /run/secrets/obleth-chat
               readOnly: true
             - name: tmp
               mountPath: /tmp

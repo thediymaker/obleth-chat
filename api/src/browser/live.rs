@@ -26,10 +26,10 @@ const SESSION: Duration = Duration::from_secs(4 * 60 * 60);
 const MIN_VIEWPORT: (u64, u64) = (320, 240);
 const MAX_VIEWPORT: (u64, u64) = (1920, 2400);
 
+/// `?wake=1` (what the web app sends) or `?wake=true` starts a sleeping browser.
 #[derive(Deserialize)]
 pub struct Wake {
-    #[serde(default)]
-    wake: bool,
+    wake: Option<String>,
 }
 
 pub async fn open(
@@ -59,7 +59,7 @@ pub async fn open(
         .get(user.id)
         .await?
         .is_some_and(|b| b.status == "running");
-    if !running && !query.wake {
+    if !running && !matches!(query.wake.as_deref(), Some("1" | "true")) {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "The browser is asleep".into(),

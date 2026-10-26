@@ -29,9 +29,9 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       }
       if (local.tab === 'usage') { const [u, l] = await Promise.all([api.request(`/api/admin/usage${query ? '?q=' + encodeURIComponent(query) : ''}`), api.request('/api/admin/limits')]); if (sequence !== local.sequence) return; local.usage = u.users || []; local.hasMore = !!u.hasMore; local.limits = l; }
       if (local.tab === 'system') {
-        local.retention = null; local.embedding = null;
-        const [r, e] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null]); if (sequence !== local.sequence) return;
-        local.retention = r; local.embedding = e;
+        local.retention = null; local.embedding = null; local.health = null;
+        const [r, e, h] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null, api.request('/api/admin/health').catch(() => null)]); if (sequence !== local.sequence) return;
+        local.retention = r; local.embedding = e; local.health = h;
       }
       if (local.tab === 'audit') { const r = await api.request(`/api/admin/audit?limit=50${append && local.nextCursor ? '&before=' + encodeURIComponent(local.nextCursor) : ''}`); if (sequence !== local.sequence) return; local.events = append ? [...local.events, ...(r.events || [])] : r.events || []; local.nextCursor = r.nextCursor; }
     } catch (e) { if (sequence === local.sequence && e.name !== 'AbortError') local.error = e.message; }
@@ -87,9 +87,16 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     return `<section class="setting-card card embedding-card"><div class="spread"><h2>Knowledge search</h2>${badge(i.pendingDocuments || i.pendingSavedItems ? 'Indexing' : 'Up to date')}</div><p>Chat turns documents and saved items into vectors with an embedding model, so search can find passages by meaning.</p><p class="inline-note">${esc(status)}</p><form id="admin-embedding-form">${field('embedding-model', 'Embedding model', `<select class="form-control" id="embedding-model" name="embedding-model" data-previous="${esc(current)}">${models.map(option).join('')}</select>`, e.models ? 'Embedding models your gateway offers.' : 'The gateway could not list its embedding models, so only the current and default models are shown.')}${prefix('embedding-query', 'Search prefix', e.effective.queryPrefix, 'Put before each search. Chat fills in the prefix the model’s makers publish; change it only if the model’s documentation says otherwise.')}${prefix('embedding-document', 'Passage prefix', e.effective.documentPrefix, 'Put before each passage and saved item. Many models use none.')}<p class="inline-note retention-note">Changing the model or a prefix makes Chat index every document and saved item again: vectors from different models can’t be compared. Until that finishes, search finds only what has been redone, and a large library takes a while and uses the gateway’s embedding capacity.</p><div class="form-error" role="alert"></div><div class="modal-actions">${btn('Use defaults', 'admin-embedding-defaults', { tone: 'small' })}<button class="btn primary" type="submit">Save</button></div></form></section>`;
   }
   // Everything else about the installation is set where Chat runs, so the tab points there.
+  // Whether this replica runs workspaces, and if not, why.
+  function workspaceStatus() {
+    const w = local.health?.workspaces;
+    if (!w) return 'Linux workspaces and each person’s browser on Kubernetes';
+    if (w.enabled) return esc(`On, in namespace ${w.namespace}${w.browser ? ', with the browser' : ''}`);
+    return esc(`Off: ${w.off || 'not set up'}`);
+  }
   function system() {
     const docs = 'https://www.obleth.com/docs/run-chat', link = ([glyph, label, path, note]) => `<a class="setting-line docs-link" href="${docs}${path}" target="_blank" rel="noopener">${icon(glyph)}<div class="grow"><h3>${label}</h3><p>${note}</p></div>${icon('external')}</a>`;
-    const pages = [['cube', 'Connect the gateway', '/connect-gateway', 'Model access and inference through Obleth'], ['lock', 'Accounts and sign-in', '/accounts', 'Local accounts and single sign-on'], ['book', 'Knowledge', '/enable-knowledge', 'Collections and saved items in S3'], ['terminal', 'Workspaces and the browser', '/enable-workspaces', 'Linux workspaces and each person’s browser on Kubernetes'], ['link', 'Connections and clusters', '/enable-connections', 'MCP servers, Slurm and Kubernetes'], ['shield', 'Reverse proxies', '/reverse-proxies', 'Client addresses and sign-in limits'], ['chart', 'Operate Chat', '/operations', 'Health checks, metrics and backups'], ['settings', 'Environment variables', '/environment-variables', 'Every setting in one list']];
+    const pages = [['cube', 'Connect the gateway', '/connect-gateway', 'Model access and inference through Obleth'], ['lock', 'Accounts and sign-in', '/accounts', 'Local accounts and single sign-on'], ['book', 'Knowledge', '/enable-knowledge', 'Collections and saved items in S3'], ['terminal', 'Workspaces and the browser', '/enable-workspaces', workspaceStatus()], ['link', 'Connections and clusters', '/enable-connections', 'MCP servers, Slurm and Kubernetes'], ['shield', 'Reverse proxies', '/reverse-proxies', 'Client addresses and sign-in limits'], ['chart', 'Operate Chat', '/operations', 'Health checks, metrics and backups'], ['settings', 'Environment variables', '/environment-variables', 'Every setting in one list']];
     return `<div class="admin-system-grid">${retentionCard()}${embeddingCard()}<section class="setting-card card"><h2>Set where Chat runs</h2><p>The rest is configured with environment variables when Chat is deployed. These guides show how.</p>${pages.map(link).join('')}</section></div>`;
   }
 

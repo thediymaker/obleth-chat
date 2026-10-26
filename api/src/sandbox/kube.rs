@@ -164,6 +164,25 @@ impl Kube {
         bail!("Kubernetes could not delete {kind}: {}", reason(&value))
     }
 
+    /// Whether this service account may `verb` the namespaced `resource` (such as
+    /// `pods` or `pods/exec`), from a SelfSubjectAccessReview.
+    pub async fn allowed(&self, verb: &str, resource: &str) -> Result<bool> {
+        let (resource, subresource) = resource.split_once('/').unwrap_or((resource, ""));
+        let review = serde_json::json!({
+            "apiVersion": "authorization.k8s.io/v1",
+            "kind": "SelfSubjectAccessReview",
+            "spec": {"resourceAttributes": {"namespace": self.namespace, "verb": verb, "resource": resource, "subresource": subresource}},
+        });
+        let url = self
+            .base
+            .join("apis/authorization.k8s.io/v1/selfsubjectaccessreviews")?;
+        let (status, value) = self.call(Method::POST, url, Some(&review)).await?;
+        if !status.is_success() {
+            bail!("Kubernetes could not check access: {}", reason(&value));
+        }
+        Ok(value.pointer("/status/allowed").and_then(Value::as_bool) == Some(true))
+    }
+
     pub async fn list(&self, kind: &str, selector: &str) -> Result<Vec<Value>> {
         let mut url = self.url(kind, None)?;
         url.query_pairs_mut().append_pair("labelSelector", selector);
@@ -304,6 +323,16 @@ fn exit_code(payload: &[u8]) -> i32 {
         .and_then(|c| c.get("message").and_then(Value::as_str))
         .and_then(|code| code.parse().ok())
         .unwrap_or(-1)
+}
+
+/// The namespace Chat runs in, when it runs in a cluster with a service account
+/// token mounted.
+pub fn own_namespace() -> Option<String> {
+    env::var("KUBERNETES_SERVICE_HOST").ok()?;
+    std::fs::read_to_string(format!("{SERVICE_ACCOUNT}/namespace"))
+        .ok()
+        .map(|ns| ns.trim().to_owned())
+        .filter(|ns| !ns.is_empty())
 }
 
 fn reason(value: &Value) -> String {

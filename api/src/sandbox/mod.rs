@@ -41,6 +41,8 @@ pub struct SandboxConfig {
     pub cpu_limit: String,
     pub memory_limit: String,
     pub everyone: bool,
+    /// The most workspace and browser pods Chat runs at once.
+    pub slots: usize,
     /// Unset turns previews off; workspaces still run.
     pub preview_domain: Option<String>,
     pub preview_scheme: String,
@@ -50,14 +52,23 @@ pub struct SandboxConfig {
 }
 
 impl SandboxConfig {
-    /// Workspaces are enabled by OBLETH_CHAT_SANDBOX_NAMESPACE; the image and the
-    /// preview domain are then required.
-    pub fn from_env() -> Result<Option<Self>> {
+    /// Workspaces run in Chat's own namespace when Chat runs in Kubernetes with a
+    /// service account token, or in OBLETH_CHAT_SANDBOX_NAMESPACE, unless
+    /// OBLETH_CHAT_WORKSPACES=off. `Ok(Err(reason))` says why they are off.
+    pub fn from_env() -> Result<Result<Self, String>> {
         let var = |key: &str| env::var(key).ok().filter(|v| !v.trim().is_empty());
-        let Some(namespace) = var("OBLETH_CHAT_SANDBOX_NAMESPACE") else {
-            return Ok(None);
+        match var("OBLETH_CHAT_WORKSPACES").as_deref().map(str::trim) {
+            None | Some("auto") => {}
+            Some("off") => return Ok(Err("Turned off with OBLETH_CHAT_WORKSPACES=off".into())),
+            Some(_) => bail!("OBLETH_CHAT_WORKSPACES must be auto or off"),
+        }
+        let Some(namespace) = var("OBLETH_CHAT_SANDBOX_NAMESPACE").or_else(kube::own_namespace)
+        else {
+            return Ok(Err(
+                "Chat is not running in Kubernetes with a service account token".into(),
+            ));
         };
-        let image = var("OBLETH_CHAT_SANDBOX_IMAGE").context("Set OBLETH_CHAT_SANDBOX_IMAGE")?;
+        let image = var("OBLETH_CHAT_SANDBOX_IMAGE").unwrap_or_else(|| release_image("workspace"));
         let preview_domain = var("OBLETH_CHAT_PREVIEW_DOMAIN").map(|d| d.to_ascii_lowercase());
         let chat_origin =
             var("OBLETH_CHAT_ORIGIN").unwrap_or_else(|| "http://localhost:8085".into());
@@ -95,7 +106,15 @@ impl SandboxConfig {
         let storage = var("OBLETH_CHAT_SANDBOX_STORAGE").unwrap_or_else(|| "10Gi".into());
         let disk_limit = quantity_bytes(&storage)
             .context("OBLETH_CHAT_SANDBOX_STORAGE must be a size such as 10Gi")?;
-        Ok(Some(Self {
+        let slots = match var("OBLETH_CHAT_SANDBOX_SLOTS") {
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=10_000).contains(n))
+                .context("OBLETH_CHAT_SANDBOX_SLOTS must be between 1 and 10000")?,
+            None => 8,
+        };
+        Ok(Ok(Self {
             namespace,
             image,
             runtime_class: var("OBLETH_CHAT_SANDBOX_RUNTIME_CLASS"),
@@ -105,6 +124,7 @@ impl SandboxConfig {
             cpu_limit: var("OBLETH_CHAT_SANDBOX_CPU").unwrap_or_else(|| "2".into()),
             memory_limit: var("OBLETH_CHAT_SANDBOX_MEMORY").unwrap_or_else(|| "4Gi".into()),
             everyone,
+            slots,
             preview_scheme: if origin.scheme() == "https" {
                 "https"
             } else {
@@ -393,7 +413,8 @@ impl Sandboxes {
             Err(error) => {
                 let message: String = format!("{error:#}").chars().take(500).collect();
                 tracing::warn!(sandbox=%sandbox.id, "workspace did not start: {message}");
-                let message = if message.contains("exceeded quota") {
+                let message = if message.contains("exceeded quota") || message.contains(SLOTS_FULL)
+                {
                     "All workspace slots are in use right now. Try again in a few minutes.".into()
                 } else {
                     message
@@ -458,8 +479,13 @@ impl Sandboxes {
             &self.volume_manifest(&sandbox.pod_slug),
         )
         .await?;
-        kube.create("pods", &self.pod_manifest(&sandbox.pod_slug))
-            .await?;
+        create_pod(
+            &self.inner.pool,
+            kube,
+            self.inner.config.slots,
+            &self.pod_manifest(&sandbox.pod_slug),
+        )
+        .await?;
         for _ in 0..180 {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let Some(pod) = kube.get("pods", &name).await? else {
@@ -726,6 +752,33 @@ impl Sandboxes {
         Ok(())
     }
 
+    /// Whether Chat's service account may run workspaces in the namespace. The inner
+    /// error names what it may not do; the outer one means the API didn't answer.
+    pub async fn check_access(&self) -> Result<Result<(), String>> {
+        let mut missing = Vec::new();
+        for (verb, resource) in [
+            ("create", "pods"),
+            ("list", "pods"),
+            ("delete", "pods"),
+            ("create", "pods/exec"),
+            ("create", "persistentvolumeclaims"),
+            ("delete", "persistentvolumeclaims"),
+        ] {
+            if !self.inner.kube.allowed(verb, resource).await? {
+                missing.push(format!("{verb} {resource}"));
+            }
+        }
+        Ok(if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Chat's service account may not {} in namespace {}",
+                missing.join(", "),
+                self.inner.config.namespace
+            ))
+        })
+    }
+
     pub async fn worker(self, shutdown: CancellationToken) {
         loop {
             if let Err(error) = self.reconcile().await {
@@ -761,6 +814,45 @@ impl Sandboxes {
     pub(crate) fn http(&self) -> &reqwest::Client {
         &self.inner.http
     }
+}
+
+/// This release's workspace or browser image.
+pub(crate) fn release_image(name: &str) -> String {
+    format!(
+        "ghcr.io/thediymaker/obleth-chat/{name}:v{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Part of the error when every slot is taken; callers turn it into advice to wait.
+pub(crate) const SLOTS_FULL: &str = "every workspace slot is in use";
+
+/// Creates a workspace or browser pod unless `slots` of Chat's pods already run.
+/// Replicas take turns, so together they never go over.
+pub(crate) async fn create_pod(
+    pool: &PgPool,
+    kube: &Kube,
+    slots: usize,
+    pod: &Value,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('obleth-chat-workspace-slots'))")
+        .execute(&mut *tx)
+        .await?;
+    let name = pod.pointer("/metadata/name");
+    let running = kube
+        .list("pods", "app.kubernetes.io/managed-by=obleth-chat")
+        .await?
+        .iter()
+        .filter(|p| p.pointer("/metadata/name") != name)
+        .filter(|p| !matches!(pod_state(p), PodState::Finished | PodState::Deleting))
+        .count();
+    if running >= slots {
+        bail!("{SLOTS_FULL}");
+    }
+    kube.create("pods", pod).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub(crate) enum PodState {
@@ -1209,6 +1301,41 @@ mod tests {
         assert_eq!(quantity_bytes("2048"), Some(2048));
         assert_eq!(quantity_bytes("1.5Gi"), None);
         assert_eq!(quantity_bytes("10GB"), None);
+    }
+
+    /// The only test that sets these variables, so it can't race another.
+    #[test]
+    fn workspaces_need_nothing_but_a_namespace() {
+        for key in [
+            "OBLETH_CHAT_WORKSPACES",
+            "OBLETH_CHAT_SANDBOX_IMAGE",
+            "OBLETH_CHAT_SANDBOX_SLOTS",
+            "OBLETH_CHAT_PREVIEW_DOMAIN",
+        ] {
+            env::remove_var(key);
+        }
+        env::set_var("OBLETH_CHAT_SANDBOX_NAMESPACE", "chat");
+        let config = SandboxConfig::from_env().unwrap().unwrap();
+        assert_eq!(config.namespace, "chat");
+        assert_eq!(
+            config.image,
+            format!(
+                "ghcr.io/thediymaker/obleth-chat/workspace:v{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(config.slots, 8);
+        assert!(config.preview_domain.is_none());
+        env::set_var("OBLETH_CHAT_SANDBOX_SLOTS", "0");
+        assert!(SandboxConfig::from_env().is_err());
+        env::remove_var("OBLETH_CHAT_SANDBOX_SLOTS");
+        env::set_var("OBLETH_CHAT_WORKSPACES", "off");
+        let Err(reason) = SandboxConfig::from_env().unwrap() else {
+            panic!("workspaces should be off");
+        };
+        assert!(reason.contains("off"));
+        env::remove_var("OBLETH_CHAT_WORKSPACES");
+        env::remove_var("OBLETH_CHAT_SANDBOX_NAMESPACE");
     }
 
     #[test]

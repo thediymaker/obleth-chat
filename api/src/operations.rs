@@ -575,6 +575,6 @@ async fn health(
     .await
     .is_ok_and(|r| r.is_ok());
     Ok(Json(
-        json!({"application":"obleth-chat","version":env!("CARGO_PKG_VERSION"),"database":{"ready":db,"poolSize":state.store.pool.size(),"idleConnections":state.store.pool.num_idle()},"gateway":{"configured":state.gateway.is_some()},"oidc":{"configured":state.auth.oidc_enabled()},"client":client,"streams":{"activeOnReplica":state.metrics.streams.get(),"availableOnReplica":state.slots.available_permits()},"shuttingDown":state.shutdown.is_cancelled(),"metricsPath":"/metrics","readinessPath":"/readyz","scope":"Current application replica; gateway readiness is checked when discovering models."}),
+        json!({"application":"obleth-chat","version":env!("CARGO_PKG_VERSION"),"database":{"ready":db,"poolSize":state.store.pool.size(),"idleConnections":state.store.pool.num_idle()},"gateway":{"configured":state.gateway.is_some()},"oidc":{"configured":state.auth.oidc_enabled()},"client":client,"streams":{"activeOnReplica":state.metrics.streams.get(),"availableOnReplica":state.slots.available_permits()},"workspaces":{"enabled":state.sandboxes.is_some(),"namespace":state.sandboxes.as_ref().map(|sb| sb.config().namespace.clone()),"browser":state.browsers.is_some(),"off":state.workspaces_off},"shuttingDown":state.shutdown.is_cancelled(),"metricsPath":"/metrics","readinessPath":"/readyz","scope":"Current application replica; gateway readiness is checked when discovering models."}),
     ))
 }

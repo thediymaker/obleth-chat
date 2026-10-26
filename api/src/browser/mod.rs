@@ -10,7 +10,10 @@ pub mod tools;
 use crate::{
     auth::Identity,
     error::ApiError,
-    sandbox::{kube::Kube, pod_state, quantity_bytes, waiting_reason, PodState, SandboxConfig},
+    sandbox::{
+        create_pod, kube::Kube, pod_state, quantity_bytes, release_image, waiting_reason, PodState,
+        SandboxConfig, SLOTS_FULL,
+    },
     AppState,
 };
 use anyhow::{bail, Context, Result};
@@ -45,12 +48,16 @@ pub struct BrowserConfig {
 }
 
 impl BrowserConfig {
-    /// The browser is enabled by OBLETH_CHAT_BROWSER_IMAGE, alongside workspaces.
+    /// The browser comes with workspaces unless OBLETH_CHAT_BROWSER=off. Its image
+    /// defaults to this release's.
     pub fn from_env() -> Result<Option<Self>> {
         let var = |key: &str| env::var(key).ok().filter(|v| !v.trim().is_empty());
-        let Some(image) = var("OBLETH_CHAT_BROWSER_IMAGE") else {
-            return Ok(None);
-        };
+        match var("OBLETH_CHAT_BROWSER").as_deref().map(str::trim) {
+            None | Some("on") => {}
+            Some("off") => return Ok(None),
+            Some(_) => bail!("OBLETH_CHAT_BROWSER must be on or off"),
+        }
+        let image = var("OBLETH_CHAT_BROWSER_IMAGE").unwrap_or_else(|| release_image("browser"));
         let storage = var("OBLETH_CHAT_BROWSER_STORAGE").unwrap_or_else(|| "1Gi".into());
         quantity_bytes(&storage)
             .context("OBLETH_CHAT_BROWSER_STORAGE must be a size such as 1Gi")?;
@@ -293,7 +300,8 @@ impl Browsers {
             Err(error) => {
                 let message: String = format!("{error:#}").chars().take(500).collect();
                 tracing::warn!(browser=%browser.id, "browser did not start: {message}");
-                let message = if message.contains("exceeded quota") {
+                let message = if message.contains("exceeded quota") || message.contains(SLOTS_FULL)
+                {
                     "All browser and workspace slots are in use right now. Try again in a few minutes.".into()
                 } else {
                     message
@@ -336,8 +344,13 @@ impl Browsers {
             &self.volume_manifest(&browser.slug),
         )
         .await?;
-        kube.create("pods", &self.pod_manifest(&browser.slug))
-            .await?;
+        create_pod(
+            &self.inner.pool,
+            kube,
+            self.inner.sandbox.slots,
+            &self.pod_manifest(&browser.slug),
+        )
+        .await?;
         for _ in 0..120 {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let Some(pod) = kube.get("pods", &name).await? else {

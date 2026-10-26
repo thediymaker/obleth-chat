@@ -1,8 +1,9 @@
-# Chat workspaces: one Pod and one volume per person, created by Chat through the
-# Kubernetes API. With OBLETH_CHAT_BROWSER_IMAGE set, each person's browser is a
-# second Pod and volume here (labelled obleth.io/browser), under the same policies. Chat's own Deployment must run as the obleth-chat ServiceAccount
-# below (namespace obleth-chat). Pod Security "restricted" is enforced by the API server, so
-# Chat cannot create a privileged, root or host-network pod here even if asked to.
+# Optional: workspaces in a namespace of their own. deploy/k8s.yaml already runs
+# them in Chat's namespace; apply this as well to keep them apart under their own
+# quota, and set OBLETH_CHAT_SANDBOX_NAMESPACE=obleth-sandboxes. Each person's
+# browser runs here too (labelled obleth.io/browser), under the same policies.
+# Pod Security "restricted" is enforced by the API server, so Chat cannot create a
+# privileged, root or host-network pod here even if asked to.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -12,15 +13,9 @@ metadata:
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/warn: restricted
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: obleth-chat
-  namespace: obleth-chat
-automountServiceAccountToken: false
----
-# Chat's only cluster permissions: manage pods and volumes in this namespace and
-# exec into those pods. No Secrets, Services, RBAC or other namespaces.
+# The same permissions as in Chat's own namespace (deploy/k8s.yaml), here: manage
+# pods and volumes and exec into those pods. No Secrets, Services, RBAC or other
+# namespaces.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -57,6 +52,7 @@ metadata:
   name: workspaces
   namespace: obleth-sandboxes
 spec:
+  # Chat also stops at OBLETH_CHAT_SANDBOX_SLOTS (8) of its pods at once.
   hard:
     pods: "8"
     requests.cpu: "4"
@@ -121,11 +117,3 @@ spec:
       ports:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 80}
----
-# gVisor for workspace pods (OBLETH_CHAT_SANDBOX_RUNTIME_CLASS=gvisor). Every node
-# needs runsc first: https://gvisor.dev/docs/user_guide/containerd/quick_start/
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: gvisor
-handler: runsc

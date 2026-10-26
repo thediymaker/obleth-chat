@@ -125,6 +125,7 @@ async fn fixture(pool: PgPool) -> Fixture {
         cpu_limit: "1".into(),
         memory_limit: "1Gi".into(),
         everyone: false,
+        slots: 8,
         preview_domain: Some("sbx.example.com".into()),
         preview_scheme: "http".into(),
         chat_origin: ORIGIN.into(),

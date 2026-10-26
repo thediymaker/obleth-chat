@@ -72,6 +72,8 @@ pub struct AppState {
     pub admin_gateway_url: Option<String>,
     pub followups_enabled: bool,
     pub sandboxes: Option<sandbox::Sandboxes>,
+    /// Why workspaces are off, for administrators.
+    pub workspaces_off: Option<String>,
     pub browsers: Option<browser::Browsers>,
     pub connections: Option<connections::Connections>,
     pub knowledge: Option<knowledge::Knowledge>,
@@ -88,6 +90,7 @@ impl AppState {
             admin_gateway_url: None,
             followups_enabled: true,
             sandboxes: None,
+            workspaces_off: None,
             browsers: None,
             connections: None,
             knowledge: None,

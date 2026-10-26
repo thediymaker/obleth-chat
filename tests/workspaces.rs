@@ -51,6 +51,7 @@ async fn app(pool: PgPool, preview_domain: Option<&str>) -> Router {
         cpu_limit: "1".into(),
         memory_limit: "1Gi".into(),
         everyone: false,
+        slots: 8,
         preview_domain: preview_domain.map(Into::into),
         preview_scheme: "http".into(),
         chat_origin: ORIGIN.into(),

@@ -2,6 +2,45 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.5.0
+
+Chat sets itself up with one command, on Docker or Kubernetes, and workspaces come with the Kubernetes install.
+
+**New**
+
+- **`./setup.sh docker` and `./setup.sh kubernetes`.** They ask for the address people use and the gateway's URL, generate every password and Chat's signing key, start Chat, and print the administrator password and the issuer entry the gateway needs. Run again, they keep what they made. Docker works with Docker Compose or Podman Compose and brings PostgreSQL. On Kubernetes, without `--database`, PostgreSQL 17 with pgvector runs in the namespace (`deploy/k8s-postgres.yaml`). See [Install Chat](https://www.obleth.com/docs/run-chat/install).
+- **Workspaces come with `deploy/k8s.yaml`.** It gives Chat a ServiceAccount and a Role for pods, exec and volumes in its own namespace, and NetworkPolicies so only Chat reaches workspace and browser pods and they reach only DNS and public HTTP(S). The namespace enforces Pod Security `restricted`. Nothing else needs setting. See [Enable workspaces](https://www.obleth.com/docs/run-chat/enable-workspaces).
+- **Workspaces turn on by themselves.** When Chat runs in Kubernetes with a service account token, workspaces run in its namespace (or `OBLETH_CHAT_SANDBOX_NAMESPACE`). The workspace and browser images default to this release's, and the browser comes with workspaces.
+- **Chat says why workspaces are off.** At startup it asks the API server what its service account may do. If something is missing, **Settings › Administration › System** and `/api/admin/health` give the reason.
+
+**Changed**
+
+- Chat caps its workspace and browser pods itself, at `OBLETH_CHAT_SANDBOX_SLOTS` (8), because a ResourceQuota in a shared namespace would count Chat's own pods too.
+- `deploy/k8s.yaml` mounts the gateway key at `/run/secrets/obleth-chat/`. Mounted over `/run/secrets`, it hid the service account token's mount point and Chat didn't start.
+- Workspace pods may reach DNS on any address, so DNS works whatever the cluster runs, including node-local caches.
+- Images are named in full (`docker.io/pgvector/pgvector`), so Podman pulls them.
+- A workspace's notes (starting, asleep, no files yet) sit in the middle of the Files and Git panes.
+
+**Limits**
+
+- Workspaces and the browser run only on Kubernetes.
+- Previews need a wildcard DNS name and certificate. Without one, everything else works.
+
+**Upgrading**
+
+- Kubernetes installs that mount a service account token now try workspaces. Without the Role, they stay off and say why; `OBLETH_CHAT_WORKSPACES=off` turns them off.
+- The browser comes with workspaces unless `OBLETH_CHAT_BROWSER=off`.
+- `deploy/k8s-workspaces.yaml` no longer creates the ServiceAccount (now in `deploy/k8s.yaml`) or the `gvisor` RuntimeClass (see the gVisor steps in Enable workspaces). Applying it doesn't remove existing ones.
+- If you apply the new `deploy/k8s.yaml`, anything else you run in Chat's namespace must meet Pod Security `restricted`.
+
+**Images**
+
+- `ghcr.io/thediymaker/obleth-chat/chat:v0.5.0`
+- `ghcr.io/thediymaker/obleth-chat/workspace:v0.5.0`
+- `ghcr.io/thediymaker/obleth-chat/browser:v0.5.0`
+
+Pin them by digest in production.
+
 ## v0.4.5
 
 Workspaces no longer need a preview domain.

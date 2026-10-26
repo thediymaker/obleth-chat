@@ -21,14 +21,19 @@ window.OblethChatConfig = {
   // Use '' to hide an icon. These icons are separate from the optional site logo.
   icons: { greeting: 'chat', assistant: 'chat', loading: 'chat' },
 
+  // The sign-in page. A blank title reads 'Sign in to <siteName>'; a blank
+  // description shows nothing under it.
   login: {
-    eyebrow: 'A space for every idea',
-    title: 'A little space\nfor big ideas.',
-    description: 'Ask questions, explore ideas, and make something new.\nYour conversations, all in one place.',
-    footer: '',
-    welcomeTitle: 'Make yourself at home.',
-    welcomeDescription: 'Sign in to your personal workspace.',
+    title: '',
+    description: '',
+    // The single sign-on button, shown only when OIDC is configured, and an
+    // optional line under it, e.g. 'Uses your university account.'
+    ssoLabel: 'Continue with single sign-on',
+    ssoHint: '',
+    // The line under the form. helpLink adds one link after it, e.g.
+    // { label: 'Request an account', url: 'https://accounts.example.edu' }.
     help: 'Need an account? Your administrator can create one for you.',
+    helpLink: null,
   },
 
   // Links in the sign-in page footer, e.g. help, privacy or terms. Use [] for none.

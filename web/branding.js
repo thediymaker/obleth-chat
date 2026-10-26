@@ -9,12 +9,10 @@ const defaults = {
   favicon: { light: './assets/obleth-ink.svg', dark: './assets/obleth.svg' },
   icons: { greeting: 'chat', assistant: 'chat', loading: 'chat' },
   login: {
-    eyebrow: 'A space for every idea',
-    title: 'A little space\nfor big ideas.',
-    description: 'Ask questions, explore ideas, and make something new.\nYour conversations, all in one place.',
-    footer: '',
-    welcomeTitle: 'Make yourself at home.',
-    welcomeDescription: 'Sign in to your personal workspace.',
+    title: '',
+    description: '',
+    ssoLabel: 'Continue with single sign-on',
+    ssoHint: '',
     help: 'Need an account? Your administrator can create one for you.',
   },
   links: [
@@ -70,6 +68,15 @@ function copyFields(source, fallback) {
   return Object.fromEntries(Object.entries(fallback).map(([key, value]) => [key, text(input[key], value)]));
 }
 
+// The help line may end in one link, e.g. to where people request an account.
+function loginCopy(value) {
+  const input = plainObject(value);
+  const login = copyFields(input, defaults.login);
+  const link = plainObject(input.helpLink);
+  const label = text(link.label, '').trim(), url = linkUrl(link.url);
+  return { ...login, ssoLabel: login.ssoLabel.trim() || defaults.login.ssoLabel, helpLink: label && url ? { label, url } : null };
+}
+
 export function normalizeBranding(value) {
   const input = plainObject(value);
   const configuredIcons = plainObject(input.icons);
@@ -90,7 +97,7 @@ export function normalizeBranding(value) {
       const name = configuredIcons[role];
       return [role, name === '' || supportedIcons.has(name) ? name : fallback];
     })),
-    login: copyFields(input.login, defaults.login),
+    login: loginCopy(input.login),
     links: links(input.links),
     home: copyFields(input.home, defaults.home),
     appearance: { defaultTheme: ['system', 'light', 'dark'].includes(defaultTheme) ? defaultTheme : defaults.appearance.defaultTheme },

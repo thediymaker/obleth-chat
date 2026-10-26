@@ -21,7 +21,12 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
-use std::{env, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -196,6 +201,11 @@ const SELECT: &str = "SELECT s.id,s.conversation_id,s.owner_id,s.slug,s.pod_id,p
 const DISK_CHECK: Duration = Duration::from_secs(5 * 60);
 /// Dev servers of projects unused this long are stopped; the pod keeps running.
 const SERVER_IDLE: Duration = Duration::from_secs(30 * 60);
+/// How long a confirmed pod address is trusted before the API server is asked again.
+const POD_CHECK: Duration = Duration::from_secs(5);
+/// Marks a pod record stopped when it still holds the address that went stale; a pod
+/// started since keeps its record. Its projects' dev servers went with the pod.
+const STOP_STALE: &str = "WITH p AS (UPDATE sandbox_pods SET status='stopped',pod_ip=NULL WHERE id=$1 AND status='running' AND pod_ip=$2 RETURNING id) UPDATE sandboxes SET preview_port=NULL WHERE pod_id IN (SELECT id FROM p)";
 
 #[derive(Clone)]
 pub struct Sandboxes {
@@ -207,6 +217,8 @@ struct Inner {
     pool: PgPool,
     http: reqwest::Client,
     key: OnceCell<Vec<u8>>,
+    /// Pod name to the address last confirmed for it, and when.
+    confirmed: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 impl Sandboxes {
@@ -223,6 +235,7 @@ impl Sandboxes {
                 pool,
                 http,
                 key: OnceCell::new(),
+                confirmed: Mutex::default(),
             }),
         })
     }
@@ -263,6 +276,64 @@ impl Sandboxes {
     pub fn allowed(&self, user: &Identity) -> bool {
         self.inner.config.everyone || user.is_admin()
     }
+
+    /// Whether an account is enabled and may still use workspaces, for work that runs
+    /// without anyone signed in.
+    pub async fn owner_allowed(&self, owner: Uuid) -> Result<bool, ApiError> {
+        let user = sqlx::query_as::<_, Identity>(
+            "SELECT id,username,display_name,role FROM users WHERE id=$1 AND enabled",
+        )
+        .bind(owner)
+        .fetch_optional(&self.inner.pool)
+        .await?;
+        Ok(user.is_some_and(|user| self.allowed(&user)))
+    }
+
+    /// Whether the owner's pod still runs at the address on record. Pods are evicted,
+    /// deleted or lost with their node, and their address can go to another pod, so a
+    /// pod that is gone or changed marks the record stopped. A confirmation is
+    /// trusted for a few seconds.
+    pub async fn confirm_pod(&self, sandbox: &Sandbox) -> Result<bool, ApiError> {
+        let Some(ip) = sandbox.pod_ip.as_deref() else {
+            return Ok(false);
+        };
+        let name = sandbox.pod_name();
+        let fresh = self
+            .inner
+            .confirmed
+            .lock()
+            .unwrap()
+            .get(&name)
+            .is_some_and(|(known, at)| known == ip && at.elapsed() < POD_CHECK);
+        if fresh {
+            return Ok(true);
+        }
+        let pod = self.inner.kube.get("pods", &name).await.map_err(|error| {
+            tracing::warn!("could not check the workspace pod: {error:#}");
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The workspace could not be reached. Try again in a moment.".into(),
+            )
+        })?;
+        let serving = pod.is_some_and(|pod| serves(&pod, &sandbox.pod_slug, ip));
+        {
+            let mut confirmed = self.inner.confirmed.lock().unwrap();
+            confirmed.retain(|_, (_, at)| at.elapsed() < POD_CHECK);
+            if serving {
+                confirmed.insert(name, (ip.to_owned(), Instant::now()));
+                return Ok(true);
+            }
+            confirmed.remove(&name);
+        }
+        tracing::info!(pod=%name, "workspace pod is gone or moved; marking it stopped");
+        sqlx::query(STOP_STALE)
+            .bind(sandbox.pod_id)
+            .bind(ip)
+            .execute(&self.inner.pool)
+            .await?;
+        Ok(false)
+    }
+
     /// The workspace's preview address, when previews are set up.
     pub fn preview_origin(&self, sandbox: &Sandbox) -> Option<String> {
         let c = &self.inner.config;
@@ -672,8 +743,8 @@ impl Sandboxes {
     }
 
     /// One replica at a time: stop idle dev servers and idle pods (keeping their
-    /// volumes), remove volumes past retention, and delete cluster objects whose
-    /// pod record no longer exists.
+    /// volumes), remove volumes past retention, mark records stopped whose pod is
+    /// gone or moved, and delete cluster objects whose pod record no longer exists.
     async fn reconcile(&self) -> Result<()> {
         let pool = &self.inner.pool;
         let mut tx = pool.begin().await?;
@@ -709,6 +780,31 @@ impl Sandboxes {
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
+        }
+        // Pods evicted, deleted or lost with their node leave records that point at an
+        // address another pod may be given. Records are read before pods are listed,
+        // so a pod started in between keeps its new address.
+        let running: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT id,slug,pod_ip FROM sandbox_pods WHERE status='running' AND pod_ip IS NOT NULL",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        if !running.is_empty() {
+            let pods = kube
+                .list(
+                    "pods",
+                    "app.kubernetes.io/managed-by=obleth-chat,!obleth.io/browser",
+                )
+                .await?;
+            for (id, slug, ip) in running {
+                if !pods.iter().any(|pod| serves(pod, &slug, &ip)) {
+                    sqlx::query(STOP_STALE)
+                        .bind(id)
+                        .bind(&ip)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
         }
         let idle_servers = sqlx::query_as::<_, Sandbox>(&format!("{SELECT} WHERE p.status='running' AND s.preview_port IS NOT NULL AND s.last_used_at<NOW()-make_interval(secs=>$1)"))
             .bind(SERVER_IDLE.as_secs() as f64).fetch_all(&mut *tx).await?;
@@ -882,6 +978,23 @@ pub(crate) fn pod_state(pod: &Value) -> PodState {
     }
 }
 
+/// Whether `pod` is the running workspace pod for record `slug` at `ip`.
+fn serves(pod: &Value, slug: &str, ip: &str) -> bool {
+    let text = |pointer: &str| pod.pointer(pointer).and_then(Value::as_str);
+    let label = |key: &str| {
+        pod.pointer("/metadata/labels")
+            .and_then(|labels| labels.get(key))
+            .and_then(Value::as_str)
+    };
+    pod.pointer("/metadata/deletionTimestamp").is_none()
+        && text("/metadata/name") == Some(pod_name(slug).as_str())
+        && label("app.kubernetes.io/managed-by") == Some("obleth-chat")
+        && label("obleth.io/pod") == Some(slug)
+        && label("obleth.io/browser").is_none()
+        && text("/status/phase") == Some("Running")
+        && text("/status/podIP") == Some(ip)
+}
+
 pub(crate) fn waiting_reason(pod: &Value) -> String {
     pod.pointer("/status/containerStatuses/0/state/waiting/reason")
         .or_else(|| pod.pointer("/status/containerStatuses/0/state/terminated/reason"))
@@ -1051,11 +1164,21 @@ async fn preview_link(
             Err(error) => tracing::warn!("could not restart the workspace server: {error}"),
         }
     }
+    // The ticket, and the preview access it opens, last only as long as this sign-in.
+    let session = s
+        .auth
+        .session_id(&headers)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
+    let grant = preview::Grant {
+        user: user.id,
+        session,
+    };
     let ticket = preview::sign(
         sandboxes.key().await?,
         preview::ENTER,
         &sandbox.slug,
-        user.id,
+        grant,
         60,
     );
     let mut url = format!("{origin}/__obleth/enter?ticket={ticket}");
@@ -1120,8 +1243,8 @@ async fn file(
     ))
 }
 
-/// The project as a zip, without dependencies or build output. An asleep
-/// workspace is woken first.
+/// The project as a zip, without dependencies or build output. A GET never wakes an
+/// asleep workspace; opening the workspace does.
 async fn download(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1132,10 +1255,12 @@ async fn download(
         .get(user.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let sandbox = sandboxes
-        .ensure_running(&sandbox)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    if sandbox.status != "running" {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "The workspace is asleep. Open it first, then download the project.".into(),
+        ));
+    }
     let title: String = sqlx::query_scalar("SELECT title FROM conversations WHERE id=$1")
         .bind(id)
         .fetch_one(&sandboxes.inner.pool)
@@ -1336,6 +1461,40 @@ mod tests {
         assert!(reason.contains("off"));
         env::remove_var("OBLETH_CHAT_WORKSPACES");
         env::remove_var("OBLETH_CHAT_SANDBOX_NAMESPACE");
+    }
+
+    #[test]
+    fn only_the_records_own_running_pod_serves_it() {
+        let slug = "abcdefgh12345678";
+        let pod = json!({
+            "metadata": {"name": "sbx-abcdefgh12345678", "labels": Sandboxes::labels(slug)},
+            "status": {"phase": "Running", "podIP": "10.0.0.7"},
+        });
+        assert!(serves(&pod, slug, "10.0.0.7"));
+        // Another address, another record's pod, a browser, or a pod on its way out.
+        assert!(!serves(&pod, slug, "10.0.0.8"));
+        assert!(!serves(&pod, "bbcdefgh12345678", "10.0.0.7"));
+        let changed = |pointer: &str, value: Value| {
+            let mut other = pod.clone();
+            *other.pointer_mut(pointer).unwrap() = value;
+            other
+        };
+        assert!(!serves(
+            &changed("/status/phase", json!("Failed")),
+            slug,
+            "10.0.0.7"
+        ));
+        assert!(!serves(
+            &changed("/metadata/name", json!("sbx-other")),
+            slug,
+            "10.0.0.7"
+        ));
+        let mut browser = pod.clone();
+        browser["metadata"]["labels"]["obleth.io/browser"] = json!("x");
+        assert!(!serves(&browser, slug, "10.0.0.7"));
+        let mut leaving = pod.clone();
+        leaving["metadata"]["deletionTimestamp"] = json!("2026-01-01T00:00:00Z");
+        assert!(!serves(&leaving, slug, "10.0.0.7"));
     }
 
     #[test]

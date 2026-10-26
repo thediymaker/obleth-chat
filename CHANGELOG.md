@@ -2,6 +2,21 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Fixed**
+
+- **Previews only reach the workspace's own pod.** Before proxying, Chat checks with the API server (at most every few seconds per pod) that the workspace pod is still running at the address on record. A pod that was evicted, deleted or lost with its node is marked stopped instead of its old address being used, which another pod may have been given. The reconciler does the same every minute.
+- **Preview access ends with the sign-in.** Preview links and the preview cookie carry the Chat session they came from. Signing out, revoking that session, disabling the account or losing workspace access ends preview access at once. The cookie lasts an hour (was eight) and is named `__Host-obleth_preview` on https.
+- **Preview apps' cookies stay on their own host.** The proxy strips `Domain` from cookies a dev server sets and drops any named like Chat's own (`obleth_preview`, `__Host-obleth…`, `__Secure-obleth…`).
+- **Workspace file tools stay in the project.** Paths with `..` are refused.
+- **Downloading a project no longer wakes its workspace.** An asleep workspace answers 409 and asks to be opened first; the download button shows only while the workspace runs.
+- **Research runs stop when their owner loses workspace access** or the account is disabled, instead of running on in the workspace.
+
+**Upgrading**
+
+- Open previews need reopening once: earlier preview links and cookies are refused.
+
 ## v0.5.1
 
 Fixes the browser: opening the Browser tab now starts it.

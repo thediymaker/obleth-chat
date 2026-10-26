@@ -475,6 +475,20 @@ impl Auth {
         cookie_value(headers, self.session_cookie_name())
     }
 
+    /// The id of the live browser session these headers carry, so access granted
+    /// elsewhere can end with it.
+    pub(crate) async fn session_id(&self, headers: &HeaderMap) -> Result<Option<Uuid>, ApiError> {
+        let Some(token) = self.session_token(headers) else {
+            return Ok(None);
+        };
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM auth_sessions WHERE token_hash = $1 AND expires_at > NOW()",
+        )
+        .bind(digest(&token))
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     fn session_response(
         &self,
         user: Identity,
@@ -859,6 +873,20 @@ fn random_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// The person signed in by session `id`, while the session is unexpired and the
+/// account enabled and not waiting on a password change. Sign-out, session
+/// revocation and disabling the account end it.
+pub(crate) async fn session_owner(pool: &PgPool, id: Uuid) -> Result<Option<Identity>, ApiError> {
+    Ok(sqlx::query_as::<_, Identity>(
+        "SELECT u.id, u.username, u.display_name, u.role FROM auth_sessions s \
+         JOIN users u ON u.id = s.user_id WHERE s.id = $1 \
+         AND s.expires_at > NOW() AND u.enabled = TRUE AND NOT u.password_change_required",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 fn digest(secret: &str) -> Vec<u8> {

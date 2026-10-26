@@ -2,7 +2,9 @@
 
 Each release's section is also its GitHub Release notes.
 
-## Unreleased
+## v0.5.2
+
+Security fixes for workspace previews, uploads, personal tokens, sign-in limits and shared chats, and a simpler sign-in page.
 
 **New**
 
@@ -10,6 +12,7 @@ Each release's section is also its GitHub Release notes.
 
 **Changed**
 
+- **The sign-in page is one quiet column**: the brand and theme switch at the top, a plain heading, the form, and the footer links, in place of the two panels with a large slogan. When single sign-on is configured, its button leads and the password form comes second. `login` in `site.config.js` now takes `title` (blank reads "Sign in to" and the site name), `description`, `ssoLabel`, `ssoHint`, `help` and a new `helpLink` (`{ label, url }`) at the end of the help line. The invitation, password change, session check and error screens use the same layout, and an expired session shows a notice instead of an error.
 - **Making a personal API token needs a sign-in from the last 15 minutes** (was 12 hours, as long as a session lasts), so a borrowed or stolen session cannot turn into a 30-day token. Otherwise the web app offers to sign out and back in.
 
 **Fixed**
@@ -35,6 +38,7 @@ Each release's section is also its GitHub Release notes.
 
 **Upgrading**
 
+- Sign-in text: `login.eyebrow`, `footer`, `welcomeTitle` and `welcomeDescription` are no longer used, and `login.title` is now the heading above the form. Review a customized `site.config.js` before upgrading.
 - Open previews need reopening once: earlier preview links and cookies are refused.
 - Migration `043` runs when Chat starts: it adds `api_tokens.session_id`.
 

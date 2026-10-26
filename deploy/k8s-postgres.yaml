@@ -1,0 +1,130 @@
+# Optional: PostgreSQL 17 with pgvector for Chat, for clusters without a database
+# to give it. setup.sh applies this when you give no database URL. To apply it by
+# hand, first create in Chat's namespace:
+#   Secret obleth-chat-postgres with admin-password and chat-password (hex, so it is
+#     safe in a URL: openssl rand -hex 32).
+#   ConfigMap obleth-chat-postgres-init from deploy/postgres-init.sh, under the
+#     key 10-obleth-chat.sh.
+# Chat's database URL is then
+#   postgresql://obleth_chat:<chat-password>@obleth-chat-postgres:5432/obleth_chat
+# One replica on one volume: back it up (see Operate Chat), or use a managed
+# PostgreSQL or an operator such as CloudNativePG for anything that matters.
+apiVersion: v1
+kind: Service
+metadata:
+  name: obleth-chat-postgres
+  namespace: obleth-chat
+spec:
+  type: ClusterIP
+  selector:
+    app: obleth-chat-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# Only Chat connects. Workspace pods couldn't anyway: their egress stops at
+# private addresses.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-from-chat
+  namespace: obleth-chat
+spec:
+  podSelector:
+    matchLabels: {app: obleth-chat-postgres}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: obleth-chat}
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: obleth-chat-postgres
+  namespace: obleth-chat
+spec:
+  serviceName: obleth-chat-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: obleth-chat-postgres
+  template:
+    metadata:
+      labels:
+        app: obleth-chat-postgres
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      # The image's postgres user, so it runs under Pod Security "restricted".
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: docker.io/pgvector/pgvector:0.8.7-pg17-trixie@sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_DB
+              value: postgres
+            - name: POSTGRES_INITDB_ARGS
+              value: --auth-host=scram-sha-256
+            # A subdirectory, because some volumes start with lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: obleth-chat-postgres
+                  key: admin-password
+            - name: OBLETH_CHAT_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: obleth-chat-postgres
+                  key: chat-password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, postgres, -d, postgres]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: init
+          configMap:
+            name: obleth-chat-postgres-init
+            defaultMode: 0555
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 10Gi

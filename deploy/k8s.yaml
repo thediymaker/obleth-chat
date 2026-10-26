@@ -1,4 +1,5 @@
-# Chat on Kubernetes, with workspaces and each person's browser. Provide an
+# Chat on Kubernetes, with workspaces and each person's browser. ./setup.sh kubernetes
+# does everything below for you. By hand: provide an
 # external PostgreSQL 17 database with the pgvector extension created in it
 # (CREATE EXTENSION vector, as a superuser). Before applying, replace the
 # ConfigMap origins, then create the namespace (kubectl create namespace

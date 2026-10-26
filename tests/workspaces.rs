@@ -43,6 +43,8 @@ static KUBE_ENV: Mutex<()> = Mutex::new(());
 struct FakeKube {
     pods: Mutex<Vec<Value>>,
     seen: Mutex<Vec<String>>,
+    /// Answers 500 to everything, as an API server that is down.
+    down: std::sync::atomic::AtomicBool,
 }
 
 impl FakeKube {
@@ -154,6 +156,11 @@ async fn serve_kube(kube: Arc<FakeKube>) -> (String, PathBuf) {
                     request.method(),
                     request.uri().path()
                 ));
+                if kube.down.load(std::sync::atomic::Ordering::SeqCst) {
+                    return axum::response::IntoResponse::into_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    );
+                }
                 next.run(request).await
             },
         ))
@@ -384,22 +391,43 @@ async fn enter_preview(app: &Router, session: &(String, String), conversation: U
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body: Value =
+    let link: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    let url: Uri = body["url"].as_str().unwrap().parse().unwrap();
+    assert_eq!(link["url"], format!("http://{SLUG}.{DOMAIN}/"));
     let response = app
         .clone()
-        .oneshot(preview_request(
-            url.path_and_query().unwrap().as_str(),
-            None,
-        ))
+        .oneshot(enter_request(&link, Some(ORIGIN), "POST"))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["access-control-allow-origin"], ORIGIN);
+    assert_eq!(
+        response.headers()["access-control-allow-credentials"],
+        "true"
+    );
     let cookie = response.headers()["set-cookie"].to_str().unwrap();
     assert!(cookie.starts_with("obleth_preview="), "{cookie}");
     assert!(cookie.contains("Max-Age=3600"), "{cookie}");
     cookie.split(';').next().unwrap().to_owned()
+}
+
+/// Redeems a preview link's ticket, as a request from `origin`.
+fn enter_request(link: &Value, origin: Option<&str>, method: &str) -> Request<Body> {
+    let enter: Uri = link["enter"].as_str().unwrap().parse().unwrap();
+    let mut request = Request::builder()
+        .method(method)
+        .uri(enter.path())
+        .header("host", format!("{SLUG}.{DOMAIN}"))
+        .header("content-type", "application/x-www-form-urlencoded");
+    if let Some(origin) = origin {
+        request = request.header("origin", origin);
+    }
+    request
+        .body(Body::from(format!(
+            "ticket={}",
+            link["ticket"].as_str().unwrap()
+        )))
+        .unwrap()
 }
 
 async fn text(response: axum::response::Response) -> String {
@@ -503,6 +531,8 @@ async fn preview_access_ends_with_the_sign_in(pool: PgPool) {
         .await
         .unwrap();
     assert!(response.status().is_success(), "{}", response.status());
+    // A confirmed sign-in is trusted for a few seconds of requests.
+    tokio::time::sleep(Duration::from_millis(5200)).await;
     let response = app
         .clone()
         .oneshot(preview_request("/", Some(&cookie)))
@@ -619,4 +649,162 @@ async fn research_runs_stop_when_workspace_access_ends(pool: PgPool) {
             .unwrap();
     assert_eq!(status, "lost");
     assert!(log.contains("no longer use workspaces"), "{log}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn only_chats_own_page_can_redeem_a_preview_ticket(pool: PgPool) {
+    let kube = Arc::new(FakeKube::default());
+    kube.set_pod(Some("127.0.0.1"));
+    let (app, _) = app_with(pool.clone(), Some(DOMAIN), Some(kube)).await;
+    let admin = login(&app).await;
+    let port = serve_app().await;
+    let conversation = workspace(&pool, port, "running").await;
+    let response = app
+        .clone()
+        .oneshot(req(
+            &format!("/api/conversations/{conversation}/workspace/preview"),
+            "localhost:8085",
+            &admin,
+            Some(json!({})),
+        ))
+        .await
+        .unwrap();
+    let link: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    // A ticket sent to someone else as a link, or posted to the preview by any page
+    // but Chat's (another site, another workspace's preview, a page with its origin
+    // hidden), opens nothing.
+    let lure = format!(
+        "/__obleth/enter?ticket={}",
+        link["ticket"].as_str().unwrap()
+    );
+    let response = app
+        .clone()
+        .oneshot(preview_request(&lure, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(response.headers().get("set-cookie").is_none());
+    for (origin, method) in [
+        (None, "POST"),
+        (Some("https://elsewhere.example"), "POST"),
+        (Some("http://bbcdefghijklmnop.sbx.example.com"), "POST"),
+        (Some("null"), "POST"),
+        (Some(ORIGIN), "GET"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(enter_request(&link, origin, method))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{origin:?} {method}"
+        );
+        assert!(response.headers().get("set-cookie").is_none(), "{origin:?}");
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+    }
+    // Chat's page can, and a forged ticket is refused there too.
+    let response = app
+        .clone()
+        .oneshot(enter_request(&link, Some(ORIGIN), "POST"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut forged = link.clone();
+    forged["ticket"] = json!("e30.AAAA");
+    let response = app
+        .clone()
+        .oneshot(enter_request(&forged, Some(ORIGIN), "POST"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.headers()["access-control-allow-origin"], ORIGIN);
+    assert!(text(response).await.contains("expired"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn other_pages_cannot_send_changes_into_a_preview(pool: PgPool) {
+    let kube = Arc::new(FakeKube::default());
+    kube.set_pod(Some("127.0.0.1"));
+    let (app, _) = app_with(pool.clone(), Some(DOMAIN), Some(kube)).await;
+    let admin = login(&app).await;
+    let port = serve_app().await;
+    let conversation = workspace(&pool, port, "running").await;
+    let cookie = enter_preview(&app, &admin, conversation).await;
+    let post = |headers: &[(&str, &str)]| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/save")
+            .header("host", format!("{SLUG}.{DOMAIN}"))
+            .header("cookie", &cookie);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.body(Body::from("x=1")).unwrap()
+    };
+    let own = format!("http://{SLUG}.{DOMAIN}");
+    // Another workspace's preview is the same site, so the browser sends the cookie.
+    for refused in [
+        vec![("sec-fetch-site", "same-site")],
+        vec![("sec-fetch-site", "cross-site"), ("origin", own.as_str())],
+        vec![("origin", "http://bbcdefghijklmnop.sbx.example.com")],
+    ] {
+        let response = app.clone().oneshot(post(&refused)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{refused:?}");
+    }
+    for allowed in [
+        vec![("sec-fetch-site", "same-origin"), ("origin", own.as_str())],
+        vec![("origin", own.as_str())],
+    ] {
+        let response = app.clone().oneshot(post(&allowed)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{allowed:?}");
+        assert_eq!(text(response).await, "answered by the pod at this address");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_page_load_checks_the_pod_once_and_rides_out_an_api_outage(pool: PgPool) {
+    let kube = Arc::new(FakeKube::default());
+    kube.set_pod(Some("127.0.0.1"));
+    let (app, _) = app_with(pool.clone(), Some(DOMAIN), Some(kube.clone())).await;
+    let admin = login(&app).await;
+    let port = serve_app().await;
+    let conversation = workspace(&pool, port, "running").await;
+    let cookie = enter_preview(&app, &admin, conversation).await;
+    // Many assets at once share one check of the pod.
+    kube.seen.lock().unwrap().clear();
+    let loads = (0..40).map(|index| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            app.oneshot(preview_request(
+                &format!("/asset-{index}.js"),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap()
+            .status()
+        }
+    });
+    let statuses = futures_util::future::join_all(loads).await;
+    assert!(
+        statuses.iter().all(|s| *s == StatusCode::OK),
+        "{statuses:?}"
+    );
+    assert_eq!(kube.seen().len(), 1, "{:?}", kube.seen());
+    // While the API server is down, a recent confirmation still serves the preview.
+    kube.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(5200)).await;
+    let response = app
+        .clone()
+        .oneshot(preview_request("/", Some(&cookie)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(pod_record(&pool).await.0, "running");
 }

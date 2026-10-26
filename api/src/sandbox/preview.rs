@@ -2,14 +2,17 @@
 //! workspace gets its own origin, so app code never runs on Chat's origin, never
 //! sees Chat's `__Host-` session cookie, and cannot read another workspace. Access
 //! needs a host-only cookie minted from a one-minute ticket that Chat issues to the
-//! workspace owner. Both carry the Chat sign-in they came from, so signing out,
-//! revoking that session or disabling the account ends preview access at once.
+//! workspace owner. Only Chat's own page can redeem a ticket (a POST that the
+//! browser marks as coming from Chat's origin), so a ticket sent to someone else
+//! opens nothing for them. Ticket and cookie carry the Chat sign-in they came from,
+//! so signing out, revoking that session or disabling the account ends preview
+//! access within seconds, and closes open WebSockets within a minute.
 use super::Sandboxes;
 use crate::error::ApiError;
 use axum::{
     body::Body,
     extract::{ws::WebSocketUpgrade, FromRequestParts, Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -18,7 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
 use uuid::Uuid;
 
@@ -28,6 +31,14 @@ const COOKIE: &str = "obleth_preview";
 /// The cookie's name on https, where the prefix stops sibling hosts shadowing it.
 const HOST_COOKIE: &str = "__Host-obleth_preview";
 const VIEW_SECONDS: u64 = 3600;
+/// A page load renews a cookie with less than this left, so an open preview keeps
+/// working while the sign-in it came from lasts.
+const RENEW_SECONDS: u64 = 1800;
+/// How long a confirmed sign-in is trusted for proxied requests, so a page's many
+/// assets do not each check the session.
+const SIGN_IN_CHECK: Duration = Duration::from_secs(5);
+/// How often an open WebSocket checks that its sign-in is still live.
+const SOCKET_CHECK: Duration = Duration::from_secs(60);
 
 fn now() -> u64 {
     SystemTime::now()
@@ -37,7 +48,7 @@ fn now() -> u64 {
 }
 
 /// Who a ticket or view cookie was issued to, and the Chat sign-in it came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Grant {
     pub user: Uuid,
     pub session: Uuid,
@@ -59,25 +70,55 @@ pub fn sign(key: &[u8], purpose: &str, slug: &str, grant: Grant, seconds: u64) -
 /// Returns who a token was issued to when it is authentic, unexpired, and for this
 /// purpose and workspace.
 pub fn verify(key: &[u8], token: &str, purpose: &str, slug: &str) -> Option<Grant> {
+    verify_until(key, token, purpose, slug).map(|(grant, _)| grant)
+}
+
+/// `verify`, with when the token expires (seconds since the epoch).
+fn verify_until(key: &[u8], token: &str, purpose: &str, slug: &str) -> Option<(Grant, u64)> {
     let (payload, signature) = token.split_once('.')?;
     let mut mac = Hmac::<Sha256>::new_from_slice(key).ok()?;
     mac.update(payload.as_bytes());
     mac.verify_slice(&URL_SAFE_NO_PAD.decode(signature).ok()?)
         .ok()?;
     let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
-    if claims["p"] != purpose || claims["s"] != slug || claims["e"].as_u64()? <= now() {
+    let expires = claims["e"].as_u64()?;
+    if claims["p"] != purpose || claims["s"] != slug || expires <= now() {
         return None;
     }
-    Some(Grant {
-        user: claims["u"].as_str()?.parse().ok()?,
-        session: claims["a"].as_str()?.parse().ok()?,
-    })
+    Some((
+        Grant {
+            user: claims["u"].as_str()?.parse().ok()?,
+            session: claims["a"].as_str()?.parse().ok()?,
+        },
+        expires,
+    ))
 }
 
 /// Whether the sign-in behind a grant is still live and may still use workspaces.
-async fn signed_in(sb: &Sandboxes, grant: Grant) -> Result<bool, ApiError> {
+async fn still_signed_in(sb: &Sandboxes, grant: Grant) -> Result<bool, ApiError> {
     let owner = crate::auth::session_owner(&sb.inner.pool, grant.session).await?;
     Ok(owner.is_some_and(|who| who.id == grant.user && sb.allowed(&who)))
+}
+
+/// `still_signed_in`, trusting a confirmation for `SIGN_IN_CHECK`.
+async fn signed_in(sb: &Sandboxes, grant: Grant) -> Result<bool, ApiError> {
+    let fresh = sb
+        .inner
+        .sign_ins
+        .lock()
+        .unwrap()
+        .get(&grant)
+        .is_some_and(|at| at.elapsed() < SIGN_IN_CHECK);
+    if fresh {
+        return Ok(true);
+    }
+    let live = still_signed_in(sb, grant).await?;
+    let mut sign_ins = sb.inner.sign_ins.lock().unwrap();
+    sign_ins.retain(|_, at| at.elapsed() < SIGN_IN_CHECK);
+    if live {
+        sign_ins.insert(grant, Instant::now());
+    }
+    Ok(live)
 }
 
 fn cookie_name(sb: &Sandboxes) -> &'static str {
@@ -168,10 +209,22 @@ fn frame_headers(headers: &mut HeaderMap, sb: &Sandboxes) {
         headers.append(header::CONTENT_SECURITY_POLICY, value);
     }
     headers.remove(header::X_FRAME_OPTIONS);
+    // Same-origin requests keep their Origin, which `cross_origin` checks.
     headers.insert(
         header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+        HeaderValue::from_static("same-origin"),
     );
+}
+
+/// Whether a request that may change something comes from a page other than the
+/// preview itself, such as another workspace's preview under the same domain,
+/// which browsers treat as the same site and send the preview cookie from.
+fn cross_origin(headers: &HeaderMap, origin: &str) -> bool {
+    let value = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(site) = value("sec-fetch-site") {
+        return site != "same-origin";
+    }
+    value(header::ORIGIN.as_str()).is_some_and(|sent| sent != origin)
 }
 
 fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -249,8 +302,8 @@ pub fn landing(path: &str) -> Option<String> {
     (safe && path != "/").then_some(path)
 }
 
-/// Percent-encodes a path for a Location header, keeping its slashes.
-fn encode_path(path: &str) -> String {
+/// Percent-encodes a path for a URL, keeping its slashes.
+pub fn encode_path(path: &str) -> String {
     path.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~' => {
@@ -261,49 +314,98 @@ fn encode_path(path: &str) -> String {
         .collect()
 }
 
+/// The preview cookie for a grant, valid for `VIEW_SECONDS`.
+fn view_cookie(sb: &Sandboxes, key: &[u8], slug: &str, grant: Grant) -> Option<HeaderValue> {
+    let secure = if sb.config().preview_scheme == "https" {
+        "; Secure"
+    } else {
+        ""
+    };
+    let value = sign(key, VIEW, slug, grant, VIEW_SECONDS);
+    let name = cookie_name(sb);
+    HeaderValue::from_str(&format!(
+        "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={VIEW_SECONDS}{secure}"
+    ))
+    .ok()
+}
+
+/// Redeems a ticket for the preview cookie. Chat's page sends the ticket with a
+/// credentialed `fetch`, which always carries Chat's origin; a link or form on any
+/// other page cannot, so a ticket only ever opens the preview for its owner's browser.
+async fn enter(sb: &Sandboxes, slug: &str, key: &[u8], request: Request) -> Response {
+    let chat = sb.config().chat_origin.clone();
+    let from_chat = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        == Some(chat.as_str());
+    if request.method() != Method::POST || !from_chat {
+        return page(
+            StatusCode::FORBIDDEN,
+            "Open this preview from its conversation in Chat.",
+            sb,
+        );
+    }
+    let answer = |status: StatusCode, body: Value, cookie: Option<HeaderValue>| {
+        let mut response = (status, axum::Json(body)).into_response();
+        let headers = response.headers_mut();
+        if let Ok(origin) = HeaderValue::from_str(&chat) {
+            headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        }
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+            HeaderValue::from_static("true"),
+        );
+        headers.insert(header::VARY, HeaderValue::from_static("origin"));
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        if let Some(cookie) = cookie {
+            headers.insert(header::SET_COOKIE, cookie);
+        }
+        response
+    };
+    let expired = || {
+        answer(
+            StatusCode::FORBIDDEN,
+            json!({"error":{"message":"This preview link has expired. Reopen the preview."}}),
+            None,
+        )
+    };
+    let Ok(body) = axum::body::to_bytes(request.into_body(), 8 * 1024).await else {
+        return expired();
+    };
+    let ticket = url::form_urlencoded::parse(&body)
+        .find(|(name, _)| name == "ticket")
+        .map(|(_, value)| value.into_owned())
+        .unwrap_or_default();
+    let Some(grant) = verify(key, &ticket, ENTER, slug) else {
+        return expired();
+    };
+    match still_signed_in(sb, grant).await {
+        Ok(true) => answer(
+            StatusCode::OK,
+            json!({"ok": true}),
+            view_cookie(sb, key, slug, grant),
+        ),
+        Ok(false) => expired(),
+        Err(error) => answer(error.0, json!({"error":{"message":error.1}}), None),
+    }
+}
+
+/// Whether a request should renew a view cookie expiring at `expires`: a page load,
+/// as opposed to an asset or an API call, once less than `RENEW_SECONDS` is left.
+fn renews(method: &Method, headers: &HeaderMap, expires: u64) -> bool {
+    let value = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    let page = match value("sec-fetch-dest") {
+        Some(dest) => dest == "document" || dest == "iframe",
+        None => value(header::ACCEPT.as_str()).is_some_and(|a| a.contains("text/html")),
+    };
+    *method == Method::GET && page && expires.saturating_sub(now()) < RENEW_SECONDS
+}
+
 async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response, ApiError> {
     let key = sb.key().await?.to_vec();
-    let path = request.uri().path().to_owned();
-    if path == "/__obleth/enter" {
-        let query_string = request.uri().query().unwrap_or_default().to_owned();
-        let query = |name: &str| {
-            url::form_urlencoded::parse(query_string.as_bytes())
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.into_owned())
-        };
-        let ticket = query("ticket").unwrap_or_default();
-        let next = query("next")
-            .as_deref()
-            .and_then(landing)
-            .map_or_else(|| "/".into(), |page| encode_path(&page));
-        let expired = || {
-            ApiError(
-                StatusCode::FORBIDDEN,
-                "This preview link has expired. Reopen the preview from Chat.".into(),
-            )
-        };
-        let grant = verify(&key, &ticket, ENTER, slug).ok_or_else(expired)?;
-        if !signed_in(sb, grant).await? {
-            return Err(expired());
-        }
-        let secure = if sb.config().preview_scheme == "https" {
-            "; Secure"
-        } else {
-            ""
-        };
-        let value = sign(&key, VIEW, slug, grant, VIEW_SECONDS);
-        let name = cookie_name(sb);
-        let mut response = Response::builder()
-            .status(StatusCode::SEE_OTHER)
-            .header(header::LOCATION, next)
-            .header(header::SET_COOKIE, format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={VIEW_SECONDS}{secure}"))
-            .body(Body::empty())
-            .map_err(|_| ApiError::internal())?;
-        frame_headers(response.headers_mut(), sb);
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        return Ok(response);
+    if request.uri().path() == "/__obleth/enter" {
+        return Ok(enter(sb, slug, &key, request).await);
     }
     let signed_out = || {
         ApiError(
@@ -311,8 +413,8 @@ async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response,
             "Open this preview from its conversation in Chat.".into(),
         )
     };
-    let grant = cookie(request.headers(), cookie_name(sb))
-        .and_then(|token| verify(&key, &token, VIEW, slug))
+    let (grant, expires) = cookie(request.headers(), cookie_name(sb))
+        .and_then(|token| verify_until(&key, &token, VIEW, slug))
         .ok_or_else(signed_out)?;
     if !signed_in(sb, grant).await? {
         return Err(signed_out());
@@ -344,6 +446,17 @@ async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response,
     if !sb.confirm_pod(&sandbox).await? {
         return Err(not_running());
     }
+    let origin = sb.preview_origin(&sandbox).unwrap_or_default();
+    let safe = matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    if !safe && cross_origin(request.headers(), &origin) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "Only the preview itself can send this request.".into(),
+        ));
+    }
     sb.touch(&sandbox).await;
     let target = format!("{ip}:{port}");
     let is_upgrade = request
@@ -352,9 +465,16 @@ async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response,
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
     if is_upgrade {
-        return websocket(sb, &sandbox, &target, request).await;
+        return websocket(sb, &sandbox, &target, request, grant, expires).await;
     }
-    proxy(sb, &target, request).await
+    let renew = renews(request.method(), request.headers(), expires)
+        .then(|| view_cookie(sb, &key, slug, grant))
+        .flatten();
+    let mut response = proxy(sb, &target, request).await?;
+    if let Some(cookie) = renew {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    Ok(response)
 }
 
 const HOP: [&str; 9] = [
@@ -427,11 +547,15 @@ async fn proxy(sb: &Sandboxes, target: &str, request: Request) -> Result<Respons
     Ok(out)
 }
 
+/// Relays a WebSocket to the dev server until either side closes it, the sign-in it
+/// came from ends, or the preview cookie it was opened with expires.
 async fn websocket(
     sb: &Sandboxes,
     sandbox: &super::Sandbox,
     target: &str,
     request: Request,
+    grant: Grant,
+    expires: u64,
 ) -> Result<Response, ApiError> {
     // Only the preview page itself may open sockets to its dev server.
     let origin = sb.preview_origin(sandbox).unwrap_or_default();
@@ -503,6 +627,7 @@ async fn websocket(
         Some(protocol) => upgrade.protocols([protocol]),
         None => upgrade,
     };
+    let sb_watch = sb.clone();
     let mut response = upgrade.on_upgrade(move |client| async move {
         let (mut client_tx, mut client_rx) = client.split();
         let (mut server_tx, mut server_rx) = server.split();
@@ -538,7 +663,21 @@ async fn websocket(
                 }
             }
         };
-        tokio::select! { _ = to_server => {}, _ = to_client => {} }
+        let watch = async {
+            let lifetime = Duration::from_secs(expires.saturating_sub(now()));
+            let deadline = tokio::time::Instant::now() + lifetime;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    _ = tokio::time::sleep(SOCKET_CHECK) => {}
+                }
+                // A failed check is not a sign-out; the next one decides.
+                if let Ok(false) = still_signed_in(&sb_watch, grant).await {
+                    break;
+                }
+            }
+        };
+        tokio::select! { _ = to_server => {}, _ = to_client => {}, _ = watch => {} }
     });
     frame_headers(response.headers_mut(), sb);
     Ok(response)
@@ -592,6 +731,76 @@ mod tests {
             URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
         );
         assert_eq!(verify(&key, &unbound, ENTER, "abcdefghijklmnop"), None);
+    }
+
+    #[test]
+    fn page_loads_renew_a_cookie_near_its_end() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in pairs {
+                headers.insert(*name, HeaderValue::from_static(value));
+            }
+            headers
+        };
+        let page = headers(&[("sec-fetch-dest", "iframe")]);
+        let soon = now() + 600;
+        assert!(renews(&Method::GET, &page, soon));
+        assert!(renews(
+            &Method::GET,
+            &headers(&[("sec-fetch-dest", "document")]),
+            soon
+        ));
+        assert!(renews(
+            &Method::GET,
+            &headers(&[("accept", "text/html,*/*")]),
+            soon
+        ));
+        assert!(!renews(&Method::GET, &page, now() + VIEW_SECONDS));
+        assert!(!renews(&Method::POST, &page, soon));
+        assert!(!renews(
+            &Method::GET,
+            &headers(&[("sec-fetch-dest", "script")]),
+            soon
+        ));
+        assert!(!renews(
+            &Method::GET,
+            &headers(&[("sec-fetch-dest", "empty"), ("accept", "text/html")]),
+            soon
+        ));
+    }
+
+    #[test]
+    fn only_the_preview_itself_may_send_changes() {
+        let origin = "https://abcdefghijklmnop.sbx.example.com";
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in pairs {
+                headers.insert(*name, HeaderValue::from_static(value));
+            }
+            headers
+        };
+        assert!(!cross_origin(
+            &headers(&[("sec-fetch-site", "same-origin")]),
+            origin
+        ));
+        assert!(!cross_origin(
+            &headers(&[("origin", "https://abcdefghijklmnop.sbx.example.com")]),
+            origin
+        ));
+        // Requests from no browser at all carry neither header.
+        assert!(!cross_origin(&headers(&[]), origin));
+        for refused in [
+            headers(&[("sec-fetch-site", "same-site")]),
+            headers(&[("sec-fetch-site", "cross-site")]),
+            headers(&[
+                ("sec-fetch-site", "same-site"),
+                ("origin", "https://abcdefghijklmnop.sbx.example.com"),
+            ]),
+            headers(&[("origin", "https://bbcdefghijklmnop.sbx.example.com")]),
+            headers(&[("origin", "null")]),
+        ] {
+            assert!(cross_origin(&refused, origin), "{refused:?}");
+        }
     }
 
     #[test]

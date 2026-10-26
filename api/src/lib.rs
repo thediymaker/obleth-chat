@@ -182,19 +182,22 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         ))
 }
 static CSP: std::sync::OnceLock<HeaderValue> = std::sync::OnceLock::new();
-/// Chat may frame its workspace previews, which live on their own origins.
+/// Chat may frame its workspace previews, which live on their own origins, and hand
+/// a preview its entry ticket.
 fn content_security_policy(sandboxes: Option<&sandbox::Sandboxes>) -> HeaderValue {
-    let frames = sandboxes
-        .and_then(|sb| {
-            let c = sb.config();
-            Some(format!(
-                " frame-src {}://*.{};",
-                c.preview_scheme,
-                c.preview_domain.as_ref()?
-            ))
-        })
-        .unwrap_or_default();
-    HeaderValue::from_str(&format!("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self';{frames} base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"))
+    let previews = sandboxes.and_then(|sb| {
+        let c = sb.config();
+        Some(format!(
+            "{}://*.{}",
+            c.preview_scheme,
+            c.preview_domain.as_ref()?
+        ))
+    });
+    let (connect, frames) = match &previews {
+        Some(previews) => (format!(" {previews}"), format!(" frame-src {previews};")),
+        None => Default::default(),
+    };
+    HeaderValue::from_str(&format!("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'{connect};{frames} base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"))
         .expect("static policy")
 }
 /// The frontend loads unhashed ES modules by relative URL, so browsers keep a copy

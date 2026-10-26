@@ -974,6 +974,10 @@ async fn start_server(sb: &Sandboxes, sandbox: &Sandbox, args: &Value) -> ToolRe
     let Some(ip) = sandbox.pod_ip.as_deref() else {
         return Err("The workspace has no network address yet".into());
     };
+    // The address on record may since have gone to another pod.
+    if !matches!(sb.confirm_pod(sandbox).await, Ok(true)) {
+        return Err("The workspace stopped. Try again to start it.".into());
+    }
     let url = format!("http://{ip}:{port}/");
     let started = Instant::now();
     let mut ready = false;
@@ -1260,6 +1264,9 @@ async fn compile_check(
     };
     // Give the file watcher a moment to see the change.
     tokio::time::sleep(Duration::from_millis(700)).await;
+    if !matches!(sb.confirm_pod(sandbox).await, Ok(true)) {
+        return (String::new(), "");
+    }
     let response = sb
         .http()
         .get(format!("http://{ip}:{port}{route}"))

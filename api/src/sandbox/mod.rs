@@ -203,6 +203,9 @@ const DISK_CHECK: Duration = Duration::from_secs(5 * 60);
 const SERVER_IDLE: Duration = Duration::from_secs(30 * 60);
 /// How long a confirmed pod address is trusted before the API server is asked again.
 const POD_CHECK: Duration = Duration::from_secs(5);
+/// While the API server does not answer, an address confirmed this recently is still
+/// trusted, so a brief API outage does not break open previews.
+const POD_CHECK_GRACE: Duration = Duration::from_secs(60);
 /// Marks a pod record stopped when it still holds the address that went stale; a pod
 /// started since keeps its record. Its projects' dev servers went with the pod.
 const STOP_STALE: &str = "WITH p AS (UPDATE sandbox_pods SET status='stopped',pod_ip=NULL WHERE id=$1 AND status='running' AND pod_ip=$2 RETURNING id) UPDATE sandboxes SET preview_port=NULL WHERE pod_id IN (SELECT id FROM p)";
@@ -219,6 +222,10 @@ struct Inner {
     key: OnceCell<Vec<u8>>,
     /// Pod name to the address last confirmed for it, and when.
     confirmed: Mutex<HashMap<String, (String, Instant)>>,
+    /// One pod check at a time per pod name; requests arriving meanwhile wait for it.
+    checks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Preview sign-ins confirmed live, and when.
+    sign_ins: Mutex<HashMap<preview::Grant, Instant>>,
 }
 
 impl Sandboxes {
@@ -236,6 +243,8 @@ impl Sandboxes {
                 http,
                 key: OnceCell::new(),
                 confirmed: Mutex::default(),
+                checks: Mutex::default(),
+                sign_ins: Mutex::default(),
             }),
         })
     }
@@ -292,35 +301,60 @@ impl Sandboxes {
     /// Whether the owner's pod still runs at the address on record. Pods are evicted,
     /// deleted or lost with their node, and their address can go to another pod, so a
     /// pod that is gone or changed marks the record stopped. A confirmation is
-    /// trusted for a few seconds.
+    /// trusted for a few seconds, and for a minute while the API server does not
+    /// answer. Concurrent requests for one pod share a single check.
     pub async fn confirm_pod(&self, sandbox: &Sandbox) -> Result<bool, ApiError> {
         let Some(ip) = sandbox.pod_ip.as_deref() else {
             return Ok(false);
         };
         let name = sandbox.pod_name();
-        let fresh = self
-            .inner
-            .confirmed
-            .lock()
-            .unwrap()
-            .get(&name)
-            .is_some_and(|(known, at)| known == ip && at.elapsed() < POD_CHECK);
-        if fresh {
+        let confirmed_within = |limit: Duration| {
+            self.inner
+                .confirmed
+                .lock()
+                .unwrap()
+                .get(&name)
+                .is_some_and(|(known, at)| known == ip && at.elapsed() < limit)
+        };
+        if confirmed_within(POD_CHECK) {
             return Ok(true);
         }
-        let pod = self.inner.kube.get("pods", &name).await.map_err(|error| {
-            tracing::warn!("could not check the workspace pod: {error:#}");
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "The workspace could not be reached. Try again in a moment.".into(),
-            )
-        })?;
+        let check = self
+            .inner
+            .checks
+            .lock()
+            .unwrap()
+            .entry(name.clone())
+            .or_default()
+            .clone();
+        let _turn = check.lock().await;
+        if confirmed_within(POD_CHECK) {
+            return Ok(true);
+        }
+        let pod = match self.inner.kube.get("pods", &name).await {
+            Ok(pod) => pod,
+            Err(error) => {
+                tracing::warn!("could not check the workspace pod: {error:#}");
+                if confirmed_within(POD_CHECK_GRACE) {
+                    return Ok(true);
+                }
+                return Err(ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The workspace could not be reached. Try again in a moment.".into(),
+                ));
+            }
+        };
+        self.inner
+            .checks
+            .lock()
+            .unwrap()
+            .retain(|_, check| Arc::strong_count(check) > 1);
         let serving = pod.is_some_and(|pod| serves(&pod, &sandbox.pod_slug, ip));
         {
             let mut confirmed = self.inner.confirmed.lock().unwrap();
-            confirmed.retain(|_, (_, at)| at.elapsed() < POD_CHECK);
+            confirmed.retain(|_, (_, at)| at.elapsed() < POD_CHECK_GRACE);
             if serving {
-                confirmed.insert(name, (ip.to_owned(), Instant::now()));
+                confirmed.insert(name.clone(), (ip.to_owned(), Instant::now()));
                 return Ok(true);
             }
             confirmed.remove(&name);
@@ -743,8 +777,9 @@ impl Sandboxes {
     }
 
     /// One replica at a time: stop idle dev servers and idle pods (keeping their
-    /// volumes), remove volumes past retention, mark records stopped whose pod is
-    /// gone or moved, and delete cluster objects whose pod record no longer exists.
+    /// volumes), remove volumes past retention, measure disks, mark records stopped
+    /// whose pod is gone or moved, and delete cluster objects whose pod record no
+    /// longer exists.
     async fn reconcile(&self) -> Result<()> {
         let pool = &self.inner.pool;
         let mut tx = pool.begin().await?;
@@ -781,31 +816,6 @@ impl Sandboxes {
                 .execute(&mut *tx)
                 .await?;
         }
-        // Pods evicted, deleted or lost with their node leave records that point at an
-        // address another pod may be given. Records are read before pods are listed,
-        // so a pod started in between keeps its new address.
-        let running: Vec<(Uuid, String, String)> = sqlx::query_as(
-            "SELECT id,slug,pod_ip FROM sandbox_pods WHERE status='running' AND pod_ip IS NOT NULL",
-        )
-        .fetch_all(&mut *tx)
-        .await?;
-        if !running.is_empty() {
-            let pods = kube
-                .list(
-                    "pods",
-                    "app.kubernetes.io/managed-by=obleth-chat,!obleth.io/browser",
-                )
-                .await?;
-            for (id, slug, ip) in running {
-                if !pods.iter().any(|pod| serves(pod, &slug, &ip)) {
-                    sqlx::query(STOP_STALE)
-                        .bind(id)
-                        .bind(&ip)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-            }
-        }
         let idle_servers = sqlx::query_as::<_, Sandbox>(&format!("{SELECT} WHERE p.status='running' AND s.preview_port IS NOT NULL AND s.last_used_at<NOW()-make_interval(secs=>$1)"))
             .bind(SERVER_IDLE.as_secs() as f64).fetch_all(&mut *tx).await?;
         for sandbox in idle_servers {
@@ -820,6 +830,9 @@ impl Sandboxes {
             .bind(DISK_CHECK.as_secs() as f64).fetch_all(&mut *tx).await?;
         for sandbox in unmeasured {
             self.measure(&sandbox).await;
+        }
+        if let Err(error) = self.stop_stale().await {
+            tracing::warn!("could not check workspace pods: {error:#}");
         }
         let known: Vec<String> = sqlx::query_scalar("SELECT slug FROM sandbox_pods")
             .fetch_all(&mut *tx)
@@ -845,6 +858,40 @@ impl Sandboxes {
             }
         }
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Marks records stopped whose pod was evicted, deleted or lost with its node, as
+    /// their address may go to another pod. Records are read before pods are listed,
+    /// so a pod started in between keeps its new address. Each record is updated on
+    /// its own, outside reconcile's transaction, so no row stays locked meanwhile.
+    async fn stop_stale(&self) -> Result<()> {
+        let pool = &self.inner.pool;
+        let running: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT id,slug,pod_ip FROM sandbox_pods WHERE status='running' AND pod_ip IS NOT NULL",
+        )
+        .fetch_all(pool)
+        .await?;
+        if running.is_empty() {
+            return Ok(());
+        }
+        let pods = self
+            .inner
+            .kube
+            .list(
+                "pods",
+                "app.kubernetes.io/managed-by=obleth-chat,!obleth.io/browser",
+            )
+            .await?;
+        for (id, slug, ip) in running {
+            if !pods.iter().any(|pod| serves(pod, &slug, &ip)) {
+                sqlx::query(STOP_STALE)
+                    .bind(id)
+                    .bind(&ip)
+                    .execute(pool)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -1181,13 +1228,12 @@ async fn preview_link(
         grant,
         60,
     );
-    let mut url = format!("{origin}/__obleth/enter?ticket={ticket}");
-    if let Some(page) = preview::landing(&q.path) {
-        url.push_str("&next=");
-        url.extend(url::form_urlencoded::byte_serialize(page.as_bytes()));
-    }
+    // The page redeems the ticket at `enter` itself, then opens `url`.
+    let page = preview::landing(&q.path).map_or_else(|| "/".into(), |p| preview::encode_path(&p));
     Ok(Json(json!({
-        "url": url,
+        "enter": format!("{origin}/__obleth/enter"),
+        "ticket": ticket,
+        "url": format!("{origin}{page}"),
         "origin": origin,
         "running": sandbox.status == "running" && serving,
     })))
@@ -1255,11 +1301,19 @@ async fn download(
         .get(user.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    let not_running = |status: &str| {
+        let message = match status {
+            "starting" => "The workspace is starting. Download the project once it runs.",
+            "error" => "The workspace could not start. Open it to see why, then try again.",
+            _ => "The workspace is asleep. Open it first, then download the project.",
+        };
+        ApiError(StatusCode::CONFLICT, message.into())
+    };
     if sandbox.status != "running" {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "The workspace is asleep. Open it first, then download the project.".into(),
-        ));
+        return Err(not_running(&sandbox.status));
+    }
+    if !sandboxes.confirm_pod(&sandbox).await? {
+        return Err(not_running("stopped"));
     }
     let title: String = sqlx::query_scalar("SELECT title FROM conversations WHERE id=$1")
         .bind(id)

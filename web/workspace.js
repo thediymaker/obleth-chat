@@ -101,6 +101,24 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   let reloading = null;
   // Without a preview domain, workspaces run but their apps can't be opened.
   const previews = () => capabilities.features?.previews !== false;
+  // The preview accepts its ticket only from this page: a credentialed fetch always
+  // carries Chat's origin, which a link or another page cannot. It sets the preview's
+  // cookie, then the frame or a new tab opens the preview itself.
+  async function enter(link) {
+    const response = await fetch(link.enter, { method: 'POST', mode: 'cors', credentials: 'include', body: new URLSearchParams({ ticket: link.ticket }) });
+    if (!response.ok) throw new Error((await response.json().catch(() => null))?.error?.message || 'The preview could not be opened. Try again.');
+  }
+  // Downloads the project, waking an asleep workspace first.
+  async function download(id) {
+    const space = entry(id);
+    if (space.workspace?.status !== 'running') {
+      toast('Waking the workspace to download the project…');
+      try { await create(id); } catch (error) { toast(error.message); return; }
+      for (let i = 0; i < 45 && space.workspace?.status !== 'running'; i++) { await new Promise(done => setTimeout(done, 2000)); await load(id); }
+      if (space.workspace?.status !== 'running') { toast('The workspace has not woken yet. Try again in a moment.'); return; }
+    }
+    const link = document.createElement('a'); link.href = `${chatPath(id)}/workspace/download`; link.download = ''; document.body.append(link); link.click(); link.remove();
+  }
   async function showPreview(id, force = false) {
     const space = entry(id);
     if (!previews() || (!space.workspace?.previewPort && !force) || space.linking) return;
@@ -108,6 +126,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     try {
       const page = space.page ? `?path=${encodeURIComponent(space.page)}` : '';
       const link = await api.request(`${chatPath(id)}/workspace/preview${page}`, { method: 'POST' });
+      await enter(link);
       space.url = link.url; space.origin = link.origin;
       if (shownId === id) { frameSrc = link.url; frame.src = link.url; }
       update();
@@ -437,6 +456,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     'turn-open-file': el => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.open = true; space.tab = 'files'; space.files = null; openFile(id, el.dataset.path); return 'render'; },
     'turn-open-files': () => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.open = true; space.tab = 'files'; space.file = null; space.files = null; update(); return 'render'; },
     'workspace-file-preview': el => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.page = el.dataset.path; space.tab = 'preview'; space.file = null; update(); showPreview(id, true); },
+    'turn-download': () => { const id = route().id; if (id && spaces.get(id)?.workspace) download(id); },
     'turn-open-preview': () => { const id = route().id, space = spaces.get(id); if (!space?.workspace || !previews()) return; space.open = true; space.tab = 'preview'; update(); showPreview(id, true); return 'render'; },
     'checkpoint-restore': el => modal(`Restore ${el.dataset.label || 'this checkpoint'}?`, `<p>The project goes back to how it was at this checkpoint: changed files are restored and files added since are removed. Installed packages stay. The current state is saved first, so you can come back to it.</p><div class="modal-actions"><button class="btn" data-action="close">Cancel</button><button class="btn primary" data-action="checkpoint-confirm" data-sha="${esc(el.dataset.sha)}" data-label="${esc(el.dataset.label || '')}">Restore</button></div>`),
     'checkpoint-confirm': async el => {

@@ -803,7 +803,7 @@ async fn upload(
     let kind = extract::kind(&name, given).ok_or_else(|| {
         bad("Chat can read PDF, Word (.docx), HTML, Markdown, text and code files")
     })?;
-    let mime = extract::mime_for(kind, given);
+    let mime = extract::mime_for(kind);
     let doc = Uuid::new_v4();
     let key = format!("knowledge/{}/{doc}", user.id);
     let size = body.len() as i64;

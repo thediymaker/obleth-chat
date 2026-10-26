@@ -231,12 +231,17 @@ async fn download(
 
 /// A stored image, sandboxed and cached privately.
 pub(crate) fn image_response(mime: &str, data: Vec<u8>) -> Result<Response, ApiError> {
+    let (mime, inline) = crate::files::served_type(mime);
     let mut response = Response::new(Body::from(data));
     let h = response.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(mime).map_err(|_| ApiError::internal())?,
-    );
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    // Stored images are checked when saved; anything else would only download.
+    if !inline {
+        h.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+    }
     // An image never changes once stored.
     h.insert(
         header::CACHE_CONTROL,

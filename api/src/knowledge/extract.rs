@@ -4,7 +4,10 @@
 
 use anyhow::{bail, Context, Result};
 use std::{path::PathBuf, process::Stdio, time::Duration};
-use tokio::process::Command;
+use tokio::{
+    io::AsyncReadExt,
+    process::{Child, Command},
+};
 use uuid::Uuid;
 
 /// Characters per passage: about 300 words, small enough to cite precisely.
@@ -41,15 +44,15 @@ pub fn kind(name: &str, mime: &str) -> Option<Kind> {
     }
 }
 
-pub fn mime_for(kind: Kind, given: &str) -> String {
+/// The type a file is stored with, from its kind alone: the uploader's own type is
+/// never kept. Web pages are stored as text, which is all Chat reads from them.
+pub fn mime_for(kind: Kind) -> String {
     match kind {
         Kind::Pdf => "application/pdf".into(),
         Kind::Docx => {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into()
         }
-        Kind::Html => "text/html; charset=utf-8".into(),
-        Kind::Text if given.starts_with("text/") || given.contains("json") => given.into(),
-        Kind::Text => "text/plain; charset=utf-8".into(),
+        Kind::Html | Kind::Text => "text/plain; charset=utf-8".into(),
     }
 }
 
@@ -141,6 +144,8 @@ pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracte
 }
 
 /// Runs a tool on the file, given as `{file}` in the arguments, and returns stdout.
+/// Output is read as it comes and the tool is stopped once it passes MAX_OUTPUT, so a
+/// small file that expands enormously (a zip bomb) cannot exhaust memory.
 async fn run(program: &str, args: &[&str], bytes: &[u8]) -> Result<Vec<u8>> {
     let path: PathBuf = std::env::temp_dir().join(format!("obleth-knowledge-{}", Uuid::new_v4()));
     tokio::fs::write(&path, bytes)
@@ -157,19 +162,38 @@ async fn run(program: &str, args: &[&str], bytes: &[u8]) -> Result<Vec<u8>> {
         .spawn();
     let result = match child {
         Ok(child) => {
-            match tokio::time::timeout(Duration::from_secs(180), child.wait_with_output()).await {
-                Ok(Ok(output)) if output.status.success() => Ok(output.stdout),
-                Ok(Ok(output)) => Err(anyhow::anyhow!("{program} exited with {}", output.status)),
-                Ok(Err(error)) => Err(error.into()),
+            match tokio::time::timeout(Duration::from_secs(180), output(program, child)).await {
+                Ok(result) => result,
                 Err(_) => Err(anyhow::anyhow!("{program} took too long")),
             }
         }
         Err(error) => Err(anyhow::anyhow!("{program} is not available: {error}")),
     };
     let _ = tokio::fs::remove_file(&path).await;
-    let out = result?;
-    if out.len() > 64 * 1024 * 1024 {
-        bail!("the file holds more text than Chat can index");
+    result
+}
+
+/// Most output a tool may write: more text than Chat indexes from one file.
+const MAX_OUTPUT: usize = 64 * 1024 * 1024;
+
+async fn output(program: &str, mut child: Child) -> Result<Vec<u8>> {
+    let mut stdout = child.stdout.take().context("reading the tool's output")?;
+    let mut out = Vec::new();
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        let n = stdout.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        if out.len() + n > MAX_OUTPUT {
+            let _ = child.kill().await;
+            bail!("the file holds more text than Chat can index");
+        }
+        out.extend_from_slice(&chunk[..n]);
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+        bail!("{program} exited with {status}");
     }
     Ok(out)
 }
@@ -425,6 +449,137 @@ mod tests {
         assert_eq!(
             docx_text(docx).split_whitespace().collect::<Vec<_>>(),
             ["First", "Second", "<b>"]
+        );
+    }
+
+    #[test]
+    fn stored_types_ignore_what_the_uploader_said() {
+        assert_eq!(kind("notes.txt", "image/svg+xml; x=json"), Some(Kind::Text));
+        assert_eq!(mime_for(Kind::Text), "text/plain; charset=utf-8");
+        assert_eq!(mime_for(Kind::Html), "text/plain; charset=utf-8");
+        assert_eq!(mime_for(Kind::Pdf), "application/pdf");
+    }
+
+    #[tokio::test]
+    async fn a_tool_is_stopped_once_its_output_passes_the_cap() {
+        let marker = std::env::temp_dir().join(format!("obleth-knowledge-{}", Uuid::new_v4()));
+        let script = format!(
+            "head -c {} /dev/zero; touch '{}'",
+            MAX_OUTPUT + 4 * 1024 * 1024,
+            marker.display()
+        );
+        let error = tokio::time::timeout(Duration::from_secs(30), run("sh", &["-c", &script], b""))
+            .await
+            .expect("the tool was not stopped")
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("more text than Chat can index"),
+            "{error:#}"
+        );
+        // The tool was killed mid-output instead of being read to the end.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!marker.exists());
+    }
+
+    /// A Word file whose document.xml inflates from about half a megabyte to past the
+    /// output cap: fixed-Huffman deflate of one zero byte followed by 258-byte copies.
+    fn docx_bomb() -> Vec<u8> {
+        let copies = (MAX_OUTPUT + 8 * 1024 * 1024) / 258;
+        let size = (1 + copies * 258) as u32;
+        let (mut deflated, mut bits, mut used) = (Vec::new(), 0u32, 0u32);
+        let mut put = |value: u32, count: u32, out: &mut Vec<u8>| {
+            bits |= value << used;
+            used += count;
+            while used >= 8 {
+                out.push(bits as u8);
+                bits >>= 8;
+                used -= 8;
+            }
+        };
+        // Huffman codes go most significant bit first.
+        let reversed = |code: u32, count: u32| code.reverse_bits() >> (32 - count);
+        put(0b011, 3, &mut deflated); // last block, fixed codes
+        put(reversed(0x30, 8), 8, &mut deflated); // literal 0
+        for _ in 0..copies {
+            put(reversed(0xc5, 8), 8, &mut deflated); // length 258
+            put(0, 5, &mut deflated); // distance 1
+        }
+        put(0, 7, &mut deflated); // end of block
+        put(0, 7, &mut deflated);
+        // CRC-32 of the inflated zeros, a byte at a time.
+        let mut table = [0u32; 256];
+        for (i, entry) in table.iter_mut().enumerate() {
+            *entry = (0..8).fold(i as u32, |c, _| {
+                if c & 1 == 1 {
+                    (c >> 1) ^ 0xedb8_8320
+                } else {
+                    c >> 1
+                }
+            });
+        }
+        let crc = !(0..size).fold(!0u32, |c, _| table[(c & 0xff) as usize] ^ (c >> 8));
+        let name = b"word/document.xml";
+        let entry = |zip: &mut Vec<u8>, signature: u32, central: bool| {
+            zip.extend(signature.to_le_bytes());
+            if central {
+                zip.extend(20u16.to_le_bytes());
+            }
+            zip.extend(20u16.to_le_bytes());
+            zip.extend(0u16.to_le_bytes()); // flags
+            zip.extend(8u16.to_le_bytes()); // deflate
+            zip.extend(0u32.to_le_bytes()); // time and date
+            zip.extend(crc.to_le_bytes());
+            zip.extend((deflated.len() as u32).to_le_bytes());
+            zip.extend(size.to_le_bytes());
+            zip.extend((name.len() as u16).to_le_bytes());
+            zip.extend(0u16.to_le_bytes()); // extra
+            if central {
+                zip.extend([0u8; 10]); // comment, disk, attributes
+                zip.extend(0u32.to_le_bytes()); // local header offset
+            }
+            zip.extend(name);
+        };
+        let mut zip = Vec::new();
+        entry(&mut zip, 0x0403_4b50, false);
+        zip.extend(&deflated);
+        let directory = zip.len() as u32;
+        entry(&mut zip, 0x0201_4b50, true);
+        let directory_size = zip.len() as u32 - directory;
+        zip.extend(0x0605_4b50u32.to_le_bytes());
+        zip.extend([0u8; 4]);
+        zip.extend(1u16.to_le_bytes());
+        zip.extend(1u16.to_le_bytes());
+        zip.extend(directory_size.to_le_bytes());
+        zip.extend(directory.to_le_bytes());
+        zip.extend(0u16.to_le_bytes());
+        zip
+    }
+
+    #[tokio::test]
+    async fn a_word_file_that_expands_past_the_cap_fails_cleanly() {
+        let tools = Tools::from_env();
+        if std::process::Command::new(&tools.unzip)
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: {} is not available", tools.unzip);
+            return;
+        }
+        let bomb = docx_bomb();
+        assert!(bomb.len() < 1024 * 1024, "{}", bomb.len());
+        let error =
+            match tokio::time::timeout(Duration::from_secs(60), extract(&tools, Kind::Docx, &bomb))
+                .await
+                .expect("extraction was not stopped")
+            {
+                Ok(_) => panic!("a file past the cap was extracted"),
+                Err(error) => format!("{error:#}"),
+            };
+        assert!(
+            error.contains("this Word file could not be opened")
+                && error.contains("more text than Chat can index"),
+            "{error}"
         );
     }
 

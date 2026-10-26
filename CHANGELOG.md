@@ -12,6 +12,8 @@ Each release's section is also its GitHub Release notes.
 - **Workspace file tools stay in the project.** Paths with `..` are refused.
 - **Downloading a project no longer wakes its workspace.** An asleep workspace answers 409 and asks to be opened first; the download button shows only while the workspace runs.
 - **Research runs stop when their owner loses workspace access** or the account is disabled, instead of running on in the workspace.
+- **Uploaded files never open as web pages.** Knowledge files, attachments, generated images and workspace files open in the browser only when they are PDFs or PNG, JPEG, GIF or WebP images. Anything else downloads, with text of any kind (HTML, XML, JSON, code) sent as plain text. Knowledge files are stored with a type taken from their name, never the one the browser sent, and documents stored as HTML by earlier versions are served the same way. Workspace SVGs still show in the file viewer but download when opened directly.
+- **A document that expands enormously no longer exhausts memory.** Word and PDF text is read as the extractor produces it, and the extractor is stopped as soon as its output passes the 64 MiB limit, so a small compressed file that inflates to gigabytes fails with "more text than Chat can index" instead of taking down the server.
 
 **Upgrading**
 

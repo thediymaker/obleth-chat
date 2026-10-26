@@ -1316,8 +1316,10 @@ async fn restore_checkpoint(
 /// Largest file served by `raw`.
 const RAW_LIMIT: usize = 10 * 1024 * 1024;
 
-/// A workspace file's bytes for the file viewer. Images are shown inline; anything
-/// else downloads. The sandbox policy keeps workspace content inert on Chat's origin.
+/// A workspace file's bytes for the file viewer. Raster images are shown inline;
+/// anything else downloads. SVG keeps its type so the viewer's `<img>` can draw it, but
+/// opened directly it downloads too. The sandbox policy keeps workspace content inert
+/// on Chat's origin.
 async fn raw(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1335,30 +1337,10 @@ async fn raw(
             "Files over 10 MB open from the project download".into(),
         ));
     }
-    let extension = q
-        .path
-        .rsplit_once('.')
-        .map(|(_, e)| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    let image = match extension.as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        "svg" => Some("image/svg+xml"),
-        _ => None,
-    };
-    let name = q.path.rsplit('/').next().unwrap_or("file");
-    let disposition = match image {
-        Some(_) => "inline".to_owned(),
-        None => format!("attachment; filename=\"{}\"", file_stem(name)),
-    };
+    let (content_type, disposition) = raw_type(&q.path);
     Ok((
         [
-            (
-                header::CONTENT_TYPE,
-                image.unwrap_or("application/octet-stream").to_owned(),
-            ),
+            (header::CONTENT_TYPE, content_type.to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
             (header::CACHE_CONTROL, "private, no-store".to_owned()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
@@ -1370,6 +1352,28 @@ async fn raw(
         bytes,
     )
         .into_response())
+}
+
+/// The type and disposition `raw` serves a workspace file with, from its name.
+fn raw_type(path: &str) -> (&'static str, String) {
+    let extension = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let image = match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    };
+    let name = path.rsplit('/').next().unwrap_or("file");
+    let disposition = match image {
+        Some(mime) if mime != "image/svg+xml" => "inline".to_owned(),
+        _ => format!("attachment; filename=\"{}\"", file_stem(name)),
+    };
+    (image.unwrap_or("application/octet-stream"), disposition)
 }
 
 /// A Kubernetes quantity such as 10Gi, 500M or 1073741824 in bytes.
@@ -1418,6 +1422,17 @@ fn file_stem(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_files_open_in_place_only_as_raster_images() {
+        assert_eq!(raw_type("out/plot.PNG"), ("image/png", "inline".into()));
+        let (kind, disposition) = raw_type("out/chart.svg");
+        assert_eq!(kind, "image/svg+xml");
+        assert!(disposition.starts_with("attachment;"), "{disposition}");
+        let (kind, disposition) = raw_type("site/index.html");
+        assert_eq!(kind, "application/octet-stream");
+        assert!(disposition.starts_with("attachment;"), "{disposition}");
+    }
 
     #[test]
     fn storage_sizes_parse_as_bytes() {

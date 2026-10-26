@@ -755,6 +755,77 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn uploaded_files_never_open_as_active_content(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, created) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/collections",
+        json!({"name":"Pages"}),
+        &admin,
+    )
+    .await;
+    let collection = created["collection"]["id"].as_str().unwrap().to_owned();
+    let page = b"<html><body><script>alert(document.domain)</script>Phishing page</body></html>";
+    // Whatever type the uploader sends, web pages, text and SVG-typed text are stored
+    // and served as plain-text downloads; only PDFs and images open in place.
+    for (name, sent) in [
+        ("page.html", "text/html"),
+        ("notes.txt", "text/html"),
+        ("drawing.txt", "image/svg+xml; x=json"),
+    ] {
+        let response = f
+            .app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/knowledge/collections/{collection}/documents?name={name}"),
+                Body::from(page.to_vec()),
+                sent,
+                &admin,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED, "{name}");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let document: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            document["document"]["mimeType"], "text/plain; charset=utf-8",
+            "{name}"
+        );
+        let response = f
+            .app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/api/knowledge/documents/{}/file",
+                    document["document"]["id"].as_str().unwrap()
+                ),
+                Body::empty(),
+                "application/json",
+                &admin,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+        let query: HashMap<String, String> = location.query_pairs().into_owned().collect();
+        assert_eq!(
+            query["response-content-type"], "text/plain; charset=utf-8",
+            "{name}"
+        );
+        assert!(
+            query["response-content-disposition"].starts_with(&format!(
+                "attachment; filename=\"{name}\"; filename*=UTF-8''{name}"
+            )),
+            "{location}"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_chat_with_a_collection_cites_its_passages(pool: PgPool) {
     let f = fixture(pool).await;
     let admin = login(&f.app, "test-admin").await;

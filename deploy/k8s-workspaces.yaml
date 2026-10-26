@@ -92,6 +92,7 @@ spec:
 # DNS, and HTTP(S) to public addresses for package installs. Private ranges (the
 # LAN, nodes, the API server and every cluster service) are unreachable. Replace
 # the public rule with a package mirror before opening workspaces to students.
+# These policies hold only if the cluster's network plugin enforces NetworkPolicy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -102,12 +103,8 @@ spec:
     matchLabels: {app.kubernetes.io/name: obleth-sandbox}
   policyTypes: [Egress]
   egress:
-    - to:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: kube-system}
-          podSelector:
-            matchLabels: {k8s-app: kube-dns}
-      ports:
+    # DNS to any resolver: cluster DNS, whatever it runs as, or a node-local cache.
+    - ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
     - to:

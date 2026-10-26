@@ -2,6 +2,26 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.4.4
+
+Each known embedding model brings its own prefixes, so choosing one in Settings needs nothing else.
+
+**New**
+
+- **Prefixes follow the model.** Choosing Qwen3-Embedding, EmbeddingGemma, Nomic Embed Text, E5, BGE English or mxbai-embed-large uses the search and passage prefixes its makers publish. Settings fills them in when you change the model, and keeps prefixes you edited. A prefix comes from your choice in Settings, then the environment variable while the default model is in use, then the model's own. Any other model gets none unless you set one. See [Choose the embedding model](https://www.obleth.com/docs/run-chat/enable-knowledge#choose-the-embedding-model).
+
+**Upgrading**
+
+- With the default `qwen3-embedding-8b`, the prefixes stay the same, so nothing is indexed again.
+
+**Images**
+
+- `ghcr.io/thediymaker/obleth-chat/chat:v0.4.4`
+- `ghcr.io/thediymaker/obleth-chat/workspace:v0.4.4`
+- `ghcr.io/thediymaker/obleth-chat/browser:v0.4.4`
+
+Pin them by digest in production.
+
 ## v0.4.3
 
 Lets administrators choose Knowledge's embedding model in Settings, and re-indexes everything when it changes. Migration `042` runs when Chat starts.

@@ -182,12 +182,13 @@ static CSP: std::sync::OnceLock<HeaderValue> = std::sync::OnceLock::new();
 /// Chat may frame its workspace previews, which live on their own origins.
 fn content_security_policy(sandboxes: Option<&sandbox::Sandboxes>) -> HeaderValue {
     let frames = sandboxes
-        .map(|sb| {
-            format!(
+        .and_then(|sb| {
+            let c = sb.config();
+            Some(format!(
                 " frame-src {}://*.{};",
-                sb.config().preview_scheme,
-                sb.config().preview_domain
-            )
+                c.preview_scheme,
+                c.preview_domain.as_ref()?
+            ))
         })
         .unwrap_or_default();
     HeaderValue::from_str(&format!("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self';{frames} base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"))
@@ -270,6 +271,7 @@ async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Val
     }
     if let (Some(sb), Some(user)) = (&s.sandboxes, &user) {
         value["features"]["workspaces"] = json!(sb.allowed(user));
+        value["features"]["previews"] = json!(sb.config().preview_domain.is_some());
         value["features"]["code"] = json!(sb.allowed(user));
     }
     value["features"]["browser"] = json!(match (&s.browsers, &user) {

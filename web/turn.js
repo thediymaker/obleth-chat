@@ -197,7 +197,7 @@ export function stats(work) {
   };
 }
 
-export function createTurn({ state, markdown, chatPath, route }) {
+export function createTurn({ state, markdown, chatPath, route, previews = () => true }) {
   // Which worker each delegate step shows in its detail panel.
   const open = new Set(), filters = new Map(), queued = new Map(), chosen = new Map();
   let steerDraft = '';
@@ -411,7 +411,7 @@ export function createTurn({ state, markdown, chatPath, route }) {
       stopped ? `<li><span class="tr-warn">!</span>Stopped before finishing${m.errorMessage ? `: ${esc(m.errorMessage)}` : ''}</li>` : '',
     ].join('');
     const id = conversation();
-    return `<section class="result-card" aria-label="What changed"><div class="result-top"><div class="grow"><span class="eyebrow">${stopped ? 'Changed so far' : 'Done'}${s.span ? ` · ${esc(duration(s.span))}` : ''}</span><strong>${s.files.length} file${s.files.length === 1 ? '' : 's'} changed <span class="tr-add">+${s.added}</span>${s.removed ? ` <span class="tr-del">−${s.removed}</span>` : ''}</strong>${checks ? `<ul class="result-checks">${checks}</ul>` : ''}</div><div class="result-actions">${s.served ? `<button type="button" class="btn small primary" data-action="turn-open-preview">${icon('play')}Open preview</button>` : ''}<button type="button" class="btn small" data-action="turn-open-files">${icon('file')}Files</button>${id ? `<a class="btn small ghost" href="${esc(chatPath(id))}/workspace/download" download>${icon('download')}Download</a>` : ''}</div></div><div class="result-files">${s.files.map(f => `<button type="button" class="result-file" data-action="turn-open-file" data-path="${esc(f.path)}"><span>${esc(f.path)}</span><span>${f.added ? `<span class="tr-add">+${f.added}</span>` : ''}${f.removed ? ` <span class="tr-del">−${f.removed}</span>` : ''}</span></button>`).join('')}</div></section>`;
+    return `<section class="result-card" aria-label="What changed"><div class="result-top"><div class="grow"><span class="eyebrow">${stopped ? 'Changed so far' : 'Done'}${s.span ? ` · ${esc(duration(s.span))}` : ''}</span><strong>${s.files.length} file${s.files.length === 1 ? '' : 's'} changed <span class="tr-add">+${s.added}</span>${s.removed ? ` <span class="tr-del">−${s.removed}</span>` : ''}</strong>${checks ? `<ul class="result-checks">${checks}</ul>` : ''}</div><div class="result-actions">${s.served && previews() ? `<button type="button" class="btn small primary" data-action="turn-open-preview">${icon('play')}Open preview</button>` : ''}<button type="button" class="btn small" data-action="turn-open-files">${icon('file')}Files</button>${id ? `<a class="btn small ghost" href="${esc(chatPath(id))}/workspace/download" download>${icon('download')}Download</a>` : ''}</div></div><div class="result-files">${s.files.map(f => `<button type="button" class="result-file" data-action="turn-open-file" data-path="${esc(f.path)}"><span>${esc(f.path)}</span><span>${f.added ? `<span class="tr-add">+${f.added}</span>` : ''}${f.removed ? ` <span class="tr-del">−${f.removed}</span>` : ''}</span></button>`).join('')}</div></section>`;
   }
   function checkpoints(s) {
     if (!s.checkpoints.length) return '';

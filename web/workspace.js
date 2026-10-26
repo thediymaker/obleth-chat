@@ -99,9 +99,11 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     polling = setTimeout(async () => { await load(id); }, 2000);
   }
   let reloading = null;
+  // Without a preview domain, workspaces run but their apps can't be opened.
+  const previews = () => capabilities.features?.previews !== false;
   async function showPreview(id, force = false) {
     const space = entry(id);
-    if ((!space.workspace?.previewPort && !force) || space.linking) return;
+    if (!previews() || (!space.workspace?.previewPort && !force) || space.linking) return;
     space.linking = true;
     try {
       const page = space.page ? `?path=${encodeURIComponent(space.page)}` : '';
@@ -136,13 +138,13 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     const w = space.workspace;
     const tabs = available(id, space).map(([key, label]) => `<button class="tab ${space.tab === key ? 'active' : ''}" data-action="workspace-tab" data-tab="${key}" ${space.tab === key ? 'aria-current="true"' : ''}>${label}</button>`).join('');
     if (space.tab === 'browser' || space.tab === 'details' || space.tab === 'code') return `<div class="workspace-tabs">${tabs}</div><span class="grow"></span><div class="workspace-actions">${space.tab === 'browser' ? iconButton('power', 'browser-off', 'Turn off the browser in this chat') : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide pane')}</div>`;
-    const address = space.origin ? `<span class="workspace-address" title="${esc(space.origin)}">${esc(space.origin.replace(/^https?:\/\//, ''))}</span>` : '<span class="workspace-address muted">No preview yet</span>';
+    const address = space.origin ? `<span class="workspace-address" title="${esc(space.origin)}">${esc(space.origin.replace(/^https?:\/\//, ''))}</span>` : `<span class="workspace-address muted">${previews() ? 'No preview yet' : ''}</span>`;
     const used = w.diskBytes, diskFull = used != null && diskLimit && used > diskLimit;
     const usage = used != null && diskLimit ? `<span class="workspace-usage ${diskFull ? 'full' : ''}" title="${diskFull ? 'Your workspaces are full: delete files to keep working' : 'Disk used by all of your workspaces'}">${(used / 2 ** 30).toFixed(1)} / ${Math.round(diskLimit / 2 ** 30)} GB</span>` : '';
     return `<div class="workspace-tabs">${tabs}</div>${address}<div class="workspace-actions">${usage}${badge(statusLabel(w), w.status === 'running' ? 'accent' : w.status === 'error' ? 'amber' : '')}${iconButton('refresh', 'workspace-reload', { files: 'Refresh files', terminal: 'Restart terminal' }[space.tab] || 'Reload preview', w.previewPort || space.tab !== 'preview' ? '' : 'disabled')}${w.status !== 'starting' ? `<a class="icon-btn" href="${esc(`${chatPath(id)}/workspace/download`)}" download aria-label="Download project" title="Download project (.zip, without dependencies)">${icon('download')}</a>` : ''}${space.origin ? `<a class="icon-btn" href="${esc(space.url || space.origin)}" target="_blank" rel="noopener" aria-label="Open preview in a new tab" title="Open in a new tab">${icon('external')}</a>` : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide workspace')}</div>`;
   }
   function available(id, space) {
-    return [...(space.workspace ? [['preview', 'Preview'], ['files', 'Files'], ['terminal', 'Terminal'], ...(code?.enabled() ? [['code', code.label(id)]] : [])] : []), ...(browser?.on(id) ? [['browser', 'Browser']] : []), ...(details && route().page === 'chat' ? [['details', 'Details']] : [])];
+    return [...(space.workspace ? [...(previews() ? [['preview', 'Preview']] : []), ['files', 'Files'], ['terminal', 'Terminal'], ...(code?.enabled() ? [['code', code.label(id)]] : [])] : []), ...(browser?.on(id) ? [['browser', 'Browser']] : []), ...(details && route().page === 'chat' ? [['details', 'Details']] : [])];
   }
   function emptyState(space) {
     const w = space.workspace;
@@ -154,7 +156,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   function filesView(id, space) {
     if (space.file) {
       const f = space.file;
-      const page = /\.html?$/i.test(f.path) ? `<button class="btn ghost small" data-action="workspace-file-preview" data-path="${esc(f.path)}">${icon('external')}Open in preview</button>` : '';
+      const page = previews() && /\.html?$/i.test(f.path) ? `<button class="btn ghost small" data-action="workspace-file-preview" data-path="${esc(f.path)}">${icon('external')}Open in preview</button>` : '';
       const head = `<div class="workspace-file-head"><span class="flip">${iconButton('right', 'workspace-file-back', 'Back to files')}</span><code>${esc(f.path)}</code>${page}</div>`;
       if (f.image) return `${head}<div class="workspace-image"><img src="${esc(f.image)}" alt="${esc(f.path)}"></div>`;
       if (f.content && !f.error && /\.csv$/i.test(f.path)) return `${head}${csvTable(f.content, f.truncated)}`;
@@ -201,7 +203,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     if (shownId !== id) { closeTerminal(); shownId = id; frameSrc = ''; frame.removeAttribute('src'); if (space.url) { frameSrc = space.url; frame.src = space.url; } }
     // A tab that is gone (the browser turned off, details closed) falls back to the next one there.
     const tabs = available(id, space).map(([key]) => key).filter(key => key !== 'details' || space.details || !space.workspace && !browsing(id));
-    if (!tabs.includes(space.tab)) space.tab = tabs.includes('preview') ? 'preview' : space.details || !browsing(id) ? 'details' : 'browser';
+    if (!tabs.includes(space.tab)) space.tab = tabs.includes('preview') ? 'preview' : tabs.includes('files') ? 'files' : space.details || !browsing(id) ? 'details' : 'browser';
     pane.querySelector('.workspace-bar').innerHTML = bar(id, space);
     const browsingTab = space.tab === 'browser', detailsTab = space.tab === 'details', gitTab = space.tab === 'code';
     browserEl.hidden = !browsingTab;
@@ -342,7 +344,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     const machine = items[0], used = machine.diskBytes;
     const summary = `<section class="card workspace-machine">${icon('server')}<div class="grow"><h2>Your machine ${badge(statusLabel(machine), machine.status === 'running' ? 'accent' : machine.status === 'error' ? 'amber' : '')}</h2><p>${machine.status === 'stopped' ? 'Asleep: it wakes when you open a project or the assistant needs it. Files are kept.' : 'It sleeps after an hour unused and keeps your files.'}</p></div>${used != null && diskLimit ? `<div class="workspace-disk"><span>${(used / 2 ** 30).toFixed(1)} of ${Math.round(diskLimit / 2 ** 30)} GB used</span><progress value="${used}" max="${diskLimit}" aria-label="Disk used"></progress></div>` : ''}</section>`;
     const rows = items.map(p => {
-      const id = encodeURIComponent(p.conversationId), live = p.status === 'running' && p.previewPort;
+      const id = encodeURIComponent(p.conversationId), live = previews() && p.status === 'running' && p.previewPort;
       return `<div class="workspace-row"><a class="grow workspace-row-main" href="#workspaces/${id}">${icon('terminal')}<span class="grow"><strong>${esc(p.title || 'Untitled conversation')}</strong><small>${live ? 'Preview running · ' : ''}Used ${esc(ago(p.lastUsedAt))}</small></span></a><div class="user-actions"><a class="btn small" href="#workspaces/${id}">Open</a><a class="btn small ghost" href="#chat/${id}">Chat</a><a class="btn small ghost" href="${esc(chatPath(p.conversationId))}/workspace/download" download title="Download project (.zip, without dependencies)">${icon('download')}</a>${iconButton('trash', 'workspace-remove', `Delete the workspace of ${p.title}`, `data-id="${esc(p.conversationId)}"`)}</div></div>`;
     }).join('');
     return `<div class="page workspaces-page">${head}${listing.error ? `<p class="inline-note">${esc(listing.error)}</p>` : ''}${summary}<section class="card workspace-list">${rows}</section></div>`;
@@ -435,7 +437,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     'turn-open-file': el => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.open = true; space.tab = 'files'; space.files = null; openFile(id, el.dataset.path); return 'render'; },
     'turn-open-files': () => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.open = true; space.tab = 'files'; space.file = null; space.files = null; update(); return 'render'; },
     'workspace-file-preview': el => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.page = el.dataset.path; space.tab = 'preview'; space.file = null; update(); showPreview(id, true); },
-    'turn-open-preview': () => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.open = true; space.tab = 'preview'; update(); showPreview(id, true); return 'render'; },
+    'turn-open-preview': () => { const id = route().id, space = spaces.get(id); if (!space?.workspace || !previews()) return; space.open = true; space.tab = 'preview'; update(); showPreview(id, true); return 'render'; },
     'checkpoint-restore': el => modal(`Restore ${el.dataset.label || 'this checkpoint'}?`, `<p>The project goes back to how it was at this checkpoint: changed files are restored and files added since are removed. Installed packages stay. The current state is saved first, so you can come back to it.</p><div class="modal-actions"><button class="btn" data-action="close">Cancel</button><button class="btn primary" data-action="checkpoint-confirm" data-sha="${esc(el.dataset.sha)}" data-label="${esc(el.dataset.label || '')}">Restore</button></div>`),
     'checkpoint-confirm': async el => {
       const id = route().id; el.disabled = true;

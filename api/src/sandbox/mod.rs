@@ -41,7 +41,8 @@ pub struct SandboxConfig {
     pub cpu_limit: String,
     pub memory_limit: String,
     pub everyone: bool,
-    pub preview_domain: String,
+    /// Unset turns previews off; workspaces still run.
+    pub preview_domain: Option<String>,
     pub preview_scheme: String,
     pub chat_origin: String,
     pub idle: Duration,
@@ -57,22 +58,23 @@ impl SandboxConfig {
             return Ok(None);
         };
         let image = var("OBLETH_CHAT_SANDBOX_IMAGE").context("Set OBLETH_CHAT_SANDBOX_IMAGE")?;
-        let preview_domain = var("OBLETH_CHAT_PREVIEW_DOMAIN")
-            .context("Set OBLETH_CHAT_PREVIEW_DOMAIN to the wildcard preview domain")?
-            .to_ascii_lowercase();
-        if !preview_domain.split('.').all(|label| {
-            !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        }) || !preview_domain.contains('.')
-        {
-            bail!("OBLETH_CHAT_PREVIEW_DOMAIN must be a domain such as sbx.example.com");
-        }
+        let preview_domain = var("OBLETH_CHAT_PREVIEW_DOMAIN").map(|d| d.to_ascii_lowercase());
         let chat_origin =
             var("OBLETH_CHAT_ORIGIN").unwrap_or_else(|| "http://localhost:8085".into());
         let origin = Url::parse(&chat_origin).context("Invalid OBLETH_CHAT_ORIGIN")?;
-        if origin.host_str().is_some_and(|host| {
-            host == preview_domain || host.ends_with(&format!(".{preview_domain}"))
-        }) {
-            bail!("The preview domain must not contain the Chat origin");
+        if let Some(domain) = &preview_domain {
+            if !domain.split('.').all(|label| {
+                !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            }) || !domain.contains('.')
+            {
+                bail!("OBLETH_CHAT_PREVIEW_DOMAIN must be a domain such as sbx.example.com");
+            }
+            if origin
+                .host_str()
+                .is_some_and(|host| host == domain || host.ends_with(&format!(".{domain}")))
+            {
+                bail!("The preview domain must not contain the Chat origin");
+            }
         }
         let minutes = |key: &str, default: u64| -> Result<Duration> {
             let value = var(key)
@@ -241,12 +243,11 @@ impl Sandboxes {
     pub fn allowed(&self, user: &Identity) -> bool {
         self.inner.config.everyone || user.is_admin()
     }
-    pub fn preview_origin(&self, sandbox: &Sandbox) -> String {
+    /// The workspace's preview address, when previews are set up.
+    pub fn preview_origin(&self, sandbox: &Sandbox) -> Option<String> {
         let c = &self.inner.config;
-        format!(
-            "{}://{}.{}",
-            c.preview_scheme, sandbox.slug, c.preview_domain
-        )
+        let domain = c.preview_domain.as_ref()?;
+        Some(format!("{}://{}.{domain}", c.preview_scheme, sandbox.slug))
     }
 
     pub async fn get(&self, owner: Uuid, conversation: Uuid) -> Result<Option<Sandbox>, ApiError> {
@@ -944,6 +945,12 @@ async fn preview_link(
         .get(user.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    let origin = sandboxes.preview_origin(&sandbox).ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            "Previews are not set up on this server".into(),
+        )
+    })?;
     // Bring the dev server back if it stopped, for example after the pod slept.
     let mut serving = sandbox.preview_port.is_some();
     if sandbox.status == "running" {
@@ -959,17 +966,14 @@ async fn preview_link(
         user.id,
         60,
     );
-    let mut url = format!(
-        "{}/__obleth/enter?ticket={ticket}",
-        sandboxes.preview_origin(&sandbox)
-    );
+    let mut url = format!("{origin}/__obleth/enter?ticket={ticket}");
     if let Some(page) = preview::landing(&q.path) {
         url.push_str("&next=");
         url.extend(url::form_urlencoded::byte_serialize(page.as_bytes()));
     }
     Ok(Json(json!({
         "url": url,
-        "origin": sandboxes.preview_origin(&sandbox),
+        "origin": origin,
         "running": sandbox.status == "running" && serving,
     })))
 }

@@ -215,7 +215,7 @@ pub(crate) fn in_project(sb: &Sandboxes, sandbox: &Sandbox, script: &str) -> Str
     format!(
         "export OBLETH_SLUG={slug} OBLETH_PREVIEW_ORIGIN={origin}; mkdir -p {dir} && cd {dir} || exit 1\n{script}",
         slug = sandbox.slug,
-        origin = sb.preview_origin(sandbox),
+        origin = sb.preview_origin(sandbox).unwrap_or_default(),
         dir = sandbox.dir(),
     )
 }

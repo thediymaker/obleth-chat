@@ -117,7 +117,7 @@ export async function startConnected(capabilities) {
       },
     },
   });
-  const turnView = createTurn({ state, markdown, chatPath, route });
+  const turnView = createTurn({ state, markdown, chatPath, route, previews: () => capabilities.features?.previews !== false });
   const turnActions = Object.fromEntries(Object.entries(turnView.actions).map(([k, f]) => [k, el => { if (f(el) === 'render') render(); }]));
   const administration = createAdmin({ api, state, capabilities, render, modal, close, toast: message => toast(message), onIdentityChanged: session, onCatalogChanged: () => applyPreferences(state.preferences) });
   const historyView = createHistory({ api, state, render, modal, close, toast: message => toast(message), refreshSidebar });

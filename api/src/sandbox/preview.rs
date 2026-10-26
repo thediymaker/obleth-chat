@@ -88,7 +88,9 @@ pub async fn dispatch(
     let Some(sb) = sandboxes else {
         return next.run(request).await;
     };
-    let domain = sb.config().preview_domain.clone();
+    let Some(domain) = sb.config().preview_domain.clone() else {
+        return next.run(request).await;
+    };
     let Some(slug) = preview_slug(request.headers(), &domain) else {
         if request
             .headers()
@@ -355,7 +357,7 @@ async fn websocket(
     request: Request,
 ) -> Result<Response, ApiError> {
     // Only the preview page itself may open sockets to its dev server.
-    let origin = sb.preview_origin(sandbox);
+    let origin = sb.preview_origin(sandbox).unwrap_or_default();
     if request
         .headers()
         .get(header::ORIGIN)

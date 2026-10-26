@@ -128,7 +128,21 @@ Administrators publish models and choose who sees them, set generation defaults 
 
 ## Quick start
 
-You need Rust stable and PostgreSQL 17 with [pgvector](https://github.com/pgvector/pgvector). Node.js 20.12+ is optional; it runs the wrapper that loads `.env`.
+With Docker or Podman, Chat brings its own PostgreSQL:
+
+```bash
+./setup.sh docker
+```
+
+On Kubernetes, with workspaces and each person's browser:
+
+```bash
+./setup.sh kubernetes
+```
+
+It asks for the address people will use and the gateway's URL, makes every password and key, starts Chat, and prints the administrator password and the entry that lets the gateway trust Chat. Workspaces run only on Kubernetes, and previews of the apps built in them need a wildcard DNS name and certificate. The [install guide](https://www.obleth.com/docs/run-chat/install) covers the options, the first sign-in and setting it up by hand.
+
+To work on Chat itself, you need Rust stable and PostgreSQL 17 with [pgvector](https://github.com/pgvector/pgvector). Node.js 20.12+ is optional; it runs the wrapper that loads `.env`.
 
 ```bash
 cp .env.example .env
@@ -136,14 +150,6 @@ cp .env.example .env
 npm run start:api
 # http://localhost:8085, sign in as admin
 ```
-
-Or with Docker Compose, which brings its own Postgres:
-
-```bash
-docker compose --env-file .env -f deploy/compose.connected.yaml up --build -d
-```
-
-Accounts and chats work right away. To list models and stream replies, [connect the gateway](https://www.obleth.com/docs/run-chat/connect-gateway). The [install guide](https://www.obleth.com/docs/run-chat/install) covers Kubernetes, the first sign-in and production settings.
 
 ## Branding and appearance
 
@@ -179,7 +185,7 @@ Recreate the container after adding the mounts. Subsequent branding edits only n
 | `api/` | The Rust server: auth, conversations, gateway streaming, Knowledge, workspaces, connections, research |
 | `web/` | The browser app, plain JavaScript modules with no build step |
 | `migrations/` | Postgres migrations, applied at startup |
-| `deploy/` | Dockerfiles, Compose, a Kubernetes reference manifest, the workspace image, Prometheus samples |
+| `deploy/` | Dockerfiles, Compose, the Kubernetes manifests, the workspace and browser images, Prometheus samples |
 | `tests/` | Rust integration tests and Node unit tests |
 | `server/` | A static design preview with sample data (`npm start`) |
 

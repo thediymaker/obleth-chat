@@ -1,12 +1,12 @@
 # Run from the repository root:
-# docker compose --env-file .env -f deploy/compose.connected.yaml up --build -d
+# ./setup.sh docker, or: docker compose --env-file .env -f deploy/compose.connected.yaml up -d
 # This is the connected app. deploy/compose.yaml remains the static design preview.
 name: obleth-chat
 
 services:
   postgres:
     # PostgreSQL 17 with pgvector, which Knowledge needs.
-    image: pgvector/pgvector:0.8.7-pg17-trixie@sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84
+    image: docker.io/pgvector/pgvector:0.8.7-pg17-trixie@sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84
     environment:
       POSTGRES_USER: postgres
       POSTGRES_DB: postgres

@@ -1173,6 +1173,8 @@ body.workspace-open .content{margin-right:var(--workspace-w)}
 .workspace-note strong{color:var(--text);font-weight:500;font-size:var(--fs-base)}
 .workspace-note p{margin:0;line-height:1.5}
 .workspace-files{overflow:auto;padding:8px 0}
+/* A note on its own (starting, asleep, no files yet) sits in the middle of the pane. */
+.workspace-files>.workspace-note,.workspace-git>.workspace-note:only-child{min-height:100%;margin:0 auto;justify-content:center}
 .workspace-tree{list-style:none;margin:0;padding:0 8px}
 .workspace-tree li{padding-left:calc(var(--depth,0) * 14px)}
 .workspace-tree li.dir{display:flex;align-items:center;gap:8px;padding-top:6px;padding-bottom:6px;padding-right:8px;font-size:var(--fs-sm);color:var(--muted)}

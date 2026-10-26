@@ -2,6 +2,22 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.5.1
+
+Fixes the browser: opening the Browser tab now starts it.
+
+**Fixed**
+
+- **The Browser tab starts a sleeping browser.** The web app asks with `?wake=1`, which the server refused with 400 before doing anything, so the browser only started when the model used it. The live view now accepts `1` and `true`.
+
+**Images**
+
+- `ghcr.io/thediymaker/obleth-chat/chat:v0.5.1`
+- `ghcr.io/thediymaker/obleth-chat/workspace:v0.5.1`
+- `ghcr.io/thediymaker/obleth-chat/browser:v0.5.1`
+
+Pin them by digest in production.
+
 ## v0.5.0
 
 Chat sets itself up with one command, on Docker or Kubernetes, and workspaces come with the Kubernetes install.

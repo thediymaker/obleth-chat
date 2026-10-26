@@ -401,3 +401,28 @@ async fn the_browser_is_offered_handed_over_and_remembered(pool: PgPool) {
     reply(&f, &id, "Thanks.", &admin).await;
     assert!(!offered(&f.seen).contains(&"browser_search".to_owned()));
 }
+
+/// The Browser tab wakes a sleeping browser with `?wake=1`. Requests here can't be
+/// upgraded to a WebSocket, so getting past the query to that refusal shows it was
+/// accepted.
+#[sqlx::test(migrations = "./migrations")]
+async fn the_live_view_accepts_the_wake_query(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app).await;
+    for query in ["?wake=1", "?wake=true", ""] {
+        let request = Request::builder()
+            .uri(format!(
+                "/api/conversations/00000000-0000-4000-8000-000000000000/browser/live{query}"
+            ))
+            .header("origin", ORIGIN)
+            .header("cookie", &admin.0)
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .unwrap();
+        let status = f.app.clone().oneshot(request).await.unwrap().status();
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED, "{query}");
+    }
+}

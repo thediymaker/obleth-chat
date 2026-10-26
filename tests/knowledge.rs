@@ -756,7 +756,7 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
 
 #[sqlx::test(migrations = "./migrations")]
 async fn uploaded_files_never_open_as_active_content(pool: PgPool) {
-    let f = fixture(pool).await;
+    let f = fixture(pool.clone()).await;
     let admin = login(&f.app, "test-admin").await;
     let (_, created) = call(
         &f.app,
@@ -823,6 +823,39 @@ async fn uploaded_files_never_open_as_active_content(pool: PgPool) {
             "{location}"
         );
     }
+    // A page an earlier version stored as HTML may carry that type in storage too, so
+    // Chat sends it itself, as a plain-text download, instead of linking to storage.
+    let legacy: String = sqlx::query_scalar(
+        "UPDATE knowledge_documents SET mime_type='text/html; charset=utf-8' WHERE name='page.html' RETURNING id::text",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/api/knowledge/documents/{legacy}/file"),
+            Body::empty(),
+            "application/json",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
+    assert!(headers["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment;"));
+    assert_eq!(
+        headers["content-security-policy"],
+        "sandbox; default-src 'none'"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], &page[..]);
 }
 
 #[sqlx::test(migrations = "./migrations")]

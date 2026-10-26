@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { workOf, stats, gist, latest, duration, changeOf } from '../web/turn.js';
+import { workOf, stats, gist, latest, duration, changeOf, createTurn } from '../web/turn.js';
 
 const t = s => new Date(Date.UTC(2026, 9, 19, 12, 0, s)).toISOString();
 const reasoning = 'Plan seven files. Then write them.Nothing vendored, so load three.js from a CDN.The script was deferred, so ours ran first.';
@@ -91,4 +91,11 @@ test('a change waiting for approval says what it does', () => {
   assert.deepEqual(job.items[0].facts, [['Partition', 'long'], ['Time limit', '1 h 30 min'], ['CPUs', '2'], ['Memory', '4 GB']]);
   assert.equal(job.text, '#!/bin/bash\nsrun ./heat');
   assert.equal(changeOf({ service: 'mcp', action: 'send', detail: 'to: x' }), null);
+});
+
+test('the result card downloads through the workspace, so an asleep one is woken first', () => {
+  const turn = createTurn({ state: {}, markdown: s => s, chatPath: id => `./api/conversations/${id}`, route: () => ({ page: 'chat', id: 'c-1' }) });
+  const html = turn.before(message);
+  assert.match(html, /data-action="turn-download"/);
+  assert.doesNotMatch(html, /workspace\/download/);
 });

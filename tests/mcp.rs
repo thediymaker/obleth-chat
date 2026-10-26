@@ -96,12 +96,16 @@ fn browser(method: &str, path: &str, body: Value, cookie: &str, csrf: &str) -> R
 }
 
 async fn login(app: &Router) -> (String, String) {
+    login_as(app, "test-admin", PASSWORD).await
+}
+
+async fn login_as(app: &Router, username: &str, password: &str) -> (String, String) {
     let response = app
         .clone()
         .oneshot(browser(
             "POST",
             "/api/auth/login",
-            json!({"username":"test-admin","password":PASSWORD}),
+            json!({"username":username,"password":password}),
             "",
             "",
         ))
@@ -398,7 +402,7 @@ async fn a_token_runs_chats_over_mcp_and_reaches_nothing_else(pool: PgPool) {
         send(&app, rpc(&reader, "ping", json!({}))).await.0,
         StatusCode::UNAUTHORIZED
     );
-    sqlx::query("UPDATE auth_sessions SET created_at=NOW() - INTERVAL '13 hours'")
+    sqlx::query("UPDATE auth_sessions SET created_at=NOW() - INTERVAL '16 minutes'")
         .execute(&pool)
         .await
         .unwrap();
@@ -433,4 +437,122 @@ async fn changing_the_password_ends_the_tokens(pool: PgPool) {
         send(&app, rpc(&token, "ping", json!({}))).await.0,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[sqlx::test(migrator = "obleth_chat::MIGRATOR")]
+async fn redeeming_a_reset_link_ends_the_tokens(pool: PgPool) {
+    let app = fixture(pool.clone()).await;
+    let (admin, admin_csrf) = login(&app).await;
+    let (status, _, user) = send(
+        &app,
+        browser(
+            "POST",
+            "/api/admin/users",
+            json!({"username":"ana","password":PASSWORD,"role":"user"}),
+            &admin,
+            &admin_csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{user}");
+    let id = user["id"].as_str().unwrap().to_owned();
+    let (cookie, csrf) = login_as(&app, "ana", PASSWORD).await;
+    let (_, created) = create_token(&app, &cookie, &csrf, json!({"name":"Laptop","days":30})).await;
+    let token = created["token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        send(&app, rpc(&token, "ping", json!({}))).await.0,
+        StatusCode::OK
+    );
+
+    // A reset link, redeemed, ends the tokens made with the old password too.
+    let (status, _, link) = send(
+        &app,
+        browser(
+            "POST",
+            &format!("/api/admin/users/{id}/access-link"),
+            json!({"kind":"reset"}),
+            &admin,
+            &admin_csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{link}");
+    let secret = link["url"].as_str().unwrap().rsplit('/').next().unwrap();
+    let (status, _, body) = send(
+        &app,
+        browser(
+            "POST",
+            "/api/auth/activate",
+            json!({"token":secret,"newPassword":"another-fixture-password-43"}),
+            "",
+            "",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        send(&app, rpc(&token, "ping", json!({}))).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test(migrator = "obleth_chat::MIGRATOR")]
+async fn signing_out_a_device_ends_the_tokens_made_on_it(pool: PgPool) {
+    let app = fixture(pool.clone()).await;
+    let (stolen, stolen_csrf) = login(&app).await;
+    let (_, created) = create_token(
+        &app,
+        &stolen,
+        &stolen_csrf,
+        json!({"name":"Taken","days":30}),
+    )
+    .await;
+    let taken = created["token"].as_str().unwrap().to_owned();
+    let (mine, mine_csrf) = login(&app).await;
+    let (_, created) =
+        create_token(&app, &mine, &mine_csrf, json!({"name":"Mine","days":30})).await;
+    let kept = created["token"].as_str().unwrap().to_owned();
+    let (cookie, csrf) = login(&app).await;
+    let (_, created) = create_token(&app, &cookie, &csrf, json!({"name":"Other","days":30})).await;
+    let other = created["token"].as_str().unwrap().to_owned();
+
+    // Signing one other device out ends the tokens made on it, and only those.
+    let id: uuid::Uuid = sqlx::query_scalar("SELECT session_id FROM api_tokens WHERE name='Other'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (status, _, _) = send(
+        &app,
+        browser(
+            "DELETE",
+            &format!("/api/auth/sessions/{id}"),
+            json!({}),
+            &mine,
+            &mine_csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let ping = |token: String| {
+        let app = app.clone();
+        async move { send(&app, rpc(&token, "ping", json!({}))).await.0 }
+    };
+    assert_eq!(ping(other).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(ping(taken.clone()).await, StatusCode::OK);
+
+    // "Sign out other devices" ends the rest made elsewhere; this device's stay.
+    let (status, _, _) = send(
+        &app,
+        browser(
+            "POST",
+            "/api/auth/sessions/revoke-others",
+            json!({}),
+            &mine,
+            &mine_csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(ping(taken).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(ping(kept).await, StatusCode::OK);
 }

@@ -130,8 +130,10 @@ async fn set_sharing(
     Ok(Json(json!({"share":share_json(pool, id).await?})))
 }
 
-/// The chat as a viewer reads it. Its own settings stay out, and images and
-/// attachments point at the shared routes.
+/// The chat as a viewer reads it. Its own settings stay out, each reply shows only
+/// its shareable settings (never the owner's instructions), and images and
+/// attachments point at the shared routes. Tool activity stays: it is part of
+/// the conversation.
 async fn read(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -149,6 +151,9 @@ async fn read(
     for m in value["messages"].as_array_mut().into_iter().flatten() {
         if let Some(text) = m["content"].as_str() {
             m["content"] = json!(text.replace("/api/images/", &images));
+        }
+        if let Some(settings) = m.get_mut("settings").filter(|s| !s.is_null()) {
+            *settings = crate::store::shareable_settings(settings);
         }
         for a in m["attachments"].as_array_mut().into_iter().flatten() {
             if let Some(file) = a["id"].as_str().map(str::to_owned) {

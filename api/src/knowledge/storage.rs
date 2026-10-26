@@ -129,10 +129,14 @@ impl ObjectStore {
         check(response).await.map(|_| ())
     }
 
-    /// A short-lived download link that opens the file in the browser under its name.
+    /// A short-lived link to the file under its name. PDFs and images open in the
+    /// browser; anything else downloads, with text as plain text, whatever type the file
+    /// was stored with (see `files::served_type`).
     pub fn presign_get(&self, key: &str, seconds: u64, name: &str, content_type: &str) -> Url {
+        let (content_type, inline) = crate::files::served_type(content_type);
         let disposition = format!(
-            "inline; filename=\"{}\"; filename*=UTF-8''{}",
+            "{}; filename=\"{}\"; filename*=UTF-8''{}",
+            if inline { "inline" } else { "attachment" },
             name.chars()
                 .map(
                     |c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' {
@@ -342,6 +346,39 @@ mod tests {
                 "X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
             ),
             "{url}"
+        );
+    }
+
+    #[test]
+    fn links_never_open_active_content_in_place() {
+        let store = ObjectStore {
+            client: reqwest::Client::new(),
+            endpoint: Url::parse("https://storage.example.com").unwrap(),
+            bucket: "bucket".into(),
+            region: "auto".into(),
+            access_key: "access".into(),
+            secret_key: "secret".into(),
+        };
+        let link = |name: &str, stored: &str| {
+            let url = store.presign_get("knowledge/a/b", 300, name, stored);
+            let query: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            (
+                query["response-content-type"].clone(),
+                query["response-content-disposition"].clone(),
+            )
+        };
+        let (kind, disposition) = link("page.html", "text/html; charset=utf-8");
+        assert_eq!(kind, "text/plain; charset=utf-8");
+        assert!(disposition.starts_with("attachment; "), "{disposition}");
+        let (kind, disposition) = link("notes.txt", "image/svg+xml; x=json");
+        assert_eq!(kind, "text/plain; charset=utf-8");
+        assert!(disposition.starts_with("attachment; "), "{disposition}");
+        let (kind, disposition) = link("Lecture 7 \"ü\".pdf", "application/pdf");
+        assert_eq!(kind, "application/pdf");
+        assert_eq!(
+            disposition,
+            "inline; filename=\"Lecture 7 ___.pdf\"; filename*=UTF-8''Lecture%207%20%22%C3%BC%22.pdf"
         );
     }
 

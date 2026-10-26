@@ -803,7 +803,7 @@ async fn upload(
     let kind = extract::kind(&name, given).ok_or_else(|| {
         bad("Chat can read PDF, Word (.docx), HTML, Markdown, text and code files")
     })?;
-    let mime = extract::mime_for(kind, given);
+    let mime = extract::mime_for(kind);
     let doc = Uuid::new_v4();
     let key = format!("knowledge/{}/{doc}", user.id);
     let size = body.len() as i64;
@@ -949,6 +949,10 @@ async fn retry(
 }
 
 /// Sends the browser to a five-minute download link for the original file.
+/// Documents stored by earlier versions may carry the type their uploader sent
+/// (such as text/html) in object storage itself; those are sent from here as
+/// downloads, so their safety never depends on the storage honouring the type a
+/// download link asks for.
 async fn file(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -957,12 +961,20 @@ async fn file(
     let user = s.auth.require(&headers, false).await?;
     let k = knowledge(&s)?;
     let (row, _) = visible_document(&k.pool, user.id, id).await?;
-    let url = k.store.presign_get(
-        row.get::<String, _>("object_key").as_str(),
-        300,
-        row.get::<String, _>("name").as_str(),
-        row.get::<String, _>("mime_type").as_str(),
-    );
+    let (key, name, mime): (String, String, String) =
+        (row.get("object_key"), row.get("name"), row.get("mime_type"));
+    let stored_safely = extract::kind(&name, &mime).map(extract::mime_for) == Some(mime.clone());
+    if !stored_safely {
+        let bytes = k.store.get(&key, MAX_FILE_BYTES).await.map_err(|error| {
+            tracing::warn!("could not read a knowledge file: {error:#}");
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "The file could not be read. Try again.".into(),
+            )
+        })?;
+        return crate::attachments::file_response(&name, &mime, bytes);
+    }
+    let url = k.store.presign_get(&key, 300, &name, &mime);
     let mut response = Redirect::to(url.as_str()).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,

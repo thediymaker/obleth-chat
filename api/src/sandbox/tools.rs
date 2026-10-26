@@ -148,11 +148,14 @@ fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
 }
 
 /// A path relative to the project folder; absolute paths under the project folder
-/// or /workspace are accepted.
+/// or /workspace are accepted. `..` is refused, so file tools stay in the project.
 fn clean_path(path: &str, slug: &str) -> Result<String, String> {
     let path = path.trim();
     if path.len() > 512 || path.chars().any(char::is_control) {
         return Err("Invalid path".into());
+    }
+    if path.split('/').any(|part| part == "..") {
+        return Err("Paths must stay inside the project; `..` is not allowed".into());
     }
     let project = format!("/workspace/{slug}");
     let relative = path
@@ -971,6 +974,10 @@ async fn start_server(sb: &Sandboxes, sandbox: &Sandbox, args: &Value) -> ToolRe
     let Some(ip) = sandbox.pod_ip.as_deref() else {
         return Err("The workspace has no network address yet".into());
     };
+    // The address on record may since have gone to another pod.
+    if !matches!(sb.confirm_pod(sandbox).await, Ok(true)) {
+        return Err("The workspace stopped. Try again to start it.".into());
+    }
     let url = format!("http://{ip}:{port}/");
     let started = Instant::now();
     let mut ready = false;
@@ -1257,6 +1264,9 @@ async fn compile_check(
     };
     // Give the file watcher a moment to see the change.
     tokio::time::sleep(Duration::from_millis(700)).await;
+    if !matches!(sb.confirm_pod(sandbox).await, Ok(true)) {
+        return (String::new(), "");
+    }
     let response = sb
         .http()
         .get(format!("http://{ip}:{port}{route}"))
@@ -1618,6 +1628,16 @@ mod tests {
         );
         assert_eq!(clean_path("/workspace", "").unwrap(), ".");
         assert!(clean_path("a\nb", "").is_err());
+        for outside in [
+            "..",
+            "../abcdefgh87654321/src/App.tsx",
+            "src/../../other",
+            "/workspace/abcdefgh12345678/../x",
+            "/workspace/..",
+        ] {
+            assert!(clean_path(outside, slug).is_err(), "{outside}");
+        }
+        assert_eq!(clean_path("a..b/..c", slug).unwrap(), "a..b/..c");
     }
 
     #[test]

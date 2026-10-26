@@ -107,13 +107,20 @@ async fn revoke_session(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(ApiError::not_found)?;
+    // Signing yourself out keeps your tokens; signing out another device ends the
+    // tokens made on it.
+    let tokens = if current {
+        0
+    } else {
+        super::tokens::revoke_made_in(&mut tx, user.id, &[id]).await?
+    };
     record_audit(
         &mut tx,
         Some(user.id),
         "session_revoked",
         "session",
         Some(&id.to_string()),
-        json!({"current":current}),
+        json!({"current":current,"tokens":tokens}),
     )
     .await?;
     tx.commit().await?;
@@ -139,19 +146,21 @@ async fn revoke_others(
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
-    let count = sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1 AND token_hash<>$2")
-        .bind(user.id)
-        .bind(digest(&token))
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    let ended: Vec<Uuid> = sqlx::query_scalar(
+        "DELETE FROM auth_sessions WHERE user_id=$1 AND token_hash<>$2 RETURNING id",
+    )
+    .bind(user.id)
+    .bind(digest(&token))
+    .fetch_all(&mut *tx)
+    .await?;
+    let tokens = super::tokens::revoke_made_in(&mut tx, user.id, &ended).await?;
     record_audit(
         &mut tx,
         Some(user.id),
         "other_sessions_revoked",
         "user",
         Some(&user.id.to_string()),
-        json!({"count":count}),
+        json!({"count":ended.len(),"tokens":tokens}),
     )
     .await?;
     tx.commit().await?;
@@ -166,12 +175,7 @@ async fn admin_revoke_sessions(
     let mut tx = auth.pool.begin().await?;
     auth.lock_admin(&mut tx, admin.id).await?;
     require_user(&mut tx, id).await?;
-    let count = sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    super::tokens::revoke_all(&mut tx, id).await?;
+    let count = super::end_sign_ins(&mut tx, id).await?;
     record_audit(
         &mut tx,
         Some(admin.id),
@@ -720,10 +724,8 @@ async fn activate(
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1")
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
+    // A reset ends every session and personal token made with the old password.
+    super::end_sign_ins(&mut tx, user.id).await?;
     // The browser's previous session, possibly another user's, is replaced too.
     if let Some(old_token) = auth.session_token(&headers) {
         sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")

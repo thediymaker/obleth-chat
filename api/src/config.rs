@@ -15,6 +15,8 @@ pub struct Config {
     pub max_streams: usize,
     pub db_connections: u32,
     pub backup_status_dir: Option<PathBuf>,
+    /// When set, `/metrics` needs `Authorization: Bearer` with this token.
+    pub metrics_token: Option<String>,
     /// Lets people's own connections reach private addresses. For development.
     pub connections_allow_private: bool,
     /// Which connections people can add: none, MCP servers only, or also clusters.
@@ -106,6 +108,10 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            metrics_token: env::var("OBLETH_CHAT_METRICS_TOKEN")
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
             connections_allow_private: env::var("OBLETH_CHAT_CONNECTIONS_ALLOW_PRIVATE")
                 .is_ok_and(|v| v == "true"),
             connections: match env::var("OBLETH_CHAT_CONNECTIONS")

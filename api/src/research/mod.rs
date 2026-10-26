@@ -322,6 +322,33 @@ pub async fn check(pool: &PgPool, sb: &Sandboxes, run: Uuid) -> bool {
         return false;
     }
     let n = number.to_string();
+    // Access can end while a run is going: the account disabled or workspaces withdrawn.
+    match sb.owner_allowed(owner).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = crate::sandbox::tools::sh(
+                sb,
+                &sandbox,
+                &cancel_script(),
+                &[&n],
+                None,
+                Duration::from_secs(20),
+            )
+            .await;
+            finish(
+                pool,
+                run,
+                experiment,
+                "lost",
+                None,
+                "The account may no longer use workspaces, so the run was stopped.",
+                &metric,
+            )
+            .await;
+            return false;
+        }
+        Err(_) => return true,
+    }
     let Ok((out, _, _)) = crate::sandbox::tools::sh(
         sb,
         &sandbox,

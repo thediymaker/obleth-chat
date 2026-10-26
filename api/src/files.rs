@@ -223,6 +223,47 @@ pub fn image_key(owner: Uuid, id: Uuid) -> String {
     format!("images/{owner}/{id}")
 }
 
+/// How a stored file is served: the type to send, and whether a browser may show it in
+/// place. Only PDFs and common raster images open inline. Text of any kind goes out as
+/// plain text and everything else as opaque bytes, both as downloads, so an uploaded
+/// HTML, XML or SVG file never runs as a page. The stored type is only a hint.
+pub fn served_type(mime: &str) -> (&'static str, bool) {
+    let essence = mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match essence.as_str() {
+        "application/pdf" => ("application/pdf", true),
+        "image/png" => ("image/png", true),
+        "image/jpeg" => ("image/jpeg", true),
+        "image/gif" => ("image/gif", true),
+        "image/webp" => ("image/webp", true),
+        e if e.starts_with("text/")
+            || e.ends_with("+json")
+            || e.ends_with("+xml")
+            || [
+                "application/json",
+                "application/xml",
+                "application/javascript",
+                "application/ecmascript",
+                "application/typescript",
+                "application/x-yaml",
+                "application/yaml",
+                "application/toml",
+                "application/x-sh",
+                "application/sql",
+                "application/x-ndjson",
+            ]
+            .contains(&e) =>
+        {
+            ("text/plain; charset=utf-8", false)
+        }
+        _ => ("application/octet-stream", false),
+    }
+}
+
 /// Deletes up to 20 trashed objects: those whose rows are gone, and pending uploads
 /// no row claimed within the grace period. Rows a running transaction is claiming are
 /// skipped.
@@ -256,4 +297,41 @@ fn unavailable(error: anyhow::Error) -> ApiError {
         StatusCode::SERVICE_UNAVAILABLE,
         "File storage is unavailable. Try again shortly.".into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::served_type;
+
+    #[test]
+    fn only_documents_and_images_are_served_inline() {
+        for (stored, served, inline) in [
+            ("application/pdf", "application/pdf", true),
+            ("IMAGE/PNG", "image/png", true),
+            ("image/webp; q=1", "image/webp", true),
+            (
+                "text/html; charset=utf-8",
+                "text/plain; charset=utf-8",
+                false,
+            ),
+            ("application/xhtml+xml", "text/plain; charset=utf-8", false),
+            ("image/svg+xml", "text/plain; charset=utf-8", false),
+            ("image/svg+xml; x=json", "text/plain; charset=utf-8", false),
+            ("application/json", "text/plain; charset=utf-8", false),
+            ("text/markdown", "text/plain; charset=utf-8", false),
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/octet-stream",
+                false,
+            ),
+            (
+                "application/x-shockwave-flash",
+                "application/octet-stream",
+                false,
+            ),
+            ("", "application/octet-stream", false),
+        ] {
+            assert_eq!(served_type(stored), (served, inline), "{stored}");
+        }
+    }
 }

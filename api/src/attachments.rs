@@ -264,7 +264,7 @@ pub(crate) fn file_response(name: &str, mime: &str, data: Vec<u8>) -> Result<Res
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(mime).map_err(|_| ApiError::internal())?,
+        HeaderValue::from_static(crate::files::served_type(mime).0),
     );
     headers.insert(
         header::CONTENT_DISPOSITION,

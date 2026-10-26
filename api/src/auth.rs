@@ -164,6 +164,12 @@ fn validate_transport(url: &Url) -> anyhow::Result<()> {
 /// Unrefunded password attempts per account from one client, and from all clients, per minute.
 const CLIENT_ACCOUNT_FAILURES: i32 = 10;
 const ACCOUNT_FAILURES: i32 = 50;
+/// Attempts per account and minute from clients not failing there, on top of
+/// `ACCOUNT_FAILURES`, so rotating addresses cannot add guesses without bound.
+const ACCOUNT_FIRST_TRIES: i32 = 50;
+/// How long, in one-minute windows, a client's unrefunded attempt on an account
+/// marks it as failing there. Throttle rows are kept this long too.
+const FAILING_WINDOWS: i64 = 10;
 
 #[derive(Clone)]
 pub struct Auth {
@@ -475,6 +481,20 @@ impl Auth {
         cookie_value(headers, self.session_cookie_name())
     }
 
+    /// The id of the live browser session these headers carry, so access granted
+    /// elsewhere can end with it.
+    pub(crate) async fn session_id(&self, headers: &HeaderMap) -> Result<Option<Uuid>, ApiError> {
+        let Some(token) = self.session_token(headers) else {
+            return Ok(None);
+        };
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM auth_sessions WHERE token_hash = $1 AND expires_at > NOW()",
+        )
+        .bind(digest(&token))
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     fn session_response(
         &self,
         user: Identity,
@@ -573,6 +593,14 @@ impl Auth {
     /// limits, and a verified password refunds its own attempt. A client stopped by
     /// its account limit does not spend the higher all-client backstop, so one client
     /// cannot lock another out.
+    ///
+    /// The all-client backstop only stops clients that are failing on the account
+    /// themselves. A client with no unrefunded attempt there in the last
+    /// `FAILING_WINDOWS` minutes is counted against a second account limit instead
+    /// (`ACCOUNT_FIRST_TRIES` a minute), so guesses from failing addresses cannot keep
+    /// the real person from signing in, and rotating addresses still adds at most
+    /// that many guesses a minute. A refused attempt leaves the client's failing
+    /// state as it was, so retrying while refused does not extend it.
     async fn throttle(
         &self,
         scope: &str,
@@ -582,17 +610,44 @@ impl Auth {
         let mut tx = self.pool.begin().await?;
         let window = throttle_window(&mut tx).await?;
         sqlx::query("DELETE FROM login_throttles WHERE window_start < $1")
-            .bind(window - 10)
+            .bind(window - FAILING_WINDOWS)
             .execute(&mut *tx)
             .await?;
         let requests = throttle_count(&mut tx, &format!("{scope}:{}", client.0), window).await?;
         let mut allowed = requests <= self.config.login_rate_per_minute as i32;
         if let (true, Some(account)) = (allowed, account) {
             let (account_key, client_key) = failure_keys(client, account);
-            allowed = throttle_take(&mut tx, &client_key, window, CLIENT_ACCOUNT_FAILURES).await?;
-            if allowed && !throttle_take(&mut tx, &account_key, window, ACCOUNT_FAILURES).await? {
-                allowed = false;
-                throttle_release(&mut tx, &[client_key], window).await?;
+            let failing_key = failing_key(client, account);
+            allowed = throttle_take(&mut tx, &client_key, window, CLIENT_ACCOUNT_FAILURES)
+                .await?
+                .is_some();
+            if allowed {
+                // One statement per key, so concurrent attempts from a client with
+                // no recent failures see exactly one of them as its first.
+                let (marks, before) = throttle_mark(&mut tx, &failing_key, window).await?;
+                let counted = if marks > 1 {
+                    throttle_take(&mut tx, &account_key, window, ACCOUNT_FAILURES).await?
+                } else {
+                    let first = first_tries_key(account);
+                    let taken = throttle_take(&mut tx, &first, window, ACCOUNT_FIRST_TRIES).await?;
+                    if taken == Some(ACCOUNT_FIRST_TRIES) {
+                        tracing::warn!(
+                            "an account reached its limit of sign-ins from new addresses for this minute"
+                        );
+                    }
+                    match taken {
+                        Some(_) => Some(throttle_count(&mut tx, &account_key, window).await?),
+                        None => None,
+                    }
+                };
+                if counted == Some(ACCOUNT_FAILURES) {
+                    tracing::warn!("an account reached its sign-in failure limit for this minute");
+                }
+                if counted.is_none() {
+                    allowed = false;
+                    throttle_release(&mut tx, &[client_key], window).await?;
+                    throttle_unmark(&mut tx, &failing_key, before).await?;
+                }
             }
         }
         tx.commit().await?;
@@ -613,7 +668,8 @@ impl Auth {
     ) -> Result<(), ApiError> {
         let window = throttle_window(tx).await?;
         let (account_key, client_key) = failure_keys(client, account);
-        throttle_release(tx, &[account_key, client_key], window).await
+        throttle_release(tx, &[account_key, client_key], window).await?;
+        throttle_unmark(tx, &failing_key(client, account), None).await
     }
 
     async fn insert_session(
@@ -664,6 +720,17 @@ fn failure_keys(client: &Client, account: &str) -> (String, String) {
         format!("account:{account}"),
         format!("account:{account}:{}", client.0),
     )
+}
+
+/// Counts a client's unrefunded attempts on an account across `FAILING_WINDOWS`.
+fn failing_key(client: &Client, account: &str) -> String {
+    let account = URL_SAFE_NO_PAD.encode(digest(account));
+    format!("failing:{account}:{}", client.0)
+}
+
+/// Counts an account's attempts from clients not failing on it, per minute.
+fn first_tries_key(account: &str) -> String {
+    format!("first:{}", URL_SAFE_NO_PAD.encode(digest(account)))
 }
 
 /// `loopback` stands for a reverse proxy on the same host. There is deliberately no
@@ -827,19 +894,54 @@ async fn throttle_count(
         RETURNING attempts").bind(key).bind(window).fetch_one(&mut **tx).await?)
 }
 
-/// Counts one attempt unless the key has already reached `limit` in this window.
+/// Counts one attempt unless the key has already reached `limit` in this window,
+/// and returns the count including it.
 async fn throttle_take(
     tx: &mut Transaction<'_, Postgres>,
     key: &str,
     window: i64,
     limit: i32,
-) -> Result<bool, ApiError> {
+) -> Result<Option<i32>, ApiError> {
     let counted: Option<i32> = sqlx::query_scalar("INSERT INTO login_throttles (key, window_start, attempts) VALUES ($1, $2, 1) \
         ON CONFLICT (key) DO UPDATE SET window_start = $2, \
         attempts = CASE WHEN login_throttles.window_start = $2 THEN login_throttles.attempts + 1 ELSE 1 END \
         WHERE login_throttles.window_start <> $2 OR login_throttles.attempts < $3 \
         RETURNING attempts").bind(key).bind(window).bind(limit).fetch_optional(&mut **tx).await?;
-    Ok(counted.is_some())
+    Ok(counted)
+}
+
+/// Adds an attempt to a key that keeps counting until it has been quiet for
+/// `FAILING_WINDOWS`. Returns the count including this attempt, and the window of
+/// the attempt before it, for `throttle_unmark`.
+async fn throttle_mark(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &str,
+    window: i64,
+) -> Result<(i32, Option<i64>), ApiError> {
+    Ok(sqlx::query_as("WITH before AS (SELECT window_start FROM login_throttles WHERE key = $1) \
+        INSERT INTO login_throttles (key, window_start, attempts) VALUES ($1, $2, 1) \
+        ON CONFLICT (key) DO UPDATE SET window_start = $2, \
+        attempts = CASE WHEN login_throttles.window_start >= $2 - $3 THEN LEAST(login_throttles.attempts + 1, 1000000) ELSE 1 END \
+        RETURNING attempts, (SELECT window_start FROM before)").bind(key).bind(window).bind(FAILING_WINDOWS).fetch_one(&mut **tx).await?)
+}
+
+/// Takes back one attempt from a `throttle_mark` key. Given the window it had
+/// before a refused attempt, it also puts that back, so the refused attempt does
+/// not restart the quiet time the key decays after.
+async fn throttle_unmark(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &str,
+    before: Option<i64>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE login_throttles SET attempts = attempts - 1, window_start = COALESCE($2, window_start) \
+         WHERE key = $1 AND attempts > 0",
+    )
+    .bind(key)
+    .bind(before)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn throttle_release(
@@ -859,6 +961,37 @@ fn random_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// The person signed in by session `id`, while the session is unexpired and the
+/// account enabled and not waiting on a password change. Sign-out, session
+/// revocation and disabling the account end it.
+pub(crate) async fn session_owner(pool: &PgPool, id: Uuid) -> Result<Option<Identity>, ApiError> {
+    Ok(sqlx::query_as::<_, Identity>(
+        "SELECT u.id, u.username, u.display_name, u.role FROM auth_sessions s \
+         JOIN users u ON u.id = s.user_id WHERE s.id = $1 \
+         AND s.expires_at > NOW() AND u.enabled = TRUE AND NOT u.password_change_required",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Ends every way a person is signed in: all their browser sessions and personal
+/// API tokens. Every path that resets someone's credentials or access calls this,
+/// so nothing made with the old credentials outlives the reset. Returns how many
+/// sessions ended.
+pub(crate) async fn end_sign_ins(
+    tx: &mut Transaction<'_, Postgres>,
+    user: Uuid,
+) -> Result<u64, ApiError> {
+    let sessions = sqlx::query("DELETE FROM auth_sessions WHERE user_id = $1")
+        .bind(user)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    tokens::revoke_all(tx, user).await?;
+    Ok(sessions)
 }
 
 fn digest(secret: &str) -> Vec<u8> {
@@ -1080,11 +1213,7 @@ async fn change_password(
     }
     auth.throttle_refund(&mut tx, &client, &identity.username)
         .await?;
-    sqlx::query("DELETE FROM auth_sessions WHERE user_id = $1")
-        .bind(identity.id)
-        .execute(&mut *tx)
-        .await?;
-    tokens::revoke_all(&mut tx, identity.id).await?;
+    end_sign_ins(&mut tx, identity.id).await?;
     let token = random_token();
     let lifetime = auth.config.session_hours as i64 * 3600;
     auth.insert_session(&mut tx, identity.id, &token, lifetime, &headers)
@@ -1249,11 +1378,7 @@ async fn update_user(
     sqlx::query("UPDATE users SET enabled=$2,role=$3,display_name=COALESCE($4,display_name),updated_at=NOW() WHERE id=$1")
         .bind(id).bind(next_enabled).bind(next_role).bind(&display_name).execute(&mut *tx).await?;
     if enabled != next_enabled || role != next_role {
-        sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        tokens::revoke_all(&mut tx, id).await?;
+        end_sign_ins(&mut tx, id).await?;
         sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
             .bind(id)
             .execute(&mut *tx)
@@ -1289,11 +1414,7 @@ async fn reset_password(
     // Administrators cannot silently add local credentials to an OIDC-only identity.
     if sqlx::query("UPDATE users SET password_hash = $1, password_change_required=$3, updated_at = NOW() WHERE id = $2 AND password_hash IS NOT NULL")
         .bind(hash).bind(id).bind(input.force_password_change).execute(&mut *tx).await?.rows_affected() == 0 { return Err(ApiError::not_found()); }
-    sqlx::query("DELETE FROM auth_sessions WHERE user_id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    tokens::revoke_all(&mut tx, id).await?;
+    end_sign_ins(&mut tx, id).await?;
     sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
         .bind(id)
         .execute(&mut *tx)

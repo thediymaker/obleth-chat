@@ -29,3 +29,28 @@ test('nested administration deep links remain denied without issuing privileged 
     assert.deepEqual(calls, []);
   } finally { if (old === undefined) delete globalThis.location; else globalThis.location = old; }
 });
+
+test('a token refused for an old sign-in offers to sign in again', async () => {
+  const { ApiError } = await import('../web/client.js');
+  const { createSettings } = await import('../web/settings.js');
+  const values = { 'token-name': { value: 'Laptop' }, 'token-days': { value: '7' }, 'token-read-only': { checked: false } };
+  const form = { id: 'personal-token-form', elements: { namedItem: name => values[name] } };
+  const shown = [];
+  const settings = response => createSettings({ api: { request: async (path, options) => { if (options?.method === 'POST') return response(); return { sessions: [], tokens: [] }; } }, state: { user: { username: 'ana' } }, render() {}, modal: (title, body) => shown.push({ title, body }), close() {}, toast() {} });
+  await settings(() => { throw new ApiError('Sign in again to create a token', 403); }).submit(form);
+  assert.equal(shown.at(-1).title, 'Sign in again');
+  assert.match(shown.at(-1).body, /data-action="logout"/);
+  assert.match(shown.at(-1).body, /Sign in again to create a token\./);
+  await assert.rejects(settings(() => { throw new ApiError('A token lasts 1, 7 or 30 days', 400); }).submit(form), /A token lasts/);
+  // Other refusals are not about the sign-in's age and are shown as they are.
+  const before = shown.length;
+  await assert.rejects(settings(() => { throw new ApiError('Change your password before continuing', 403); }).submit(form), /Change your password/);
+  await assert.rejects(settings(() => { throw new ApiError('Forbidden', 403); }).submit(form), /Forbidden/);
+  assert.equal(shown.length, before);
+  const old = globalThis.location;
+  globalThis.location = { origin: 'https://chat.example.com', hash: '#settings' };
+  try {
+    await settings(() => ({ token: 'obc_secret' })).submit(form);
+    assert.equal(shown.at(-1).title, 'Copy your token now');
+  } finally { if (old === undefined) delete globalThis.location; else globalThis.location = old; }
+});

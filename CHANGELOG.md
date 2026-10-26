@@ -2,6 +2,42 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**New**
+
+- **`/metrics` can require a token.** Set `OBLETH_CHAT_METRICS_TOKEN` and `/metrics` answers only requests with `Authorization: Bearer <token>`; others get 401. Unset, it stays open as before.
+
+**Changed**
+
+- **Making a personal API token needs a sign-in from the last 15 minutes** (was 12 hours, as long as a session lasts), so a borrowed or stolen session cannot turn into a 30-day token. Otherwise the web app offers to sign out and back in.
+
+**Fixed**
+
+- **Previews only reach the workspace's own pod.** Before proxying, Chat checks with the API server (at most every few seconds per pod) that the workspace pod is still running at the address on record. A pod that was evicted, deleted or lost with its node is marked stopped instead of its old address being used, which another pod may have been given. The reconciler does the same every minute.
+- **Preview access ends with the sign-in.** Preview tickets and the preview cookie carry the Chat session they came from. Signing out, revoking that session, disabling the account or losing workspace access ends preview access within a few seconds, and closes open preview WebSockets within a minute. The cookie lasts an hour (was eight), renewed by page loads while the sign-in lasts, and is named `__Host-obleth_preview` on https.
+- **Only Chat can open a preview.** A preview ticket is no longer a link: Chat's page redeems it with a request the browser marks as coming from Chat's origin, so a ticket sent to someone else, or posted by any other page, opens nothing. Chat's content security policy now lets it connect to preview hosts for this.
+- **Other pages cannot send changes into a preview.** Previews share a site, so browsers send one preview's cookie with requests from another. The proxy now refuses requests other than GET, HEAD and OPTIONS unless they come from the preview itself (`Sec-Fetch-Site: same-origin`, or a matching `Origin`). Preview pages get `Referrer-Policy: same-origin` (was `no-referrer`) so their own form posts keep their origin.
+- **Preview pages check the pod once, not once per asset.** Requests arriving together share a single check, and while the API server does not answer, a pod confirmed in the last minute is still served instead of every asset failing with 503. The sign-in behind a preview is likewise checked at most every few seconds.
+- **Preview apps' cookies stay on their own host.** The proxy strips `Domain` from cookies a dev server sets and drops any named like Chat's own (`obleth_preview`, `__Host-obleth…`, `__Secure-obleth…`).
+- **Workspace file tools stay in the project.** Paths with `..` are refused.
+- **Downloading a project no longer wakes its workspace by itself.** An asleep, starting or failed workspace, or one whose pod is gone, answers 409 with a message saying which; the download button in the workspace bar shows only while the workspace runs. The Download button on a reply's result card wakes the workspace first, then downloads.
+- **Starting and checking a dev server reach only the workspace's own pod**, confirmed the same way as previews.
+- **Research runs stop when their owner loses workspace access** or the account is disabled, instead of running on in the workspace.
+- **Uploaded files never open as web pages.** Knowledge files, attachments, generated images and workspace files open in the browser only when they are PDFs or PNG, JPEG, GIF or WebP images. Anything else downloads, with text of any kind (HTML, XML, JSON, code) sent as plain text. Knowledge files are stored with a type taken from their name, never the one the browser sent. Documents stored by earlier versions with the uploader's type are sent by Chat itself as downloads rather than through a storage link, so they are safe whether or not the storage honours a link's type. Workspace SVGs still show in the file viewer but download when opened directly.
+- **A document that expands enormously no longer exhausts memory.** Word and PDF text is read as the extractor produces it, and the extractor is stopped as soon as its output passes the 64 MiB limit, so a small compressed file that inflates to gigabytes fails with "more text than Chat can index" instead of taking down the server.
+- **Signing out another device ends the API tokens made on it.** Revoking a session, or "Sign out other devices", also revokes the personal API tokens created in those sessions, so a token made with a stolen session ends when the person signs that session out. Tokens made on the current device stay. Tokens made before this release are not linked to a session and need revoking by hand.
+- **Redeeming a password reset link ends personal API tokens**, as changing or resetting a password already did. Every path that resets someone's sign-ins (password change or reset, reset link, an administrator revoking sessions, changing the role or disabling the account) now ends sessions and tokens together.
+- **Forking a shared chat no longer copies its owner's instructions.** The fork keeps the model and sampling settings; the owner's system prompt, which the viewer never saw, no longer steers the viewer's chat and tools.
+- **Shared chats no longer show the owner's instructions on each reply.** Viewers see the model and sampling settings and the tools' steps, not the system prompt. The share dialog now says that tool steps and what they returned are visible.
+- **Failed sign-ins from other addresses can no longer lock someone out.** The per-account limit of 50 failures a minute now stops only addresses that are failing on that account themselves. An address with no failures there in the last 10 minutes counts against a separate limit of 50 a minute per account instead, so rotating through many addresses still adds at most 50 guesses a minute. Each address keeps its own limit of 10. An address that is refused stays failing until it has been quiet for 10 minutes since its last counted attempt; retrying while refused does not restart that time. Chat logs when an account reaches either limit.
+- **The web app offers a fresh sign-in only when a token needs one.** Other refusals when making a token, such as a pending password change, show their own message.
+
+**Upgrading**
+
+- Open previews need reopening once: earlier preview links and cookies are refused.
+- Migration `043` runs when Chat starts: it adds `api_tokens.session_id`.
+
 ## v0.5.1
 
 Fixes the browser: opening the Browser tab now starts it.

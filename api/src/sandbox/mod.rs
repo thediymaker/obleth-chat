@@ -21,7 +21,12 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
-use std::{env, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -196,6 +201,14 @@ const SELECT: &str = "SELECT s.id,s.conversation_id,s.owner_id,s.slug,s.pod_id,p
 const DISK_CHECK: Duration = Duration::from_secs(5 * 60);
 /// Dev servers of projects unused this long are stopped; the pod keeps running.
 const SERVER_IDLE: Duration = Duration::from_secs(30 * 60);
+/// How long a confirmed pod address is trusted before the API server is asked again.
+const POD_CHECK: Duration = Duration::from_secs(5);
+/// While the API server does not answer, an address confirmed this recently is still
+/// trusted, so a brief API outage does not break open previews.
+const POD_CHECK_GRACE: Duration = Duration::from_secs(60);
+/// Marks a pod record stopped when it still holds the address that went stale; a pod
+/// started since keeps its record. Its projects' dev servers went with the pod.
+const STOP_STALE: &str = "WITH p AS (UPDATE sandbox_pods SET status='stopped',pod_ip=NULL WHERE id=$1 AND status='running' AND pod_ip=$2 RETURNING id) UPDATE sandboxes SET preview_port=NULL WHERE pod_id IN (SELECT id FROM p)";
 
 #[derive(Clone)]
 pub struct Sandboxes {
@@ -207,6 +220,12 @@ struct Inner {
     pool: PgPool,
     http: reqwest::Client,
     key: OnceCell<Vec<u8>>,
+    /// Pod name to the address last confirmed for it, and when.
+    confirmed: Mutex<HashMap<String, (String, Instant)>>,
+    /// One pod check at a time per pod name; requests arriving meanwhile wait for it.
+    checks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Preview sign-ins confirmed live, and when.
+    sign_ins: Mutex<HashMap<preview::Grant, Instant>>,
 }
 
 impl Sandboxes {
@@ -223,6 +242,9 @@ impl Sandboxes {
                 pool,
                 http,
                 key: OnceCell::new(),
+                confirmed: Mutex::default(),
+                checks: Mutex::default(),
+                sign_ins: Mutex::default(),
             }),
         })
     }
@@ -263,6 +285,89 @@ impl Sandboxes {
     pub fn allowed(&self, user: &Identity) -> bool {
         self.inner.config.everyone || user.is_admin()
     }
+
+    /// Whether an account is enabled and may still use workspaces, for work that runs
+    /// without anyone signed in.
+    pub async fn owner_allowed(&self, owner: Uuid) -> Result<bool, ApiError> {
+        let user = sqlx::query_as::<_, Identity>(
+            "SELECT id,username,display_name,role FROM users WHERE id=$1 AND enabled",
+        )
+        .bind(owner)
+        .fetch_optional(&self.inner.pool)
+        .await?;
+        Ok(user.is_some_and(|user| self.allowed(&user)))
+    }
+
+    /// Whether the owner's pod still runs at the address on record. Pods are evicted,
+    /// deleted or lost with their node, and their address can go to another pod, so a
+    /// pod that is gone or changed marks the record stopped. A confirmation is
+    /// trusted for a few seconds, and for a minute while the API server does not
+    /// answer. Concurrent requests for one pod share a single check.
+    pub async fn confirm_pod(&self, sandbox: &Sandbox) -> Result<bool, ApiError> {
+        let Some(ip) = sandbox.pod_ip.as_deref() else {
+            return Ok(false);
+        };
+        let name = sandbox.pod_name();
+        let confirmed_within = |limit: Duration| {
+            self.inner
+                .confirmed
+                .lock()
+                .unwrap()
+                .get(&name)
+                .is_some_and(|(known, at)| known == ip && at.elapsed() < limit)
+        };
+        if confirmed_within(POD_CHECK) {
+            return Ok(true);
+        }
+        let check = self
+            .inner
+            .checks
+            .lock()
+            .unwrap()
+            .entry(name.clone())
+            .or_default()
+            .clone();
+        let _turn = check.lock().await;
+        if confirmed_within(POD_CHECK) {
+            return Ok(true);
+        }
+        let pod = match self.inner.kube.get("pods", &name).await {
+            Ok(pod) => pod,
+            Err(error) => {
+                tracing::warn!("could not check the workspace pod: {error:#}");
+                if confirmed_within(POD_CHECK_GRACE) {
+                    return Ok(true);
+                }
+                return Err(ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The workspace could not be reached. Try again in a moment.".into(),
+                ));
+            }
+        };
+        self.inner
+            .checks
+            .lock()
+            .unwrap()
+            .retain(|_, check| Arc::strong_count(check) > 1);
+        let serving = pod.is_some_and(|pod| serves(&pod, &sandbox.pod_slug, ip));
+        {
+            let mut confirmed = self.inner.confirmed.lock().unwrap();
+            confirmed.retain(|_, (_, at)| at.elapsed() < POD_CHECK_GRACE);
+            if serving {
+                confirmed.insert(name.clone(), (ip.to_owned(), Instant::now()));
+                return Ok(true);
+            }
+            confirmed.remove(&name);
+        }
+        tracing::info!(pod=%name, "workspace pod is gone or moved; marking it stopped");
+        sqlx::query(STOP_STALE)
+            .bind(sandbox.pod_id)
+            .bind(ip)
+            .execute(&self.inner.pool)
+            .await?;
+        Ok(false)
+    }
+
     /// The workspace's preview address, when previews are set up.
     pub fn preview_origin(&self, sandbox: &Sandbox) -> Option<String> {
         let c = &self.inner.config;
@@ -672,8 +777,9 @@ impl Sandboxes {
     }
 
     /// One replica at a time: stop idle dev servers and idle pods (keeping their
-    /// volumes), remove volumes past retention, and delete cluster objects whose
-    /// pod record no longer exists.
+    /// volumes), remove volumes past retention, measure disks, mark records stopped
+    /// whose pod is gone or moved, and delete cluster objects whose pod record no
+    /// longer exists.
     async fn reconcile(&self) -> Result<()> {
         let pool = &self.inner.pool;
         let mut tx = pool.begin().await?;
@@ -725,6 +831,9 @@ impl Sandboxes {
         for sandbox in unmeasured {
             self.measure(&sandbox).await;
         }
+        if let Err(error) = self.stop_stale().await {
+            tracing::warn!("could not check workspace pods: {error:#}");
+        }
         let known: Vec<String> = sqlx::query_scalar("SELECT slug FROM sandbox_pods")
             .fetch_all(&mut *tx)
             .await?;
@@ -749,6 +858,40 @@ impl Sandboxes {
             }
         }
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Marks records stopped whose pod was evicted, deleted or lost with its node, as
+    /// their address may go to another pod. Records are read before pods are listed,
+    /// so a pod started in between keeps its new address. Each record is updated on
+    /// its own, outside reconcile's transaction, so no row stays locked meanwhile.
+    async fn stop_stale(&self) -> Result<()> {
+        let pool = &self.inner.pool;
+        let running: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT id,slug,pod_ip FROM sandbox_pods WHERE status='running' AND pod_ip IS NOT NULL",
+        )
+        .fetch_all(pool)
+        .await?;
+        if running.is_empty() {
+            return Ok(());
+        }
+        let pods = self
+            .inner
+            .kube
+            .list(
+                "pods",
+                "app.kubernetes.io/managed-by=obleth-chat,!obleth.io/browser",
+            )
+            .await?;
+        for (id, slug, ip) in running {
+            if !pods.iter().any(|pod| serves(pod, &slug, &ip)) {
+                sqlx::query(STOP_STALE)
+                    .bind(id)
+                    .bind(&ip)
+                    .execute(pool)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -880,6 +1023,23 @@ pub(crate) fn pod_state(pod: &Value) -> PodState {
         }
         _ => PodState::Pending,
     }
+}
+
+/// Whether `pod` is the running workspace pod for record `slug` at `ip`.
+fn serves(pod: &Value, slug: &str, ip: &str) -> bool {
+    let text = |pointer: &str| pod.pointer(pointer).and_then(Value::as_str);
+    let label = |key: &str| {
+        pod.pointer("/metadata/labels")
+            .and_then(|labels| labels.get(key))
+            .and_then(Value::as_str)
+    };
+    pod.pointer("/metadata/deletionTimestamp").is_none()
+        && text("/metadata/name") == Some(pod_name(slug).as_str())
+        && label("app.kubernetes.io/managed-by") == Some("obleth-chat")
+        && label("obleth.io/pod") == Some(slug)
+        && label("obleth.io/browser").is_none()
+        && text("/status/phase") == Some("Running")
+        && text("/status/podIP") == Some(ip)
 }
 
 pub(crate) fn waiting_reason(pod: &Value) -> String {
@@ -1051,20 +1211,29 @@ async fn preview_link(
             Err(error) => tracing::warn!("could not restart the workspace server: {error}"),
         }
     }
+    // The ticket, and the preview access it opens, last only as long as this sign-in.
+    let session = s
+        .auth
+        .session_id(&headers)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
+    let grant = preview::Grant {
+        user: user.id,
+        session,
+    };
     let ticket = preview::sign(
         sandboxes.key().await?,
         preview::ENTER,
         &sandbox.slug,
-        user.id,
+        grant,
         60,
     );
-    let mut url = format!("{origin}/__obleth/enter?ticket={ticket}");
-    if let Some(page) = preview::landing(&q.path) {
-        url.push_str("&next=");
-        url.extend(url::form_urlencoded::byte_serialize(page.as_bytes()));
-    }
+    // The page redeems the ticket at `enter` itself, then opens `url`.
+    let page = preview::landing(&q.path).map_or_else(|| "/".into(), |p| preview::encode_path(&p));
     Ok(Json(json!({
-        "url": url,
+        "enter": format!("{origin}/__obleth/enter"),
+        "ticket": ticket,
+        "url": format!("{origin}{page}"),
         "origin": origin,
         "running": sandbox.status == "running" && serving,
     })))
@@ -1120,8 +1289,8 @@ async fn file(
     ))
 }
 
-/// The project as a zip, without dependencies or build output. An asleep
-/// workspace is woken first.
+/// The project as a zip, without dependencies or build output. A GET never wakes an
+/// asleep workspace; opening the workspace does.
 async fn download(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1132,10 +1301,20 @@ async fn download(
         .get(user.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let sandbox = sandboxes
-        .ensure_running(&sandbox)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    let not_running = |status: &str| {
+        let message = match status {
+            "starting" => "The workspace is starting. Download the project once it runs.",
+            "error" => "The workspace could not start. Open it to see why, then try again.",
+            _ => "The workspace is asleep. Open it first, then download the project.",
+        };
+        ApiError(StatusCode::CONFLICT, message.into())
+    };
+    if sandbox.status != "running" {
+        return Err(not_running(&sandbox.status));
+    }
+    if !sandboxes.confirm_pod(&sandbox).await? {
+        return Err(not_running("stopped"));
+    }
     let title: String = sqlx::query_scalar("SELECT title FROM conversations WHERE id=$1")
         .bind(id)
         .fetch_one(&sandboxes.inner.pool)
@@ -1191,8 +1370,10 @@ async fn restore_checkpoint(
 /// Largest file served by `raw`.
 const RAW_LIMIT: usize = 10 * 1024 * 1024;
 
-/// A workspace file's bytes for the file viewer. Images are shown inline; anything
-/// else downloads. The sandbox policy keeps workspace content inert on Chat's origin.
+/// A workspace file's bytes for the file viewer. Raster images are shown inline;
+/// anything else downloads. SVG keeps its type so the viewer's `<img>` can draw it, but
+/// opened directly it downloads too. The sandbox policy keeps workspace content inert
+/// on Chat's origin.
 async fn raw(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1210,30 +1391,10 @@ async fn raw(
             "Files over 10 MB open from the project download".into(),
         ));
     }
-    let extension = q
-        .path
-        .rsplit_once('.')
-        .map(|(_, e)| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    let image = match extension.as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        "svg" => Some("image/svg+xml"),
-        _ => None,
-    };
-    let name = q.path.rsplit('/').next().unwrap_or("file");
-    let disposition = match image {
-        Some(_) => "inline".to_owned(),
-        None => format!("attachment; filename=\"{}\"", file_stem(name)),
-    };
+    let (content_type, disposition) = raw_type(&q.path);
     Ok((
         [
-            (
-                header::CONTENT_TYPE,
-                image.unwrap_or("application/octet-stream").to_owned(),
-            ),
+            (header::CONTENT_TYPE, content_type.to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
             (header::CACHE_CONTROL, "private, no-store".to_owned()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
@@ -1245,6 +1406,28 @@ async fn raw(
         bytes,
     )
         .into_response())
+}
+
+/// The type and disposition `raw` serves a workspace file with, from its name.
+fn raw_type(path: &str) -> (&'static str, String) {
+    let extension = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let image = match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    };
+    let name = path.rsplit('/').next().unwrap_or("file");
+    let disposition = match image {
+        Some(mime) if mime != "image/svg+xml" => "inline".to_owned(),
+        _ => format!("attachment; filename=\"{}\"", file_stem(name)),
+    };
+    (image.unwrap_or("application/octet-stream"), disposition)
 }
 
 /// A Kubernetes quantity such as 10Gi, 500M or 1073741824 in bytes.
@@ -1295,6 +1478,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workspace_files_open_in_place_only_as_raster_images() {
+        assert_eq!(raw_type("out/plot.PNG"), ("image/png", "inline".into()));
+        let (kind, disposition) = raw_type("out/chart.svg");
+        assert_eq!(kind, "image/svg+xml");
+        assert!(disposition.starts_with("attachment;"), "{disposition}");
+        let (kind, disposition) = raw_type("site/index.html");
+        assert_eq!(kind, "application/octet-stream");
+        assert!(disposition.starts_with("attachment;"), "{disposition}");
+    }
+
+    #[test]
     fn storage_sizes_parse_as_bytes() {
         assert_eq!(quantity_bytes("10Gi"), Some(10 << 30));
         assert_eq!(quantity_bytes("500M"), Some(500_000_000));
@@ -1336,6 +1530,40 @@ mod tests {
         assert!(reason.contains("off"));
         env::remove_var("OBLETH_CHAT_WORKSPACES");
         env::remove_var("OBLETH_CHAT_SANDBOX_NAMESPACE");
+    }
+
+    #[test]
+    fn only_the_records_own_running_pod_serves_it() {
+        let slug = "abcdefgh12345678";
+        let pod = json!({
+            "metadata": {"name": "sbx-abcdefgh12345678", "labels": Sandboxes::labels(slug)},
+            "status": {"phase": "Running", "podIP": "10.0.0.7"},
+        });
+        assert!(serves(&pod, slug, "10.0.0.7"));
+        // Another address, another record's pod, a browser, or a pod on its way out.
+        assert!(!serves(&pod, slug, "10.0.0.8"));
+        assert!(!serves(&pod, "bbcdefgh12345678", "10.0.0.7"));
+        let changed = |pointer: &str, value: Value| {
+            let mut other = pod.clone();
+            *other.pointer_mut(pointer).unwrap() = value;
+            other
+        };
+        assert!(!serves(
+            &changed("/status/phase", json!("Failed")),
+            slug,
+            "10.0.0.7"
+        ));
+        assert!(!serves(
+            &changed("/metadata/name", json!("sbx-other")),
+            slug,
+            "10.0.0.7"
+        ));
+        let mut browser = pod.clone();
+        browser["metadata"]["labels"]["obleth.io/browser"] = json!("x");
+        assert!(!serves(&browser, slug, "10.0.0.7"));
+        let mut leaving = pod.clone();
+        leaving["metadata"]["deletionTimestamp"] = json!("2026-01-01T00:00:00Z");
+        assert!(!serves(&leaving, slug, "10.0.0.7"));
     }
 
     #[test]

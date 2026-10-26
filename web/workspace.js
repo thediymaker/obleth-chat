@@ -101,6 +101,24 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
   let reloading = null;
   // Without a preview domain, workspaces run but their apps can't be opened.
   const previews = () => capabilities.features?.previews !== false;
+  // The preview accepts its ticket only from this page: a credentialed fetch always
+  // carries Chat's origin, which a link or another page cannot. It sets the preview's
+  // cookie, then the frame or a new tab opens the preview itself.
+  async function enter(link) {
+    const response = await fetch(link.enter, { method: 'POST', mode: 'cors', credentials: 'include', body: new URLSearchParams({ ticket: link.ticket }) });
+    if (!response.ok) throw new Error((await response.json().catch(() => null))?.error?.message || 'The preview could not be opened. Try again.');
+  }
+  // Downloads the project, waking an asleep workspace first.
+  async function download(id) {
+    const space = entry(id);
+    if (space.workspace?.status !== 'running') {
+      toast('Waking the workspace to download the project…');
+      try { await create(id); } catch (error) { toast(error.message); return; }
+      for (let i = 0; i < 45 && space.workspace?.status !== 'running'; i++) { await new Promise(done => setTimeout(done, 2000)); await load(id); }
+      if (space.workspace?.status !== 'running') { toast('The workspace has not woken yet. Try again in a moment.'); return; }
+    }
+    const link = document.createElement('a'); link.href = `${chatPath(id)}/workspace/download`; link.download = ''; document.body.append(link); link.click(); link.remove();
+  }
   async function showPreview(id, force = false) {
     const space = entry(id);
     if (!previews() || (!space.workspace?.previewPort && !force) || space.linking) return;
@@ -108,6 +126,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     try {
       const page = space.page ? `?path=${encodeURIComponent(space.page)}` : '';
       const link = await api.request(`${chatPath(id)}/workspace/preview${page}`, { method: 'POST' });
+      await enter(link);
       space.url = link.url; space.origin = link.origin;
       if (shownId === id) { frameSrc = link.url; frame.src = link.url; }
       update();
@@ -141,7 +160,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     const address = space.origin ? `<span class="workspace-address" title="${esc(space.origin)}">${esc(space.origin.replace(/^https?:\/\//, ''))}</span>` : `<span class="workspace-address muted">${previews() ? 'No preview yet' : ''}</span>`;
     const used = w.diskBytes, diskFull = used != null && diskLimit && used > diskLimit;
     const usage = used != null && diskLimit ? `<span class="workspace-usage ${diskFull ? 'full' : ''}" title="${diskFull ? 'Your workspaces are full: delete files to keep working' : 'Disk used by all of your workspaces'}">${(used / 2 ** 30).toFixed(1)} / ${Math.round(diskLimit / 2 ** 30)} GB</span>` : '';
-    return `<div class="workspace-tabs">${tabs}</div>${address}<div class="workspace-actions">${usage}${badge(statusLabel(w), w.status === 'running' ? 'accent' : w.status === 'error' ? 'amber' : '')}${iconButton('refresh', 'workspace-reload', { files: 'Refresh files', terminal: 'Restart terminal' }[space.tab] || 'Reload preview', w.previewPort || space.tab !== 'preview' ? '' : 'disabled')}${w.status !== 'starting' ? `<a class="icon-btn" href="${esc(`${chatPath(id)}/workspace/download`)}" download aria-label="Download project" title="Download project (.zip, without dependencies)">${icon('download')}</a>` : ''}${space.origin ? `<a class="icon-btn" href="${esc(space.url || space.origin)}" target="_blank" rel="noopener" aria-label="Open preview in a new tab" title="Open in a new tab">${icon('external')}</a>` : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide workspace')}</div>`;
+    return `<div class="workspace-tabs">${tabs}</div>${address}<div class="workspace-actions">${usage}${badge(statusLabel(w), w.status === 'running' ? 'accent' : w.status === 'error' ? 'amber' : '')}${iconButton('refresh', 'workspace-reload', { files: 'Refresh files', terminal: 'Restart terminal' }[space.tab] || 'Reload preview', w.previewPort || space.tab !== 'preview' ? '' : 'disabled')}${w.status === 'running' ? `<a class="icon-btn" href="${esc(`${chatPath(id)}/workspace/download`)}" download aria-label="Download project" title="Download project (.zip, without dependencies)">${icon('download')}</a>` : ''}${space.origin ? `<a class="icon-btn" href="${esc(space.url || space.origin)}" target="_blank" rel="noopener" aria-label="Open preview in a new tab" title="Open in a new tab">${icon('external')}</a>` : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide workspace')}</div>`;
   }
   function available(id, space) {
     return [...(space.workspace ? [...(previews() ? [['preview', 'Preview']] : []), ['files', 'Files'], ['terminal', 'Terminal'], ...(code?.enabled() ? [['code', code.label(id)]] : [])] : []), ...(browser?.on(id) ? [['browser', 'Browser']] : []), ...(details && route().page === 'chat' ? [['details', 'Details']] : [])];
@@ -345,7 +364,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     const summary = `<section class="card workspace-machine">${icon('server')}<div class="grow"><h2>Your machine ${badge(statusLabel(machine), machine.status === 'running' ? 'accent' : machine.status === 'error' ? 'amber' : '')}</h2><p>${machine.status === 'stopped' ? 'Asleep: it wakes when you open a project or the assistant needs it. Files are kept.' : 'It sleeps after an hour unused and keeps your files.'}</p></div>${used != null && diskLimit ? `<div class="workspace-disk"><span>${(used / 2 ** 30).toFixed(1)} of ${Math.round(diskLimit / 2 ** 30)} GB used</span><progress value="${used}" max="${diskLimit}" aria-label="Disk used"></progress></div>` : ''}</section>`;
     const rows = items.map(p => {
       const id = encodeURIComponent(p.conversationId), live = previews() && p.status === 'running' && p.previewPort;
-      return `<div class="workspace-row"><a class="grow workspace-row-main" href="#workspaces/${id}">${icon('terminal')}<span class="grow"><strong>${esc(p.title || 'Untitled conversation')}</strong><small>${live ? 'Preview running · ' : ''}Used ${esc(ago(p.lastUsedAt))}</small></span></a><div class="user-actions"><a class="btn small" href="#workspaces/${id}">Open</a><a class="btn small ghost" href="#chat/${id}">Chat</a><a class="btn small ghost" href="${esc(chatPath(p.conversationId))}/workspace/download" download title="Download project (.zip, without dependencies)">${icon('download')}</a>${iconButton('trash', 'workspace-remove', `Delete the workspace of ${p.title}`, `data-id="${esc(p.conversationId)}"`)}</div></div>`;
+      return `<div class="workspace-row"><a class="grow workspace-row-main" href="#workspaces/${id}">${icon('terminal')}<span class="grow"><strong>${esc(p.title || 'Untitled conversation')}</strong><small>${live ? 'Preview running · ' : ''}Used ${esc(ago(p.lastUsedAt))}</small></span></a><div class="user-actions"><a class="btn small" href="#workspaces/${id}">Open</a><a class="btn small ghost" href="#chat/${id}">Chat</a>${p.status === 'running' ? `<a class="btn small ghost" href="${esc(chatPath(p.conversationId))}/workspace/download" download title="Download project (.zip, without dependencies)">${icon('download')}</a>` : ''}${iconButton('trash', 'workspace-remove', `Delete the workspace of ${p.title}`, `data-id="${esc(p.conversationId)}"`)}</div></div>`;
     }).join('');
     return `<div class="page workspaces-page">${head}${listing.error ? `<p class="inline-note">${esc(listing.error)}</p>` : ''}${summary}<section class="card workspace-list">${rows}</section></div>`;
   }
@@ -437,6 +456,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     'turn-open-file': el => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.open = true; space.tab = 'files'; space.files = null; openFile(id, el.dataset.path); return 'render'; },
     'turn-open-files': () => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.open = true; space.tab = 'files'; space.file = null; space.files = null; update(); return 'render'; },
     'workspace-file-preview': el => { const id = route().id, space = spaces.get(id); if (!space?.workspace) return; space.page = el.dataset.path; space.tab = 'preview'; space.file = null; update(); showPreview(id, true); },
+    'turn-download': () => { const id = route().id; if (id && spaces.get(id)?.workspace) download(id); },
     'turn-open-preview': () => { const id = route().id, space = spaces.get(id); if (!space?.workspace || !previews()) return; space.open = true; space.tab = 'preview'; update(); showPreview(id, true); return 'render'; },
     'checkpoint-restore': el => modal(`Restore ${el.dataset.label || 'this checkpoint'}?`, `<p>The project goes back to how it was at this checkpoint: changed files are restored and files added since are removed. Installed packages stay. The current state is saved first, so you can come back to it.</p><div class="modal-actions"><button class="btn" data-action="close">Cancel</button><button class="btn primary" data-action="checkpoint-confirm" data-sha="${esc(el.dataset.sha)}" data-label="${esc(el.dataset.label || '')}">Restore</button></div>`),
     'checkpoint-confirm': async el => {

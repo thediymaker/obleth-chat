@@ -182,19 +182,22 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         ))
 }
 static CSP: std::sync::OnceLock<HeaderValue> = std::sync::OnceLock::new();
-/// Chat may frame its workspace previews, which live on their own origins.
+/// Chat may frame its workspace previews, which live on their own origins, and hand
+/// a preview its entry ticket.
 fn content_security_policy(sandboxes: Option<&sandbox::Sandboxes>) -> HeaderValue {
-    let frames = sandboxes
-        .and_then(|sb| {
-            let c = sb.config();
-            Some(format!(
-                " frame-src {}://*.{};",
-                c.preview_scheme,
-                c.preview_domain.as_ref()?
-            ))
-        })
-        .unwrap_or_default();
-    HeaderValue::from_str(&format!("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self';{frames} base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"))
+    let previews = sandboxes.and_then(|sb| {
+        let c = sb.config();
+        Some(format!(
+            "{}://*.{}",
+            c.preview_scheme,
+            c.preview_domain.as_ref()?
+        ))
+    });
+    let (connect, frames) = match &previews {
+        Some(previews) => (format!(" {previews}"), format!(" frame-src {previews};")),
+        None => Default::default(),
+    };
+    HeaderValue::from_str(&format!("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'{connect};{frames} base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"))
         .expect("static policy")
 }
 /// The frontend loads unhashed ES modules by relative URL, so browsers keep a copy
@@ -257,14 +260,25 @@ async fn ready(State(s): State<AppState>) -> impl IntoResponse {
         ),
     }
 }
-async fn metrics_endpoint(State(s): State<AppState>) -> impl IntoResponse {
-    (
+/// Prometheus metrics. With OBLETH_CHAT_METRICS_TOKEN set, only a scraper sending
+/// that token as a bearer credential may read them.
+async fn metrics_endpoint(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    if !s.metrics.allows(&headers) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Metrics need the configured bearer token".into(),
+        ));
+    }
+    Ok((
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         s.metrics.render(),
-    )
+    ))
 }
 async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Value> {
     let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":true,"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});

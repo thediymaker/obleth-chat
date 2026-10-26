@@ -9,6 +9,9 @@ scrape_configs:
   - job_name: obleth-chat
     metrics_path: /metrics
     scrape_timeout: 5s
+    # With OBLETH_CHAT_METRICS_TOKEN set, send it as a bearer token:
+    # authorization:
+    #   credentials_file: /etc/prometheus/obleth-chat-metrics-token
     static_configs:
       - targets: ["obleth-chat:8085"]
         labels:

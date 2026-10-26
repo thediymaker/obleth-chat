@@ -755,6 +755,110 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn uploaded_files_never_open_as_active_content(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, created) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/collections",
+        json!({"name":"Pages"}),
+        &admin,
+    )
+    .await;
+    let collection = created["collection"]["id"].as_str().unwrap().to_owned();
+    let page = b"<html><body><script>alert(document.domain)</script>Phishing page</body></html>";
+    // Whatever type the uploader sends, web pages, text and SVG-typed text are stored
+    // and served as plain-text downloads; only PDFs and images open in place.
+    for (name, sent) in [
+        ("page.html", "text/html"),
+        ("notes.txt", "text/html"),
+        ("drawing.txt", "image/svg+xml; x=json"),
+    ] {
+        let response = f
+            .app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/knowledge/collections/{collection}/documents?name={name}"),
+                Body::from(page.to_vec()),
+                sent,
+                &admin,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED, "{name}");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let document: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            document["document"]["mimeType"], "text/plain; charset=utf-8",
+            "{name}"
+        );
+        let response = f
+            .app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/api/knowledge/documents/{}/file",
+                    document["document"]["id"].as_str().unwrap()
+                ),
+                Body::empty(),
+                "application/json",
+                &admin,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+        let query: HashMap<String, String> = location.query_pairs().into_owned().collect();
+        assert_eq!(
+            query["response-content-type"], "text/plain; charset=utf-8",
+            "{name}"
+        );
+        assert!(
+            query["response-content-disposition"].starts_with(&format!(
+                "attachment; filename=\"{name}\"; filename*=UTF-8''{name}"
+            )),
+            "{location}"
+        );
+    }
+    // A page an earlier version stored as HTML may carry that type in storage too, so
+    // Chat sends it itself, as a plain-text download, instead of linking to storage.
+    let legacy: String = sqlx::query_scalar(
+        "UPDATE knowledge_documents SET mime_type='text/html; charset=utf-8' WHERE name='page.html' RETURNING id::text",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/api/knowledge/documents/{legacy}/file"),
+            Body::empty(),
+            "application/json",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
+    assert!(headers["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment;"));
+    assert_eq!(
+        headers["content-security-policy"],
+        "sandbox; default-src 'none'"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], &page[..]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_chat_with_a_collection_cites_its_passages(pool: PgPool) {
     let f = fixture(pool).await;
     let admin = login(&f.app, "test-admin").await;
@@ -1718,7 +1822,7 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
         .oneshot(req(
             "POST",
             &format!("/api/conversations/{id}/messages"),
-            Body::from(json!({"content":"Plan the refactor","model":"fixture-model","attachmentIds":[file]}).to_string()),
+            Body::from(json!({"content":"Plan the refactor","model":"fixture-model","attachmentIds":[file],"systemPrompt":"Ana's private instructions","temperature":0.3}).to_string()),
             "application/json",
             &ana,
         ))
@@ -1732,6 +1836,32 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
         .bind(image).bind(ana_uuid).bind(conversation).execute(&pool).await.unwrap();
     sqlx::query("UPDATE messages SET content = content || $2 WHERE conversation_id = $1 AND role = 'assistant'")
         .bind(conversation).bind(format!("\n\n![chart](/api/images/{image})")).execute(&pool).await.unwrap();
+    let activity = json!([{"kind":"tool","title":"Read the plan"}]);
+    sqlx::query(
+        "UPDATE messages SET activity = $2 WHERE conversation_id = $1 AND role = 'assistant'",
+    )
+    .bind(conversation)
+    .bind(&activity)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Ana's own view keeps her instructions, on the chat and on the reply.
+    let (_, own) = call(
+        &f.app,
+        "GET",
+        &format!("/api/conversations/{id}"),
+        Value::Null,
+        &ana,
+    )
+    .await;
+    assert_eq!(
+        own["conversation"]["settings"]["systemPrompt"],
+        "Ana's private instructions"
+    );
+    assert_eq!(
+        own["conversation"]["messages"][1]["settings"]["systemPrompt"],
+        "Ana's private instructions"
+    );
 
     // Not shared: nobody else can open it.
     let shared = format!("/api/shared/{id}");
@@ -1766,6 +1896,16 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
         (json!(false), json!("ana"))
     );
     assert!(seen["conversation"].get("settings").is_none());
+    // Nor do the instructions show on any reply; the model, its sampling and the
+    // reply's tool activity do.
+    assert!(
+        !seen.to_string().contains("Ana's private instructions"),
+        "{seen}"
+    );
+    let reply = &seen["conversation"]["messages"][1];
+    assert_eq!(reply["settings"]["model"], "fixture-model");
+    assert_eq!(reply["settings"]["temperature"], 0.3);
+    assert_eq!(reply["activity"], activity);
     let messages = seen["conversation"]["messages"].as_array().unwrap();
     assert_eq!(messages[0]["content"], "Plan the refactor");
     let link = messages[0]["attachments"][0]["url"]
@@ -1842,8 +1982,21 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(mine["conversation"]["title"], "Pairing · fork");
+    // The fork does not take Ana's instructions, which would steer Ben's chat
+    // unseen; it keeps her model and sampling.
+    assert!(
+        !mine.to_string().contains("Ana's private instructions"),
+        "{mine}"
+    );
+    assert!(mine["conversation"]["settings"]
+        .get("systemPrompt")
+        .is_none());
+    assert_eq!(mine["conversation"]["settings"]["temperature"], 0.3);
+    assert_eq!(mine["conversation"]["model"], "fixture-model");
     let copied = mine["conversation"]["messages"].as_array().unwrap();
     assert_eq!(copied.len(), 2);
+    assert_eq!(copied[1]["settings"]["temperature"], 0.3);
+    assert_eq!(copied[1]["activity"], activity);
     let own_file = copied[0]["attachments"][0]["id"]
         .as_str()
         .unwrap()

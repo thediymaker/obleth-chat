@@ -25,6 +25,21 @@ async fn round_trip_against_real_storage() {
         "{disposition}"
     );
     assert_eq!(response.text().await.unwrap(), "hello knowledge");
+    // A link overrides the stored type: an object stored as HTML is served as text.
+    store
+        .put(&key, b"<p>page</p>".to_vec(), "text/html")
+        .await
+        .unwrap();
+    let link = store.presign_get(&key, 60, "page.html", "text/html");
+    let response = reqwest::get(link).await.unwrap();
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/plain; charset=utf-8"
+    );
+    assert!(response.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment;"));
     store.delete(&key).await.unwrap();
     assert!(store.get(&key, 1024).await.is_err());
     store.delete(&key).await.unwrap();

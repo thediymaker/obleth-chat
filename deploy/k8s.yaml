@@ -5,11 +5,13 @@
 # ConfigMap origins, then create the namespace (kubectl create namespace
 # obleth-chat) and in it:
 #   Secret obleth-chat-env with OBLETH_CHAT_DATABASE_URL and
-#     OBLETH_CHAT_BOOTSTRAP_PASSWORD (optional OIDC settings can go here too).
+#     OBLETH_CHAT_BOOTSTRAP_PASSWORD (optional OIDC settings can go here too, and
+#     OBLETH_CHAT_METRICS_TOKEN to make /metrics require that bearer token).
 #   Secret obleth-chat-gateway-signing-key with a gateway_signing_key PEM file.
 # Use the same signing key, origin, issuer, database, and OIDC config on all replicas.
 # Expose the ClusterIP service through your existing HTTPS ingress. Permit metrics
-# access only from monitoring, and configure ingress SSE buffering/timeouts.
+# access only from monitoring (or set OBLETH_CHAT_METRICS_TOKEN), and configure
+# ingress SSE buffering/timeouts.
 #
 # Workspaces need nothing else: Chat runs them as pods in this namespace with
 # its service account, behind the NetworkPolicies below. Set

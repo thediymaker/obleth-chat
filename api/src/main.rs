@@ -117,6 +117,9 @@ async fn main() -> Result<()> {
     if let Some(dir) = config.backup_status_dir {
         state.metrics.register_backup_status(dir)?;
     }
+    if let Some(token) = &config.metrics_token {
+        state.metrics.require_token(token);
+    }
     // Auto mode's watchdog nudges unattended turns that stopped without finishing.
     tokio::spawn(obleth_chat::autopilot::worker(
         state.clone(),

@@ -2,6 +2,22 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.4.5
+
+Workspaces no longer need a preview domain.
+
+**Changed**
+
+- **Previews are optional.** Without `OBLETH_CHAT_PREVIEW_DOMAIN`, workspaces, the terminal, files, code and the browser work as before. The Preview tab and open-preview buttons are hidden, and Chat reports `previews: false` in its capabilities. Setting the domain later turns previews on with nothing else to change. See [Enable workspaces](https://www.obleth.com/docs/run-chat/enable-workspaces).
+
+**Images**
+
+- `ghcr.io/thediymaker/obleth-chat/chat:v0.4.5`
+- `ghcr.io/thediymaker/obleth-chat/workspace:v0.4.5`
+- `ghcr.io/thediymaker/obleth-chat/browser:v0.4.5`
+
+Pin them by digest in production.
+
 ## v0.4.4
 
 Each known embedding model brings its own prefixes, so choosing one in Settings needs nothing else.

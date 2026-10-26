@@ -20,6 +20,8 @@ fn config() -> AuthConfig {
     }
 }
 
+static VECTOR: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
 struct Database {
     pool: PgPool,
     admin: PgPool,
@@ -37,7 +39,16 @@ impl Database {
             .execute(&admin)
             .await
             .unwrap();
-        let search_path = format!("SET search_path TO {schema}");
+        // pgvector's types live in public; the extension is made once per database.
+        VECTOR
+            .get_or_init(|| async {
+                sqlx::query("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+                    .execute(&admin)
+                    .await
+                    .unwrap();
+            })
+            .await;
+        let search_path = format!("SET search_path TO {schema}, public");
         let pool = PgPoolOptions::new()
             .max_connections(8)
             .after_connect(move |conn, _| {
@@ -50,18 +61,9 @@ impl Database {
             .connect(&url)
             .await
             .unwrap();
-        sqlx::raw_sql(include_str!("../../../migrations/001_auth.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::raw_sql(include_str!("../../../migrations/004_accounts.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::raw_sql(include_str!("../../../migrations/040_api_tokens.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Every migration, so handlers that touch other features' tables (deleting a
+        // group clears its shares, for one) work as they do in production.
+        crate::MIGRATOR.run(&pool).await.unwrap();
         Some(Self {
             pool,
             admin,
@@ -2300,21 +2302,34 @@ async fn concurrent_attempts_cannot_overrun_the_account_limits() {
         .map(|_| Client("attacker".into()))
         .collect();
     assert_eq!(passed(one_client).await, CLIENT_ACCOUNT_FAILURES);
-    // Each client's first attempt gets past the all-client limit, and is counted...
-    let bots = || {
-        (0..2 * ACCOUNT_FAILURES)
-            .map(|index| Client(format!("bot-{index}")))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(passed(bots()).await, 2 * ACCOUNT_FAILURES);
-    // ...but once failing there, none of them gets another.
-    assert_eq!(passed(bots()).await, 0);
-    // A client with no failures gets exactly one attempt past the limit, however
-    // many it sends at once.
+    // A few more addresses fill the all-client limit.
+    let fillers = (ACCOUNT_FAILURES - CLIENT_ACCOUNT_FAILURES) / CLIENT_ACCOUNT_FAILURES;
+    let filling = (0..fillers)
+        .flat_map(|index| {
+            (0..CLIENT_ACCOUNT_FAILURES).map(move |_| Client(format!("filler-{index}")))
+        })
+        .collect();
+    assert_eq!(
+        passed(filling).await,
+        ACCOUNT_FAILURES - CLIENT_ACCOUNT_FAILURES
+    );
+    // A client with no failures gets exactly one attempt past the all-client limit,
+    // however many it sends at once.
     let fresh = (0..3 * CLIENT_ACCOUNT_FAILURES)
         .map(|_| Client("fresh".into()))
         .collect();
     assert_eq!(passed(fresh).await, 1);
+    // First attempts from new addresses have their own account limit, so rotating
+    // through addresses adds only so many guesses a minute...
+    let bots = || {
+        (0..2 * ACCOUNT_FIRST_TRIES)
+            .map(|index| Client(format!("bot-{index}")))
+            .collect::<Vec<_>>()
+    };
+    // (The first attempt of each client above was one too.)
+    assert_eq!(passed(bots()).await, ACCOUNT_FIRST_TRIES - fillers - 2);
+    // ...and once failing there, none of them gets another.
+    assert_eq!(passed(bots()).await, 0);
     db.close().await;
 }
 
@@ -2361,6 +2376,27 @@ async fn failing_clients_cannot_lock_out_a_client_that_is_not_failing() {
     assert!(limited(
         auth.throttle("login", &newcomer, Some("admin")).await
     ));
+    // Nor does retrying while stopped restart the quiet time it must wait out.
+    let key = failing_key(&newcomer, "admin");
+    let window = |pool: PgPool, key: String| async move {
+        sqlx::query_scalar::<_, i64>("SELECT window_start FROM login_throttles WHERE key=$1")
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    sqlx::query("UPDATE login_throttles SET window_start = window_start - 3 WHERE key=$1")
+        .bind(&key)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let quiet_since = window(db.pool.clone(), key.clone()).await;
+    for _ in 0..3 {
+        assert!(limited(
+            auth.throttle("login", &newcomer, Some("admin")).await
+        ));
+    }
+    assert_eq!(window(db.pool.clone(), key).await, quiet_since);
     db.close().await;
 }
 

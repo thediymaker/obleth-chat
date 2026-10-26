@@ -495,3 +495,64 @@ async fn redeeming_a_reset_link_ends_the_tokens(pool: PgPool) {
         StatusCode::UNAUTHORIZED
     );
 }
+
+#[sqlx::test(migrator = "obleth_chat::MIGRATOR")]
+async fn signing_out_a_device_ends_the_tokens_made_on_it(pool: PgPool) {
+    let app = fixture(pool.clone()).await;
+    let (stolen, stolen_csrf) = login(&app).await;
+    let (_, created) = create_token(
+        &app,
+        &stolen,
+        &stolen_csrf,
+        json!({"name":"Taken","days":30}),
+    )
+    .await;
+    let taken = created["token"].as_str().unwrap().to_owned();
+    let (mine, mine_csrf) = login(&app).await;
+    let (_, created) =
+        create_token(&app, &mine, &mine_csrf, json!({"name":"Mine","days":30})).await;
+    let kept = created["token"].as_str().unwrap().to_owned();
+    let (cookie, csrf) = login(&app).await;
+    let (_, created) = create_token(&app, &cookie, &csrf, json!({"name":"Other","days":30})).await;
+    let other = created["token"].as_str().unwrap().to_owned();
+
+    // Signing one other device out ends the tokens made on it, and only those.
+    let id: uuid::Uuid = sqlx::query_scalar("SELECT session_id FROM api_tokens WHERE name='Other'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (status, _, _) = send(
+        &app,
+        browser(
+            "DELETE",
+            &format!("/api/auth/sessions/{id}"),
+            json!({}),
+            &mine,
+            &mine_csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let ping = |token: String| {
+        let app = app.clone();
+        async move { send(&app, rpc(&token, "ping", json!({}))).await.0 }
+    };
+    assert_eq!(ping(other).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(ping(taken.clone()).await, StatusCode::OK);
+
+    // "Sign out other devices" ends the rest made elsewhere; this device's stay.
+    let (status, _, _) = send(
+        &app,
+        browser(
+            "POST",
+            "/api/auth/sessions/revoke-others",
+            json!({}),
+            &mine,
+            &mine_csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(ping(taken).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(ping(kept).await, StatusCode::OK);
+}

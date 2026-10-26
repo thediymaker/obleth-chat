@@ -107,13 +107,20 @@ async fn revoke_session(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(ApiError::not_found)?;
+    // Signing yourself out keeps your tokens; signing out another device ends the
+    // tokens made on it.
+    let tokens = if current {
+        0
+    } else {
+        super::tokens::revoke_made_in(&mut tx, user.id, &[id]).await?
+    };
     record_audit(
         &mut tx,
         Some(user.id),
         "session_revoked",
         "session",
         Some(&id.to_string()),
-        json!({"current":current}),
+        json!({"current":current,"tokens":tokens}),
     )
     .await?;
     tx.commit().await?;
@@ -139,19 +146,21 @@ async fn revoke_others(
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
-    let count = sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1 AND token_hash<>$2")
-        .bind(user.id)
-        .bind(digest(&token))
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    let ended: Vec<Uuid> = sqlx::query_scalar(
+        "DELETE FROM auth_sessions WHERE user_id=$1 AND token_hash<>$2 RETURNING id",
+    )
+    .bind(user.id)
+    .bind(digest(&token))
+    .fetch_all(&mut *tx)
+    .await?;
+    let tokens = super::tokens::revoke_made_in(&mut tx, user.id, &ended).await?;
     record_audit(
         &mut tx,
         Some(user.id),
         "other_sessions_revoked",
         "user",
         Some(&user.id.to_string()),
-        json!({"count":count}),
+        json!({"count":ended.len(),"tokens":tokens}),
     )
     .await?;
     tx.commit().await?;

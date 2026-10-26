@@ -164,6 +164,9 @@ fn validate_transport(url: &Url) -> anyhow::Result<()> {
 /// Unrefunded password attempts per account from one client, and from all clients, per minute.
 const CLIENT_ACCOUNT_FAILURES: i32 = 10;
 const ACCOUNT_FAILURES: i32 = 50;
+/// Attempts per account and minute from clients not failing there, on top of
+/// `ACCOUNT_FAILURES`, so rotating addresses cannot add guesses without bound.
+const ACCOUNT_FIRST_TRIES: i32 = 50;
 /// How long, in one-minute windows, a client's unrefunded attempt on an account
 /// marks it as failing there. Throttle rows are kept this long too.
 const FAILING_WINDOWS: i64 = 10;
@@ -593,9 +596,11 @@ impl Auth {
     ///
     /// The all-client backstop only stops clients that are failing on the account
     /// themselves. A client with no unrefunded attempt there in the last
-    /// `FAILING_WINDOWS` minutes gets one attempt past it (still counted), so guesses
-    /// from other addresses cannot keep the real person from signing in. Each
-    /// address can add at most one guess per `FAILING_WINDOWS` that way.
+    /// `FAILING_WINDOWS` minutes is counted against a second account limit instead
+    /// (`ACCOUNT_FIRST_TRIES` a minute), so guesses from failing addresses cannot keep
+    /// the real person from signing in, and rotating addresses still adds at most
+    /// that many guesses a minute. A refused attempt leaves the client's failing
+    /// state as it was, so retrying while refused does not extend it.
     async fn throttle(
         &self,
         scope: &str,
@@ -619,11 +624,21 @@ impl Auth {
             if allowed {
                 // One statement per key, so concurrent attempts from a client with
                 // no recent failures see exactly one of them as its first.
-                let failing = throttle_mark(&mut tx, &failing_key, window).await? > 1;
-                let counted = if failing {
+                let (marks, before) = throttle_mark(&mut tx, &failing_key, window).await?;
+                let counted = if marks > 1 {
                     throttle_take(&mut tx, &account_key, window, ACCOUNT_FAILURES).await?
                 } else {
-                    Some(throttle_count(&mut tx, &account_key, window).await?)
+                    let first = first_tries_key(account);
+                    let taken = throttle_take(&mut tx, &first, window, ACCOUNT_FIRST_TRIES).await?;
+                    if taken == Some(ACCOUNT_FIRST_TRIES) {
+                        tracing::warn!(
+                            "an account reached its limit of sign-ins from new addresses for this minute"
+                        );
+                    }
+                    match taken {
+                        Some(_) => Some(throttle_count(&mut tx, &account_key, window).await?),
+                        None => None,
+                    }
                 };
                 if counted == Some(ACCOUNT_FAILURES) {
                     tracing::warn!("an account reached its sign-in failure limit for this minute");
@@ -631,7 +646,7 @@ impl Auth {
                 if counted.is_none() {
                     allowed = false;
                     throttle_release(&mut tx, &[client_key], window).await?;
-                    throttle_unmark(&mut tx, &failing_key).await?;
+                    throttle_unmark(&mut tx, &failing_key, before).await?;
                 }
             }
         }
@@ -654,7 +669,7 @@ impl Auth {
         let window = throttle_window(tx).await?;
         let (account_key, client_key) = failure_keys(client, account);
         throttle_release(tx, &[account_key, client_key], window).await?;
-        throttle_unmark(tx, &failing_key(client, account)).await
+        throttle_unmark(tx, &failing_key(client, account), None).await
     }
 
     async fn insert_session(
@@ -711,6 +726,11 @@ fn failure_keys(client: &Client, account: &str) -> (String, String) {
 fn failing_key(client: &Client, account: &str) -> String {
     let account = URL_SAFE_NO_PAD.encode(digest(account));
     format!("failing:{account}:{}", client.0)
+}
+
+/// Counts an account's attempts from clients not failing on it, per minute.
+fn first_tries_key(account: &str) -> String {
+    format!("first:{}", URL_SAFE_NO_PAD.encode(digest(account)))
 }
 
 /// `loopback` stands for a reverse proxy on the same host. There is deliberately no
@@ -891,23 +911,34 @@ async fn throttle_take(
 }
 
 /// Adds an attempt to a key that keeps counting until it has been quiet for
-/// `FAILING_WINDOWS`, and returns the count including this attempt.
+/// `FAILING_WINDOWS`. Returns the count including this attempt, and the window of
+/// the attempt before it, for `throttle_unmark`.
 async fn throttle_mark(
     tx: &mut Transaction<'_, Postgres>,
     key: &str,
     window: i64,
-) -> Result<i32, ApiError> {
-    Ok(sqlx::query_scalar("INSERT INTO login_throttles (key, window_start, attempts) VALUES ($1, $2, 1) \
+) -> Result<(i32, Option<i64>), ApiError> {
+    Ok(sqlx::query_as("WITH before AS (SELECT window_start FROM login_throttles WHERE key = $1) \
+        INSERT INTO login_throttles (key, window_start, attempts) VALUES ($1, $2, 1) \
         ON CONFLICT (key) DO UPDATE SET window_start = $2, \
         attempts = CASE WHEN login_throttles.window_start >= $2 - $3 THEN LEAST(login_throttles.attempts + 1, 1000000) ELSE 1 END \
-        RETURNING attempts").bind(key).bind(window).bind(FAILING_WINDOWS).fetch_one(&mut **tx).await?)
+        RETURNING attempts, (SELECT window_start FROM before)").bind(key).bind(window).bind(FAILING_WINDOWS).fetch_one(&mut **tx).await?)
 }
 
-async fn throttle_unmark(tx: &mut Transaction<'_, Postgres>, key: &str) -> Result<(), ApiError> {
+/// Takes back one attempt from a `throttle_mark` key. Given the window it had
+/// before a refused attempt, it also puts that back, so the refused attempt does
+/// not restart the quiet time the key decays after.
+async fn throttle_unmark(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &str,
+    before: Option<i64>,
+) -> Result<(), ApiError> {
     sqlx::query(
-        "UPDATE login_throttles SET attempts = attempts - 1 WHERE key = $1 AND attempts > 0",
+        "UPDATE login_throttles SET attempts = attempts - 1, window_start = COALESCE($2, window_start) \
+         WHERE key = $1 AND attempts > 0",
     )
     .bind(key)
+    .bind(before)
     .execute(&mut **tx)
     .await?;
     Ok(())

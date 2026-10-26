@@ -42,6 +42,11 @@ test('a token refused for an old sign-in offers to sign in again', async () => {
   assert.match(shown.at(-1).body, /data-action="logout"/);
   assert.match(shown.at(-1).body, /Sign in again to create a token\./);
   await assert.rejects(settings(() => { throw new ApiError('A token lasts 1, 7 or 30 days', 400); }).submit(form), /A token lasts/);
+  // Other refusals are not about the sign-in's age and are shown as they are.
+  const before = shown.length;
+  await assert.rejects(settings(() => { throw new ApiError('Change your password before continuing', 403); }).submit(form), /Change your password/);
+  await assert.rejects(settings(() => { throw new ApiError('Forbidden', 403); }).submit(form), /Forbidden/);
+  assert.equal(shown.length, before);
   const old = globalThis.location;
   globalThis.location = { origin: 'https://chat.example.com', hash: '#settings' };
   try {

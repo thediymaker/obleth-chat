@@ -25,6 +25,8 @@ jobs:
           --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgres://obleth:obleth@localhost:5432/postgres
+      # The auth unit tests skip without it.
+      TEST_DATABASE_URL: postgres://obleth:obleth@localhost:5432/postgres
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: tools the tests use

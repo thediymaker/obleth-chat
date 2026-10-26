@@ -16,7 +16,7 @@ test('partial or malformed branding keeps usable defaults and optional copy can 
     siteName: '  Acme Chat  ',
     assistantName: '',
     home: { eyebrow: '', description: false },
-    login: { title: '', footer: '' },
+    login: { title: '', help: '' },
     icons: { greeting: '', assistant: 'book', loading: 'toString' },
     appearance: { defaultTheme: 'unknown' },
   });
@@ -24,7 +24,7 @@ test('partial or malformed branding keeps usable defaults and optional copy can 
   assert.equal(config.assistantName, 'Assistant');
   assert.equal(config.home.eyebrow, '');
   assert.equal(config.login.title, '');
-  assert.equal(config.login.footer, '');
+  assert.equal(config.login.help, '');
   assert.equal(config.home.description, 'Ask a question, explore an idea, or start something new.');
   assert.equal(brandIcon('greeting', config), '');
   assert.match(brandIcon('assistant', config), /<svg/);
@@ -147,4 +147,13 @@ test('footer links accept web, mail and same-site addresses only', () => {
   assert.match(html, /href="\.\/terms\.html">Terms/);
   assert.doesNotMatch(html, /javascript:/);
   assert.doesNotMatch(siteFooter(normalizeBranding({ links: [] })), /<nav/);
+});
+
+test('sign-in copy keeps a usable button label and only a safe help link', () => {
+  const config = normalizeBranding({ login: { ssoLabel: '  ', helpLink: { label: ' Request an account ', url: 'https://accounts.example.edu/new' } } });
+  assert.equal(config.login.ssoLabel, 'Continue with single sign-on');
+  assert.deepEqual(config.login.helpLink, { label: 'Request an account', url: 'https://accounts.example.edu/new' });
+  for (const helpLink of [{ label: 'Bad', url: 'javascript:alert(1)' }, { label: '', url: 'https://example.edu' }, { url: 'https://example.edu' }, 'https://example.edu', null]) {
+    assert.equal(normalizeBranding({ login: { helpLink } }).login.helpLink, null);
+  }
 });

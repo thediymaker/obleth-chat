@@ -1,6 +1,7 @@
 import { icon, esc, badge, btn, iconButton, displayName } from './manage-ui.js';
-import { branding, brand, brandLogo, brandIcon, siteFooter, copy as brandCopy, pageTitle } from './branding.js';
+import { branding, brand, brandLogo, brandIcon, copy as brandCopy, pageTitle } from './branding.js';
 import { themeControl } from './theme-control.js';
+import { authScreen } from './sign-in.js';
 import { ApiClient, readEvents } from './client.js';
 import { markdown } from './markdown.js';
 import { createSettings } from './settings.js';
@@ -43,7 +44,7 @@ export async function startConnected(capabilities) {
     phase: 'loading', draftKey: 0, user: null, oidc: !!capabilities.integrations?.oidc?.configured,
     chats: [], models: [], model: '', draft: '', error: '', catalogError: '', chatError: '',
     active: null, loadingChat: false, streaming: false, streamController: null, streamChatId: null,
-    context: true, compact: false, users: null, busy: false, loginError: '', shared: null,
+    context: true, compact: false, users: null, busy: false, loginError: '', loginNotice: '', shared: null,
     systemPrompt: '', temperature: 0.7, topP: 1, maxTokens: 0, reasoningEffort: 'medium', preferences: null, preferenceOverrides: {}, presets: [],
     workspaceDraft: false, browserDraft: false, openActivity: new Set(),
   };
@@ -142,7 +143,7 @@ export async function startConnected(capabilities) {
     api.clearSession(); codeView.clear(); attachments.clear(); personal.clear(); connectionsView.clear(); clustersView.clear(); knowledgeView.clear(); libraryView.clear(); projectsView.clear(); groupsView.clear(); questionsView.clear(); researchView.clear(); hideSelection(); administration.clear(); historyView.clear(); thinkingOpen.clear(); detailsOpen.clear(); pendingEfforts.clear(); closeMenu(false); closeModels(false); close();
   }
   function expire(message) {
-    clearPrivateState(); state.phase = 'login'; state.loginError = message; state.busy = false;
+    clearPrivateState(); state.phase = 'login'; state.loginError = ''; state.loginNotice = message; state.busy = false;
     history.replaceState(null, '', '#chat'); render();
   }
   function alert(message, action = '') {
@@ -188,9 +189,6 @@ export async function startConnected(capabilities) {
     const list = $('#model-choices', modelPopover);
     if (!list) return;
     list.innerHTML = choices.map(m => `<button class="model-option ${m.id === state.model ? 'selected' : ''}" role="option" aria-selected="${m.id === state.model}" data-action="select-model" data-value="${esc(m.id)}">${icon(favorites.includes(m.id) ? 'bookmark' : 'cube')}<span class="grow"><strong>${esc(m.name || m.id)}${m.isDefault ? badge('Default') : ''}${m.metadata?.supportsVision ? badge('Vision') : ''}</strong>${(() => { const detail = m.id === 'auto' ? 'Picks a permitted model for each request' : m.description || m.detail || (m.name && m.name !== m.id ? m.id : ''); return detail ? `<small>${esc(detail)}</small>` : ''; })()}</span>${m.id === state.model ? icon('check') : ''}</button>`).join('') || '<p class="model-empty">No matching models.</p>';
-  }
-  function authScreen() {
-    return `<main id="main" class="auth-layout"><div class="auth-story">${brand()}<div class="auth-story-copy">${branding.login.eyebrow ? `<div class="greeting-mark">${brandIcon('greeting')}${brandCopy(branding.login.eyebrow)}</div>` : ''}${branding.login.title ? `<h1>${brandCopy(branding.login.title)}</h1>` : ''}${branding.login.description ? `<p>${brandCopy(branding.login.description)}</p>` : ''}</div>${branding.login.footer ? `<div class="auth-foot">${brandCopy(branding.login.footer)}</div>` : ''}</div><section class="auth-panel"><div class="auth-card">${state.phase === 'activate' ? `<div class="eyebrow">Your account</div><h2>Choose your password.</h2><p class="muted">Finish setting up access to ${esc(branding.siteName)}.</p><form id="activation-form"><label class="form-label" for="activation-password">New password</label><input class="form-control" id="activation-password" type="password" minlength="12" autocomplete="new-password" required><label class="form-label" for="activation-confirm">Confirm password</label><input class="form-control" id="activation-confirm" type="password" minlength="12" autocomplete="new-password" required><div class="form-error" role="alert"></div><button type="submit" class="btn primary auth-submit">Set password and sign in${icon('right')}</button></form>` : state.phase === 'password-required' ? `<div class="eyebrow">Account security</div><h2>Choose a new password.</h2><p class="muted">Your administrator requires a password change before you continue.</p><form id="required-password-form"><input type="hidden" autocomplete="username" value="${esc(state.user?.username)}"><label class="form-label" for="required-current">Current password</label><input class="form-control" id="required-current" type="password" autocomplete="current-password" required><label class="form-label" for="required-password">New password</label><input class="form-control" id="required-password" type="password" minlength="12" autocomplete="new-password" required><label class="form-label" for="required-confirm">Confirm password</label><input class="form-control" id="required-confirm" type="password" minlength="12" autocomplete="new-password" required><div class="form-error" role="alert"></div><button type="submit" class="btn primary auth-submit">Update password${icon('right')}</button></form>${btn('Sign out', 'logout', { tone: 'ghost small', type: '' })}` : state.phase === 'loading' ? `<div class="loading-mark">${brandIcon('loading')}</div><h2>Opening your workspace…</h2><p class="muted">Checking your secure session.</p>` : state.phase === 'error' ? `<h2>We couldn’t open your workspace.</h2><p class="muted">${esc(state.error)}</p>${btn('Try again', 'retry-session', { icon: 'refresh', tone: 'primary', type: '' })}` : `<div class="eyebrow">Welcome to ${esc(branding.siteName)}</div>${branding.login.welcomeTitle ? `<h2>${brandCopy(branding.login.welcomeTitle)}</h2>` : ''}${branding.login.welcomeDescription ? `<p class="muted">${brandCopy(branding.login.welcomeDescription)}</p>` : ''}${alert(state.loginError)}<form id="login-form"><label class="form-label" for="username">Username</label><input id="username" class="form-control" name="username" autocomplete="username" maxlength="128" required autofocus><label class="form-label" for="password">Password</label><input id="password" class="form-control" name="password" type="password" autocomplete="current-password" required><button class="btn primary auth-submit" type="submit" ${state.busy ? 'disabled' : ''}>${state.busy ? 'Signing in…' : 'Sign in'}${icon('right')}</button></form>${state.oidc ? `<div class="auth-divider"><span>or</span></div><a class="btn auth-oidc" href="/api/auth/oidc/login">${icon('shield')}Continue with single sign-on</a>` : ''}${branding.login.help ? `<p class="auth-help">${brandCopy(branding.login.help)}</p>` : ''}`}</div>${siteFooter()}</section></main>`;
   }
   /** The pages inside Compute this server offers: workspaces and clusters. */
   function computeTabs() {
@@ -451,7 +449,7 @@ export async function startConnected(capabilities) {
     $('#app').classList.toggle('auth-mode', !ready);
     document.body.classList.toggle('compact', state.compact);
     const page = route().page;
-    $('#app').innerHTML = ready ? shell(page === 'chat' ? chatPage() : page === 'history' ? historyView.view() : ['settings','admin','connections'].includes(page) ? settingsPage() : page === 'workspaces' && workspace.enabled() ? (route().id ? workspace.page() : withTabs(workspace.page(), tabBar(computeTabs(), 'workspaces', 'Compute'))) : page === 'clusters' && capabilities.features?.connections ? withTabs(clustersView.page(), tabBar(computeTabs(), 'clusters', 'Compute')) : page === 'knowledge' && knowledgeView.enabled() ? (route().id ? knowledgeView.page(route().id) : withTabs(knowledgeView.page(''), tabBar(libraryTabs, 'knowledge', 'Library'))) : page === 'projects' ? projectsView.page(route().id) : page === 'groups' ? groupsView.page(route().id) : page === 'library' && libraryView.enabled() ? libraryView.page(route().id, tabBar(libraryTabs, route().id === 'generated' ? 'library/generated' : 'library', 'Library')) : unavailable(page)) : authScreen();
+    $('#app').innerHTML = ready ? shell(page === 'chat' ? chatPage() : page === 'history' ? historyView.view() : ['settings','admin','connections'].includes(page) ? settingsPage() : page === 'workspaces' && workspace.enabled() ? (route().id ? workspace.page() : withTabs(workspace.page(), tabBar(computeTabs(), 'workspaces', 'Compute'))) : page === 'clusters' && capabilities.features?.connections ? withTabs(clustersView.page(), tabBar(computeTabs(), 'clusters', 'Compute')) : page === 'knowledge' && knowledgeView.enabled() ? (route().id ? knowledgeView.page(route().id) : withTabs(knowledgeView.page(''), tabBar(libraryTabs, 'knowledge', 'Library'))) : page === 'projects' ? projectsView.page(route().id) : page === 'groups' ? groupsView.page(route().id) : page === 'library' && libraryView.enabled() ? libraryView.page(route().id, tabBar(libraryTabs, route().id === 'generated' ? 'library/generated' : 'library', 'Library')) : unavailable(page)) : authScreen(state);
     const sectionTabs = $('.admin-tabs'), activeSection = sectionTabs && $('[aria-current="page"]', sectionTabs);
     if (activeSection) { const outer = sectionTabs.getBoundingClientRect(), selected = activeSection.getBoundingClientRect(); sectionTabs.scrollLeft += selected.right > outer.right ? selected.right - outer.right : selected.left < outer.left ? selected.left - outer.left : 0; }
     if (focusedPrompt && $('#prompt')) { $('#prompt').focus({ preventScroll: true }); $('#prompt').setSelectionRange(focusedPrompt.start, focusedPrompt.end); $('#prompt').style.height = focusedPrompt.height; }
@@ -460,7 +458,7 @@ export async function startConnected(capabilities) {
   }
   async function session() {
     const epoch = identityEpoch;
-    if (route().page === 'activate' && route().id) { clearPrivateState(); state.phase = 'activate'; state.loginError = ''; render(); return; }
+    if (route().page === 'activate' && route().id) { clearPrivateState(); state.phase = 'activate'; state.loginError = ''; state.loginNotice = ''; render(); return; }
     state.phase = 'loading'; state.error = ''; render();
     try {
       const result = await api.request('/api/session');
@@ -469,7 +467,7 @@ export async function startConnected(capabilities) {
       if (!result.authenticated) { state.phase = 'login'; render(); return; }
       state.user = result.user; api.csrfToken = result.csrfToken;
       if (result.passwordChangeRequired) { state.phase = 'password-required'; render(); return; }
-      state.phase = 'ready'; state.loginError = ''; render(); await refresh();
+      state.phase = 'ready'; state.loginError = ''; state.loginNotice = ''; render(); await refresh();
     } catch (error) {
       if (state.phase === 'login' || epoch !== identityEpoch) return;
       state.phase = 'error'; state.error = error.message; render();
@@ -1064,7 +1062,7 @@ export async function startConnected(capabilities) {
 
       }
     } catch (error) {
-      if (form.id === 'login-form') { state.loginError = error.message; render(); }
+      if (form.id === 'login-form') { state.loginError = error.message; state.loginNotice = ''; render(); }
       else if ($('.form-error', form)) $('.form-error', form).textContent = error.message;
       else if (state.user) toast(error.message);
     } finally { if (submit?.isConnected) submit.disabled = false; }

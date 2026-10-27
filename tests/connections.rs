@@ -13,7 +13,9 @@ use obleth_chat::{
     auth::{Auth, AuthConfig},
     connections::Connections,
     gateway::Gateway,
-    router, AppState,
+    router,
+    secrets::SecretKey,
+    AppState,
 };
 use rsa::{pkcs8::EncodePrivateKey, RsaPrivateKey};
 use serde_json::{json, Value};
@@ -280,6 +282,8 @@ struct Fixture {
     cluster_seen: Seen,
     gateway_seen: Seen,
     script: Script,
+    /// The gateway signing key, which connection tokens are sealed with.
+    pem: String,
 }
 
 /// The gateway's tool calls as (id, tool, arguments).
@@ -366,6 +370,7 @@ async fn fixture_with(pool: PgPool, clusters: bool) -> Fixture {
         cluster_seen,
         gateway_seen,
         script,
+        pem: pem.to_string(),
     }
 }
 
@@ -1870,4 +1875,113 @@ async fn any_chat_can_send_workers_without_a_workspace(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(rows, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_secret_key_takes_over_tokens_sealed_with_the_signing_key(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Fixture","url":f.mcp_url,"token":TOKEN}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Everyone","url":f.mcp_url,"token":TOKEN,"shared":true,"options":{"personalTokens":true}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let path = format!(
+        "/api/connections/{}/credential",
+        shared["id"].as_str().unwrap()
+    );
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &path,
+        json!({"token":PERSONAL_TOKEN}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username='test-admin'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let formats = || async {
+        sqlx::query_scalar::<_, i32>(
+            "SELECT get_byte(token, 0) FROM connections UNION ALL SELECT get_byte(token, 0) FROM connection_credentials",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(formats().await, [1, 1, 1]);
+
+    let key = SecretKey::from_bytes([5u8; 32]);
+    let secret_only = Connections::with_keys(pool.clone(), None, Some(key.clone()), true).unwrap();
+    assert!(
+        secret_only
+            .toolset(admin_id, Uuid::new_v4())
+            .await
+            .is_empty(),
+        "tokens sealed with the signing key need it until they move"
+    );
+    // Two replicas starting at once move each token exactly once.
+    let both =
+        Connections::with_keys(pool.clone(), Some(f.pem.as_bytes()), Some(key), true).unwrap();
+    let replica = both.clone();
+    let (first, second) = tokio::join!(both.reseal(), replica.reseal());
+    assert_eq!(first.unwrap() + second.unwrap(), 3);
+    assert_eq!(formats().await, [2, 2, 2]);
+    assert_eq!(
+        both.reseal().await.unwrap(),
+        0,
+        "moving again changes nothing"
+    );
+    let stored: Vec<Vec<u8>> = sqlx::query_scalar("SELECT token FROM connection_credentials")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&stored[0]).contains(PERSONAL_TOKEN));
+
+    // Without the signing key, the secret key alone now reads every token.
+    assert_eq!(
+        secret_only
+            .toolset(admin_id, Uuid::new_v4())
+            .await
+            .definitions()
+            .len(),
+        4
+    );
+    let mut state = f.state.clone();
+    state.connections = Some(secret_only);
+    let app = router(state, "web".into());
+    let (_, listed) = call(&app, "GET", "/api/connections", Value::Null, &admin).await;
+    let own = listed["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Fixture")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, refreshed) = call(
+        &app,
+        "POST",
+        &format!("/api/connections/{own}/refresh"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refreshed}");
 }

@@ -22,6 +22,7 @@ pub mod questions;
 pub mod research;
 pub mod retention;
 pub mod sandbox;
+pub mod secrets;
 pub mod shares;
 pub mod steer;
 pub mod store;

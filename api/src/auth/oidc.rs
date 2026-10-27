@@ -63,10 +63,12 @@ pub(super) struct Oidc {
 
 /// Why a refresh did not produce a token.
 pub(super) enum RefreshFailure {
-    /// The provider refused the grant or Chat's client: the sign-in is over.
+    /// The provider refused the grant (invalid_grant): the sign-in is over.
     Rejected,
-    /// The provider could not be reached or failed; the grant may still be good.
+    /// The provider failed or refused Chat's client; the grant may still be good.
     Unavailable,
+    /// No answer arrived, so the provider may or may not have used the token.
+    Unanswered,
 }
 
 /// A refreshed access token, and the refresh token to use next when the provider
@@ -130,14 +132,29 @@ impl Oidc {
                 refresh: tokens.refresh_token().cloned(),
                 expires_in: tokens.expires_in(),
             }),
+            // Only invalid_grant is about this grant. invalid_client and the like
+            // say Chat's own client is misconfigured at the provider, which ending
+            // people's sign-ins would not fix.
             Err(RequestTokenError::ServerResponse(error))
-                if matches!(
-                    error.error(),
-                    CoreErrorResponseType::InvalidGrant | CoreErrorResponseType::InvalidClient
-                ) =>
+                if *error.error() == CoreErrorResponseType::InvalidGrant =>
             {
                 Err(RefreshFailure::Rejected)
             }
+            Err(RequestTokenError::ServerResponse(error)) => {
+                if matches!(
+                    error.error(),
+                    CoreErrorResponseType::InvalidClient
+                        | CoreErrorResponseType::UnauthorizedClient
+                ) {
+                    tracing::error!(
+                        error = error.error().as_ref(),
+                        "the identity provider refused Chat's client credentials; check OBLETH_CHAT_OIDC_CLIENT_ID and OBLETH_CHAT_OIDC_CLIENT_SECRET"
+                    );
+                }
+                Err(RefreshFailure::Unavailable)
+            }
+            // No answer arrived; the provider may still have rotated the token.
+            Err(RequestTokenError::Request(_)) => Err(RefreshFailure::Unanswered),
             Err(_) => Err(RefreshFailure::Unavailable),
         }
     }
@@ -340,156 +357,174 @@ pub(super) async fn callback(
                 "Identity provider sign-in failed".into(),
             )
         })?;
-    let id_token = tokens.id_token().ok_or_else(ApiError::unauthorized)?;
-    // Only the asymmetric algorithms the provider advertises; the library would
-    // otherwise also accept an HMAC keyed with the client secret.
-    let verifier = client
-        .id_token_verifier()
-        .set_allowed_algs(discovered.algorithms);
-    let nonce = Nonce::new(transaction.nonce);
-    // openidconnect validates signature, issuer, audience, expiry, and nonce.
-    let claims = id_token.claims(&verifier, &nonce).map_err(|_| {
-        tracing::warn!("OIDC ID token validation failed");
-        ApiError::unauthorized()
-    })?;
-    // The library deliberately leaves the azp check to the application.
-    if claims
-        .authorized_party()
-        .is_some_and(|party| party.as_str() != provider.config.client_id)
-        || (claims.audiences().len() > 1 && claims.authorized_party().is_none())
-        || claims.issue_time() > Utc::now() + chrono::Duration::seconds(60)
-    {
-        return Err(ApiError::unauthorized());
-    }
-    if let Some(expected) = claims.access_token_hash() {
-        let actual = AccessTokenHash::from_token(
-            tokens.access_token(),
-            id_token
-                .signing_alg()
-                .map_err(|_| ApiError::unauthorized())?,
-            id_token
-                .signing_key(&verifier)
-                .map_err(|_| ApiError::unauthorized())?,
-        )
-        .map_err(|_| ApiError::unauthorized())?;
-        if actual != *expected {
+    // Everything after the exchange runs here, so a failure can revoke the grant.
+    let outcome: Result<Response, ApiError> = async {
+        let id_token = tokens.id_token().ok_or_else(ApiError::unauthorized)?;
+        // Only the asymmetric algorithms the provider advertises; the library would
+        // otherwise also accept an HMAC keyed with the client secret.
+        let verifier = client
+            .id_token_verifier()
+            .set_allowed_algs(discovered.algorithms);
+        let nonce = Nonce::new(transaction.nonce);
+        // openidconnect validates signature, issuer, audience, expiry, and nonce.
+        let claims = id_token.claims(&verifier, &nonce).map_err(|_| {
+            tracing::warn!("OIDC ID token validation failed");
+            ApiError::unauthorized()
+        })?;
+        // The library deliberately leaves the azp check to the application.
+        if claims
+            .authorized_party()
+            .is_some_and(|party| party.as_str() != provider.config.client_id)
+            || (claims.audiences().len() > 1 && claims.authorized_party().is_none())
+            || claims.issue_time() > Utc::now() + chrono::Duration::seconds(60)
+        {
             return Err(ApiError::unauthorized());
         }
-    }
-    let mapped_groups = auth
-        .group_policy
-        .groups_from_verified_token(&id_token.to_string())?;
-    let subject = claims.subject().as_str();
-    if subject.is_empty() || subject.len() > 255 {
-        return Err(ApiError::unauthorized());
-    }
-    // Forwarding the provider's tokens needs a refresh token to keep them current.
-    let refresh = match (&auth.grants, tokens.refresh_token()) {
-        (Some(_), None) => {
-            tracing::warn!("the identity provider issued no refresh token; check offline_access");
-            return Err(ApiError(
-                StatusCode::UNAUTHORIZED,
-                "The identity provider did not allow Chat to stay signed in".into(),
-            ));
-        }
-        (_, refresh) => refresh,
-    };
-    // A session is capped at the ID token's expiry, except while the provider's
-    // grant is kept: then the provider ends the sign-in when it ends the grant.
-    let lifetime = match auth.grants {
-        Some(_) => auth.config.session_hours as i64 * 3600,
-        None => (claims.expiration() - Utc::now())
-            .num_seconds()
-            .min(auth.config.session_hours as i64 * 3600),
-    };
-    if lifetime <= 0 {
-        return Err(ApiError::unauthorized());
-    }
-    let name = claims
-        .name()
-        .and_then(|n| n.get(None))
-        .map(|name| name.as_str())
-        .or_else(|| claims.preferred_username().map(|name| name.as_str()))
-        .unwrap_or("OIDC user");
-    let display_name = validate_display_name(name).unwrap_or_else(|_| "OIDC user".into());
-    let mut tx = auth.pool.begin().await?;
-    // Serialize provisioning for this issuer/subject, including the first sign-in.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("oidc:{}:{subject}", provider.config.issuer))
-        .execute(&mut *tx)
-        .await?;
-    let existing = sqlx::query_as::<_, PasswordUser>(
-        "SELECT u.id, u.username, u.display_name, u.role, u.password_hash, u.enabled, u.password_change_required FROM oidc_identities o \
-         JOIN users u ON u.id = o.user_id WHERE o.issuer = $1 AND o.subject = $2 FOR UPDATE OF u"
-    ).bind(&provider.config.issuer).bind(subject).fetch_optional(&mut *tx).await?;
-    let identity = match existing {
-        Some(user) if user.enabled => user.identity(),
-        Some(_) => return Err(ApiError::forbidden()),
-        None if !provider.config.allow_signup => {
-            return Err(ApiError(
-                StatusCode::FORBIDDEN,
-                "This OIDC identity has not been provisioned; contact your administrator".into(),
-            ))
-        }
-        None => {
-            let id = Uuid::new_v4();
-            // Names and emails from the IdP cannot claim an existing local account.
-            let identity = sqlx::query_as::<_, Identity>("INSERT INTO users (id, username, display_name, role) VALUES ($1, $2, $3, $4) RETURNING id, username, display_name, role")
-                .bind(id).bind(format!("oidc_{}", id.simple())).bind(display_name).bind(Role::User).fetch_one(&mut *tx).await?;
-            sqlx::query(
-                "INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3)",
-            )
-            .bind(&provider.config.issuer)
-            .bind(subject)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-            auth.group_policy.initial(&mut tx, identity.id).await?;
-            identity
-        }
-    };
-    auth.group_policy
-        .reconcile(&mut tx, identity.id, &mapped_groups)
-        .await?;
-    if let Some(old) = auth.session_token(&headers) {
-        sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")
-            .bind(digest(&old))
-            .execute(&mut *tx)
-            .await?;
-    }
-    let token = random_token();
-    let session = auth
-        .insert_session(&mut tx, identity.id, &token, lifetime, &headers)
-        .await?;
-    if let (Some(grants), Some(refresh)) = (&auth.grants, refresh) {
-        grants
-            .store(
-                &mut tx,
-                identity.id,
-                session,
-                subject,
+        if let Some(expected) = claims.access_token_hash() {
+            let actual = AccessTokenHash::from_token(
                 tokens.access_token(),
-                refresh,
-                tokens.expires_in(),
+                id_token
+                    .signing_alg()
+                    .map_err(|_| ApiError::unauthorized())?,
+                id_token
+                    .signing_key(&verifier)
+                    .map_err(|_| ApiError::unauthorized())?,
             )
+            .map_err(|_| ApiError::unauthorized())?;
+            if actual != *expected {
+                return Err(ApiError::unauthorized());
+            }
+        }
+        let mapped_groups = auth
+            .group_policy
+            .groups_from_verified_token(&id_token.to_string())?;
+        let subject = claims.subject().as_str();
+        if subject.is_empty() || subject.len() > 255 {
+            return Err(ApiError::unauthorized());
+        }
+        // Forwarding the provider's tokens needs a refresh token to keep them current.
+        let refresh = match (&auth.grants, tokens.refresh_token()) {
+            (Some(_), None) => {
+                tracing::warn!("the identity provider issued no refresh token; check offline_access");
+                return Err(ApiError(
+                    StatusCode::UNAUTHORIZED,
+                    "The identity provider did not allow Chat to stay signed in".into(),
+                ));
+            }
+            (_, refresh) => refresh,
+        };
+        // A session is capped at the ID token's expiry, except while the provider's
+        // grant is kept: then the provider ends the sign-in when it ends the grant.
+        let lifetime = match auth.grants {
+            Some(_) => auth.config.session_hours as i64 * 3600,
+            None => (claims.expiration() - Utc::now())
+                .num_seconds()
+                .min(auth.config.session_hours as i64 * 3600),
+        };
+        if lifetime <= 0 {
+            return Err(ApiError::unauthorized());
+        }
+        let name = claims
+            .name()
+            .and_then(|n| n.get(None))
+            .map(|name| name.as_str())
+            .or_else(|| claims.preferred_username().map(|name| name.as_str()))
+            .unwrap_or("OIDC user");
+        let display_name = validate_display_name(name).unwrap_or_else(|_| "OIDC user".into());
+        let mut tx = auth.pool.begin().await?;
+        // Serialize provisioning for this issuer/subject, including the first sign-in.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("oidc:{}:{subject}", provider.config.issuer))
+            .execute(&mut *tx)
             .await?;
+        let existing = sqlx::query_as::<_, PasswordUser>(
+            "SELECT u.id, u.username, u.display_name, u.role, u.password_hash, u.enabled, u.password_change_required FROM oidc_identities o \
+             JOIN users u ON u.id = o.user_id WHERE o.issuer = $1 AND o.subject = $2 FOR UPDATE OF u"
+        ).bind(&provider.config.issuer).bind(subject).fetch_optional(&mut *tx).await?;
+        let identity = match existing {
+            Some(user) if user.enabled => user.identity(),
+            Some(_) => return Err(ApiError::forbidden()),
+            None if !provider.config.allow_signup => {
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    "This OIDC identity has not been provisioned; contact your administrator".into(),
+                ))
+            }
+            None => {
+                let id = Uuid::new_v4();
+                // Names and emails from the IdP cannot claim an existing local account.
+                let identity = sqlx::query_as::<_, Identity>("INSERT INTO users (id, username, display_name, role) VALUES ($1, $2, $3, $4) RETURNING id, username, display_name, role")
+                    .bind(id).bind(format!("oidc_{}", id.simple())).bind(display_name).bind(Role::User).fetch_one(&mut *tx).await?;
+                sqlx::query(
+                    "INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3)",
+                )
+                .bind(&provider.config.issuer)
+                .bind(subject)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+                auth.group_policy.initial(&mut tx, identity.id).await?;
+                identity
+            }
+        };
+        auth.group_policy
+            .reconcile(&mut tx, identity.id, &mapped_groups)
+            .await?;
+        if let Some(old) = auth.session_token(&headers) {
+            sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")
+                .bind(digest(&old))
+                .execute(&mut *tx)
+                .await?;
+        }
+        let token = random_token();
+        let session = auth
+            .insert_session(&mut tx, identity.id, &token, lifetime, &headers, true)
+            .await?;
+        if let (Some(grants), Some(refresh)) = (&auth.grants, refresh) {
+            grants
+                .store(
+                    &mut tx,
+                    identity.id,
+                    session,
+                    subject,
+                    tokens.access_token(),
+                    refresh,
+                    tokens.expires_in(),
+                )
+                .await?;
+        }
+        tx.commit().await?;
+        auth.after_sign_out();
+        let mut response = Redirect::to("/").into_response();
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            auth.cookie(auth.session_cookie_name(), &token, lifetime),
+        );
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            auth.cookie(auth.oidc_cookie_name(), "", 0),
+        );
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+            .headers_mut()
+            .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+        Ok(response)
     }
-    tx.commit().await?;
-    auth.after_sign_out();
-    let mut response = Redirect::to("/").into_response();
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        auth.cookie(auth.session_cookie_name(), &token, lifetime),
-    );
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        auth.cookie(auth.oidc_cookie_name(), "", 0),
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
-        .headers_mut()
-        .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    Ok(response)
+    .await;
+    // The exchange made a grant at the provider (some providers also register a
+    // device and tell the person). When this sign-in then failed, revoke its
+    // refresh token so no live grant is left behind.
+    if outcome.is_err() {
+        if let Some(refresh) = tokens.refresh_token() {
+            let (provider, token) = (provider.clone(), refresh.secret().clone());
+            tokio::spawn(async move {
+                if !provider.revoke(&token).await {
+                    tracing::warn!("could not revoke the grant of a failed sign-in");
+                }
+            });
+        }
+    }
+    outcome
 }

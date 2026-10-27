@@ -489,6 +489,7 @@ async fn identity(pool: &PgPool, id: Uuid) -> anyhow::Result<Identity> {
         } else {
             Role::User
         },
+        session: None,
     })
 }
 

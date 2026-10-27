@@ -200,6 +200,8 @@ async fn identity(s: &AppState, user: Uuid) -> Result<Option<Identity>, sqlx::Er
         username,
         display_name,
         role,
+        // Auto mode runs on its own, without a sign-in.
+        session: None,
     }))
 }
 

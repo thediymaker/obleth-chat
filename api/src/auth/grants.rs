@@ -13,6 +13,15 @@ const SEALED: u8 = 1;
 const REFRESH_MARGIN_SECS: f64 = 60.0;
 /// Assumed lifetime of an access token the provider gave no expiry for.
 const DEFAULT_LIFETIME: Duration = Duration::from_secs(300);
+/// How long one replica may hold a grant's refresh before others take over:
+/// discovery and two token requests, with room to spare.
+const LEASE: Duration = Duration::from_secs(60);
+/// How long after its access token expired a sign-in is still trusted when the
+/// provider can't be asked.
+const UNCONFIRMED_GRACE: Duration = Duration::from_secs(15 * 60);
+/// The columns of a GrantRow, from `oidc_grants g`; $3 is the refresh margin.
+const COLUMNS: &str = "g.id, g.user_id, g.session_id, g.access_token, g.refresh_token, \
+     g.access_expires_at > NOW() + make_interval(secs => $3) AS fresh";
 /// Revocations tried this many times are dropped; the token expires on its own.
 const REVOKE_ATTEMPTS: i32 = 5;
 
@@ -37,6 +46,19 @@ impl ProviderToken {
     }
 }
 
+impl From<String> for ProviderToken {
+    fn from(token: String) -> Self {
+        Self(token)
+    }
+}
+
+fn unavailable() -> ApiError {
+    ApiError(
+        StatusCode::BAD_GATEWAY,
+        "The identity provider is unavailable; try again shortly".into(),
+    )
+}
+
 /// No live grant is left for someone who signs in with the provider.
 pub fn sign_in_again() -> ApiError {
     ApiError(StatusCode::UNAUTHORIZED, SIGN_IN_AGAIN.into())
@@ -51,6 +73,14 @@ struct GrantRow {
     access_token: Vec<u8>,
     refresh_token: Vec<u8>,
     fresh: bool,
+}
+
+#[derive(FromRow)]
+struct LeasedRow {
+    #[sqlx(flatten)]
+    grant: GrantRow,
+    /// Whether a replica holds the grant's refresh lease.
+    leased: bool,
 }
 
 #[derive(FromRow)]
@@ -124,10 +154,18 @@ impl Grants {
 
     /// The access token a gateway call for `user` carries. None for someone without
     /// an identity at this provider, such as a local password account. Someone with
-    /// one only ever gets their own token: their most recently refreshed live grant,
-    /// refreshed first when it is about to expire. A grant the provider refuses ends
-    /// its sign-in and the next one is tried; with none left, they must sign in again.
-    pub async fn access_token(&self, user: Uuid) -> Result<Option<ProviderToken>, ApiError> {
+    /// one only ever gets their own token. A call from a sign-in that has a grant
+    /// (a browser session, or an API token made in one) uses that grant alone, so
+    /// ending one sign-in at the provider ends it in Chat too. Other calls, such as
+    /// Auto mode and Knowledge indexing, use the most recently refreshed live grant.
+    /// A grant is refreshed first when it is about to expire; one the provider
+    /// refuses ends its sign-in, and then the call must sign in again or, for work
+    /// without a sign-in of its own, tries the next grant.
+    pub async fn access_token(
+        &self,
+        user: Uuid,
+        session: Option<Uuid>,
+    ) -> Result<Option<ProviderToken>, ApiError> {
         let linked: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM oidc_identities WHERE user_id = $1 AND issuer = $2)",
         )
@@ -138,91 +176,210 @@ impl Grants {
         if !linked {
             return Ok(None);
         }
+        if let Some(session) = session {
+            let own = sqlx::query_as::<_, GrantRow>(&format!(
+                "SELECT {COLUMNS} FROM oidc_grants g JOIN auth_sessions s ON s.id = g.session_id \
+                 WHERE g.session_id = $1 AND g.user_id = $2 AND g.issuer = $4 AND s.expires_at > NOW()"
+            ))
+            .bind(session)
+            .bind(user)
+            .bind(REFRESH_MARGIN_SECS)
+            .bind(&self.issuer)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(grant) = own {
+                return match self.current(&grant).await? {
+                    Some(token) => Ok(Some(token)),
+                    None => Err(sign_in_again()),
+                };
+            }
+        }
         loop {
-            let grant = sqlx::query_as::<_, GrantRow>(
-                "SELECT g.id, g.user_id, g.session_id, g.access_token, g.refresh_token, \
-                 g.access_expires_at > NOW() + make_interval(secs => $3) AS fresh \
-                 FROM oidc_grants g JOIN auth_sessions s ON s.id = g.session_id \
+            let grant = sqlx::query_as::<_, GrantRow>(&format!(
+                "SELECT {COLUMNS} FROM oidc_grants g JOIN auth_sessions s ON s.id = g.session_id \
                  WHERE g.user_id = $1 AND g.issuer = $2 AND s.expires_at > NOW() \
-                 ORDER BY g.refreshed_at DESC, g.id LIMIT 1",
-            )
+                 ORDER BY g.refreshed_at DESC, g.id LIMIT 1"
+            ))
             .bind(user)
             .bind(&self.issuer)
             .bind(REFRESH_MARGIN_SECS)
             .fetch_optional(&self.pool)
             .await?
             .ok_or_else(sign_in_again)?;
-            if grant.fresh {
-                if let Some(token) = self.open("access", grant.id, user, &grant.access_token) {
-                    return Ok(Some(ProviderToken(token)));
-                }
-            }
-            if let Some(token) = self.refresh(grant.id).await? {
+            if let Some(token) = self.current(&grant).await? {
                 return Ok(Some(token));
             }
         }
     }
 
-    /// Refreshes one grant while holding its row lock, so replicas never present
-    /// the same refresh token twice: the provider would take that as theft. Returns
-    /// None when the grant has ended, so the caller tries the next one.
-    async fn refresh(&self, id: Uuid) -> Result<Option<ProviderToken>, ApiError> {
-        let mut tx = self.pool.begin().await?;
-        let Some(grant) = sqlx::query_as::<_, GrantRow>(
-            "SELECT id, user_id, session_id, access_token, refresh_token, \
-             access_expires_at > NOW() + make_interval(secs => $2) AS fresh \
-             FROM oidc_grants WHERE id = $1 FOR UPDATE",
+    /// Whether the sign-in behind `session` still holds its grant. Chat checks on
+    /// each request once the access token has expired, so the provider ending the
+    /// grant ends the sign-in; a refused grant ends the session. A provider that
+    /// can't answer is trusted for a short while after the token expired.
+    pub async fn confirm(&self, session: Uuid) -> Result<bool, ApiError> {
+        let Some((id, expired, recent)) = sqlx::query_as::<_, (Uuid, bool, bool)>(
+            "SELECT id, access_expires_at <= NOW(), access_expires_at > NOW() - make_interval(secs => $3) \
+             FROM oidc_grants WHERE session_id = $1 AND issuer = $2",
         )
-        .bind(id)
-        .bind(REFRESH_MARGIN_SECS)
-        .fetch_optional(&mut *tx)
+        .bind(session)
+        .bind(&self.issuer)
+        .bind(UNCONFIRMED_GRACE.as_secs_f64())
+        .fetch_optional(&self.pool)
         .await?
         else {
-            return Ok(None);
+            return Ok(true);
         };
-        let user = grant.user_id;
-        // Another replica may have refreshed it while this one waited for the lock.
+        if !expired {
+            return Ok(true);
+        }
+        match self.refresh(id).await {
+            Ok(token) => Ok(token.is_some()),
+            Err(_) if recent => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The grant's access token, refreshed first when it is about to expire. None
+    /// when the grant has ended.
+    async fn current(&self, grant: &GrantRow) -> Result<Option<ProviderToken>, ApiError> {
         if grant.fresh {
-            if let Some(token) = self.open("access", grant.id, user, &grant.access_token) {
-                tx.commit().await?;
-                return Ok(Some(ProviderToken(token)));
+            if let Some(token) = self.open("access", grant.id, grant.user_id, &grant.access_token) {
+                return Ok(Some(token.into()));
             }
         }
+        self.refresh(grant.id).await
+    }
+
+    /// Refreshes one grant. The work runs in its own task, so a caller that goes
+    /// away (a closed tab, a stopped chat, a timeout) can't stop it between the
+    /// provider rotating the refresh token and Chat saving the new one.
+    async fn refresh(&self, id: Uuid) -> Result<Option<ProviderToken>, ApiError> {
+        let grants = self.clone();
+        tokio::spawn(async move { grants.refresh_now(id).await })
+            .await
+            .map_err(|_| ApiError::internal())?
+    }
+
+    /// Refreshes one grant under a lease, so replicas never present the same
+    /// refresh token twice: the provider would take that as theft. The lease is a
+    /// column, not a row lock, so no database connection is held while the provider
+    /// answers; others wait for the lease holder by polling. Returns None when the
+    /// grant has ended.
+    async fn refresh_now(&self, id: Uuid) -> Result<Option<ProviderToken>, ApiError> {
+        let waited_until = tokio::time::Instant::now() + LEASE + Duration::from_secs(5);
+        let mut waited = false;
+        let grant = loop {
+            let claimed = sqlx::query_as::<_, GrantRow>(
+                "UPDATE oidc_grants SET refreshing_until = NOW() + make_interval(secs => $3) \
+                 WHERE id = $1 AND access_expires_at <= NOW() + make_interval(secs => $2) \
+                 AND (refreshing_until IS NULL OR refreshing_until <= NOW()) \
+                 RETURNING id, user_id, session_id, access_token, refresh_token, FALSE AS fresh",
+            )
+            .bind(id)
+            .bind(REFRESH_MARGIN_SECS)
+            .bind(LEASE.as_secs_f64())
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(grant) = claimed {
+                break grant;
+            }
+            let Some(LeasedRow { grant, leased }) = sqlx::query_as::<_, LeasedRow>(
+                "SELECT id, user_id, session_id, access_token, refresh_token, \
+                 access_expires_at > NOW() + make_interval(secs => $2) AS fresh, \
+                 COALESCE(refreshing_until > NOW(), FALSE) AS leased FROM oidc_grants WHERE id = $1",
+            )
+            .bind(id)
+            .bind(REFRESH_MARGIN_SECS)
+            .fetch_optional(&self.pool)
+            .await?
+            else {
+                return Ok(None);
+            };
+            // Another replica may have refreshed it meanwhile.
+            if grant.fresh {
+                if let Some(token) =
+                    self.open("access", grant.id, grant.user_id, &grant.access_token)
+                {
+                    return Ok(Some(token.into()));
+                }
+                // Not due for a refresh, so it can't be claimed, and unreadable.
+                tracing::warn!("a stored sign-in could not be decrypted; ending it");
+                let mut tx = self.pool.begin().await?;
+                self.end(&mut tx, &grant, "unreadable").await?;
+                tx.commit().await?;
+                return Ok(None);
+            }
+            if leased {
+                if tokio::time::Instant::now() >= waited_until {
+                    return Err(unavailable());
+                }
+                waited = true;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+            // The lease holder gave up without a new token: the provider is down.
+            if waited {
+                return Err(unavailable());
+            }
+        };
+        let user = grant.user_id;
         let Some(refresh) = self.open("refresh", grant.id, user, &grant.refresh_token) else {
             tracing::warn!("a stored sign-in could not be decrypted; ending it");
+            let mut tx = self.pool.begin().await?;
             self.end(&mut tx, &grant, "unreadable").await?;
             tx.commit().await?;
             return Ok(None);
         };
-        match self.oidc.refresh(&refresh).await {
+        let mut result = self.oidc.refresh(&refresh).await;
+        // When no answer arrived the provider may have rotated the token anyway. Try
+        // again at once, inside the window in which it still takes the old token.
+        if matches!(result, Err(RefreshFailure::Unanswered)) {
+            result = self.oidc.refresh(&refresh).await;
+        }
+        match result {
             Ok(refreshed) => {
                 let next = refreshed
                     .refresh
                     .as_ref()
                     .map(|token| token.secret().as_str())
                     .unwrap_or(&refresh);
-                sqlx::query(
+                let saved = sqlx::query(
                     "UPDATE oidc_grants SET access_token = $2, refresh_token = $3, \
-                     access_expires_at = NOW() + make_interval(secs => $4), refreshed_at = NOW() WHERE id = $1",
+                     access_expires_at = NOW() + make_interval(secs => $4), refreshed_at = NOW(), \
+                     refreshing_until = NULL WHERE id = $1 AND refresh_token = $5",
                 )
                 .bind(grant.id)
                 .bind(self.seal("access", grant.id, user, refreshed.access.secret()))
                 .bind(self.seal("refresh", grant.id, user, next))
                 .bind(lifetime(refreshed.expires_in))
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
+                .bind(&grant.refresh_token)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+                if saved == 0 {
+                    // The sign-in ended while the provider answered: its old token is
+                    // queued for revocation, and the new one goes too.
+                    if let Some(token) = refreshed.refresh {
+                        let oidc = self.oidc.clone();
+                        tokio::spawn(async move { oidc.revoke(token.secret()).await });
+                    }
+                    return Ok(None);
+                }
                 Ok(Some(ProviderToken(refreshed.access.secret().clone())))
             }
             Err(RefreshFailure::Rejected) => {
+                let mut tx = self.pool.begin().await?;
                 self.end(&mut tx, &grant, "refused").await?;
                 tx.commit().await?;
                 Ok(None)
             }
-            Err(RefreshFailure::Unavailable) => Err(ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The identity provider is unavailable; try again shortly".into(),
-            )),
+            Err(RefreshFailure::Unavailable | RefreshFailure::Unanswered) => {
+                sqlx::query("UPDATE oidc_grants SET refreshing_until = NULL WHERE id = $1")
+                    .bind(grant.id)
+                    .execute(&self.pool)
+                    .await?;
+                Err(unavailable())
+            }
         }
     }
 

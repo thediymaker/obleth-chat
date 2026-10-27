@@ -260,6 +260,28 @@ impl Connections {
         Ok(moved)
     }
 
+    /// While both keys are set, moves tokens to the secret key every few minutes.
+    /// During a rolling update, replicas still running a release without the secret
+    /// key keep sealing with the signing key, so one pass at startup is not enough.
+    pub async fn reseal_worker(self, shutdown: tokio_util::sync::CancellationToken) {
+        if self.secret.is_none() || self.legacy.is_none() {
+            return;
+        }
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+            }
+            match self.reseal().await {
+                Ok(0) => {}
+                Ok(moved) => tracing::info!(moved, "connection tokens moved to the secret key"),
+                Err(error) => {
+                    tracing::warn!("could not move connection tokens to the secret key: {error:#}")
+                }
+            }
+        }
+    }
+
     /// Lets people switch a chat to Auto mode (the default) or not.
     pub fn auto_mode(mut self, allowed: bool) -> Self {
         self.auto_mode = allowed;

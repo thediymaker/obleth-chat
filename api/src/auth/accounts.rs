@@ -740,8 +740,8 @@ async fn activate(
             .await?;
     }
     let token = random_token();
-    let lifetime = auth.config.session_hours as i64 * 3600;
-    auth.insert_session(&mut tx, user.id, &token, lifetime, &headers)
+    let lifetime = auth.password_session_lifetime();
+    auth.insert_session(&mut tx, user.id, &token, lifetime, &headers, false)
         .await?;
     record_audit(
         &mut tx,

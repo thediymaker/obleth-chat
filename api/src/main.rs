@@ -62,6 +62,9 @@ async fn main() -> Result<()> {
         Ok(sandbox_config) => {
             let sandboxes =
                 obleth_chat::sandbox::Sandboxes::new(sandbox_config.clone(), pool.clone())?;
+            if let Some(grants) = state.auth.grants() {
+                sandboxes.follow_grants(grants);
+            }
             // Missing permissions turn workspaces off and say why; an API that doesn't
             // answer yet leaves them on, to fail with its own error when used.
             match sandboxes.check_access().await {
@@ -127,6 +130,7 @@ async fn main() -> Result<()> {
                 tracing::warn!("could not move connection tokens to the secret key: {error:#}")
             }
         }
+        tokio::spawn(connections.clone().reseal_worker(state.shutdown.clone()));
         state.connections = Some(connections);
         tracing::info!(
             clusters = config.connections == ConnectionsMode::All,

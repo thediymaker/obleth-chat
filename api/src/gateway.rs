@@ -168,7 +168,7 @@ impl Gateway {
         user: &Identity,
     ) -> Result<reqwest::header::HeaderValue, ApiError> {
         if let Some(grants) = &self.grants {
-            if let Some(token) = grants.access_token(user.id).await? {
+            if let Some(token) = grants.access_token(user.id, user.session).await? {
                 return token.authorization();
             }
         }

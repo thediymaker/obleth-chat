@@ -71,9 +71,12 @@ impl Auth {
              last_used_at = NOW() \
              FROM users u WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND t.expires_at > NOW() \
              AND u.id = t.user_id AND u.enabled AND NOT u.password_change_required \
-             RETURNING t.id AS token_id, t.scopes, t.window_calls, u.id, u.username, u.display_name, u.role",
+             AND (t.single_sign_on OR $2) \
+             RETURNING t.id AS token_id, t.scopes, t.window_calls, u.id, u.username, u.display_name, u.role, \
+             t.session_id AS session",
         )
         .bind(digest(&format!("{MARKER}{secret}")))
+        .bind(self.config.password_sign_in)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
@@ -83,6 +86,9 @@ impl Auth {
                 "This token is making too many calls. Wait a minute and try again.".into(),
             ));
         }
+        // A token lasts no longer than the provider grant of the sign-in it was
+        // made in, while that sign-in is live.
+        self.confirm_grant(row.user.session).await?;
         Ok(TokenUser {
             id: row.token_id,
             user: row.user,
@@ -180,8 +186,9 @@ async fn create(
     let token = format!("{MARKER}{secret}");
     let id = Uuid::new_v4();
     let view = sqlx::query_as::<_, TokenView>(&format!(
-        "INSERT INTO api_tokens(id,user_id,name,token_hash,prefix,scopes,expires_at,session_id) \
-         VALUES($1,$2,$3,$4,$5,$6,NOW() + make_interval(days => $7),$8) RETURNING {VIEW}"
+        "INSERT INTO api_tokens(id,user_id,name,token_hash,prefix,scopes,expires_at,session_id,single_sign_on) \
+         VALUES($1,$2,$3,$4,$5,$6,NOW() + make_interval(days => $7),$8, \
+         COALESCE((SELECT single_sign_on FROM auth_sessions WHERE id=$8), FALSE)) RETURNING {VIEW}"
     ))
     .bind(id)
     .bind(user.id)

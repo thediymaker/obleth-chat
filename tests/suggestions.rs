@@ -127,6 +127,7 @@ async fn seed(pool: &PgPool) -> (Identity, Uuid, Uuid) {
             username: name,
             display_name: "Suggestions test".into(),
             role: Role::User,
+            session: None,
         },
         conversation,
         answer,

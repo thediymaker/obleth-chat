@@ -81,6 +81,7 @@ async fn person(pool: &PgPool, name: &str) -> Identity {
         username: name.to_lowercase(),
         display_name: name.into(),
         role: Role::User,
+        session: None,
     }
 }
 

@@ -12,7 +12,10 @@ CREATE TABLE oidc_grants (
     refresh_token BYTEA NOT NULL CHECK (OCTET_LENGTH(refresh_token) <= 16384),
     access_expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- While set and in the future, one replica is refreshing this grant; the others
+    -- wait for it instead of presenting the same refresh token.
+    refreshing_until TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX oidc_grants_session_idx ON oidc_grants(session_id);
 CREATE INDEX oidc_grants_user_idx ON oidc_grants(user_id, refreshed_at DESC);
@@ -40,3 +43,14 @@ END
 $$;
 CREATE TRIGGER oidc_grants_ended AFTER DELETE ON oidc_grants
     FOR EACH ROW EXECUTE FUNCTION oidc_grant_ended();
+
+-- Whether a session, and an API token made in one, began with single sign-on.
+-- With passwords off, only those keep working. Someone without a password can
+-- only have signed in with single sign-on; everyone else's existing sessions and
+-- tokens count as password ones.
+ALTER TABLE auth_sessions ADD COLUMN single_sign_on BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE api_tokens ADD COLUMN single_sign_on BOOLEAN NOT NULL DEFAULT FALSE;
+UPDATE auth_sessions s SET single_sign_on = TRUE FROM users u
+    WHERE u.id = s.user_id AND u.password_hash IS NULL;
+UPDATE api_tokens t SET single_sign_on = TRUE FROM users u
+    WHERE u.id = t.user_id AND u.password_hash IS NULL;

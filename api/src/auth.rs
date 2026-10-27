@@ -91,6 +91,9 @@ pub struct OidcConfig {
     pub scopes: Vec<String>,
 }
 
+/// Longest session that does not follow a provider grant.
+pub const PASSWORD_SESSION_HOURS: u32 = 168;
+
 /// The scopes Chat asks for when OBLETH_CHAT_OIDC_SCOPES is not set.
 pub const DEFAULT_OIDC_SCOPES: &str = "openid profile";
 
@@ -169,8 +172,13 @@ impl AuthConfig {
         }
         self.origin = url.origin().ascii_serialization();
         // With forwarded tokens the provider ends a sign-in whenever it ends the
-        // grant, so a session may be set to last much longer.
-        let max_hours = if self.forward_tokens { 8760 } else { 168 };
+        // grant, so those sessions may be set to last much longer. Password
+        // sessions stay capped at PASSWORD_SESSION_HOURS either way.
+        let max_hours = if self.forward_tokens {
+            8760
+        } else {
+            PASSWORD_SESSION_HOURS
+        };
         if !(1..=max_hours).contains(&self.session_hours) {
             bail!("OBLETH_CHAT_SESSION_HOURS must be between 1 and {max_hours}");
         }
@@ -348,6 +356,11 @@ pub struct Identity {
     pub username: String,
     pub display_name: String,
     pub role: Role,
+    /// The browser session a request came from, or the one an API token was made
+    /// in. Gateway calls carry that sign-in's own provider token. Never serialized.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub session: Option<Uuid>,
 }
 
 impl Identity {
@@ -381,6 +394,7 @@ impl PasswordUser {
             username: self.username.clone(),
             display_name: self.display_name.clone(),
             role: self.role,
+            session: None,
         }
     }
 }
@@ -440,6 +454,29 @@ impl Auth {
                     "passwords are off; no account waits on a password change"
                 );
             }
+            // Sign-ins made with a password, and the API tokens made in them, end
+            // too. Requests also refuse them, for any a replica that still allows
+            // passwords makes during a rolling update.
+            let mut tx = auth.pool.begin().await?;
+            let sessions = sqlx::query("DELETE FROM auth_sessions WHERE NOT single_sign_on")
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            let tokens = sqlx::query(
+                "UPDATE api_tokens SET revoked_at = NOW() WHERE NOT single_sign_on AND revoked_at IS NULL",
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            tx.commit().await?;
+            if sessions + tokens > 0 {
+                tracing::info!(
+                    sessions,
+                    tokens,
+                    "passwords are off; password sign-ins ended"
+                );
+                auth.after_sign_out();
+            }
         }
         if let Some(config) = Arc::get_mut(&mut auth.config) {
             config.bootstrap_username = None;
@@ -463,6 +500,14 @@ impl Auth {
         if let Some(grants) = self.grants.clone() {
             tokio::spawn(async move { grants.revoke_ended().await });
         }
+    }
+
+    /// Seconds a session lasts when it did not begin with the identity provider.
+    /// Only a sign-in whose grant Chat keeps may last longer than the 168 hours
+    /// sessions were always capped at: the provider ends that one when it ends the
+    /// grant, while nothing outside Chat ends a password session.
+    fn password_session_lifetime(&self) -> i64 {
+        self.config.session_hours.min(PASSWORD_SESSION_HOURS) as i64 * 3600
     }
 
     /// Whether people may sign in with, set or reset a password.
@@ -526,12 +571,14 @@ impl Auth {
         let token = self
             .session_token(headers)
             .ok_or_else(ApiError::unauthorized)?;
+        // With passwords off, only sessions that began with single sign-on count.
         let identity = sqlx::query_as::<_, SessionIdentity>(
-            "SELECT u.id, u.username, u.display_name, u.role, u.password_change_required FROM auth_sessions s \
+            "SELECT u.id, u.username, u.display_name, u.role, s.id AS session, u.password_change_required FROM auth_sessions s \
              JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 \
-             AND s.expires_at > NOW() AND u.enabled = TRUE",
+             AND s.expires_at > NOW() AND u.enabled = TRUE AND (s.single_sign_on OR $2)",
         )
         .bind(digest(&token))
+        .bind(self.config.password_sign_in)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
@@ -553,7 +600,25 @@ impl Auth {
                 "Change your password before continuing".into(),
             ));
         }
+        self.confirm_grant(identity.user.session).await?;
         Ok(identity.user)
+    }
+
+    /// In forward mode a sign-in lasts only as long as the provider keeps its grant:
+    /// once the access token has expired, the next request refreshes it, and a
+    /// refused grant ends the session (and the API tokens made in it) right away.
+    /// Only activity refreshes, so the provider's idle expiry still applies.
+    pub(crate) async fn confirm_grant(&self, session: Option<Uuid>) -> Result<(), ApiError> {
+        match (&self.grants, session) {
+            (Some(grants), Some(session)) => {
+                if grants.confirm(session).await? {
+                    Ok(())
+                } else {
+                    Err(ApiError::unauthorized())
+                }
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) async fn require_admin(
@@ -830,6 +895,7 @@ impl Auth {
         token: &str,
         lifetime: i64,
         headers: &HeaderMap,
+        single_sign_on: bool,
     ) -> Result<Uuid, ApiError> {
         sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= NOW()")
             .execute(&mut **tx)
@@ -844,8 +910,8 @@ impl Auth {
             .filter(|c| !c.is_control())
             .take(256)
             .collect::<String>();
-        Ok(sqlx::query_scalar("INSERT INTO auth_sessions (token_hash, user_id, expires_at, user_agent) VALUES ($1, $2, NOW() + make_interval(secs => $3), $4) RETURNING id")
-            .bind(digest(token)).bind(user_id).bind(lifetime as f64).bind(user_agent).fetch_one(&mut **tx).await?)
+        Ok(sqlx::query_scalar("INSERT INTO auth_sessions (token_hash, user_id, expires_at, user_agent, single_sign_on) VALUES ($1, $2, NOW() + make_interval(secs => $3), $4, $5) RETURNING id")
+            .bind(digest(token)).bind(user_id).bind(lifetime as f64).bind(user_agent).bind(single_sign_on).fetch_one(&mut **tx).await?)
     }
 }
 
@@ -1118,7 +1184,7 @@ fn random_token() -> String {
 /// revocation and disabling the account end it.
 pub(crate) async fn session_owner(pool: &PgPool, id: Uuid) -> Result<Option<Identity>, ApiError> {
     Ok(sqlx::query_as::<_, Identity>(
-        "SELECT u.id, u.username, u.display_name, u.role FROM auth_sessions s \
+        "SELECT u.id, u.username, u.display_name, u.role, s.id AS session FROM auth_sessions s \
          JOIN users u ON u.id = s.user_id WHERE s.id = $1 \
          AND s.expires_at > NOW() AND u.enabled = TRUE AND NOT u.password_change_required",
     )
@@ -1304,8 +1370,8 @@ async fn login(
             .await?;
     }
     let token = random_token();
-    let lifetime = auth.config.session_hours as i64 * 3600;
-    auth.insert_session(&mut tx, user.id, &token, lifetime, &headers)
+    let lifetime = auth.password_session_lifetime();
+    auth.insert_session(&mut tx, user.id, &token, lifetime, &headers, false)
         .await?;
     tx.commit().await?;
     auth.after_sign_out();
@@ -1384,8 +1450,8 @@ async fn change_password(
         .await?;
     end_sign_ins(&mut tx, identity.id).await?;
     let token = random_token();
-    let lifetime = auth.config.session_hours as i64 * 3600;
-    auth.insert_session(&mut tx, identity.id, &token, lifetime, &headers)
+    let lifetime = auth.password_session_lifetime();
+    auth.insert_session(&mut tx, identity.id, &token, lifetime, &headers, false)
         .await?;
     sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
         .bind(identity.id)
@@ -1656,6 +1722,23 @@ async fn link_oidc_identity(
             .await?;
     if user.is_none() {
         return Err(ApiError::not_found());
+    }
+    // When gateway calls carry provider tokens, an account with two identities at
+    // the provider would send one person's calls with the other's token.
+    if auth.grants.is_some() {
+        let linked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM oidc_identities WHERE user_id = $1 AND issuer = $2)",
+        )
+        .bind(input.user_id)
+        .bind(&provider.issuer)
+        .fetch_one(&mut *tx)
+        .await?;
+        if linked {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "This account is already linked to a single sign-on identity".into(),
+            ));
+        }
     }
     let inserted = sqlx::query("INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3) ON CONFLICT (issuer, subject) DO NOTHING")
         .bind(&provider.issuer).bind(&input.subject).bind(input.user_id).execute(&mut *tx).await?.rows_affected();

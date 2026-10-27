@@ -87,6 +87,9 @@ pub struct OidcConfig {
     pub client_id: String,
     pub client_secret: String,
     pub allow_signup: bool,
+    /// Name accounts after the provider's `preferred_username` when it is free. Only
+    /// for providers that assign usernames themselves and never reuse them.
+    pub provider_usernames: bool,
     /// Requested scopes; always includes `openid`.
     pub scopes: Vec<String>,
 }
@@ -124,14 +127,24 @@ impl AuthConfig {
         let client_secret = optional_env("OBLETH_CHAT_OIDC_CLIENT_SECRET");
         let allow_signup = optional_env("OBLETH_CHAT_OIDC_ALLOW_SIGNUP");
         let scopes = optional_env("OBLETH_CHAT_OIDC_SCOPES");
+        let provider_usernames = optional_env("OBLETH_CHAT_OIDC_PROVIDER_USERNAMES");
         let oidc = match (issuer, client_id, client_secret) {
-            (None, None, None) if allow_signup.is_none() && scopes.is_none() => None,
+            (None, None, None)
+                if allow_signup.is_none() && scopes.is_none() && provider_usernames.is_none() =>
+            {
+                None
+            }
             (Some(issuer), Some(client_id), Some(client_secret)) => Some(OidcConfig {
                 issuer, client_id, client_secret,
                 allow_signup: match allow_signup.as_deref().unwrap_or("false") {
                     "true" => true,
                     "false" => false,
                     _ => bail!("OBLETH_CHAT_OIDC_ALLOW_SIGNUP must be true or false"),
+                },
+                provider_usernames: match provider_usernames.as_deref().unwrap_or("false") {
+                    "true" => true,
+                    "false" => false,
+                    _ => bail!("OBLETH_CHAT_OIDC_PROVIDER_USERNAMES must be true or false"),
                 },
                 scopes: parse_scopes(scopes.as_deref().unwrap_or(DEFAULT_OIDC_SCOPES))?,
             }),
@@ -1737,6 +1750,11 @@ async fn link_oidc_identity(
     }
     let mut tx = auth.pool.begin().await?;
     auth.lock_admin(&mut tx, admin.id).await?;
+    // The same lock as a first sign-in for this identity, so the two never race.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("oidc:{}:{}", provider.issuer, input.subject))
+        .execute(&mut *tx)
+        .await?;
     let user: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM users WHERE id = $1 AND enabled FOR UPDATE")
             .bind(input.user_id)

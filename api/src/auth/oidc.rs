@@ -444,6 +444,88 @@ struct OidcTransaction {
     pkce_verifier: String,
 }
 
+/// The username Chat makes up when the provider's is missing, invalid or taken.
+fn generated_username(id: Uuid) -> String {
+    format!("oidc_{}", id.simple())
+}
+
+/// Renames the account to `name` if no other account has it, recording whether the
+/// name came from the provider. A savepoint keeps a name taken at the same moment
+/// from failing the whole sign-in.
+pub(super) async fn take_username(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    name: &str,
+    from_provider: bool,
+) -> Result<Option<String>, ApiError> {
+    let mut savepoint = sqlx::Acquire::begin(&mut **tx).await?;
+    let renamed = sqlx::query_scalar::<_, String>(
+        "UPDATE users SET username = $2, username_from_provider = $3, updated_at = NOW() \
+         WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM users WHERE username = $2 AND id <> $1) \
+         RETURNING username",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(from_provider)
+    .fetch_optional(&mut *savepoint)
+    .await;
+    match renamed {
+        Ok(renamed) => {
+            savepoint.commit().await?;
+            Ok(renamed)
+        }
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            savepoint.rollback().await?;
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Keeps a username that came from the provider equal to the provider's current one,
+/// and gives an account still on its generated name the provider's once it is free.
+/// When another account holds the provider's name, or the provider no longer sends a
+/// usable one, a provider-derived name goes back to a generated one rather than keep
+/// showing a name the provider no longer gives this person. Names an administrator or
+/// bootstrap chose are left alone.
+async fn follow_provider_username(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    identity: &mut Identity,
+    issuer: &str,
+    name: Option<&str>,
+) -> Result<(), ApiError> {
+    let (from_provider, identities): (bool, i64) = sqlx::query_as(
+        "SELECT u.username_from_provider, \
+         (SELECT COUNT(*) FROM oidc_identities o WHERE o.user_id = u.id AND o.issuer = $2) \
+         FROM users u WHERE u.id = $1",
+    )
+    .bind(identity.id)
+    .bind(issuer)
+    .fetch_one(&mut **tx)
+    .await?;
+    // An account linked to two identities at the provider would swap between their
+    // names on every sign-in.
+    if identities != 1 {
+        return Ok(());
+    }
+    let generated = generated_username(identity.id);
+    let renamed = match name {
+        Some(name) if identity.username == name => None,
+        Some(name) if from_provider || identity.username == generated => {
+            match take_username(tx, identity.id, name, true).await? {
+                None if from_provider => take_username(tx, identity.id, &generated, false).await?,
+                renamed => renamed,
+            }
+        }
+        None if from_provider => take_username(tx, identity.id, &generated, false).await?,
+        _ => None,
+    };
+    if let Some(renamed) = renamed {
+        identity.username = renamed;
+    }
+    Ok(())
+}
+
 pub(super) async fn callback(
     State(auth): State<Auth>,
     headers: HeaderMap,
@@ -559,6 +641,15 @@ pub(super) async fn callback(
             .or_else(|| claims.preferred_username().map(|name| name.as_str()))
             .unwrap_or("OIDC user");
         let display_name = validate_display_name(name).unwrap_or_else(|_| "OIDC user".into());
+        // With provider usernames on, the provider's username names the account when
+        // it is valid and free. The oidc_ prefix stays reserved for the names Chat
+        // makes up.
+        let provider_username = claims
+            .preferred_username()
+            .filter(|_| provider.config.provider_usernames)
+            .and_then(|name| normalize_username(name.as_str()).ok())
+            .filter(|name| !name.starts_with("oidc_"));
+        let follow_provider = provider.config.provider_usernames;
         let mut tx = auth.pool.begin().await?;
         // Serialize provisioning for this issuer/subject, including the first sign-in.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -570,7 +661,19 @@ pub(super) async fn callback(
              JOIN users u ON u.id = o.user_id WHERE o.issuer = $1 AND o.subject = $2 FOR UPDATE OF u"
         ).bind(&provider.config.issuer).bind(subject).fetch_optional(&mut *tx).await?;
         let identity = match existing {
-            Some(user) if user.enabled => user.identity(),
+            Some(user) if user.enabled => {
+                let mut identity = user.identity();
+                if follow_provider {
+                    follow_provider_username(
+                        &mut tx,
+                        &mut identity,
+                        &provider.config.issuer,
+                        provider_username.as_deref(),
+                    )
+                    .await?;
+                }
+                identity
+            }
             Some(_) => return Err(ApiError::forbidden()),
             None if !provider.config.allow_signup => {
                 return Err(ApiError(
@@ -580,9 +683,18 @@ pub(super) async fn callback(
             }
             None => {
                 let id = Uuid::new_v4();
-                // Names and emails from the IdP cannot claim an existing local account.
-                let identity = sqlx::query_as::<_, Identity>("INSERT INTO users (id, username, display_name, role) VALUES ($1, $2, $3, $4) RETURNING id, username, display_name, role")
-                    .bind(id).bind(format!("oidc_{}", id.simple())).bind(display_name).bind(Role::User).fetch_one(&mut *tx).await?;
+                // Names and emails from the IdP cannot claim an existing local account:
+                // a taken username falls back to a generated one.
+                let mut identity = None;
+                if let Some(name) = &provider_username {
+                    identity = sqlx::query_as::<_, Identity>("INSERT INTO users (id, username, display_name, role, username_from_provider) VALUES ($1, $2, $3, $4, TRUE) ON CONFLICT (username) DO NOTHING RETURNING id, username, display_name, role")
+                        .bind(id).bind(name).bind(&display_name).bind(Role::User).fetch_optional(&mut *tx).await?;
+                }
+                let identity = match identity {
+                    Some(identity) => identity,
+                    None => sqlx::query_as::<_, Identity>("INSERT INTO users (id, username, display_name, role) VALUES ($1, $2, $3, $4) RETURNING id, username, display_name, role")
+                        .bind(id).bind(generated_username(id)).bind(&display_name).bind(Role::User).fetch_one(&mut *tx).await?,
+                };
                 sqlx::query(
                     "INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3)",
                 )

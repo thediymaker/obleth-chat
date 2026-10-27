@@ -824,6 +824,12 @@ async fn fake_token(
         "azp" => claims["azp"] = json!("another-client"),
         "multiple-audiences" => claims["aud"] = json!(["chat", "another-client"]),
         "access-hash" => claims["at_hash"] = json!(URL_SAFE_NO_PAD.encode([0u8; 32])),
+        "no-username" => {
+            claims.as_object_mut().unwrap().remove("preferred_username");
+        }
+        name if name.starts_with("username=") => {
+            claims["preferred_username"] = json!(&name["username=".len()..])
+        }
         _ => (),
     }
     let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
@@ -940,6 +946,7 @@ async fn oidc_validates_tokens_pkce_state_replay_and_explicit_provisioning() {
         client_id: "chat".into(),
         client_secret: "secret".into(),
         allow_signup: true,
+        provider_usernames: false,
         scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
     });
     let auth = Auth::new(db.pool.clone(), cfg.clone()).await.unwrap();
@@ -2025,6 +2032,7 @@ async fn oidc_group_mapping_changes_only_managed_memberships_and_never_roles() {
         client_id: "chat".into(),
         client_secret: "secret".into(),
         allow_signup: true,
+        provider_usernames: false,
         scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
     });
     let mut auth = Auth::new(db.pool.clone(), cfg).await.unwrap();
@@ -2544,6 +2552,7 @@ async fn access_links_cannot_add_passwords_after_oidc_linking_and_replace_the_br
         client_id: "chat".into(),
         client_secret: "secret".into(),
         allow_signup: false,
+        provider_usernames: false,
         scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
     });
     let auth = Auth::new(db.pool.clone(), cfg).await.unwrap();
@@ -2672,11 +2681,203 @@ fn forward_config(issuer: &FakeIssuer) -> AuthConfig {
         client_id: "chat".into(),
         client_secret: "secret".into(),
         allow_signup: true,
+        provider_usernames: false,
         scopes: parse_scopes("openid profile offline_access").unwrap(),
     });
     cfg.forward_tokens = true;
     cfg.secret_key = Some(SecretKey::from_bytes([9u8; 32]));
     cfg
+}
+
+#[tokio::test]
+async fn oidc_usernames_follow_the_provider_only_when_asked_and_free() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let mut cfg = config();
+    cfg.oidc = Some(OidcConfig {
+        issuer: issuer.origin.clone(),
+        client_id: "chat".into(),
+        client_secret: "secret".into(),
+        allow_signup: true,
+        provider_usernames: false,
+        scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
+    });
+    let generated_only = Auth::new(db.pool.clone(), cfg.clone())
+        .await
+        .unwrap()
+        .router();
+    cfg.oidc.as_mut().unwrap().provider_usernames = true;
+    let app = Auth::new(db.pool.clone(), cfg).await.unwrap().router();
+    // Off by default: the provider's username is not trusted to name accounts.
+    let frank = oidc_user(&generated_only, &issuer, "username=frank", "frank-subject").await;
+    assert!(frank.username.starts_with("oidc_"), "{}", frank.username);
+    let frank = oidc_user(&app, &issuer, "username=frank", "frank-subject").await;
+    assert_eq!(
+        frank.username, "frank",
+        "a generated name takes the provider's once on"
+    );
+
+    let carol = oidc_user(&app, &issuer, "username=Carol", "carol-subject").await;
+    assert_eq!(
+        carol.username, "carol",
+        "a free provider username names the account"
+    );
+    assert_eq!(carol.display_name, "OIDC Student");
+    for _ in 0..2 {
+        // Taken: falls back, and a later sign-in still works and leaves it alone.
+        let other = oidc_user(&app, &issuer, "username=carol", "other-subject").await;
+        assert!(other.username.starts_with("oidc_"), "{}", other.username);
+    }
+    for (mode, subject) in [
+        ("valid", "admin-name-subject"),
+        ("username=not a name!", "invalid-subject"),
+        ("username=oidc_0123456789abcdef", "reserved-subject"),
+        ("no-username", "unnamed-subject"),
+    ] {
+        let user = oidc_user(&app, &issuer, mode, subject).await;
+        assert!(
+            user.username.starts_with("oidc_"),
+            "{mode}: {}",
+            user.username
+        );
+    }
+    // The provider renames carol: Chat follows, and the old name is free again.
+    let caroline = oidc_user(&app, &issuer, "username=caroline", "carol-subject").await;
+    assert_eq!(
+        (caroline.id, caroline.username.as_str()),
+        (carol.id, "caroline")
+    );
+    let other = oidc_user(&app, &issuer, "username=carol", "other-subject").await;
+    assert_eq!(
+        other.username, "carol",
+        "the account on its generated name takes it"
+    );
+    // The provider gives carol-subject a name another account holds: rather than keep
+    // showing a stale name, the account goes back to a generated one.
+    let back = oidc_user(&app, &issuer, "username=carol", "carol-subject").await;
+    assert_eq!(back.id, carol.id);
+    assert!(back.username.starts_with("oidc_"), "{}", back.username);
+    // A name Chat did not take from the provider is never changed.
+    sqlx::query(
+        "UPDATE users SET username = 'chosen', username_from_provider = FALSE WHERE id = $1",
+    )
+    .bind(frank.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let kept = oidc_user(&app, &issuer, "username=zed", "frank-subject").await;
+    assert_eq!((kept.id, kept.username.as_str()), (frank.id, "chosen"));
+    // The provider stops sending a usable name: the name it gave is released.
+    let named = oidc_user(&app, &issuer, "username=yara", "yara-subject").await;
+    assert_eq!(named.username, "yara");
+    let unnamed = oidc_user(&app, &issuer, "no-username", "yara-subject").await;
+    assert!(
+        unnamed.username.starts_with("oidc_"),
+        "{}",
+        unnamed.username
+    );
+    // An account with two identities at the provider keeps its name instead of
+    // swapping between theirs.
+    let named = oidc_user(&app, &issuer, "username=yara", "yara-subject").await;
+    assert_eq!(named.username, "yara");
+    sqlx::query(
+        "INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, 'second-yara', $2)",
+    )
+    .bind(&issuer.origin)
+    .bind(named.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let second = oidc_user(&app, &issuer, "username=yara2", "second-yara").await;
+    assert_eq!((second.id, second.username.as_str()), (named.id, "yara"));
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_username_taken_during_a_rename_leaves_the_sign_in_usable() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, role) VALUES ($1, $2, 'Renamed', 'user')",
+    )
+    .bind(id)
+    .bind(format!("oidc_{}", id.simple()))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    // Another transaction holds the name without committing yet, so the rename's
+    // NOT EXISTS sees nothing and its UPDATE waits on the unique index.
+    let mut blocker = db.pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, role) VALUES ($1, 'zed', 'Zed', 'user')",
+    )
+    .bind(Uuid::new_v4())
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    let pool = db.pool.clone();
+    let rename = tokio::spawn(async move {
+        let mut tx = pool.begin().await.unwrap();
+        let renamed = oidc::take_username(&mut tx, id, "zed", true).await.unwrap();
+        let usable: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        (renamed, usable)
+    });
+    // Release the name only once the rename is waiting on it.
+    let mut waiting = false;
+    for _ in 0..100 {
+        waiting = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted)")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(waiting, "the rename must be waiting on the held name");
+    blocker.commit().await.unwrap();
+    let (renamed, usable) = rename.await.unwrap();
+    assert_eq!((renamed, usable), (None, 1));
+    let (username, from_provider): (String, bool) =
+        sqlx::query_as("SELECT username, username_from_provider FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (username, from_provider),
+        (format!("oidc_{}", id.simple()), false)
+    );
+    db.close().await;
+}
+
+/// Signs in through the provider with the given mode and returns the person.
+async fn oidc_user(app: &Router, issuer: &FakeIssuer, mode: &str, subject: &str) -> Identity {
+    let (browser, path) = issuer.flow(app, mode, subject).await;
+    let (status, headers, _) =
+        call(app, "GET", &path, None, Some(&browser), None, Value::Null).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{mode}");
+    let (_, _, session) = call(
+        app,
+        "GET",
+        "/api/session",
+        None,
+        Some(&response_cookie(&headers)),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(session["authenticated"], true, "{session}");
+    serde_json::from_value(session["user"].clone()).unwrap()
 }
 
 /// Signs in through the provider and returns the session cookie, its CSRF token and
@@ -2778,6 +2979,7 @@ fn forwarding_and_passwords_off_need_their_settings() {
         client_id: "chat".into(),
         client_secret: "secret".into(),
         allow_signup: false,
+        provider_usernames: false,
         scopes: parse_scopes("profile offline_access").unwrap(),
     };
     assert_eq!(oidc().scopes, ["openid", "profile", "offline_access"]);

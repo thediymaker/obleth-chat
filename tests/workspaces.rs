@@ -820,8 +820,14 @@ async fn verdicts_endpoint(yes: f64) -> (String, Arc<Mutex<Vec<Value>>>) {
             "/v1/verdicts",
             axum::routing::post(
                 move |State(seen): State<Arc<Mutex<Vec<Value>>>>, Json(body): Json<Value>| async move {
+                    let verdicts: serde_json::Map<String, Value> = body["questions"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(id, _)| (id.clone(), json!({"type": "boolean", "value": yes >= 0.5, "probabilities": {"true": yes, "false": 1.0 - yes}, "confidence": 0.7})))
+                        .collect();
                     seen.lock().unwrap().push(body);
-                    Json(json!({"model": "judge-31b", "verdicts": {"tested": {"type": "boolean", "value": yes >= 0.5, "probabilities": {"true": yes, "false": 1.0 - yes}, "confidence": 0.7}}, "usage": {"prompt_tokens": 900, "completion_tokens": 1, "total_tokens": 901}}))
+                    Json(json!({"model": "judge-31b", "verdicts": verdicts, "usage": {"prompt_tokens": 900, "completion_tokens": 1, "total_tokens": 901}}))
                 },
             ),
         )
@@ -987,4 +993,326 @@ async fn a_finished_run_is_checked_for_whether_it_tested_its_idea(pool: PgPool) 
     let unchecked = finish(DIFF).await;
     run(&ctx, "experiment_wait", "{}").await;
     assert_eq!(decision(unchecked).await, None);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn new_experiments_say_what_they_build_on_and_a_doubted_placement_is_refused_once(
+    pool: PgPool,
+) {
+    use obleth_chat::{
+        auth::{Identity, Role},
+        decisions::{Asker, Decisions},
+        research::tools::{run, Ctx},
+    };
+    let kube = Arc::new(FakeKube::default());
+    kube.set_pod(Some("127.0.0.1"));
+    let (app, sandboxes) = app_with(pool.clone(), Some(DOMAIN), Some(kube)).await;
+    login(&app).await;
+    let conversation = workspace(&pool, 3000, "running").await;
+    let owner: Uuid = sqlx::query_scalar("SELECT owner_id FROM conversations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let sandbox = sandboxes.get(owner, conversation).await.unwrap().unwrap();
+    let (project, research, baseline, warmup) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    sqlx::query("INSERT INTO projects(id,owner_id,name) VALUES($1,$2,'Study')")
+        .bind(project)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO research(id,project_id,owner_id,conversation_id,goal,metric,direction,run_command) VALUES($1,$2,$3,$4,'Lower loss','loss','min','python train.py')")
+        .bind(research).bind(project).bind(owner).bind(conversation)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO experiments(id,research_id,title,branch,frozen) VALUES($1,$2,'Baseline','research/baseline',TRUE)")
+        .bind(baseline).bind(research)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO experiments(id,research_id,parent_id,title,description,branch,frozen) VALUES($1,$2,$3,'Warmup 500 steps','Add a 500-step linear warmup','research/warmup-500',TRUE)")
+        .bind(warmup).bind(research).bind(baseline)
+        .execute(&pool).await.unwrap();
+    for (number, node, loss) in [(1, baseline, 2.5), (2, warmup, 2.3)] {
+        sqlx::query("INSERT INTO research_runs(id,research_id,experiment_id,number,commit_sha,status,metric,reported,finished_at) VALUES($1,$2,$3,$4,'aaa','completed',$5,TRUE,NOW())")
+            .bind(Uuid::new_v4()).bind(research).bind(node).bind(number).bind(loss)
+            .execute(&pool).await.unwrap();
+    }
+    let identity = Identity {
+        id: owner,
+        username: "test-admin".into(),
+        display_name: "Test admin".into(),
+        role: Role::Admin,
+        session: None,
+    };
+    let decisions = Decisions::new(pool.clone(), None);
+    let ctx = Ctx {
+        pool: &pool,
+        sb: &sandboxes,
+        sandbox: &sandbox,
+        user: owner,
+        conversation,
+        project,
+        ask: Some(Asker {
+            decisions: &decisions,
+            gateway: None,
+            user: &identity,
+        }),
+    };
+    let set = |url: String, check_tree: bool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE decisions SET endpoint='custom', url=$1, check_tree=$2")
+                .bind(url)
+                .bind(check_tree)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let short = &warmup.simple().to_string()[..8];
+
+    // A child of a measured node has to say what it keeps from it.
+    let out = run(
+        &ctx,
+        "experiment_create",
+        &json!({"parent": short, "title": "Cosine decay"}).to_string(),
+    )
+    .await;
+    assert!(!out.ok);
+    assert!(
+        out.output
+            .contains("Say in builds_on what “Warmup 500 steps” established"),
+        "{}",
+        out.output
+    );
+    assert!(
+        out.output
+            .contains("make it a child of “Baseline” [baseline]"),
+        "{}",
+        out.output
+    );
+
+    // An alternative to the parent, filed under it, is refused once with where it belongs.
+    let (url, seen) = verdicts_endpoint(0.2).await;
+    set(format!("{url}/v1/verdicts"), true).await;
+    let args = json!({"parent": short, "title": "Warmup 2000 steps", "description": "A 2000-step warmup instead of 500", "builds_on": "the warmup"});
+    let out = run(&ctx, "experiment_create", &args.to_string()).await;
+    assert!(!out.ok);
+    assert_eq!(out.summary, "Placement doubted");
+    assert!(out.output.contains("A check by judge-31b doubts “Warmup 2000 steps” builds on “Warmup 500 steps”: it gives 20% that it fits."), "{}", out.output);
+    assert!(
+        out.output
+            .contains("as a child of “Baseline” [baseline]. Nothing was created."),
+        "{}",
+        out.output
+    );
+    assert!(out.output.contains("confirm: true"), "{}", out.output);
+    let asked = seen.lock().unwrap()[0].clone();
+    assert_eq!(asked["state"]["parent"]["title"], "Warmup 500 steps");
+    assert_eq!(asked["state"]["parent"]["result"], "loss=2.3 (run 2)");
+    assert_eq!(asked["state"]["new_experiment"]["builds_on"], "the warmup");
+    assert_eq!(asked["questions"]["fits"]["type"], "boolean");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM experiments")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    // Confirmed, it goes on to make the branch (which this test has no pod for).
+    let mut confirmed = args.clone();
+    confirmed["confirm"] = json!(true);
+    let out = run(&ctx, "experiment_create", &confirmed.to_string()).await;
+    assert_ne!(out.summary, "Placement doubted");
+
+    // Under the baseline, once a round has a winner, a new decision is pointed to the winner.
+    let out = run(
+        &ctx,
+        "experiment_create",
+        &json!({"parent": "baseline", "title": "Bigger batch"}).to_string(),
+    )
+    .await;
+    assert!(
+        out.output.contains("“Warmup 500 steps” ["),
+        "{}",
+        out.output
+    );
+    assert!(
+        out.output
+            .contains("has the best result so far (run 2: 2.3)"),
+        "{}",
+        out.output
+    );
+    let asked = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        asked["state"]["round_under_baseline"][0]["title"],
+        "Warmup 500 steps"
+    );
+    assert_eq!(asked["state"]["best_so_far"]["result"], "loss=2.3 (run 2)");
+
+    // Turned off, nothing is asked.
+    set(format!("{url}/v1/verdicts"), false).await;
+    let before = seen.lock().unwrap().len();
+    let out = run(&ctx, "experiment_create", &args.to_string()).await;
+    assert_ne!(out.summary, "Placement doubted");
+    assert_eq!(seen.lock().unwrap().len(), before);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_research_reply_is_checked_against_its_runs(pool: PgPool) {
+    use obleth_chat::{
+        auth::{Identity, Role},
+        decisions::{Asker, Decisions},
+        research::{self, report, tools},
+    };
+    let kube = Arc::new(FakeKube::default());
+    kube.set_pod(Some("127.0.0.1"));
+    let (app, sandboxes) = app_with(pool.clone(), Some(DOMAIN), Some(kube)).await;
+    login(&app).await;
+    let conversation = workspace(&pool, 3000, "running").await;
+    let owner: Uuid = sqlx::query_scalar("SELECT owner_id FROM conversations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let sandbox = sandboxes.get(owner, conversation).await.unwrap().unwrap();
+    let (project, id, baseline, warmup) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    sqlx::query("INSERT INTO projects(id,owner_id,name) VALUES($1,$2,'Study')")
+        .bind(project)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO research(id,project_id,owner_id,conversation_id,goal,metric,direction,run_command) VALUES($1,$2,$3,$4,'Lower loss','loss','min','python train.py')")
+        .bind(id).bind(project).bind(owner).bind(conversation)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO experiments(id,research_id,title,branch,frozen) VALUES($1,$2,'Baseline','research/baseline',TRUE)")
+        .bind(baseline).bind(id)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO experiments(id,research_id,parent_id,title,branch,frozen) VALUES($1,$2,$3,'Warmup','research/warmup',TRUE)")
+        .bind(warmup).bind(id).bind(baseline)
+        .execute(&pool).await.unwrap();
+    for (number, node, loss) in [(1, baseline, 2.4113), (2, warmup, 2.3148)] {
+        sqlx::query("INSERT INTO research_runs(id,research_id,experiment_id,number,commit_sha,status,metric,metrics,reported,finished_at) VALUES($1,$2,$3,$4,'aaa','completed',$5,$6,TRUE,NOW())")
+            .bind(Uuid::new_v4()).bind(id).bind(node).bind(number).bind(loss).bind(json!({"loss": loss, "tok_s": 1500}))
+            .execute(&pool).await.unwrap();
+    }
+    let research = research::for_project(&pool, project)
+        .await
+        .unwrap()
+        .unwrap();
+    let identity = Identity {
+        id: owner,
+        username: "test-admin".into(),
+        display_name: "Test admin".into(),
+        role: Role::Admin,
+        session: None,
+    };
+    let decisions = Decisions::new(pool.clone(), None);
+    let ask = Asker {
+        decisions: &decisions,
+        gateway: None,
+        user: &identity,
+    };
+    let (url, seen) = verdicts_endpoint(0.1).await;
+    sqlx::query("UPDATE decisions SET endpoint='custom', url=$1")
+        .bind(format!("{url}/v1/verdicts"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let saved = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<Value>>("SELECT report_check FROM research")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    // A wrong value and a run that doesn't exist are found in code; a cause goes to the check.
+    let reply = "Round done.\n\n- Run 2 (warmup) reached loss 2.29, the best so far.\n- Run 1 is the baseline at loss 2.41.\n- Run 7 is still to come.\n\nThe warmup helped because early steps were unstable in run 1.";
+    let entry = report::check(&pool, Some(ask), &research, reply)
+        .await
+        .unwrap();
+    assert_eq!(entry["tool"], "report_check");
+    assert_eq!(entry["flagged"], true);
+    assert_eq!(
+        entry["summary"],
+        "Checked 4 statements against the runs: 3 don't match"
+    );
+    let detail = entry["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("Run 2 printed loss=2.3148, not 2.29."),
+        "{detail}"
+    );
+    assert!(detail.contains("There is no run 7."), "{detail}");
+    assert!(
+        detail.contains(
+            "A check by judge-31b doubts the runs support this: it gives 10% that they do."
+        ),
+        "{detail}"
+    );
+    let asked = seen.lock().unwrap()[0].clone();
+    assert_eq!(asked["questions"].as_object().unwrap().len(), 1);
+    assert!(asked["questions"]["s1"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("The warmup helped because"));
+    assert_eq!(asked["state"]["runs"][1]["printed"]["loss"], 2.3148);
+    let found = saved().await.unwrap();
+    assert_eq!(found["problems"].as_array().unwrap().len(), 3);
+
+    // The next research turn is told what to correct.
+    let prompt = tools::prompt(&pool, &tools::Standing::Here(research.clone()), &sandbox).await;
+    assert!(prompt.contains("## Your last report"), "{prompt}");
+    assert!(
+        prompt.contains("Run 2 printed loss=2.3148, not 2.29."),
+        "{prompt}"
+    );
+
+    // A corrected reply clears it; a reply that cites no run asks nothing.
+    let entry = report::check(
+        &pool,
+        Some(ask),
+        &research,
+        "Run 2 reached loss 2.31 (run 1: 2.41).",
+    )
+    .await
+    .unwrap();
+    assert_eq!(entry["flagged"], false);
+    assert_eq!(
+        entry["summary"],
+        "Checked 1 statement against the runs: they match"
+    );
+    assert_eq!(saved().await, None);
+    let before = seen.lock().unwrap().len();
+    assert!(
+        report::check(&pool, Some(ask), &research, "Shall I start the next round?")
+            .await
+            .is_none()
+    );
+    assert_eq!(seen.lock().unwrap().len(), before);
+
+    // With report checks off, values are still checked but nothing is asked.
+    sqlx::query("UPDATE decisions SET check_reports=FALSE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let entry = report::check(
+        &pool,
+        Some(ask),
+        &research,
+        "Run 2 is better because of the warmup, at loss 2.31.",
+    )
+    .await
+    .unwrap();
+    assert_eq!(entry["flagged"], false);
+    assert_eq!(seen.lock().unwrap().len(), before);
 }

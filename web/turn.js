@@ -5,8 +5,8 @@ import { icon, esc } from './manage-ui.js';
 // When it is done: what changed and whether it works, checkpoints, and a "Show
 // work" trace in which each thought sits before the step it led to.
 
-const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', run_in_terminal: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', delegate: 'users', output_limit: 'info', connection: 'info', thinking_limit: 'info', check: 'check', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
-const RESEARCH = new Set(['research_setup', 'research_status', 'experiment_create', 'experiment_checkout', 'experiment_run', 'experiment_wait', 'run_log']);
+const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', run_in_terminal: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', report_check: 'shield', delegate: 'users', output_limit: 'info', connection: 'info', thinking_limit: 'info', check: 'check', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
+const RESEARCH = new Set(['research_setup', 'research_status', 'experiment_create', 'experiment_checkout', 'experiment_run', 'experiment_wait', 'run_log', 'report_check']);
 const kindOf = e => e.kind || 'tool';
 // Work on a cluster or other service goes through its own stages: look, ask, act,
 // then check what the change did.
@@ -237,7 +237,7 @@ export function createTurn({ state, markdown, chatPath, route, previews = () => 
   }
   const stepTime = s => ({ running: 'Running…', awaiting: 'Needs your answer', error: 'Failed', declined: 'Declined' }[s.status] || duration(s.durationMs));
   function step(s, extraClass = '') {
-    const mark = s.status === 'error' || s.check === 'error' ? 'bad' : s.status === 'running' || s.status === 'awaiting' ? 'now' : s.status === 'declined' ? 'off' : 'ok';
+    const mark = s.status === 'error' || s.check === 'error' ? 'bad' : s.status === 'running' || s.status === 'awaiting' ? 'now' : s.status === 'declined' ? 'off' : s.flagged ? 'warn' : 'ok';
     const glyph = icon(s.connection ? 'link' : TOOL_ICONS[s.tool] || 'terminal');
     const thumb = s.thumb && String(s.thumb).startsWith('data:image/jpeg;base64,') ? `<img class="tr-thumb" src="${esc(s.thumb)}" alt="" loading="lazy">` : '';
     const head = `${thumb}<span class="tr-text">${stepText(s)}${s.check === 'error' ? ' <span class="tr-del">· preview broke</span>' : ''}</span><small>${esc(stepTime(s))}</small>`;
@@ -247,7 +247,7 @@ export function createTurn({ state, markdown, chatPath, route, previews = () => 
       : s.status === 'awaiting'
       ? `<div class="tr-line">${head}</div>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}${approval(s)}`
       : detail && !(FILE_TOOLS.has(s.tool) && s.status === 'completed')
-        ? `<details class="tr-more" ${s.status === 'error' ? 'open' : ''}><summary class="tr-line">${head}</summary><pre>${esc(detail)}</pre></details>`
+        ? `<details class="tr-more" ${s.status === 'error' || s.flagged ? 'open' : ''}><summary class="tr-line">${head}</summary><pre>${esc(detail)}</pre></details>`
         : `<div class="tr-line">${head}</div>`;
     return `<li class="tr-row tr-step is-${mark} ${extraClass}"><span class="tr-mark" aria-hidden="true">${glyph}</span><div class="tr-body">${body}</div></li>`;
   }

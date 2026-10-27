@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAdmin } from '../web/admin.js';
 
-const saved = { endpoint: 'gateway', url: null, hasKey: false, keyUnreadable: false, model: null, checkRuns: true, canStoreKey: true, gateway: true, models: ['judge-31b'] };
+const saved = { endpoint: 'gateway', url: null, hasKey: false, keyUnreadable: false, model: null, checkRuns: true, checkTree: true, checkReports: false, canStoreKey: true, gateway: true, models: ['judge-31b'] };
 
 async function fixture(decisions = saved, answer = { ok: true, model: 'judge-31b', yes: 0.98, confidence: 0.9, ms: 412 }) {
   globalThis.location = { hash: '#settings/admin/system' };
@@ -31,19 +31,21 @@ test('the system tab says where decisions go and whose usage they count toward',
   assert.match(view, /count toward that person’s usage/);
   assert.match(view, /<div class="decisions-custom" hidden>/);
   assert.match(view, /<option value="judge-31b"><\/option>/);
+  assert.match(view, /name="decisions-check-tree"[^>]*checked/);
+  assert.doesNotMatch(view, /name="decisions-check-reports"[^>]*checked/);
 });
 
 test('saving the gateway sends no URL or key', async () => {
   const { admin, requests } = await fixture();
-  await admin.submit(form({ 'decisions-endpoint': 'gateway', 'decisions-url': 'https://left.over', 'decisions-key': 'sk-old' }, { 'decisions-check-runs': true }));
-  assert.deepEqual(requests[0], { path: '/api/admin/decisions', method: 'PATCH', body: { endpoint: 'gateway', model: null, checkRuns: true } });
+  await admin.submit(form({ 'decisions-endpoint': 'gateway', 'decisions-url': 'https://left.over', 'decisions-key': 'sk-old' }, { 'decisions-check-runs': true, 'decisions-check-reports': true }));
+  assert.deepEqual(requests[0], { path: '/api/admin/decisions', method: 'PATCH', body: { endpoint: 'gateway', model: null, checkRuns: true, checkTree: false, checkReports: true } });
 });
 
 test('another endpoint sends its URL, and a blank key keeps the saved one', async () => {
   const { admin, requests } = await fixture({ ...saved, endpoint: 'custom', url: 'https://d.example.com/v1/verdicts', hasKey: true });
   const values = { 'decisions-endpoint': 'custom', 'decisions-url': ' https://d.example.com ', 'decisions-model': 'judge-31b' };
   await admin.submit(form(values));
-  assert.deepEqual(requests[0].body, { endpoint: 'custom', model: 'judge-31b', checkRuns: false, url: 'https://d.example.com' });
+  assert.deepEqual(requests[0].body, { endpoint: 'custom', model: 'judge-31b', checkRuns: false, checkTree: false, checkReports: false, url: 'https://d.example.com' });
   await admin.submit(form({ ...values, 'decisions-key': 'sk-new' }));
   assert.equal(requests[1].body.key, 'sk-new');
   await admin.submit(form(values, { 'decisions-remove-key': true }));
@@ -56,7 +58,7 @@ test('Check asks with the form as it is and says what came back', async () => {
   const button = { closest: () => ({ ...values, querySelector: () => out }) };
   const ok = await fixture();
   await ok.admin.actions['admin-decisions-check'](button);
-  assert.deepEqual(ok.requests[0], { path: '/api/admin/decisions/check', method: 'POST', body: { endpoint: 'custom', model: null, checkRuns: false, url: 'https://d.example.com' } });
+  assert.deepEqual(ok.requests[0], { path: '/api/admin/decisions/check', method: 'POST', body: { endpoint: 'custom', model: null, checkRuns: false, checkTree: false, checkReports: false, url: 'https://d.example.com' } });
   assert.equal(out.textContent, 'Working. judge-31b answered a sample true statement correctly (98% yes) in 412 ms.');
   const wrong = await fixture(saved, { ok: true, model: 'tiny', yes: 0.2, confidence: 0.4, ms: 90 });
   await wrong.admin.actions['admin-decisions-check'](button);

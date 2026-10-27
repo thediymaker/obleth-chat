@@ -1527,6 +1527,7 @@ body.workspace-full .workspace-resize{display:none}
 .tr-mark .icon{width:13px;height:13px}
 .tr-step.is-ok .tr-mark{color:var(--success)}
 .tr-step.is-bad .tr-mark{color:var(--destructive-text)}
+.tr-step.is-warn .tr-mark{color:var(--amber)}
 .tr-step.is-now .tr-mark{color:var(--text)}
 .tr-step.is-off .tr-mark{color:var(--faint)}
 .tr-dot{width:8px;height:8px;border-radius:50%;border:1px dashed var(--faint)}

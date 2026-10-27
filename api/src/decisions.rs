@@ -92,6 +92,10 @@ pub struct Settings {
     pub model: Option<String>,
     /// Ask whether each research run tested its idea.
     pub check_runs: bool,
+    /// Ask whether a new experiment belongs under the parent it was given.
+    pub check_tree: bool,
+    /// Ask whether a research report's statements are supported by the runs.
+    pub check_reports: bool,
 }
 
 impl Settings {
@@ -110,6 +114,14 @@ pub struct YesNo {
     pub confidence: f64,
 }
 
+impl YesNo {
+    /// A no the answer is sure of. A check that refuses or corrects something acts only on
+    /// this: an unsure no about a true statement would teach the model the wrong thing.
+    pub fn sure_no(&self) -> bool {
+        self.yes < 0.5 && self.confidence >= 0.5
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct Row {
     endpoint: String,
@@ -117,6 +129,8 @@ struct Row {
     api_key: Option<Vec<u8>>,
     model: Option<String>,
     check_runs: bool,
+    check_tree: bool,
+    check_reports: bool,
 }
 
 #[derive(Clone)]
@@ -142,7 +156,9 @@ impl Decisions {
     }
 
     async fn row(&self) -> Result<Row, sqlx::Error> {
-        sqlx::query_as("SELECT endpoint, url, api_key, model, check_runs FROM decisions WHERE id")
+        sqlx::query_as(
+            "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports FROM decisions WHERE id",
+        )
             .fetch_one(&self.pool)
             .await
     }
@@ -171,6 +187,8 @@ impl Decisions {
             endpoint,
             model: row.model.clone(),
             check_runs: row.check_runs,
+            check_tree: row.check_tree,
+            check_reports: row.check_reports,
         }
     }
 
@@ -316,9 +334,10 @@ pub fn yes_no(response: &Value, id: &str) -> Result<YesNo, String> {
             .take(160)
             .collect(),
         yes,
+        // A service that doesn't say how sure it is is as sure as its answer is far from a coin flip.
         confidence: verdict["confidence"]
             .as_f64()
-            .unwrap_or(0.0)
+            .unwrap_or((yes - 0.5).abs() * 2.0)
             .clamp(0.0, 1.0),
     })
 }
@@ -360,6 +379,8 @@ struct Patch {
     key: Option<Option<String>>,
     model: Option<Option<String>>,
     check_runs: Option<bool>,
+    check_tree: Option<bool>,
+    check_reports: Option<bool>,
 }
 
 fn bad(message: impl Into<String>) -> ApiError {
@@ -367,13 +388,21 @@ fn bad(message: impl Into<String>) -> ApiError {
 }
 
 fn patch(body: &Value) -> Result<Patch, ApiError> {
-    let fields = body
-        .as_object()
-        .ok_or_else(|| bad("Send an object with endpoint, url, key, model or checkRuns"))?;
-    if let Some(key) = fields
-        .keys()
-        .find(|k| !["endpoint", "url", "key", "model", "checkRuns"].contains(&k.as_str()))
-    {
+    let fields = body.as_object().ok_or_else(|| {
+        bad("Send an object with endpoint, url, key, model, checkRuns, checkTree or checkReports")
+    })?;
+    if let Some(key) = fields.keys().find(|k| {
+        ![
+            "endpoint",
+            "url",
+            "key",
+            "model",
+            "checkRuns",
+            "checkTree",
+            "checkReports",
+        ]
+        .contains(&k.as_str())
+    }) {
         return Err(bad(format!("Unknown setting: {key}")));
     }
     let mut patch = Patch::default();
@@ -419,12 +448,18 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
             ))
         }
     }
-    if let Some(value) = fields.get("checkRuns") {
-        patch.check_runs = Some(
-            value
-                .as_bool()
-                .ok_or_else(|| bad("checkRuns must be true or false"))?,
-        );
+    for (name, field) in [
+        ("checkRuns", &mut patch.check_runs),
+        ("checkTree", &mut patch.check_tree),
+        ("checkReports", &mut patch.check_reports),
+    ] {
+        if let Some(value) = fields.get(name) {
+            *field = Some(
+                value
+                    .as_bool()
+                    .ok_or_else(|| bad(format!("{name} must be true or false")))?,
+            );
+        }
     }
     Ok(patch)
 }
@@ -447,6 +482,12 @@ impl Patch {
         }
         if let Some(check_runs) = self.check_runs {
             row.check_runs = check_runs;
+        }
+        if let Some(check_tree) = self.check_tree {
+            row.check_tree = check_tree;
+        }
+        if let Some(check_reports) = self.check_reports {
+            row.check_reports = check_reports;
         }
         if row.endpoint == "custom" && row.url.is_none() {
             return Err(bad("Enter the endpoint's URL"));
@@ -498,6 +539,8 @@ async fn document(s: &AppState, user: &Identity) -> Result<Value, ApiError> {
         "keyUnreadable": key == Key::Unreadable,
         "model": row.model,
         "checkRuns": row.check_runs,
+        "checkTree": row.check_tree,
+        "checkReports": row.check_reports,
         "canStoreKey": d.secret.is_some(),
         "gateway": s.gateway.is_some(),
         "models": models,
@@ -527,7 +570,7 @@ async fn save(
     };
     let mut tx = crate::operations::admin_transaction(&s.store.pool, user.id).await?;
     let row: Row = sqlx::query_as(
-        "SELECT endpoint, url, api_key, model, check_runs FROM decisions WHERE id FOR UPDATE",
+        "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports FROM decisions WHERE id FOR UPDATE",
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -536,20 +579,22 @@ async fn save(
         row.api_key = sealed;
     }
     sqlx::query(
-        "UPDATE decisions SET endpoint=$1, url=$2, api_key=$3, model=$4, check_runs=$5, updated_at=NOW() WHERE id",
+        "UPDATE decisions SET endpoint=$1, url=$2, api_key=$3, model=$4, check_runs=$5, check_tree=$6, check_reports=$7, updated_at=NOW() WHERE id",
     )
     .bind(&row.endpoint)
     .bind(&row.url)
     .bind(&row.api_key)
     .bind(&row.model)
     .bind(row.check_runs)
+    .bind(row.check_tree)
+    .bind(row.check_reports)
     .execute(&mut *tx)
     .await?;
     // The key itself never reaches the audit log; only that it changed.
     sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'decisions.update','site',$3)")
         .bind(Uuid::new_v4())
         .bind(user.id)
-        .bind(json!({"endpoint": row.endpoint, "url": row.url, "model": row.model, "checkRuns": row.check_runs, "keyChanged": patch.key.is_some(), "hasKey": row.api_key.is_some()}))
+        .bind(json!({"endpoint": row.endpoint, "url": row.url, "model": row.model, "checkRuns": row.check_runs, "checkTree": row.check_tree, "checkReports": row.check_reports, "keyChanged": patch.key.is_some(), "hasKey": row.api_key.is_some()}))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -642,8 +687,12 @@ mod tests {
             }
         );
         // A service that sends only the value still gives a usable answer.
-        let bare = json!({"verdicts": {"tested": {"value": true}}});
-        assert_eq!(yes_no(&bare, "tested").unwrap().yes, 1.0);
+        let bare = json!({"verdicts": {"tested": {"value": false}}});
+        let found = yes_no(&bare, "tested").unwrap();
+        assert_eq!((found.yes, found.confidence), (0.0, 1.0));
+        assert!(found.sure_no());
+        let unsure = json!({"verdicts": {"tested": {"probabilities": {"true": 0.4, "false": 0.6}, "confidence": 0.02}}});
+        assert!(!yes_no(&unsure, "tested").unwrap().sure_no());
         let unanswered = json!({"verdicts": {"tested": {"value": true, "probabilities": {"true": 0.5, "false": 0.5}, "confidence": 0.0, "answered": false}}});
         assert!(yes_no(&unanswered, "tested").is_err());
         assert!(yes_no(&json!({"verdicts": {}}), "tested").is_err());
@@ -653,12 +702,13 @@ mod tests {
 
     #[test]
     fn patches_take_only_known_settings() {
-        let p = patch(&json!({"endpoint": "custom", "url": "https://d.example.com", "key": " sk-1 ", "model": "", "checkRuns": false})).unwrap();
+        let p = patch(&json!({"endpoint": "custom", "url": "https://d.example.com", "key": " sk-1 ", "model": "", "checkRuns": false, "checkTree": false, "checkReports": true})).unwrap();
         assert_eq!(p.endpoint, Some("custom"));
         assert_eq!(p.url.unwrap().as_str(), "https://d.example.com/v1/verdicts");
         assert_eq!(p.key, Some(Some("sk-1".into())));
         assert_eq!(p.model, Some(None));
         assert_eq!(p.check_runs, Some(false));
+        assert_eq!((p.check_tree, p.check_reports), (Some(false), Some(true)));
         assert_eq!(patch(&json!({"key": null})).unwrap().key, Some(None));
         for wrong in [
             json!({"endpoint": "elsewhere"}),
@@ -666,6 +716,7 @@ mod tests {
             json!({"key": ""}),
             json!({"model": "a\nb"}),
             json!({"checkRuns": "yes"}),
+            json!({"checkTree": 1}),
             json!({"secret": 1}),
             json!([]),
         ] {
@@ -681,6 +732,8 @@ mod tests {
             api_key: Some(vec![1]),
             model: None,
             check_runs: true,
+            check_tree: true,
+            check_reports: true,
         };
         assert!(patch(&json!({"endpoint": "custom"}))
             .unwrap()

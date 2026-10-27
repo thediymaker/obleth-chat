@@ -7,10 +7,11 @@ use openidconnect::{
         CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm, CoreJwsSigningAlgorithm,
         CoreResponseMode, CoreResponseType, CoreSubjectIdentifierType,
     },
-    AccessToken, AccessTokenHash, AdditionalProviderMetadata, AuthorizationCode, ClientId,
-    ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet, EndpointSet, IssuerUrl, Nonce,
-    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, ProviderMetadata, RedirectUrl,
-    RefreshToken, RequestTokenError, RevocationUrl, Scope, TokenResponse,
+    AccessToken, AccessTokenHash, AdditionalProviderMetadata, AsyncHttpClient, AuthorizationCode,
+    ClientId, ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet, EndpointSet,
+    HttpClientError, HttpRequest, HttpResponse, IssuerUrl, Nonce, OAuth2TokenResponse,
+    PkceCodeChallenge, PkceCodeVerifier, ProviderMetadata, RedirectUrl, RefreshToken,
+    RequestTokenError, RevocationUrl, Scope, TokenResponse,
 };
 use tokio::sync::Mutex;
 
@@ -81,10 +82,58 @@ pub(super) struct Oidc {
 pub(super) enum RefreshFailure {
     /// The provider refused the grant (invalid_grant): the sign-in is over.
     Rejected,
-    /// The provider failed or refused Chat's client; the grant may still be good.
+    /// The provider did not take the token: the request never left Chat, or the
+    /// provider answered with an error. The grant may still be good.
     Unavailable,
-    /// No answer arrived, so the provider may or may not have used the token.
+    /// The request went out and no answer Chat could read came back, so the
+    /// provider may or may not have rotated the token.
     Unanswered,
+}
+
+/// How far a token request got.
+#[derive(Clone, Copy)]
+enum Reached {
+    NotSent,
+    Sent,
+    Answered(StatusCode),
+}
+
+/// Chat's HTTP client for one token request, noting how far the request got.
+struct Tracked<F> {
+    http: reqwest::Client,
+    /// Asked right before the request goes out.
+    may_send: F,
+    reached: std::sync::Mutex<Reached>,
+}
+
+impl<'c, F: Fn() -> bool + Send + Sync + 'c> AsyncHttpClient<'c> for Tracked<F> {
+    type Error = HttpClientError<reqwest::Error>;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HttpResponse, Self::Error>> + Send + 'c>,
+    >;
+
+    fn call(&'c self, request: HttpRequest) -> Self::Future {
+        Box::pin(async move {
+            if !(self.may_send)() {
+                return Err(HttpClientError::Other("not sent".into()));
+            }
+            *self.reached.lock().unwrap() = Reached::Sent;
+            let result = self.http.call(request).await;
+            match &result {
+                Ok(response) => {
+                    *self.reached.lock().unwrap() = Reached::Answered(response.status())
+                }
+                // No connection, so the request never left Chat.
+                Err(HttpClientError::Reqwest(error))
+                    if error.is_connect() || error.is_builder() =>
+                {
+                    *self.reached.lock().unwrap() = Reached::NotSent
+                }
+                Err(_) => {}
+            }
+            result
+        })
+    }
 }
 
 /// A refreshed access token, and the refresh token to use next when the provider
@@ -166,18 +215,30 @@ impl Oidc {
         }
     }
 
-    /// Trades a refresh token for a new access token.
-    pub(super) async fn refresh(&self, token: &str) -> Result<Refreshed, RefreshFailure> {
+    /// Trades a refresh token for a new access token. `may_send` is asked right
+    /// before the request goes out, after discovery; when it says no, nothing is
+    /// sent and the refresh is Unavailable.
+    pub(super) async fn refresh(
+        &self,
+        token: &str,
+        may_send: impl Fn() -> bool + Send + Sync,
+    ) -> Result<Refreshed, RefreshFailure> {
         let discovered = self
             .discovered()
             .await
             .map_err(|_| RefreshFailure::Unavailable)?;
+        let http = Tracked {
+            http: self.http.clone(),
+            may_send,
+            reached: std::sync::Mutex::new(Reached::NotSent),
+        };
         let response = discovered
             .client
             .exchange_refresh_token(&RefreshToken::new(token.into()))
             .map_err(|_| RefreshFailure::Unavailable)?
-            .request_async(&self.http)
+            .request_async(&http)
             .await;
+        let reached = *http.reached.lock().unwrap();
         match response {
             Ok(tokens) => Ok(Refreshed {
                 access: tokens.access_token().clone(),
@@ -205,9 +266,17 @@ impl Oidc {
                 }
                 Err(RefreshFailure::Unavailable)
             }
-            // No answer arrived; the provider may still have rotated the token.
-            Err(RequestTokenError::Request(_)) => Err(RefreshFailure::Unanswered),
-            Err(_) => Err(RefreshFailure::Unavailable),
+            // An error status the provider gave without a readable error, or a
+            // request that never left: the token was not taken.
+            Err(_) => match reached {
+                Reached::NotSent => Err(RefreshFailure::Unavailable),
+                Reached::Answered(status) if !status.is_success() => {
+                    Err(RefreshFailure::Unavailable)
+                }
+                // No answer, or a success Chat could not read: the provider may
+                // have rotated the token.
+                Reached::Sent | Reached::Answered(_) => Err(RefreshFailure::Unanswered),
+            },
         }
     }
 

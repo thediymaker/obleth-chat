@@ -696,10 +696,14 @@ struct FakeIssuer {
     /// Refresh tokens presented to the token endpoint, and to the revocation endpoint.
     presented: Arc<tokio::sync::Mutex<Vec<String>>>,
     revoked: Arc<tokio::sync::Mutex<Vec<String>>>,
-    /// How refresh requests go: ok, invalid_grant, invalid_client, unavailable, or
-    /// reuse, which takes a refresh token again as providers with a reuse window do.
+    /// How refresh requests go: ok, invalid_grant, invalid_client, unavailable,
+    /// reuse, which takes a refresh token again as providers with a reuse window do,
+    /// or lost, which rotates the token and sends back an answer Chat can't read.
     refresh_mode: Arc<tokio::sync::Mutex<&'static str>>,
     refresh_delay: Arc<std::sync::atomic::AtomicU64>,
+    /// This many refresh requests get an answer Chat can't read, without the
+    /// provider using the token.
+    garble: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl FakeIssuer {
@@ -725,6 +729,7 @@ impl FakeIssuer {
             revoked: Default::default(),
             refresh_mode: Arc::new(tokio::sync::Mutex::new("ok")),
             refresh_delay: Default::default(),
+            garble: Default::default(),
         };
         let app = Router::new()
             .route("/.well-known/openid-configuration", get(|State(s): State<FakeIssuer>| async move {
@@ -872,6 +877,22 @@ async fn fake_refresh(state: FakeIssuer, token: &str) -> Response {
         .load(std::sync::atomic::Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(delay)).await;
     let mode = *state.refresh_mode.lock().await;
+    let garbled = || Json(json!({"token_type":"Bearer"})).into_response();
+    if state
+        .garble
+        .fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |left| left.checked_sub(1),
+        )
+        .is_ok()
+    {
+        return garbled();
+    }
+    if mode == "lost" && state.live.lock().await.remove(token) {
+        state.issue().await;
+        return garbled();
+    }
     if mode == "unavailable" {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -3369,7 +3390,7 @@ async fn stall_refresh(
 }
 
 #[tokio::test]
-async fn a_refresh_that_outlasts_its_lease_ends_no_live_sign_in() {
+async fn a_lapsed_lease_ends_its_sign_in_without_presenting_the_token_again() {
     let Some(db) = Database::new().await else {
         return;
     };
@@ -3383,6 +3404,58 @@ async fn a_refresh_that_outlasts_its_lease_ends_no_live_sign_in() {
     let app = first.router();
     let (cookie, _, user) = oidc_session(&app, &issuer, "student").await;
     let (one, two) = (first.grants().unwrap(), second.grants().unwrap());
+
+    // The holder may have had the token rotated, so the other replica ends the
+    // sign-in instead of presenting it. The holder's late answer finds the grant
+    // ended and revokes the token it got.
+    expire(&db.pool, "1 second").await;
+    let stalled = stall_refresh(&db, &issuer, one.clone(), user.id).await;
+    let Err(error) = two.access_token(user.id, None).await else {
+        panic!("the sign-in ended");
+    };
+    assert_eq!(
+        (error.0, error.1.as_str()),
+        (StatusCode::UNAUTHORIZED, grants::SIGN_IN_AGAIN)
+    );
+    assert_eq!(
+        stalled.await.unwrap().err().unwrap().1.as_str(),
+        grants::SIGN_IN_AGAIN
+    );
+    one.finish().await;
+    let (refresh, presented) = (
+        issuer.refresh.lock().await.clone(),
+        issuer.presented.lock().await.clone(),
+    );
+    assert_eq!(presented, [refresh[0].clone()]);
+    assert_eq!(*issuer.revoked.lock().await, [refresh[1].clone()]);
+    let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oidc_revocations")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        queued, 0,
+        "the token that may be rotated out is not sent anywhere"
+    );
+    assert_eq!(
+        authenticated(&app, &cookie).await,
+        (StatusCode::OK, json!(false))
+    );
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_token_sent_without_an_answer_is_presented_again_only_for_a_while() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let auth = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let app = auth.router();
+    let grants = auth.grants().unwrap();
+    let (cookie, _, user) = oidc_session(&app, &issuer, "student").await;
     let header = |token: Option<grants::ProviderToken>| {
         token
             .unwrap()
@@ -3392,50 +3465,194 @@ async fn a_refresh_that_outlasts_its_lease_ends_no_live_sign_in() {
             .unwrap()
             .to_owned()
     };
+    let state = || async {
+        sqlx::query_as::<_, (bool, bool)>(
+            "SELECT presented_at IS NOT NULL, refreshing_until IS NOT NULL FROM oidc_grants",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    };
 
-    // The provider takes a refresh token only once: the stalled holder is refused
-    // after the other replica refreshed, and that refusal ends nothing.
+    // An answer that can't be read leaves the token in doubt; the holder asks
+    // again at once, and an answer settles it.
+    issuer.garble.store(1, std::sync::atomic::Ordering::SeqCst);
     expire(&db.pool, "1 second").await;
-    let stalled = stall_refresh(&db, &issuer, one.clone(), user.id).await;
-    let token = two.access_token(user.id, None).await.unwrap();
-    let late = stalled.await.unwrap().unwrap();
-    let access = issuer.access.lock().await.clone();
-    assert_eq!(header(token), format!("Bearer {}", access[1]));
-    assert_eq!(header(late), format!("Bearer {}", access[1]));
+    let token = grants.access_token(user.id, None).await.unwrap();
+    assert_eq!(
+        header(token),
+        format!("Bearer {}", issuer.access.lock().await[1])
+    );
+    let refresh = issuer.refresh.lock().await.clone();
+    assert_eq!(
+        *issuer.presented.lock().await,
+        [refresh[0].clone(), refresh[0].clone()]
+    );
+    assert_eq!(state().await, (false, false));
+
+    // An error answer means the provider did not take it: no doubt is kept.
+    *issuer.refresh_mode.lock().await = "unavailable";
+    expire(&db.pool, "1 second").await;
+    assert_eq!(
+        grants.access_token(user.id, None).await.err().unwrap().0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(issuer.presented.lock().await.len(), 3);
+    assert_eq!(state().await, (false, false));
+
+    // A token sent without an answer longer ago than the window, after the holder
+    // gave up or stopped, is never presented again: the sign-in ends.
+    retry_now(&db.pool).await;
+    *issuer.refresh_mode.lock().await = "ok";
+    sqlx::query("UPDATE oidc_grants SET presented_at = NOW() - INTERVAL '50 seconds'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        grants.access_token(user.id, None).await.err().unwrap().1,
+        grants::SIGN_IN_AGAIN
+    );
+    assert_eq!(issuer.presented.lock().await.len(), 3);
+    assert_eq!(
+        authenticated(&app, &cookie).await,
+        (StatusCode::OK, json!(false))
+    );
+    let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oidc_revocations")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 0);
+
+    // A provider that rotated the token and lost its answer refuses it when asked
+    // again within the window, and that ends the sign-in too.
+    let (cookie, _, _) = oidc_session(&app, &issuer, "student").await;
+    *issuer.refresh_mode.lock().await = "lost";
+    expire(&db.pool, "1 second").await;
+    assert_eq!(
+        grants.access_token(user.id, None).await.err().unwrap().1,
+        grants::SIGN_IN_AGAIN
+    );
+    let presented = issuer.presented.lock().await.clone();
+    assert_eq!(presented.len(), 5);
+    assert_eq!(presented[3], presented[4]);
+    assert_eq!(
+        authenticated(&app, &cookie).await,
+        (StatusCode::OK, json!(false))
+    );
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn shutdown_starts_no_refresh_and_stops_presenting_tokens() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let auth = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let grants = auth.grants().unwrap();
+    let (_, _, user) = oidc_session(&auth.router(), &issuer, "student").await;
+
+    // A refresh whose answer can't be read is not asked again once shutdown began;
+    // its token keeps the time it was sent, for another replica to settle.
+    issuer.garble.store(1, std::sync::atomic::Ordering::SeqCst);
+    issuer
+        .refresh_delay
+        .store(300, std::sync::atomic::Ordering::SeqCst);
+    expire(&db.pool, "1 second").await;
+    let refreshing = tokio::spawn({
+        let grants = grants.clone();
+        async move { grants.access_token(user.id, None).await }
+    });
+    while issuer.presented.lock().await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    grants.close();
+    assert_eq!(
+        refreshing.await.unwrap().err().unwrap().0,
+        StatusCode::BAD_GATEWAY
+    );
+    grants.finish().await;
+    assert_eq!(issuer.presented.lock().await.len(), 1);
+    let (doubt, leased): (bool, bool) = sqlx::query_as(
+        "SELECT presented_at IS NOT NULL, refreshing_until IS NOT NULL FROM oidc_grants",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!((doubt, leased), (true, false));
+
+    // No new refresh starts: a token that still lasts serves, an expired one fails.
+    expire_soon(&db.pool, "").await;
+    let token = grants.access_token(user.id, None).await.unwrap().unwrap();
+    assert_eq!(
+        token.authorization().unwrap(),
+        format!("Bearer {}", issuer.access.lock().await[0]).as_str()
+    );
+    expire(&db.pool, "1 second").await;
+    assert_eq!(
+        grants.access_token(user.id, None).await.err().unwrap().0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(issuer.presented.lock().await.len(), 1);
+
+    // Another replica settles it inside the window.
+    let other = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    issuer
+        .refresh_delay
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let token = other
+        .grants()
+        .unwrap()
+        .access_token(user.id, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        token.authorization().unwrap(),
+        format!("Bearer {}", issuer.access.lock().await[1]).as_str()
+    );
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_slow_provider_holds_no_request_up_inside_the_grace() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let auth = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let app = auth.router();
+    let grants = auth.grants().unwrap();
+    let (cookie, _, _) = oidc_session(&app, &issuer, "student").await;
+    issuer
+        .refresh_delay
+        .store(5000, std::sync::atomic::Ordering::SeqCst);
+    expire(&db.pool, "1 minute").await;
+    let started = std::time::Instant::now();
     assert_eq!(
         authenticated(&app, &cookie).await,
         (StatusCode::OK, json!(true))
     );
-
-    // A provider that takes it again answers both; the later save finds the token
-    // replaced, keeps the grant and revokes nothing.
-    *issuer.refresh_mode.lock().await = "reuse";
-    expire(&db.pool, "1 second").await;
-    let stalled = stall_refresh(&db, &issuer, one.clone(), user.id).await;
-    let token = two.access_token(user.id, None).await.unwrap();
-    let late = stalled.await.unwrap().unwrap();
-    let access = issuer.access.lock().await.clone();
-    assert_eq!(header(token), format!("Bearer {}", access[2]));
-    assert_eq!(header(late), format!("Bearer {}", access[3]));
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(issuer.revoked.lock().await.is_empty());
-    *issuer.refresh_mode.lock().await = "ok";
-    expire(&db.pool, "1 second").await;
-    let token = two.access_token(user.id, None).await.unwrap();
-    let (refresh, presented) = (
-        issuer.refresh.lock().await.clone(),
-        issuer.presented.lock().await.clone(),
-    );
-    assert_eq!(presented.last(), Some(&refresh[2]), "the first save stands");
-    assert_eq!(
-        header(token),
-        format!("Bearer {}", issuer.access.lock().await[4])
-    );
-    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions")
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    assert_eq!(sessions, 1);
+    let waited = started.elapsed();
+    assert!(waited < Duration::from_millis(4500), "{waited:?}");
+    // The refresh goes on and saves its token.
+    grants.finish().await;
+    let saved: bool = sqlx::query_scalar(
+        "SELECT refreshing_until IS NULL AND access_expires_at > NOW() + INTERVAL '5 minutes' FROM oidc_grants",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(saved);
+    assert_eq!(issuer.presented.lock().await.len(), 1);
     task.abort();
     db.close().await;
 }

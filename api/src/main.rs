@@ -158,6 +158,7 @@ async fn main() -> Result<()> {
         state.shutdown.clone(),
     ));
     let shutdown = state.shutdown.clone();
+    let closing = state.auth.grants();
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address=%config.listen,"obleth-chat listening; local accounts enabled");
     let app = router(state.clone(), config.static_dir)
@@ -176,25 +177,35 @@ async fn main() -> Result<()> {
                 let _ = tokio::signal::ctrl_c().await;
             }
             shutdown.cancel();
+            // No refresh starts from here: one could outlast the process.
+            if let Some(grants) = closing {
+                grants.close();
+            }
         })
         .await?;
-    let _ = tokio::time::timeout(Duration::from_secs(10), async {
-        while state.metrics.streams.get() > 0 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    // Refreshes under way save the refresh token the provider rotated while the
+    // streams and maintenance finish; they send nothing more once closed.
+    let refreshes = async {
+        if let Some(grants) = state.auth.grants() {
+            let _ = tokio::time::timeout(Duration::from_secs(30), grants.finish()).await;
         }
-    })
-    .await;
-    if tokio::time::timeout(Duration::from_secs(10), &mut maintenance)
-        .await
-        .is_err()
-    {
-        maintenance.abort();
-        let _ = maintenance.await;
-    }
-    // A refresh the provider has answered still saves the refresh token it rotated.
-    if let Some(grants) = state.auth.grants() {
-        let _ = tokio::time::timeout(Duration::from_secs(15), grants.finish()).await;
-    }
+    };
+    let rest = async {
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            while state.metrics.streams.get() > 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        if tokio::time::timeout(Duration::from_secs(10), &mut maintenance)
+            .await
+            .is_err()
+        {
+            maintenance.abort();
+            let _ = maintenance.await;
+        }
+    };
+    tokio::join!(refreshes, rest);
     pool.close().await;
     Ok(())
 }

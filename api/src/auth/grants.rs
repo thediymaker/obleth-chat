@@ -14,19 +14,26 @@ const SEALED: u8 = 1;
 const REFRESH_MARGIN_SECS: f64 = 60.0;
 /// Assumed lifetime of an access token the provider gave no expiry for.
 const DEFAULT_LIFETIME: Duration = Duration::from_secs(300);
-/// How long a lease holder may spend on the provider, from its claim: discovery
-/// and two token requests. It never presents the token after this.
-const HOLD: Duration = Duration::from_secs(75);
-/// How long one replica holds a grant's refresh before others may take over. Well
-/// past HOLD, so a holder is done with the provider before its lease can lapse.
+/// Once a refresh token went to the provider without an answer Chat could read,
+/// the provider may have rotated it. Providers that rotate refresh tokens refuse
+/// the old one for a short while and may then take its reuse as theft, ending the
+/// sign-in at the provider. So Chat presents a token again only within this long
+/// of first sending it; after that it ends the sign-in itself.
+const PRESENT_WINDOW: Duration = Duration::from_secs(45);
+/// How long one replica holds a grant's refresh. Well past PRESENT_WINDOW plus the
+/// last answer and its save, so a holder still at work keeps its lease; a lease
+/// that lapses means its holder stopped, maybe after the provider rotated the
+/// token, and the grant ends rather than present that token again.
 const LEASE: Duration = Duration::from_secs(120);
 /// How long a request waits for another's refresh of an expired access token.
 const WAIT: Duration = Duration::from_secs(80);
 /// After the provider couldn't answer a grant's refresh, no one asks it again for
 /// that grant for this long.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
-/// How long saving a rotated refresh token is retried while the database fails.
-const SAVE_FOR: Duration = Duration::from_secs(120);
+/// How long saving a refreshed token is retried while the database fails.
+const SAVE_FOR: Duration = Duration::from_secs(90);
+/// How long a sign-in's check waits for a refresh while it is still in the grace.
+const CONFIRM_WAIT: Duration = Duration::from_secs(3);
 /// How long after its access token expired a sign-in is still trusted when the
 /// provider can't be asked.
 const UNCONFIRMED_GRACE: Duration = Duration::from_secs(15 * 60);
@@ -98,16 +105,22 @@ struct Claimed {
     #[sqlx(flatten)]
     grant: GrantRow,
     lease: DateTime<Utc>,
+    /// An earlier request sent the token and no answer came back.
+    doubt: bool,
+    /// Seconds left in which the token may still be sent.
+    send_for: f64,
 }
 
 #[derive(FromRow)]
-struct LeasedRow {
+struct WaitingRow {
     #[sqlx(flatten)]
     grant: GrantRow,
-    /// Whether a replica holds the grant's refresh lease.
-    leased: bool,
     /// Whether the provider failed to answer a refresh of it just now.
     failing: bool,
+    /// Whether its refresh token may have been rotated too long ago to present: a
+    /// request sent it with no answer longer than PRESENT_WINDOW ago, or a holder
+    /// stopped without giving its lease back.
+    doomed: bool,
 }
 
 /// What became of a refreshed token on saving it.
@@ -146,6 +159,12 @@ impl Grants {
             issuer,
             tasks: TaskTracker::new(),
         }
+    }
+
+    /// Starts no new refresh, and sends no more tokens to the provider, from now
+    /// on: one begun at shutdown could outlast the process.
+    pub fn close(&self) {
+        self.tasks.close();
     }
 
     /// Waits for the refreshes under way, so none loses a rotated token at shutdown.
@@ -287,11 +306,17 @@ impl Grants {
         if busy && recent {
             return Ok(true);
         }
-        match self.refresh(id).await {
-            Ok(token) => Ok(token.is_some()),
-            Err(_) if recent => Ok(true),
-            Err(error) => Err(error),
+        if !recent {
+            return Ok(self.refresh(id).await?.is_some());
         }
+        // Inside the grace a slow provider holds no request up: the refresh goes on
+        // without it, and a refusal still ends the session for the next one.
+        Ok(
+            match tokio::time::timeout(CONFIRM_WAIT, self.refresh(id)).await {
+                Ok(Ok(token)) => token.is_some(),
+                Ok(Err(_)) | Err(_) => true,
+            },
+        )
     }
 
     /// The grant's access token, refreshed first when it is about to expire. None
@@ -305,67 +330,61 @@ impl Grants {
         self.refresh(grant.id).await
     }
 
-    /// Refreshes one grant. The work runs in its own task, so a caller that goes
-    /// away (a closed tab, a stopped chat, a timeout) can't stop it between the
-    /// provider rotating the refresh token and Chat saving the new one.
-    async fn refresh(&self, id: Uuid) -> Result<Option<ProviderToken>, ApiError> {
-        let grants = self.clone();
-        self.tasks
-            .spawn(async move { grants.refresh_now(id).await })
-            .await
-            .map_err(|_| ApiError::internal())?
-    }
-
     /// Refreshes one grant under a lease, so replicas never present the same
-    /// refresh token twice: the provider would take that as theft. The lease is a
-    /// column, not a row lock, so no database connection is held while the provider
-    /// answers; others wait for the lease holder by polling, or use the access token
-    /// while it lasts. After the provider fails to answer, no one asks it again for
-    /// a while. Returns None when the grant has ended.
-    async fn refresh_now(&self, id: Uuid) -> Result<Option<ProviderToken>, ApiError> {
+    /// refresh token at once. The lease is a column, not a row lock, so no database
+    /// connection is held while the provider answers; others use the access token
+    /// while it lasts, or wait for the holder by polling. The claim and the refresh
+    /// run in their own task, so a caller that goes away (a closed tab, a stopped
+    /// chat, a timeout) can't leave a lease without a holder, or stop the holder
+    /// between the provider rotating the refresh token and Chat saving the new one.
+    /// A token that may have been rotated longer ago than PRESENT_WINDOW is never
+    /// presented again: its sign-in ends. After the provider fails to answer, no
+    /// one asks it again for a while. Returns None when the grant has ended.
+    async fn refresh(&self, id: Uuid) -> Result<Option<ProviderToken>, ApiError> {
         let deadline = tokio::time::Instant::now() + WAIT;
-        let claimed = loop {
-            let claimed = sqlx::query_as::<_, Claimed>(
-                "UPDATE oidc_grants SET refreshing_until = NOW() + make_interval(secs => $3) \
-                 WHERE id = $1 AND access_expires_at <= NOW() + make_interval(secs => $2) \
-                 AND (refreshing_until IS NULL OR refreshing_until <= NOW()) \
-                 AND (refresh_failed_at IS NULL OR refresh_failed_at <= NOW() - make_interval(secs => $4)) \
-                 RETURNING id, user_id, session_id, access_token, refresh_token, FALSE AS fresh, \
-                 access_expires_at > NOW() AS live, refreshing_until AS lease",
-            )
-            .bind(id)
-            .bind(REFRESH_MARGIN_SECS)
-            .bind(LEASE.as_secs_f64())
-            .bind(RETRY_AFTER.as_secs_f64())
-            .fetch_optional(&self.pool)
-            .await?;
-            if let Some(claimed) = claimed {
-                break claimed;
+        loop {
+            let closing = self.tasks.is_closed();
+            if !closing {
+                let grants = self.clone();
+                let held = self
+                    .tasks
+                    .spawn(async move {
+                        match grants.claim(id).await? {
+                            Some(claimed) => grants.hold(claimed).await.map(Some),
+                            None => Ok(None),
+                        }
+                    })
+                    .await
+                    .map_err(|_| ApiError::internal())??;
+                if let Some(token) = held {
+                    return Ok(token);
+                }
             }
-            let Some(LeasedRow {
+            let Some(WaitingRow {
                 grant,
-                leased,
                 failing,
-            }) = sqlx::query_as::<_, LeasedRow>(
+                doomed,
+            }) = sqlx::query_as::<_, WaitingRow>(
                 "SELECT id, user_id, session_id, access_token, refresh_token, \
                  access_expires_at > NOW() + make_interval(secs => $2) AS fresh, \
                  access_expires_at > NOW() AS live, \
-                 COALESCE(refreshing_until > NOW(), FALSE) AS leased, \
-                 COALESCE(refresh_failed_at > NOW() - make_interval(secs => $3), FALSE) AS failing \
+                 COALESCE(refresh_failed_at > NOW() - make_interval(secs => $3), FALSE) AS failing, \
+                 COALESCE(refreshing_until <= NOW(), FALSE) OR (refreshing_until IS NULL \
+                 AND COALESCE(presented_at <= NOW() - make_interval(secs => $4), FALSE)) AS doomed \
                  FROM oidc_grants WHERE id = $1",
             )
             .bind(id)
             .bind(REFRESH_MARGIN_SECS)
             .bind(RETRY_AFTER.as_secs_f64())
+            .bind(PRESENT_WINDOW.as_secs_f64())
             .fetch_optional(&self.pool)
             .await?
             else {
                 return Ok(None);
             };
-            // Another replica may have refreshed it meanwhile. While another holds the
-            // lease, or the provider just failed, the access token still serves until
-            // it actually expires.
-            if grant.fresh || ((leased || failing) && grant.live) {
+            // Another replica may have refreshed it meanwhile. Whatever keeps this
+            // one from refreshing, the access token serves until it expires.
+            if grant.fresh || grant.live {
                 if let Some(token) =
                     self.open("access", grant.id, grant.user_id, &grant.access_token)
                 {
@@ -380,21 +399,53 @@ impl Grants {
                     continue;
                 }
             }
-            // The provider failed to answer just now; asking again won't help yet.
-            if failing {
-                return Err(unavailable());
+            if doomed {
+                if self.end(&grant, "unconfirmed").await? {
+                    return Ok(None);
+                }
+                continue;
             }
-            if tokio::time::Instant::now() >= deadline {
+            // The provider failed to answer just now, or shutdown began: asking again
+            // won't help yet.
+            if failing || closing || tokio::time::Instant::now() >= deadline {
                 return Err(unavailable());
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
-        };
-        self.hold(claimed).await
+        }
+    }
+
+    /// Claims a grant's refresh when it is due, no one holds it, and its refresh
+    /// token may still be presented.
+    async fn claim(&self, id: Uuid) -> Result<Option<Claimed>, ApiError> {
+        Ok(sqlx::query_as::<_, Claimed>(
+            "UPDATE oidc_grants SET refreshing_until = NOW() + make_interval(secs => $3), \
+             presented_at = COALESCE(presented_at, NOW()) \
+             WHERE id = $1 AND access_expires_at <= NOW() + make_interval(secs => $2) \
+             AND refreshing_until IS NULL \
+             AND (presented_at IS NULL OR presented_at > NOW() - make_interval(secs => $5)) \
+             AND (refresh_failed_at IS NULL OR refresh_failed_at <= NOW() - make_interval(secs => $4)) \
+             RETURNING id, user_id, session_id, access_token, refresh_token, FALSE AS fresh, \
+             access_expires_at > NOW() AS live, refreshing_until AS lease, \
+             presented_at < NOW() AS doubt, \
+             EXTRACT(EPOCH FROM presented_at + make_interval(secs => $5) - NOW())::FLOAT8 AS send_for",
+        )
+        .bind(id)
+        .bind(REFRESH_MARGIN_SECS)
+        .bind(LEASE.as_secs_f64())
+        .bind(RETRY_AFTER.as_secs_f64())
+        .bind(PRESENT_WINDOW.as_secs_f64())
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     /// Refreshes a grant this replica holds the lease of.
     async fn hold(&self, claimed: Claimed) -> Result<Option<ProviderToken>, ApiError> {
-        let Claimed { grant, lease } = claimed;
+        let Claimed {
+            grant,
+            lease,
+            mut doubt,
+            send_for,
+        } = claimed;
         let Some(refresh) = self.open("refresh", grant.id, grant.user_id, &grant.refresh_token)
         else {
             tracing::warn!("a stored sign-in could not be decrypted; ending it");
@@ -403,34 +454,39 @@ impl Grants {
             }
             return self.stored(grant.id).await;
         };
-        // All of it within HOLD of the claim, so the token is never presented once
-        // the lease could have lapsed and another replica taken over.
-        let result = tokio::time::timeout(HOLD, async {
-            let result = self.oidc.refresh(&refresh).await;
-            // When no answer arrived the provider may have rotated the token anyway.
-            // Try again at once, inside the window in which it still takes the old
-            // token.
-            match result {
-                Err(RefreshFailure::Unanswered) => self.oidc.refresh(&refresh).await,
-                result => result,
+        let send_by = tokio::time::Instant::now() + Duration::from_secs_f64(send_for.max(0.0));
+        let tasks = self.tasks.clone();
+        let may_send = move || tokio::time::Instant::now() < send_by && !tasks.is_closed();
+        // Once a request went unanswered, only an answer about the token settles
+        // whether the provider rotated it, so it is asked again while it may be.
+        let result = loop {
+            match self.oidc.refresh(&refresh, may_send.clone()).await {
+                Err(RefreshFailure::Unanswered) => doubt = true,
+                Err(RefreshFailure::Unavailable) if doubt => {}
+                result => break result,
             }
-        })
-        .await
-        .unwrap_or(Err(RefreshFailure::Unanswered));
+            if !may_send() {
+                break Err(RefreshFailure::Unanswered);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        };
         match result {
             Ok(refreshed) => {
                 let access = ProviderToken(refreshed.access.secret().clone());
-                match self.save(&grant, &refresh, &refreshed).await? {
-                    Saved::Kept => Ok(Some(access)),
-                    Saved::Ended => {
-                        // Its old token is queued for revocation; the new one goes too.
-                        if let Some(token) = refreshed.refresh {
-                            let oidc = self.oidc.clone();
-                            self.tasks
-                                .spawn(async move { oidc.revoke(token.secret()).await });
-                        }
-                        Ok(None)
+                let saved = self.save(&grant, &refresh, &refreshed).await;
+                if !matches!(saved, Ok(Saved::Kept)) {
+                    // The grant ended, or will once its lease lapses: its old token
+                    // is queued for revocation or never presented again, and the new
+                    // one goes too.
+                    if let Some(token) = refreshed.refresh {
+                        let oidc = self.oidc.clone();
+                        self.tasks
+                            .spawn(async move { oidc.revoke(token.secret()).await });
                     }
+                }
+                match saved? {
+                    Saved::Kept => Ok(Some(access)),
+                    Saved::Ended => Ok(None),
                 }
             }
             Err(RefreshFailure::Rejected) => {
@@ -441,12 +497,21 @@ impl Grants {
                 self.stored(grant.id).await
             }
             Err(RefreshFailure::Unavailable | RefreshFailure::Unanswered) => {
+                // A token the provider may have rotated keeps the time it was first
+                // sent: another replica may settle it while that is recent, and the
+                // grant ends after. Otherwise no one asks the failing provider again
+                // for a while, unless it was shutdown that stopped this refresh.
+                let failed = !doubt && !self.tasks.is_closed();
                 sqlx::query(
-                    "UPDATE oidc_grants SET refreshing_until = NULL, refresh_failed_at = NOW() \
+                    "UPDATE oidc_grants SET refreshing_until = NULL, \
+                     presented_at = CASE WHEN $3 THEN presented_at END, \
+                     refresh_failed_at = CASE WHEN $4 THEN NOW() ELSE refresh_failed_at END \
                      WHERE id = $1 AND refreshing_until = $2",
                 )
                 .bind(grant.id)
                 .bind(lease)
+                .bind(doubt)
+                .bind(failed)
                 .execute(&self.pool)
                 .await?;
                 if grant.live {
@@ -463,7 +528,8 @@ impl Grants {
 
     /// Saves a refresh's tokens over the ones it was made from. The provider may
     /// have rotated the refresh token, and the new one exists nowhere else, so a
-    /// failing database is retried for a while rather than losing it.
+    /// failing database is retried for a while rather than losing it, often enough
+    /// to save it as soon as the database is back.
     async fn save(
         &self,
         grant: &GrantRow,
@@ -478,13 +544,13 @@ impl Grants {
         let access = self.seal("access", grant.id, grant.user_id, refreshed.access.secret());
         let refresh = self.seal("refresh", grant.id, grant.user_id, next);
         let started = tokio::time::Instant::now();
-        let mut pause = Duration::from_millis(250);
+        let mut pause = Duration::from_millis(100);
         loop {
             let attempt: Result<Saved, sqlx::Error> = async {
                 let saved = sqlx::query(
                     "UPDATE oidc_grants SET access_token = $2, refresh_token = $3, \
                      access_expires_at = NOW() + make_interval(secs => $4), refreshed_at = NOW(), \
-                     refreshing_until = NULL, refresh_failed_at = NULL \
+                     refreshing_until = NULL, refresh_failed_at = NULL, presented_at = NULL \
                      WHERE id = $1 AND refresh_token = $5",
                 )
                 .bind(grant.id)
@@ -498,8 +564,9 @@ impl Grants {
                 if saved == 1 {
                     return Ok(Saved::Kept);
                 }
-                // Another refresh, whose lease ours outlasted, saved first; both
-                // answers came from the same grant, which goes on.
+                // An earlier attempt saved it and only the database's answer was
+                // lost: the lease keeps other refreshes out, and a grant whose lease
+                // lapsed ends instead of being refreshed.
                 let exists: bool =
                     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM oidc_grants WHERE id = $1)")
                         .bind(grant.id)
@@ -513,7 +580,7 @@ impl Grants {
                 Err(error) if started.elapsed() < SAVE_FOR => {
                     tracing::warn!("could not save a refreshed sign-in yet: {error}");
                     tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(Duration::from_secs(5));
+                    pause = (pause * 2).min(Duration::from_secs(1));
                 }
                 Err(error) => {
                     tracing::error!("could not save a refreshed sign-in: {error}");

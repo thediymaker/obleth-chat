@@ -15,7 +15,10 @@ CREATE TABLE oidc_grants (
     refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- While set and in the future, one replica is refreshing this grant; the others
     -- wait for it instead of presenting the same refresh token.
-    refreshing_until TIMESTAMPTZ
+    refreshing_until TIMESTAMPTZ,
+    -- When the provider last failed to answer a refresh of this grant; for a short
+    -- while after, no replica asks it again.
+    refresh_failed_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX oidc_grants_session_idx ON oidc_grants(session_id);
 CREATE INDEX oidc_grants_user_idx ON oidc_grants(user_id, refreshed_at DESC);

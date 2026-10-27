@@ -62,9 +62,7 @@ async fn main() -> Result<()> {
         Ok(sandbox_config) => {
             let sandboxes =
                 obleth_chat::sandbox::Sandboxes::new(sandbox_config.clone(), pool.clone())?;
-            if let Some(grants) = state.auth.grants() {
-                sandboxes.follow_grants(grants);
-            }
+            sandboxes.follow_sign_ins(state.auth.grants(), state.auth.password_sign_in());
             // Missing permissions turn workspaces off and say why; an API that doesn't
             // answer yet leaves them on, to fail with its own error when used.
             match sandboxes.check_access().await {
@@ -192,6 +190,10 @@ async fn main() -> Result<()> {
     {
         maintenance.abort();
         let _ = maintenance.await;
+    }
+    // A refresh the provider has answered still saves the refresh token it rotated.
+    if let Some(grants) = state.auth.grants() {
+        let _ = tokio::time::timeout(Duration::from_secs(15), grants.finish()).await;
     }
     pool.close().await;
     Ok(())

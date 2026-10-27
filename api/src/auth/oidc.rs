@@ -54,11 +54,27 @@ struct Discovered {
     revocation: Option<RevocationUrl>,
 }
 
+/// Discovery is repeated this often, so provider key rotation needs no deployment.
+const DISCOVERY_AGE: Duration = Duration::from_secs(300);
+/// The longest one discovery may take: the metadata and the JWKS.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
+/// After a failed discovery, callers fail at once for this long instead of each
+/// asking the provider again.
+const DISCOVERY_RETRY: Duration = Duration::from_secs(15);
+
+struct Cache {
+    at: std::time::Instant,
+    discovered: Discovered,
+    failed_at: Option<std::time::Instant>,
+}
+
 pub(super) struct Oidc {
     config: OidcConfig,
     origin: String,
     http: reqwest::Client,
-    cache: Mutex<(std::time::Instant, Discovered)>,
+    cache: std::sync::Mutex<Cache>,
+    /// One discovery at a time; the lock on the cache is never held across it.
+    discovering: Mutex<()>,
 }
 
 /// Why a refresh did not produce a token.
@@ -91,27 +107,63 @@ impl Oidc {
             config: config.clone(),
             origin: origin.into(),
             http,
-            cache: Mutex::new((std::time::Instant::now(), discovered)),
+            cache: std::sync::Mutex::new(Cache {
+                at: std::time::Instant::now(),
+                discovered,
+                failed_at: None,
+            }),
+            discovering: Mutex::new(()),
         })
     }
 
-    async fn discovered(&self) -> Result<Discovered, ApiError> {
-        let mut cache = self.cache.lock().await;
-        // Refresh discovery/JWKS regularly so provider key rotation does not require
-        // a deployment. A failed refresh fails closed without exposing its response.
-        if cache.0.elapsed() >= Duration::from_secs(300) {
-            let refreshed = discover(&self.config, &self.origin, &self.http)
-                .await
-                .map_err(|_| {
-                    tracing::warn!("OIDC discovery refresh failed");
-                    ApiError(
-                        StatusCode::BAD_GATEWAY,
-                        "The identity provider is unavailable".into(),
-                    )
-                })?;
-            *cache = (std::time::Instant::now(), refreshed);
+    /// The cached discovery while it is current; an error while a recent attempt to
+    /// renew it failed; None when it is due.
+    fn cached(&self) -> Result<Option<Discovered>, ApiError> {
+        let cache = self.cache.lock().unwrap();
+        if cache.at.elapsed() < DISCOVERY_AGE {
+            return Ok(Some(cache.discovered.clone()));
         }
-        Ok(cache.1.clone())
+        if cache
+            .failed_at
+            .is_some_and(|at| at.elapsed() < DISCOVERY_RETRY)
+        {
+            return Err(provider_unavailable());
+        }
+        Ok(None)
+    }
+
+    async fn discovered(&self) -> Result<Discovered, ApiError> {
+        if let Some(discovered) = self.cached()? {
+            return Ok(discovered);
+        }
+        // Refresh discovery/JWKS regularly so provider key rotation does not require
+        // a deployment. A failed refresh fails closed without exposing its response,
+        // and those waiting on it fail with it rather than each trying again.
+        let _turn = self.discovering.lock().await;
+        if let Some(discovered) = self.cached()? {
+            return Ok(discovered);
+        }
+        let refreshed = tokio::time::timeout(
+            DISCOVERY_TIMEOUT,
+            discover(&self.config, &self.origin, &self.http),
+        )
+        .await;
+        let mut cache = self.cache.lock().unwrap();
+        match refreshed {
+            Ok(Ok(discovered)) => {
+                *cache = Cache {
+                    at: std::time::Instant::now(),
+                    discovered: discovered.clone(),
+                    failed_at: None,
+                };
+                Ok(discovered)
+            }
+            _ => {
+                tracing::warn!("OIDC discovery refresh failed");
+                cache.failed_at = Some(std::time::Instant::now());
+                Err(provider_unavailable())
+            }
+        }
     }
 
     /// Trades a refresh token for a new access token.
@@ -188,6 +240,13 @@ impl Oidc {
         // An unknown or already revoked token is a success too (RFC 7009 2.2).
         matches!(response, Ok(response) if response.status().is_success())
     }
+}
+
+fn provider_unavailable() -> ApiError {
+    ApiError(
+        StatusCode::BAD_GATEWAY,
+        "The identity provider is unavailable".into(),
+    )
 }
 
 /// ID token algorithms Chat accepts: the asymmetric ones, never a MAC keyed with the
@@ -516,7 +575,8 @@ pub(super) async fn callback(
     // The exchange made a grant at the provider (some providers also register a
     // device and tell the person). When this sign-in then failed, revoke its
     // refresh token so no live grant is left behind.
-    if outcome.is_err() {
+    // Only when Chat would have kept the grant: in sign mode it never keeps one.
+    if outcome.is_err() && auth.grants.is_some() {
         if let Some(refresh) = tokens.refresh_token() {
             let (provider, token) = (provider.clone(), refresh.secret().clone());
             tokio::spawn(async move {

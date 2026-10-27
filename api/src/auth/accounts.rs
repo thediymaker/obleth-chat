@@ -93,7 +93,7 @@ async fn revoke_session(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let user = auth.require_session(&headers, true, true).await?;
+    let user = auth.ending_session(&headers, true, true).await?;
     let token = auth
         .session_token(&headers)
         .ok_or_else(ApiError::unauthorized)?;
@@ -138,7 +138,7 @@ async fn revoke_others(
     State(auth): State<Auth>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let user = auth.require_session(&headers, true, true).await?;
+    let user = auth.ending_session(&headers, true, true).await?;
     let token = auth
         .session_token(&headers)
         .ok_or_else(ApiError::unauthorized)?;

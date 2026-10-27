@@ -565,6 +565,22 @@ impl Auth {
         mutation: bool,
         allow_password_change: bool,
     ) -> Result<Identity, ApiError> {
+        let identity = self
+            .ending_session(headers, mutation, allow_password_change)
+            .await?;
+        self.confirm_grant(identity.session).await?;
+        Ok(identity)
+    }
+
+    /// The session's person, without asking the provider about its grant. Only the
+    /// paths that end sign-ins use it directly, so signing out works while the
+    /// provider is down.
+    pub(super) async fn ending_session(
+        &self,
+        headers: &HeaderMap,
+        mutation: bool,
+        allow_password_change: bool,
+    ) -> Result<Identity, ApiError> {
         if mutation {
             self.check_origin(headers)?;
         }
@@ -600,7 +616,6 @@ impl Auth {
                 "Change your password before continuing".into(),
             ));
         }
-        self.confirm_grant(identity.user.session).await?;
         Ok(identity.user)
     }
 
@@ -1179,16 +1194,23 @@ fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// The person signed in by session `id`, while the session is unexpired and the
-/// account enabled and not waiting on a password change. Sign-out, session
-/// revocation and disabling the account end it.
-pub(crate) async fn session_owner(pool: &PgPool, id: Uuid) -> Result<Option<Identity>, ApiError> {
+/// The person signed in by session `id`, while the session is unexpired, the
+/// account enabled and not waiting on a password change, and, with passwords off,
+/// the session began with single sign-on. Sign-out, session revocation and
+/// disabling the account end it.
+pub(crate) async fn session_owner(
+    pool: &PgPool,
+    id: Uuid,
+    password_sign_in: bool,
+) -> Result<Option<Identity>, ApiError> {
     Ok(sqlx::query_as::<_, Identity>(
         "SELECT u.id, u.username, u.display_name, u.role, s.id AS session FROM auth_sessions s \
          JOIN users u ON u.id = s.user_id WHERE s.id = $1 \
-         AND s.expires_at > NOW() AND u.enabled = TRUE AND NOT u.password_change_required",
+         AND s.expires_at > NOW() AND u.enabled = TRUE AND NOT u.password_change_required \
+         AND (s.single_sign_on OR $2)",
     )
     .bind(id)
+    .bind(password_sign_in)
     .fetch_optional(pool)
     .await?)
 }
@@ -1384,7 +1406,7 @@ async fn login(
 }
 
 async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Result<Response, ApiError> {
-    auth.require_session(&headers, true, true).await?;
+    auth.ending_session(&headers, true, true).await?;
     let token = auth
         .session_token(&headers)
         .ok_or_else(ApiError::unauthorized)?;

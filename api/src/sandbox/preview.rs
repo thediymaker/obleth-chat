@@ -101,7 +101,11 @@ async fn still_signed_in(sb: &Sandboxes, grant: Grant) -> Result<bool, ApiError>
             return Ok(false);
         }
     }
-    let owner = crate::auth::session_owner(&sb.inner.pool, grant.session).await?;
+    let passwords = sb
+        .inner
+        .password_sessions
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let owner = crate::auth::session_owner(&sb.inner.pool, grant.session, passwords).await?;
     Ok(owner.is_some_and(|who| who.id == grant.user && sb.allowed(&who)))
 }
 

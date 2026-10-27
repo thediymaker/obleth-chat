@@ -2,7 +2,7 @@
 
 Each release's section is also its GitHub Release notes.
 
-## Unreleased
+## v0.6.0
 
 Chat can send each person's own identity provider token to the gateway, and can run with single sign-on only.
 

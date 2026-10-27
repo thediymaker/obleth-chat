@@ -884,16 +884,18 @@ async fn fake_refresh(state: FakeIssuer, token: &str) -> Response {
     tokio::time::sleep(Duration::from_millis(delay)).await;
     let mode = *state.refresh_mode.lock().await;
     let garbled = || Json(json!({"token_type":"Bearer"})).into_response();
-    if state
-        .garble
-        .fetch_update(
+    // Takes one garbled answer if any are left.
+    let mut left = state.garble.load(std::sync::atomic::Ordering::SeqCst);
+    while left > 0 {
+        match state.garble.compare_exchange(
+            left,
+            left - 1,
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
-            |left| left.checked_sub(1),
-        )
-        .is_ok()
-    {
-        return garbled();
+        ) {
+            Ok(_) => return garbled(),
+            Err(current) => left = current,
+        }
     }
     if mode == "lost" && state.live.lock().await.remove(token) {
         state.issue().await;

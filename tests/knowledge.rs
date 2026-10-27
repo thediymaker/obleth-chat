@@ -2406,3 +2406,33 @@ async fn changing_the_embedding_model_reindexes_everything(pool: PgPool) {
         "ready"
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_ampersand_before_wide_characters_is_indexed_and_indexing_goes_on(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, created) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/collections",
+        json!({"name":"Manuals"}),
+        &admin,
+    )
+    .await;
+    let collection = created["collection"]["id"].as_str().unwrap().to_owned();
+    let page = "<html><body><h1>R&D team 用户手册</h1><p>安装 &amp; 配置：Q&A 用户指南。本手册说明如何安装和配置研究计算集群上的软件。</p></body></html>";
+    for (name, bytes) in [
+        ("manual.html", page.as_bytes().to_vec()),
+        ("after.md", b"Files after it are indexed too.".to_vec()),
+    ] {
+        assert_eq!(
+            upload(&f.app, &collection, name, bytes, &admin).await.0,
+            StatusCode::CREATED
+        );
+    }
+    let documents = settled(&f.app, &collection, &admin).await;
+    for document in &documents {
+        assert_eq!(document["status"], "ready", "{document}");
+    }
+    assert_eq!(documents.len(), 2);
+}

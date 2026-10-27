@@ -146,6 +146,7 @@ async fn administrators_point_decisions_at_another_endpoint_with_a_sealed_key(po
     assert_eq!(saved["checkRuns"], true);
     assert_eq!(saved["checkTree"], true);
     assert_eq!(saved["checkReports"], true);
+    assert_eq!(saved["pickSections"], true);
     assert_eq!(saved["hasKey"], false);
     assert_eq!(saved["canStoreKey"], true);
     assert_eq!(saved["gateway"], false);
@@ -350,4 +351,99 @@ async fn check_says_why_an_endpoint_gave_no_answer(pool: PgPool) {
     let (url, _) = service(|| Json(json!({"verdicts": {"true_statement": {"value": true, "probabilities": {"true": 0.5, "false": 0.5}, "confidence": 0.0, "answered": false}}})).into_response()).await;
     let (_, checked) = call(&app, &admin, "POST", "/api/admin/decisions/check", ask(url)).await;
     assert_eq!(checked["error"], "The model gave no answer");
+}
+
+fn section_answer() -> Response {
+    Json(json!({"model": "judge-31b", "verdicts": {"section": {"type": "choice", "value": "s102", "probabilities": {"s102": 0.6, "s203": 0.3, "s150": 0.06, "s2": 0.04}, "confidence": 0.7}}})).into_response()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_paper_is_ranked_by_its_sections_and_a_long_one_by_its_chapters_first(pool: PgPool) {
+    use obleth_chat::{
+        auth::{Identity, Role},
+        knowledge::extract::Section,
+        research::paper::{pick, top, Paper},
+    };
+    let (url, seen) = service(section_answer).await;
+    sqlx::query("UPDATE decisions SET endpoint='custom', url=$1")
+        .bind(format!("{url}/v1/verdicts"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let decisions = Decisions::new(pool.clone(), None);
+    let settings = decisions.settings().await.unwrap();
+    let user = Identity {
+        id: Uuid::new_v4(),
+        username: "someone".into(),
+        display_name: "Someone".into(),
+        role: Role::User,
+        session: None,
+    };
+    let ask = decisions::Asker {
+        decisions: &decisions,
+        gateway: None,
+        user: &user,
+    };
+    // Three chapters of a hundred sections each: more than one question takes.
+    let mut sections = vec![];
+    for chapter in ["A", "B", "C"] {
+        sections.push(Section {
+            level: 2,
+            path: vec![format!("{chapter} Chapter")],
+            text: String::new(),
+        });
+        for n in 1..=100 {
+            sections.push(Section {
+                level: 3,
+                path: vec![format!("{chapter} Chapter"), format!("{chapter}.{n} Part")],
+                text: format!("Part {n} of chapter {chapter}."),
+            });
+        }
+    }
+    let paper = Paper {
+        title: Some("Long".into()),
+        sections,
+    };
+    let (model, ranked) = pick(ask, &settings, &paper, "the schedule", "Lower loss")
+        .await
+        .unwrap();
+    assert_eq!(model, "judge-31b");
+    let asked: Vec<Value> = seen
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, body)| body.clone())
+        .collect();
+    assert_eq!(asked.len(), 2);
+    let options = |k: usize| {
+        asked[k]["questions"]["section"]["criteria"]
+            .as_object()
+            .unwrap()
+            .len()
+    };
+    assert_eq!((options(0), options(1)), (3, 202));
+    assert_eq!(asked[0]["questions"]["section"]["type"], "choice");
+    assert_eq!(asked[0]["state"]["looking_for"], "the schedule");
+    assert_eq!(
+        asked[0]["questions"]["section"]["criteria"]["s102"],
+        "B Chapter"
+    );
+    assert_eq!(
+        asked[1]["questions"]["section"]["criteria"]["s150"],
+        "B Chapter › B.48 Part: Part 48 of chapter B."
+    );
+    // The answer's options outside the question are dropped, and unlikely ones aren't returned.
+    assert_eq!(top(&ranked), [(101, 0.6), (202, 0.3), (149, 0.06)]);
+
+    // A short paper is one question over all of its sections.
+    let short = Paper {
+        title: None,
+        sections: paper.sections[..3].to_vec(),
+    };
+    let (_, ranked) = pick(ask, &settings, &short, "the schedule", "Lower loss")
+        .await
+        .unwrap();
+    assert_eq!(seen.0.lock().unwrap().len(), 3);
+    assert_eq!(top(&ranked), [(1, 0.04)]);
 }

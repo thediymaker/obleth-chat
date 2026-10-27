@@ -125,7 +125,16 @@ impl Knowledge {
                 || match self.claim().await {
                     Ok(Some(job)) => {
                         let id = job.id;
-                        if let Err(error) = self.process(&gateway, job).await {
+                        // Each file is read in its own task, so one that makes Chat panic
+                        // fails on its own instead of stopping indexing for everyone.
+                        let (knowledge, gateway) = (self.clone(), gateway.clone());
+                        let result =
+                            tokio::spawn(async move { knowledge.process(&gateway, job).await })
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(anyhow::anyhow!("Chat failed while reading this file"))
+                                });
+                        if let Err(error) = result {
                             tracing::warn!(document=%id, "could not index a document: {error:#}");
                             let message = format!("{error:#}");
                             let _ = sqlx::query(

@@ -8,6 +8,7 @@ import { createSettings } from './settings.js';
 import { createAdmin } from './admin.js';
 import { createHistory } from './history.js';
 import { createAttachments } from './attachments.js';
+import { createLoad, WAIT_NOTICE_MS } from './load.js';
 import { createWorkspace } from './workspace.js';
 import { createBrowser } from './browser.js';
 import { createConnections } from './connections.js';
@@ -84,6 +85,9 @@ export async function startConnected(capabilities) {
     clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('show'), 5000);
   };
   const attachments = createAttachments({ api, state, render, modal, close, toast: message => toast(message) });
+  const load = createLoad({ api, state, modelName: id => modelName(id) });
+  // A reply to send again, with the model picked from its waiting notice, once it has stopped.
+  let switchAfterStop = null;
   const browserView = createBrowser({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), send: text => send(text), modal: (...args) => modal(...args), close: () => close(), assistantName: () => branding.assistantName });
   const codeView = createCode({ api, state, capabilities, render: () => render(), modal: (...args) => modal(...args), close: () => close(), toast: message => toast(message), chatPath, send: text => send(text), terminal: (id, command) => workspace.runInTerminal(id, command), moveToProject: () => projectsView.actions['project-move'](), startFrom: (projectId, start, prompt = '') => {
     // A new chat in the project with a workspace, at a commit or the latest code.
@@ -188,7 +192,7 @@ export async function startConnected(capabilities) {
     const choices = state.models.filter(m => [m.name,m.id,m.description,...(m.tags || [])].join(' ').toLowerCase().includes(query.toLowerCase())).sort((a,b) => (a.id === 'auto' ? -2 : favorites.includes(a.id) ? -1 : 0) - (b.id === 'auto' ? -2 : favorites.includes(b.id) ? -1 : 0));
     const list = $('#model-choices', modelPopover);
     if (!list) return;
-    list.innerHTML = choices.map(m => `<button class="model-option ${m.id === state.model ? 'selected' : ''}" role="option" aria-selected="${m.id === state.model}" data-action="select-model" data-value="${esc(m.id)}">${icon(favorites.includes(m.id) ? 'bookmark' : 'cube')}<span class="grow"><strong>${esc(m.name || m.id)}${m.isDefault ? badge('Default') : ''}${m.metadata?.supportsVision ? badge('Vision') : ''}</strong>${(() => { const detail = m.id === 'auto' ? 'Picks a permitted model for each request' : m.description || m.detail || (m.name && m.name !== m.id ? m.id : ''); return detail ? `<small>${esc(detail)}</small>` : ''; })()}</span>${m.id === state.model ? icon('check') : ''}</button>`).join('') || '<p class="model-empty">No matching models.</p>';
+    list.innerHTML = choices.map(m => `<button class="model-option ${m.id === state.model ? 'selected' : ''}" role="option" aria-selected="${m.id === state.model}" data-action="select-model" data-value="${esc(m.id)}">${icon(favorites.includes(m.id) ? 'bookmark' : 'cube')}<span class="grow"><strong>${esc(m.name || m.id)}${m.isDefault ? badge('Default') : ''}${m.metadata?.supportsVision ? badge('Vision') : ''}</strong>${(() => { const detail = m.id === 'auto' ? 'Picks a permitted model for each request' : m.description || m.detail || (m.name && m.name !== m.id ? m.id : ''); return detail ? `<small>${esc(detail)}</small>` : ''; })()}</span>${load.mark(m.id)}${m.id === state.model ? icon('check') : ''}</button>`).join('') || '<p class="model-empty">No matching models.</p>';
   }
   /** The pages inside Compute this server offers: workspaces and clusters. */
   function computeTabs() {
@@ -234,7 +238,7 @@ export async function startConnected(capabilities) {
   /** One pill for the model and its thinking effort; it opens the model list with effort and the other parameters. */
   function engineButton(available) {
     const name = modelName(state.model), level = efforts.indexOf(state.reasoningEffort);
-    return `<button type="button" class="engine-button" data-action="models" aria-haspopup="dialog" aria-expanded="false" aria-controls="model-popover" aria-label="Model: ${esc(name)}. Thinking effort: ${effortLabel(state.reasoningEffort)}" title="${esc(name)} · thinking ${effortLabel(state.reasoningEffort).toLowerCase()}" ${!available || state.streaming ? 'disabled' : ''}>${icon('cube')}<span class="engine-name">${esc(name)}</span><span class="effort-bars" aria-hidden="true">${[1, 2, 3].map(i => `<i class="${level >= i ? 'lit' : ''}"></i>`).join('')}</span>${icon('down')}</button>`;
+    return `<button type="button" class="engine-button" data-action="models" aria-haspopup="dialog" aria-expanded="false" aria-controls="model-popover" aria-label="Model: ${esc(name)}. Thinking effort: ${effortLabel(state.reasoningEffort)}" title="${esc(name)} · thinking ${effortLabel(state.reasoningEffort).toLowerCase()}" ${!available || state.streaming ? 'disabled' : ''}>${icon('cube')}<span class="engine-name">${esc(name)}</span>${load.mark(state.model)}<span class="effort-bars" aria-hidden="true">${[1, 2, 3].map(i => `<i class="${level >= i ? 'lit' : ''}"></i>`).join('')}</span>${icon('down')}</button>`;
   }
   /** How much of the model's window the chat uses: the last request of the last reply,
    * its input and output. A reply with tools is several requests; its totals add them up. */
@@ -323,8 +327,28 @@ export async function startConnected(capabilities) {
     const key = m.id || `pending-${index}`, details = turnDetails(m, key);
     const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' && !state.shared ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${m.id && !state.streaming && !state.switchingVersion && !state.shared ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
     const status = m.role === 'assistant' ? `<span class="response-meta ${isPendingMessage(m) ? 'is-generating' : ''} ${m.status === 'error' ? 'is-error' : ''}" ${isPendingMessage(m) ? 'role="status"' : ''}>${esc(responseStatus(m))}</span>` : '';
-    return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(state.shared ? owner().initials : initials())}</span>${state.shared ? esc(owner().name) : 'You'}` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) && !state.shared ? turnView.steerForm() : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion && !state.shared ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
+    return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(state.shared ? owner().initials : initials())}</span>${state.shared ? esc(owner().name) : 'You'}` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) && !state.shared ? turnView.steerForm() : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? loadNotice(m, index) + knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion && !state.shared ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
   }
+  /** Under a reply that waits for a free slot, or that the gateway gave up on: why, and a model to switch to. */
+  function loadNotice(m, index) {
+    if (m.role !== 'assistant' || state.shared) return '';
+    const waiting = isPendingMessage(m) && !String(m.content || '').trim() && !m.reasoningContent && !(m.activity || []).length;
+    const asked = state.active?.messages?.[index - 1];
+    return load.notice(m, index, { waitingSince: waiting ? Date.parse(m._began || m.createdAt || '') || 0 : 0, needsVision: (asked?.attachments || []).some(a => a.kind === 'image') });
+  }
+  /** While a reply waits for its first words, asks how busy its model is, so its notice can say. */
+  setInterval(() => {
+    const c = state.active, index = c?.messages?.findIndex(m => isPendingMessage(m) && !String(m.content || '').trim());
+    if (index == null || index < 0 || !load.offered() || route().id !== c.id) return;
+    const m = c.messages[index];
+    if (Date.now() - (Date.parse(m._began || m.createdAt || '') || Date.now()) < WAIT_NOTICE_MS - 1000) return;
+    load.refresh(2500).then(() => { if (state.active === c && c.messages[index] === m) updateMessage(m, index); });
+  }, 1000);
+  // The mark on the model button stays roughly current while the page is open.
+  setInterval(() => {
+    if (document.visibilityState !== 'visible' || !state.user || !load.offered()) return;
+    load.refresh(55000).then(() => { const button = $('.engine-button'); if (button && !button.matches('[aria-expanded="true"]')) button.outerHTML = engineButton(state.models.length > 0); });
+  }, 60000);
   function updateMessage(m, index) {
     const article = $(`[data-message="${index}"]`);
     if (!article) return;
@@ -391,6 +415,13 @@ export async function startConnected(capabilities) {
       if (current) { if (html) current.outerHTML = html; else current.remove(); }
       else if (html) answer.insertAdjacentHTML('afterend', html);
       article._sources = sourcesSignature; answer._citedText = m.content;
+    }
+    const notice = loadNotice(m, index);
+    if (article._load !== notice) {
+      const current = $('.load-notice', article);
+      if (current) { if (notice) current.outerHTML = notice; else current.remove(); }
+      else if (notice) answer.insertAdjacentHTML('afterend', notice);
+      article._load = notice;
     }
     const status = $('.response-meta', article), text = responseStatus(m);
     if (status.textContent !== text) status.textContent = text;
@@ -637,6 +668,10 @@ export async function startConnected(capabilities) {
       state.draft = op.prompt; attachments.restore(op.attached || []);
     }
     if (saved) observeConversation(saved);
+    if (switchAfterStop && saved?.id === switchAfterStop.conversation) {
+      const { message: id } = switchAfterStop; switchAfterStop = null;
+      setTimeout(() => { syncStreamingState(); if (route().id === saved.id) forkAndSend(id, 'regenerate'); }, 0);
+    }
   }
   async function reconcileConversation(id) {
     if (versionSelections.has(id)) { scheduleWatch(id); return; }
@@ -890,6 +925,13 @@ export async function startConnected(capabilities) {
     logout: async () => { await api.request('/api/auth/logout', { method: 'POST' }); expire(''); document.body.classList.remove('collapsed', 'sidebar-open'); },
     models: el => openModels(el),
     // The model you pick becomes your default, so new chats start with the last one you used.
+    'switch-waiting': async el => {
+      const c = state.active, m = c?.messages?.[Number(el.dataset.index)];
+      if (!m?.id || (isPendingMessage(m) && !currentOperation())) return;
+      state.model = el.dataset.value; resetGeneration();
+      if (isPendingMessage(m)) { switchAfterStop = { conversation: c.id, message: m.id }; await stopCurrent(); }
+      else { render(); await forkAndSend(m.id, 'regenerate'); }
+    },
     'select-model': async el => { state.model = el.dataset.value; resetGeneration(); closeModels(); render(); if (state.preferences?.defaultModel !== state.model) await savePreference({ defaultModel: state.model }); },
     parameters: () => { closeModels(false); modal('Generation parameters', `<p>Applies to your next message. Locked controls are managed by your administrator.</p>${state.presets.length ? btn('Use a saved preset', 'presets', { icon: 'grid', tone: 'small', type: '' }) : ''}<form id="parameters-form"><label class="form-label" for="system-prompt">System instructions ${isLocked('systemPrompt') ? badge('Locked', 'accent') : ''}</label><textarea id="system-prompt" class="form-control" rows="4" maxlength="8192" ${isLocked('systemPrompt') ? 'disabled' : ''}>${esc(state.systemPrompt)}</textarea><div class="form-columns"><div><label class="form-label" for="temperature">Temperature ${isLocked('temperature') ? badge('Locked', 'accent') : ''}</label><input id="temperature" class="form-control" type="number" min="0" max="2" step="0.1" value="${state.temperature}" ${isLocked('temperature') ? 'disabled' : ''} required></div><div><label class="form-label" for="top-p">Top P ${isLocked('topP') ? badge('Locked', 'accent') : ''}</label><input id="top-p" class="form-control" type="number" min="0.01" max="1" step="0.01" value="${state.topP}" ${isLocked('topP') ? 'disabled' : ''} required></div></div><label class="form-label" for="max-tokens">Maximum output tokens ${isLocked('maxTokens') ? badge('Locked', 'accent') : ''}</label><input id="max-tokens" class="form-control" type="number" min="0" max="262144" step="1" value="${state.maxTokens || ''}" placeholder="The model’s own limit" ${isLocked('maxTokens') ? 'disabled' : ''}><p class="field-help">Leave empty to let the model write as much as it needs.</p><div class="modal-actions"><button class="btn primary" type="submit">Save parameters</button></div></form>`); },
     presets: () => modal('Saved presets', state.presets.map(p => `<button class="select-option" data-action="apply-preset" data-id="${esc(p.id)}">${icon('grid')}<span class="grow"><h3>${esc(p.name)}</h3><p>${esc(modelName(p.model))}</p></span>${icon('right')}</button>`).join('')),
@@ -947,6 +989,7 @@ export async function startConnected(capabilities) {
     closeMenu(false); modelAnchor = anchor;
     modelPopover.innerHTML = `<label class="model-search">${icon('search')}<input id="model-search" aria-label="Search models" placeholder="Search models" autocomplete="off"></label><div id="model-choices" role="listbox" aria-label="Available models"></div><div class="engine-effort">${effortControl()}</div>`;
     modelPopover.hidden = false; modelChoices();
+    load.refresh().then(() => { if (!modelPopover.hidden) modelChoices($('#model-search', modelPopover)?.value || ''); });
     anchor.setAttribute('aria-expanded', 'true');
     // Open downward like a dropdown; flip above the button only when it would not fit.
     const rect = anchor.getBoundingClientRect(), fitsBelow = rect.bottom + 8 + modelPopover.offsetHeight <= window.innerHeight - 12;

@@ -253,6 +253,41 @@ impl Gateway {
         }
         Ok(json!({"models":models}))
     }
+    /// Live load per model from the gateway's `/v1/load`, as the user. None when the
+    /// gateway doesn't offer it: another kind of gateway, an older one, or one whose
+    /// administrator turned it off.
+    pub async fn load(&self, user: &Identity) -> Result<Option<Value>, ApiError> {
+        let response = self
+            .client
+            .get(self.base.join("v1/load").unwrap())
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(user).await?,
+            )
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|_| unavailable())?;
+        let status = response.status().as_u16();
+        if (400..500).contains(&status) && !matches!(status, 401 | 403 | 429) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(upstream_error(response).await);
+        }
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(part) = stream.next().await {
+            let part = part.map_err(|_| unavailable())?;
+            if bytes.len() + part.len() > 1024 * 1024 {
+                return Err(unavailable());
+            }
+            bytes.extend_from_slice(&part);
+        }
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| unavailable())
+    }
     /// Embeds each input with the given model, as the user, in input order.
     pub async fn embeddings(
         &self,
@@ -558,6 +593,13 @@ pub fn unavailable() -> ApiError {
         "The gateway could not complete this request".into(),
     )
 }
+/// What a reply says when the gateway stopped waiting for a free slot on its model.
+pub const CAPACITY_TIMEOUT: &str =
+    "The model stayed full, so the gateway stopped waiting. Retry, or pick another model.";
+/// Whether an obleth gateway gave up on a request that waited its whole queue time for a slot.
+fn gave_up_waiting(status: u16, reason: Option<&str>) -> bool {
+    status == 503 && reason.is_some_and(|r| r.contains("waiting for model capacity"))
+}
 /// The gateway's reason, when it gave one, follows Chat's own words, so a person can
 /// tell a retired model from a bad request. It is cut short and kept to one line.
 async fn upstream_error(response: Response) -> ApiError {
@@ -577,6 +619,9 @@ async fn upstream_error(response: Response) -> ApiError {
             .and_then(Result::ok)
             .and_then(|body| reason(&body)),
     };
+    if gave_up_waiting(status.as_u16(), reason.as_deref()) {
+        return ApiError(StatusCode::SERVICE_UNAVAILABLE, CAPACITY_TIMEOUT.into());
+    }
     ApiError(
         if status.as_u16() == 429 {
             StatusCode::TOO_MANY_REQUESTS
@@ -683,6 +728,19 @@ impl Decoder {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_request_the_gateway_stopped_queueing_is_told_apart() {
+        assert!(gave_up_waiting(
+            503,
+            Some("timed out waiting for model capacity")
+        ));
+        assert!(!gave_up_waiting(503, Some("no healthy upstream")));
+        assert!(!gave_up_waiting(
+            429,
+            Some("timed out waiting for model capacity")
+        ));
+        assert!(!gave_up_waiting(503, None));
+    }
     #[test]
     fn reasoning_text_aliases_are_not_duplicated_or_stringified() {
         let choice = json!({"delta":{"reasoning_content":"Plan α", "reasoning":"Plan α", "content":"Answer"}});

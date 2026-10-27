@@ -40,6 +40,24 @@ struct Fake {
     info_status: Arc<AtomicU16>,
     healthy: Arc<AtomicBool>,
     context_window: Arc<AtomicU64>,
+    load_status: Arc<AtomicU16>,
+}
+/// The gateway's `/v1/load`, with an entry of each kind Chat must drop.
+async fn load(State(fake): State<Fake>) -> impl IntoResponse {
+    (
+        StatusCode::from_u16(fake.load_status.load(Ordering::SeqCst)).unwrap(),
+        Json(json!({
+            "object": "list",
+            "scope": "cluster",
+            "data": [
+                {"id": "alpha", "state": "busy", "slots": 40, "in_flight": 34, "waiting": 0, "you": {"in_flight": 2, "limit": 4}},
+                {"id": "team/model", "state": "full", "slots": 8, "in_flight": 8, "waiting": 3},
+                {"id": "odd", "state": "melting", "slots": 1, "in_flight": 1, "waiting": 0},
+                {"id": "bad\u{7}id", "state": "free", "slots": 1, "in_flight": 0, "waiting": 0},
+                {"state": "free"}
+            ]
+        })),
+    )
 }
 async fn discovery() -> Json<Value> {
     Json(
@@ -80,10 +98,12 @@ async fn fixture(pool: PgPool) -> Fixture {
         info_status: Arc::new(AtomicU16::new(200)),
         healthy: Arc::new(AtomicBool::new(true)),
         context_window: Arc::new(AtomicU64::new(32768)),
+        load_status: Arc::new(AtomicU16::new(200)),
     };
     let upstream = Router::new()
         .route("/v1/models", get(discovery))
         .route("/model/info", get(info))
+        .route("/v1/load", get(load))
         .with_state(fake.clone());
     let server = tokio::spawn(async move {
         axum::serve(listener, upstream).await.unwrap();
@@ -687,4 +707,29 @@ async fn preferences_and_presets_are_durable_validated_and_owner_scoped(pool: Pg
         call(&f.app, &alice, "DELETE", &path, Value::Null).await.0,
         StatusCode::NO_CONTENT
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn model_load_comes_from_the_gateway_and_goes_quiet_when_it_has_none(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let user = session(&pool, Role::User).await;
+    let (status, body) = call(&f.app, &user, "GET", "/api/models/load", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({
+            "available": true,
+            "models": {
+                "alpha": {"state": "busy", "slots": 40, "inFlight": 34, "waiting": 0, "you": {"inFlight": 2, "limit": 4}},
+                "team/model": {"state": "full", "slots": 8, "inFlight": 8, "waiting": 3}
+            }
+        })
+    );
+    // A gateway without the endpoint answers 404; Chat stops asking it for a while.
+    f.fake.load_status.store(404, Ordering::SeqCst);
+    let (_, body) = call(&f.app, &user, "GET", "/api/models/load", Value::Null).await;
+    assert_eq!(body, json!({"available": false}));
+    f.fake.load_status.store(200, Ordering::SeqCst);
+    let (_, body) = call(&f.app, &user, "GET", "/api/models/load", Value::Null).await;
+    assert_eq!(body, json!({"available": false}));
 }

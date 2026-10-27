@@ -3,7 +3,7 @@
 use crate::{
     auth::Identity,
     error::ApiError,
-    gateway::{DiscoveredModel, Gateway, ModelMetadata},
+    gateway::{valid_model, DiscoveredModel, Gateway, ModelMetadata},
     store::{ReasoningEffort, MAX_SYSTEM_PROMPT_BYTES},
     AppState,
 };
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
 use uuid::Uuid;
 
 const PARAMETER_NAMES: [&str; 5] = [
@@ -571,6 +572,7 @@ fn resolve_from_catalog(
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/models", get(catalog))
+        .route("/api/models/load", get(load))
         .route("/api/admin/models", get(admin_catalog))
         .route("/api/admin/models/{*id}", put(save_profile))
         .route(
@@ -599,6 +601,58 @@ async fn catalog(
     let user = state.auth.require(&headers, false).await?;
     let result = choices(&state.store.pool, gateway(&state)?, &user).await?;
     Ok(Json(json!({"models":result})))
+}
+/// Until when (Unix seconds) the gateway is taken not to offer `/v1/load`, so Chat
+/// doesn't ask it again on every poll.
+static NO_LOAD_UNTIL: AtomicI64 = AtomicI64::new(0);
+const NO_LOAD_SECS: i64 = 300;
+
+/// How busy each model is right now, for the model list and for a reply that waits.
+/// `available` is false when the gateway can't say.
+async fn load(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    let user = state.auth.require(&headers, false).await?;
+    let now = chrono::Utc::now().timestamp();
+    if NO_LOAD_UNTIL.load(Ordering::Relaxed) > now {
+        return Ok(Json(json!({"available": false})));
+    }
+    Ok(Json(match gateway(&state)?.load(&user).await {
+        Ok(Some(load)) => load_view(&load),
+        Ok(None) => {
+            NO_LOAD_UNTIL.store(now + NO_LOAD_SECS, Ordering::Relaxed);
+            json!({"available": false})
+        }
+        // Load is a hint: when the gateway can't answer, the page goes without it.
+        Err(_) => json!({"available": false}),
+    }))
+}
+
+/// The gateway's `/v1/load` as the browser reads it: each model's state and counts by
+/// id, with the caller's own requests and cap in that model when one applies. Malformed
+/// entries are left out.
+pub fn load_view(load: &Value) -> Value {
+    let count = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64);
+    let mut models = serde_json::Map::new();
+    for m in load["data"].as_array().into_iter().flatten().take(2000) {
+        let id = m["id"].as_str().filter(|id| valid_model(id));
+        let state = m["state"]
+            .as_str()
+            .filter(|s| ["free", "busy", "full", "offline"].contains(s));
+        if let (Some(id), Some(state)) = (id, state) {
+            let mut entry = json!({
+                "state": state,
+                "slots": count(m, "slots").unwrap_or(0),
+                "inFlight": count(m, "in_flight").unwrap_or(0),
+                "waiting": count(m, "waiting").unwrap_or(0),
+            });
+            if let (Some(in_flight), Some(limit)) =
+                (count(&m["you"], "in_flight"), count(&m["you"], "limit"))
+            {
+                entry["you"] = json!({"inFlight": in_flight, "limit": limit});
+            }
+            models.insert(id.into(), entry);
+        }
+    }
+    json!({"available": true, "models": models})
 }
 async fn admin_catalog(
     State(state): State<AppState>,

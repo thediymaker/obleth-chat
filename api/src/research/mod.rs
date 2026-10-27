@@ -6,6 +6,7 @@
 //!
 //! The rules the model follows come from alphaXiv's OpenResearch playbook (MIT).
 
+pub mod report;
 pub mod tools;
 
 use std::{collections::BTreeMap, time::Duration};
@@ -510,12 +511,12 @@ pub async fn worker(pool: PgPool, sb: Sandboxes, shutdown: CancellationToken) {
 // ---- What the page and the model see ----
 
 pub async fn state_json(pool: &PgPool, research: &Research) -> Result<Value, ApiError> {
-    let experiments: Vec<Value> = sqlx::query("SELECT id,parent_id,title,description,branch,frozen,created_at FROM experiments WHERE research_id=$1 ORDER BY created_at")
+    let experiments: Vec<Value> = sqlx::query("SELECT id,parent_id,title,description,builds_on,placement,branch,frozen,created_at FROM experiments WHERE research_id=$1 ORDER BY created_at")
         .bind(research.id)
         .fetch_all(pool)
         .await?
         .iter()
-        .map(|r| json!({"id":r.get::<Uuid,_>("id"),"parentId":r.get::<Option<Uuid>,_>("parent_id"),"title":r.get::<String,_>("title"),"description":r.get::<String,_>("description"),"branch":r.get::<String,_>("branch"),"frozen":r.get::<bool,_>("frozen"),"createdAt":r.get::<chrono::DateTime<chrono::Utc>,_>("created_at")}))
+        .map(|r| json!({"id":r.get::<Uuid,_>("id"),"parentId":r.get::<Option<Uuid>,_>("parent_id"),"title":r.get::<String,_>("title"),"description":r.get::<String,_>("description"),"buildsOn":r.get::<String,_>("builds_on"),"placement":r.get::<Option<Value>,_>("placement"),"branch":r.get::<String,_>("branch"),"frozen":r.get::<bool,_>("frozen"),"createdAt":r.get::<chrono::DateTime<chrono::Utc>,_>("created_at")}))
         .collect();
     let runs: Vec<Value> = sqlx::query("SELECT id,experiment_id,number,commit_sha,status,exit_code,metric,metrics,diff_stat,decision,started_at,finished_at FROM research_runs WHERE research_id=$1 ORDER BY number")
         .bind(research.id)

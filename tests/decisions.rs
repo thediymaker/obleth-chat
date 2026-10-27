@@ -144,6 +144,8 @@ async fn administrators_point_decisions_at_another_endpoint_with_a_sealed_key(po
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["endpoint"], "gateway");
     assert_eq!(saved["checkRuns"], true);
+    assert_eq!(saved["checkTree"], true);
+    assert_eq!(saved["checkReports"], true);
     assert_eq!(saved["hasKey"], false);
     assert_eq!(saved["canStoreKey"], true);
     assert_eq!(saved["gateway"], false);
@@ -207,12 +209,17 @@ async fn administrators_point_decisions_at_another_endpoint_with_a_sealed_key(po
         &admin,
         "PATCH",
         "/api/admin/decisions",
-        json!({"checkRuns": false}),
+        json!({"checkRuns": false, "checkReports": false}),
     )
     .await;
     assert_eq!(
-        (saved["hasKey"].clone(), saved["checkRuns"].clone()),
-        (json!(true), json!(false))
+        (
+            saved["hasKey"].clone(),
+            saved["checkRuns"].clone(),
+            saved["checkTree"].clone(),
+            saved["checkReports"].clone()
+        ),
+        (json!(true), json!(false), json!(true), json!(false))
     );
     let (_, saved) = call(
         &app,

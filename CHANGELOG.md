@@ -2,6 +2,21 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**New**
+
+- **Research checks where each new experiment goes.** `experiment_create` takes `builds_on`: what the parent established that the new idea keeps. It is required unless the parent is the baseline, and an experiment that can't name it is pointed to its parent's parent instead. Chat then asks whether the idea builds on its parent; under the baseline, once another node beats it, whether the idea is another option of the round already there rather than a new decision, which belongs under the best result. A confident no refuses the experiment once and says where it belongs; the chat can confirm it with `confirm: true`. The Research tab shows each node's `builds_on` and the check. Administrators turn it off with **Check where new experiments go**.
+- **Research replies are checked against their runs.** When a research turn ends, values a reply gives a run (`run 4 reached loss 2.31`, `run 4: 2.31`, or a table with a run column) are compared with what the run printed, at the digits written, and runs that don't exist are named. Plans, targets, differences and running runs are left alone. Comparisons and causes the code can't check go to Decisions in one request. What doesn't match shows as a step under the reply, and the next research turn is told to correct it. Administrators turn the Decisions part off with **Check research reports**; the value checks need no model and always run.
+
+**Changed**
+
+- A Decisions answer that doesn't say how sure it is counts as sure in proportion to how far it is from a coin flip, instead of not at all. The new checks act only on a no that is at least 50% sure.
+
+**Upgrading**
+
+- Migration 047 adds `decisions.check_tree` and `decisions.check_reports` (both on), `experiments.builds_on` and `experiments.placement`, and `research.report_check`.
+
 ## v0.7.0
 
 Administrators choose where Chat asks its short yes/no questions, and research checks whether each run tested its idea.

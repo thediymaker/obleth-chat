@@ -1914,6 +1914,28 @@ async fn run_generation(
             }
             overthinks = 0;
             if calls.is_empty() || !tool_turn {
+                // A research reply's statements about runs are checked against them.
+                if let Some(project) = project
+                    .as_ref()
+                    .filter(|_| research_tools && calls.is_empty())
+                {
+                    if let Some(research::tools::Standing::Here(research)) =
+                        research::tools::standing(&s.store.pool, user.id, id, project.id).await
+                    {
+                        let ask = decisions::Asker {
+                            decisions: &s.decisions,
+                            gateway: Some(&gateway),
+                            user: &user,
+                        };
+                        if let Some(entry) =
+                            research::report::check(&s.store.pool, Some(ask), &research, &content)
+                                .await
+                        {
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry);
+                        }
+                    }
+                }
                 break;
             }
             // Turning Auto mode off during a long turn brings the limit back.

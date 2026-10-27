@@ -111,19 +111,27 @@ export function createResearch({ api, state, render, toast, startResearch, works
     const found = `${Math.round(d.tested * 100)}% that it did${d.model ? ` · ${d.model}` : ''}`;
     return d.tested >= 0.5 ? esc(`Tested its idea · ${found}`) : `${badge('May not have tested its idea', 'amber')} ${esc(found)}`;
   }
+  // Where the node went in the tree: what the placement check found, or why it wasn't asked.
+  function placement(d) {
+    if (d.skipped) return esc(`Skipped: ${d.skipped}`);
+    const found = `${Math.round(d.fits * 100)}% that it fits${d.model ? ` · ${d.model}` : ''}`;
+    return d.confirmed ? `${badge('Placed here despite a doubt', 'amber')} ${esc(found)}` : esc(`${d.fits >= 0.5 ? 'Fits where it is' : 'Unsure it fits here'} · ${found}`);
+  }
   function detail() {
     const e = local.data.experiments.find(x => x.id === local.selected);
     if (!e) return '';
     const runs = runsOf(e.id), summary = runs.find(r => r.id === local.run), run = summary && local.runs.get(summary.id);
     const metric = local.data.research.metric;
     const list = runs.length ? `<div class="research-runs">${runs.map(r => `<button type="button" class="research-run ${r.id === local.run ? 'on' : ''}" data-action="research-run" data-id="${esc(r.id)}" aria-pressed="${r.id === local.run}">Run ${r.number}<span>${r.status === 'completed' ? fmt(r.metric) : esc(r.status)}</span></button>`).join('')}</div>` : `<p class="context-note">${e.frozen ? '' : 'Not run yet.'}</p>`;
+    const placed = [...(e.buildsOn ? [['Builds on', esc(e.buildsOn)]] : []), ...(e.placement ? [['Placement', placement(e.placement)]] : [])];
+    const place = placed.length ? `<div class="research-facts">${placed.map(([k, v]) => `<div class="detail-row"><span>${esc(k)}</span><span>${v}</span></div>`).join('')}</div>` : '';
     let body = '';
     if (summary) {
       const values = Object.entries(summary.metrics || {}).sort(([a], [b]) => (b === metric) - (a === metric)).slice(0, 12);
       const facts = [[metric, summary.status === 'running' ? 'running…' : fmt(summary.metric)], ['Status', summary.status + (summary.exitCode != null && summary.exitCode !== 0 ? ` · exit ${summary.exitCode}` : '')], ['Commit', `<span class="mono">${esc(summary.commit)}</span>`], ['Time', `${minutes(summary.startedAt, summary.finishedAt)}${summary.finishedAt ? '' : ' so far'}`], ...(summary.diffStat ? [['Change', esc(summary.diffStat)]] : []), ...(summary.decision ? [['Check', check(summary.decision)]] : [])];
       body = `<div class="research-facts">${facts.map(([k, v]) => `<div class="detail-row"><span>${esc(k)}</span><span>${k === metric || k === 'Status' || k === 'Time' ? esc(v) : v}</span></div>`).join('')}</div>${values.length > 1 ? `<span class="eyebrow">Values it printed</span><div class="research-values">${values.map(([k, v]) => `<span><b>${esc(k)}</b>${esc(fmt(v))}</span>`).join('')}</div>` : ''}${run?.diff ? `<span class="eyebrow">Change from parent</span>${diff(run.diff)}` : ''}<span class="eyebrow">Output</span>${run ? `<pre class="research-log">${esc((run.log || '').split('\n').slice(-60).join('\n')) || 'Nothing printed yet.'}</pre>` : '<p class="inline-note">Loading…</p>'}${run?.canCancel ? btn('Stop this run', 'research-cancel', { icon: 'stop', tone: 'small danger', attrs: `data-id="${esc(summary.id)}"` }) : ''}`;
     }
-    return `<section class="card project-section research-detail"><span class="eyebrow">${e.parentId ? 'Experiment' : 'Baseline'}</span><h3>${esc(e.title)}</h3><p class="faint mono">${esc(e.branch)} · ${e.frozen ? 'frozen' : 'open'}</p>${e.description ? `<p class="research-description">${esc(e.description)}</p>` : ''}${list}${body}</section>`;
+    return `<section class="card project-section research-detail"><span class="eyebrow">${e.parentId ? 'Experiment' : 'Baseline'}</span><h3>${esc(e.title)}</h3><p class="faint mono">${esc(e.branch)} · ${e.frozen ? 'frozen' : 'open'}</p>${e.description ? `<p class="research-description">${esc(e.description)}</p>` : ''}${place}${list}${body}</section>`;
   }
   function start(project) {
     const steps = [['Say the goal', 'In a chat in this project, with a workspace: “make decode faster without hurting p95”.'], ['Answer its questions', 'It pins down the metric, whether higher or lower is better, and the one command every run uses.'], ['Baseline', 'Your code as it is becomes the baseline and runs once.'], ['Rounds', 'A few options per decision run side by side; the winner becomes the parent of the next round.']];

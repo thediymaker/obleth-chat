@@ -50,6 +50,8 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of a run's change and output the check reads.
 const CHECK_DIFF: usize = 16 * 1024;
 const CHECK_LOG: usize = 8 * 1024;
+/// Siblings the placement check reads when an idea goes under the baseline.
+const CHECK_SIBLINGS: usize = 12;
 
 pub fn definitions() -> Vec<Value> {
     let node = |what: &str| json!({"type":"string","description":format!("{what}: an experiment id (the first 8 characters are enough) or \"baseline\"")});
@@ -67,7 +69,9 @@ pub fn definitions() -> Vec<Value> {
             "parameters":{"type":"object","properties":{
                 "parent":node("The node this builds on"),
                 "title":{"type":"string","description":"The idea in a few words, such as FP8 KV cache"},
-                "description":{"type":"string","description":"The concrete change you will make on this node and why"}},
+                "description":{"type":"string","description":"The concrete change you will make on this node and why"},
+                "builds_on":{"type":"string","description":"What the parent established that this idea keeps and builds on, such as: the 3e-4 learning rate that won the last round. Required unless the parent is the baseline."},
+                "confirm":{"type":"boolean","description":"true only when a placement check doubted this parent and you are sure it is right"}},
                 "required":["parent","title"],"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"experiment_checkout","description":"Check out a node's branch to read it, or to repair a node whose run failed.",
             "parameters":{"type":"object","properties":{"experiment":node("The node")},"required":["experiment"],"additionalProperties":false}}}),
@@ -137,16 +141,28 @@ pub async fn prompt(pool: &PgPool, standing: &Standing, sandbox: &Sandbox) -> St
         Standing::Here(r) => r,
     };
     let tree = tree_text(pool, research).await;
+    let last: Option<Value> = sqlx::query_scalar("SELECT report_check FROM research WHERE id=$1")
+        .bind(research.id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+    let last = last
+        .as_ref()
+        .and_then(super::report::prompt)
+        .map(|text| format!("\n\n{text}"))
+        .unwrap_or_default();
     format!(
         "# Research\nThis project's research runs in this workspace. Goal: {goal}\nMetric: {metric} ({better} is better), printed by the code as {metric}=<number>. Run command, the same on every node: `{command}`\n\n{tree}\n\n\
 ## Rules\n\
 1. Never change a node once a run has answered it: it is frozen, and its branch is the code that result came from. A disappointing number is still a result. To try something else, create a child with experiment_create and change the child.\n\
 2. The run command and environment are a fixed contract. Never vary them between nodes or pass settings through environment variables; put every knob in committed code or config files and vary those.\n\
-3. Grow the tree downward. A round is a few sibling options of one decision under one parent (which learning rate? which cache type?). The next round branches from that round's winner, never from the baseline again. A long row of children under the baseline, or a chain of options that do not build on each other, is the wrong shape. Before making X a child of Y, name what Y established that X builds on; if you cannot, they are siblings.\n\
+3. Grow the tree downward. A round is a few sibling options of one decision under one parent (which learning rate? which cache type?). The next round branches from that round's winner, never from the baseline again. A long row of children under the baseline, or a chain of options that do not build on each other, is the wrong shape. Before making X a child of Y, name what Y established that X builds on, in builds_on; if you cannot, they are siblings.\n\
 4. A run that crashes, runs out of memory or times out answered nothing: the node stays open. Check it out, fix it and run it again. After two repairs in a row that answer nothing, or the same failure on a second node, stop and ask the person.\n\
 5. Each run starts from a clean checkout of the node's commit in its own folder, without untracked or ignored files such as downloaded data. The project's .venv and node_modules are linked into it: install packages in the project folder beforehand, not in the run command. Use absolute paths under {dir} for shared data such as model weights. Make the code print its settings and final metrics.\n\
 6. The loop: read research_status, create one round's children, edit each on its branch, start their runs (up to {max} at once), then call experiment_wait. Each time a run finishes, read its result before anything else and decide: repair the node, run the next option, promote the winner (the next round branches from it), or stop. Stop when the goal is met or after about three runs in a row without a gain.\n\
-7. Report only results you read from runs, citing them as \"run N\", and label inferences as such. When a round ends or you stop, give one line per node: what it tested, its status and its result.",
+7. Report only results you read from runs, citing them as \"run N\", and label inferences as such. When a round ends or you stop, give one line per node: what it tested, its status and its result.{last}",
         goal = research.goal,
         metric = research.metric,
         better = if research.direction == "min" { "lower" } else { "higher" },
@@ -520,6 +536,27 @@ async fn create(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome {
         );
     }
     let description = text(args, "description", 4000);
+    let builds_on = text(args, "builds_on", 1000);
+    let above = parent.parent.and_then(|g| nodes.iter().find(|n| n.id == g));
+    if let Some(above) = above.filter(|_| builds_on.is_empty()) {
+        return outcome(false, "Say what it builds on", format!("Say in builds_on what “{}” established that this idea keeps and builds on. If it builds on nothing “{}” established, it is an alternative to it and belongs beside it: make it a child of “{}” [{}].", parent.title, parent.title, above.title, label(above)));
+    }
+    let idea = Idea {
+        title: &title,
+        description: &description,
+        builds_on: &builds_on,
+    };
+    let placement = place(ctx, research, &nodes, parent, &idea).await;
+    let confirmed = args["confirm"].as_bool() == Some(true);
+    if let Some((_, Some(doubt))) = placement.as_ref().filter(|_| !confirmed) {
+        return outcome(false, "Placement doubted", doubt.clone());
+    }
+    let placement = placement.map(|(mut found, doubt)| {
+        if doubt.is_some() {
+            found["confirmed"] = json!(true);
+        }
+        found
+    });
     let id = Uuid::new_v4();
     let branch = format!(
         "research/{}-{}",
@@ -545,13 +582,138 @@ async fn create(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome {
             format!("The branch could not be created: {e}"),
         );
     }
-    if sqlx::query("INSERT INTO experiments(id,research_id,parent_id,title,description,branch) VALUES($1,$2,$3,$4,$5,$6)")
-        .bind(id).bind(research.id).bind(parent.id).bind(&title).bind(&description).bind(&branch)
+    if sqlx::query("INSERT INTO experiments(id,research_id,parent_id,title,description,branch,builds_on,placement) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(id).bind(research.id).bind(parent.id).bind(&title).bind(&description).bind(&branch).bind(&builds_on).bind(&placement)
         .execute(ctx.pool).await.is_err()
     {
         return outcome(false, "Experiment not created", "The experiment could not be saved.");
     }
     outcome(true, format!("Created “{title}”"), format!("Created “{title}” [{}] on branch {branch}, from “{}”, and checked it out{}. Make the change in its files, then experiment_run(\"{}\").", short(id), parent.title, if carry { ", bringing your uncommitted changes along" } else { "" }, short(id)))
+}
+
+fn label(node: &Node) -> String {
+    if node.parent.is_none() {
+        "baseline".into()
+    } else {
+        short(node.id)
+    }
+}
+
+/// A new experiment as experiment_create describes it.
+struct Idea<'a> {
+    title: &'a str,
+    description: &'a str,
+    builds_on: &'a str,
+}
+
+/// A node's best result, as the placement check reads it.
+fn result_of(research: &Research, runs: &[RunRow], node: Uuid) -> String {
+    match best_of(research, runs, Some(node)) {
+        Some((value, run)) => format!("{}={} (run {run})", research.metric, number(value)),
+        None => "not measured yet".into(),
+    }
+}
+
+/// Asks whether a new idea belongs under its parent, when the tree check is on. A child
+/// of a node should build on what the node established; an idea under the baseline, once
+/// another node beats it, should be another option of the round already there. Returns
+/// what to record, and what to tell the model when the answer doubts the placement.
+async fn place(
+    ctx: &Ctx<'_>,
+    research: &Research,
+    nodes: &[Node],
+    parent: &Node,
+    idea: &Idea<'_>,
+) -> Option<(Value, Option<String>)> {
+    let ask = ctx.ask?;
+    let settings = ask.settings().await?;
+    if !settings.on() || !settings.check_tree {
+        return None;
+    }
+    let runs = runs(ctx.pool, research).await;
+    let new =
+        json!({"title": idea.title, "description": idea.description, "builds_on": idea.builds_on});
+    let (state, question, advice) = if parent.parent.is_none() {
+        let (value, run) = best_of(research, &runs, None)?;
+        let winner = runs.iter().find(|r| r.number == run)?.experiment;
+        let winner = nodes
+            .iter()
+            .find(|n| n.id == winner && n.parent.is_some())?;
+        let round: Vec<(Uuid, String, String)> = sqlx::query_as("SELECT id, title, description FROM experiments WHERE parent_id=$1 ORDER BY created_at LIMIT $2")
+            .bind(parent.id)
+            .bind(CHECK_SIBLINGS as i64)
+            .fetch_all(ctx.pool)
+            .await
+            .ok()?;
+        let state = json!({
+            "goal": research.goal,
+            "baseline": {"result": result_of(research, &runs, parent.id)},
+            "round_under_baseline": round.iter().map(|(id, title, description)| json!({"title": title, "description": description, "result": result_of(research, &runs, *id)})).collect::<Vec<_>>(),
+            "best_so_far": {"title": winner.title, "result": result_of(research, &runs, winner.id)},
+            "new_experiment": new,
+        });
+        let question = json!({
+            "type": "boolean",
+            "instructions": "This research grows a tree of experiments. Under the baseline, one round tries options of one decision as siblings (which learning rate? which cache type?), and the next round branches from the round's winner, never from the baseline again. A new experiment is about to be added under the baseline. Is it another option of a decision the experiments in round_under_baseline already try?",
+            "criteria": {
+                "true": "Yes: it answers the same question as some of round_under_baseline, with a different choice.",
+                "false": "No: it changes something none of them try, so it starts a new decision, which belongs under the best result so far."
+            }
+        });
+        let advice = [
+            "is another option of the round under the baseline".to_string(),
+            format!("A new decision branches from the round's winner, never from the baseline again: “{}” [{}] has the best result so far (run {run}: {}).", winner.title, short(winner.id), number(value)),
+            "is another option of that round".to_string(),
+        ];
+        (state, question, advice)
+    } else {
+        let (description, builds_on): (String, String) =
+            sqlx::query_as("SELECT description, builds_on FROM experiments WHERE id=$1")
+                .bind(parent.id)
+                .fetch_one(ctx.pool)
+                .await
+                .ok()?;
+        let above = nodes.iter().find(|n| Some(n.id) == parent.parent)?;
+        let state = json!({
+            "goal": research.goal,
+            "parent": {"title": parent.title, "description": description, "builds_on": builds_on, "result": result_of(research, &runs, parent.id)},
+            "new_experiment": new,
+        });
+        let question = json!({
+            "type": "boolean",
+            "instructions": "This research grows a tree of experiments, each a change to its parent's code. A child keeps what its parent established and changes one more thing; an alternative to the parent is its sibling. A new experiment is about to be made a child of parent. Does it build on what the parent established?",
+            "criteria": {
+                "true": "Yes: it keeps the parent's change and adds to it or refines it, and builds_on names something the parent's change established.",
+                "false": "No: it doesn't need the parent's change, replaces or undoes it, or tries another option of the same decision; or builds_on names something the parent didn't establish."
+            }
+        });
+        let advice = [
+            format!("builds on “{}”", parent.title),
+            format!("A child keeps what its parent established and changes one more thing; an alternative to “{}” belongs beside it, as a child of “{}” [{}].", parent.title, above.title, label(above)),
+            format!("does build on “{}”", parent.title),
+        ];
+        (state, question, advice)
+    };
+    let found = ask
+        .ask(&settings, state, json!({"fits": question}), CHECK_TIMEOUT)
+        .await
+        .and_then(|response| crate::decisions::yes_no(&response, "fits"));
+    Some(match found {
+        Ok(v) => {
+            let who = if v.model.is_empty() {
+                "A check".to_string()
+            } else {
+                format!("A check by {}", v.model)
+            };
+            let [claim, instead, sure] = &advice;
+            let doubt = v.sure_no().then(|| format!("{who} doubts “{}” {claim}: it gives {:.0}% that it fits. {instead} Nothing was created. If it {sure}, call experiment_create again with the same arguments and confirm: true.", idea.title, v.yes * 100.0));
+            (
+                json!({"model": v.model, "fits": v.yes, "confidence": v.confidence}),
+                doubt,
+            )
+        }
+        Err(why) => (json!({"skipped": why}), None),
+    })
 }
 
 async fn checkout(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome {

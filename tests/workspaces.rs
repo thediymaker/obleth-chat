@@ -809,3 +809,182 @@ async fn a_page_load_checks_the_pod_once_and_rides_out_an_api_outage(pool: PgPoo
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(pod_record(&pool).await.0, "running");
 }
+
+/// A verdicts endpoint that keeps each request and answers `yes` for every question.
+async fn verdicts_endpoint(yes: f64) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mock = Router::new()
+        .route(
+            "/v1/verdicts",
+            axum::routing::post(
+                move |State(seen): State<Arc<Mutex<Vec<Value>>>>, Json(body): Json<Value>| async move {
+                    seen.lock().unwrap().push(body);
+                    Json(json!({"model": "judge-31b", "verdicts": {"tested": {"type": "boolean", "value": yes >= 0.5, "probabilities": {"true": yes, "false": 1.0 - yes}, "confidence": 0.7}}, "usage": {"prompt_tokens": 900, "completion_tokens": 1, "total_tokens": 901}}))
+                },
+            ),
+        )
+        .with_state(seen.clone());
+    tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+    (format!("http://{address}"), seen)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_finished_run_is_checked_for_whether_it_tested_its_idea(pool: PgPool) {
+    use obleth_chat::{
+        auth::{Identity, Role},
+        decisions::{Asker, Decisions},
+        research::tools::{run, Ctx},
+    };
+    let kube = Arc::new(FakeKube::default());
+    kube.set_pod(Some("127.0.0.1"));
+    let (app, sandboxes) = app_with(pool.clone(), Some(DOMAIN), Some(kube)).await;
+    login(&app).await;
+    let conversation = workspace(&pool, 3000, "running").await;
+    let owner: Uuid = sqlx::query_scalar("SELECT owner_id FROM conversations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let sandbox = sandboxes.get(owner, conversation).await.unwrap().unwrap();
+    let (project, research, baseline, child) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    sqlx::query("INSERT INTO projects(id,owner_id,name) VALUES($1,$2,'Study')")
+        .bind(project)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO research(id,project_id,owner_id,conversation_id,goal,metric,direction,run_command) VALUES($1,$2,$3,$4,'Lower loss','loss','min','python train.py')")
+        .bind(research).bind(project).bind(owner).bind(conversation)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO experiments(id,research_id,title,branch,frozen) VALUES($1,$2,'Baseline','research/baseline',TRUE)")
+        .bind(baseline).bind(research)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO experiments(id,research_id,parent_id,title,description,branch,frozen) VALUES($1,$2,$3,'Higher learning rate','Raise lr from 3e-4 to 1e-3','research/lr-1e3',TRUE)")
+        .bind(child).bind(research).bind(baseline)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO research_runs(id,research_id,experiment_id,number,commit_sha,status,metric,reported,finished_at) VALUES($1,$2,$3,1,'aaa','completed',2.5,TRUE,NOW())")
+        .bind(Uuid::new_v4()).bind(research).bind(baseline)
+        .execute(&pool).await.unwrap();
+    let identity = Identity {
+        id: owner,
+        username: "test-admin".into(),
+        display_name: "Test admin".into(),
+        role: Role::Admin,
+        session: None,
+    };
+    let decisions = Decisions::new(pool.clone(), None);
+    let ctx = Ctx {
+        pool: &pool,
+        sb: &sandboxes,
+        sandbox: &sandbox,
+        user: owner,
+        conversation,
+        project,
+        ask: Some(Asker {
+            decisions: &decisions,
+            gateway: None,
+            user: &identity,
+        }),
+    };
+    let mut number = 1;
+    let mut finish = |diff: &'static str| {
+        number += 1;
+        let (id, number) = (Uuid::new_v4(), number);
+        let pool = pool.clone();
+        async move {
+            sqlx::query("INSERT INTO research_runs(id,research_id,experiment_id,number,commit_sha,status,metric,metrics,log_tail,diff,finished_at) VALUES($1,$2,$3,$4,'bbb','completed',2.4,'{\"loss\":2.4}','config: lr=0.0003\nloss=2.4\n',$5,NOW())")
+                .bind(id).bind(research).bind(child).bind(number).bind(diff)
+                .execute(&pool).await.unwrap();
+            id
+        }
+    };
+    let decision = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<Value>>("SELECT decision FROM research_runs WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    const DIFF: &str = "-lr = 3e-4\n+lr = 1e-3\n";
+    let set = |endpoint: &str, url: Option<&str>, check_runs: bool| {
+        let pool = pool.clone();
+        let (endpoint, url) = (endpoint.to_owned(), url.map(str::to_owned));
+        async move {
+            sqlx::query("UPDATE decisions SET endpoint=$1, url=$2, check_runs=$3")
+                .bind(endpoint)
+                .bind(url)
+                .bind(check_runs)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+
+    // The output still shows the old learning rate: the check doubts the run, the
+    // model is told to read before trusting it, and the node stays frozen.
+    let (url, seen) = verdicts_endpoint(0.1).await;
+    set("custom", Some(&format!("{url}/v1/verdicts")), true).await;
+    let doubted = finish(DIFF).await;
+    let out = run(&ctx, "experiment_wait", "{}").await;
+    assert!(out.summary.contains("check doubts it"), "{}", out.summary);
+    assert!(out.output.contains("A check by judge-31b doubts this run tested its idea: it gives 10% that it did. Before trusting loss=2.4"), "{}", out.output);
+    let found = decision(doubted).await.unwrap();
+    assert_eq!(found["model"], "judge-31b");
+    assert_eq!(found["tested"], 0.1);
+    let asked = seen.lock().unwrap()[0].clone();
+    assert_eq!(asked["state"]["idea"]["title"], "Higher learning rate");
+    assert_eq!(
+        asked["state"]["idea"]["description"],
+        "Raise lr from 3e-4 to 1e-3"
+    );
+    assert_eq!(asked["state"]["change_from_parent"], DIFF);
+    assert!(asked["state"]["output"]
+        .as_str()
+        .unwrap()
+        .contains("lr=0.0003"));
+    assert_eq!(asked["questions"]["tested"]["type"], "boolean");
+    assert_eq!(asked["on_no_answer"], "low_confidence");
+    assert!(asked.get("model").is_none());
+
+    // A run the check believes is reported as before.
+    let (url, _) = verdicts_endpoint(0.9).await;
+    set("custom", Some(&format!("{url}/v1/verdicts")), true).await;
+    let trusted = finish(DIFF).await;
+    let out = run(&ctx, "experiment_wait", "{}").await;
+    assert!(!out.output.contains("doubts"), "{}", out.output);
+    assert_eq!(decision(trusted).await.unwrap()["tested"], 0.9);
+
+    // A run with its parent's code has nothing to check.
+    let unchanged = finish("").await;
+    run(&ctx, "experiment_wait", "{}").await;
+    assert_eq!(decision(unchanged).await, None);
+
+    // With no answer the result is reported without a check, and the run says why.
+    set("gateway", None, true).await;
+    let skipped = finish(DIFF).await;
+    let out = run(&ctx, "experiment_wait", "{}").await;
+    assert!(
+        out.output.contains("The node is now frozen."),
+        "{}",
+        out.output
+    );
+    assert_eq!(
+        decision(skipped).await.unwrap(),
+        json!({"skipped": "Chat has no gateway to ask"})
+    );
+
+    // Turned off, nothing is asked or recorded.
+    set("custom", Some(&format!("{url}/v1/verdicts")), false).await;
+    let unchecked = finish(DIFF).await;
+    run(&ctx, "experiment_wait", "{}").await;
+    assert_eq!(decision(unchecked).await, None);
+}

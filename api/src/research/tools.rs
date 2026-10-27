@@ -45,6 +45,11 @@ pub(crate) const COMMIT_FOR_RUN: &str = "if [ \"$(git rev-parse --abbrev-ref HEA
 
 const WAIT_DEFAULT: u64 = 600;
 const WAIT_MAX: u64 = 1800;
+/// How long the run check may take before a result is reported without it.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How much of a run's change and output the check reads.
+const CHECK_DIFF: usize = 16 * 1024;
+const CHECK_LOG: usize = 8 * 1024;
 
 pub fn definitions() -> Vec<Value> {
     let node = |what: &str| json!({"type":"string","description":format!("{what}: an experiment id (the first 8 characters are enough) or \"baseline\"")});
@@ -323,6 +328,8 @@ pub struct Ctx<'a> {
     pub user: Uuid,
     pub conversation: Uuid,
     pub project: Uuid,
+    /// Asks decisions as the person; None skips the run check.
+    pub ask: Option<crate::decisions::Asker<'a>>,
 }
 
 fn outcome(ok: bool, summary: impl Into<String>, output: impl Into<String>) -> Outcome {
@@ -663,7 +670,7 @@ async fn start(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome {
 
 /// Finished runs not yet told to the model, in the order they ran.
 async fn report(ctx: &Ctx<'_>, research: &Research) -> Option<(String, String)> {
-    let rows = sqlx::query("UPDATE research_runs SET reported=TRUE WHERE research_id=$1 AND status<>'running' AND NOT reported RETURNING number, experiment_id, status, exit_code, metric, metrics, log_tail, started_at, finished_at")
+    let rows = sqlx::query("UPDATE research_runs SET reported=TRUE WHERE research_id=$1 AND status<>'running' AND NOT reported RETURNING id, number, experiment_id, status, exit_code, metric, metrics, log_tail, diff, started_at, finished_at")
         .bind(research.id).fetch_all(ctx.pool).await.ok()?;
     if rows.is_empty() {
         return None;
@@ -722,7 +729,24 @@ async fn report(ctx: &Ctx<'_>, research: &Research) -> Option<(String, String)> 
                     });
                 }
                 line.push_str(". The node is now frozen.");
-                summary.push(format!("run {n} · {}", number(m)));
+                // A baseline, or a node with its parent's code, has no change to check.
+                let diff: String = r.get("diff");
+                let doubt = match node.filter(|x| x.parent.is_some() && !diff.trim().is_empty()) {
+                    Some(x) => check_run(ctx, research, r.get("id"), x, &diff, &log, m).await,
+                    None => None,
+                };
+                summary.push(format!(
+                    "run {n} · {}{}",
+                    number(m),
+                    if doubt.is_some() {
+                        " · check doubts it"
+                    } else {
+                        ""
+                    }
+                ));
+                if let Some(note) = doubt {
+                    line.push_str(&note);
+                }
             }
             ("completed", None) => {
                 line.push_str(&format!(". It finished but did not print {}=<number>, so it answered nothing and the node stays open: make the code print the metric and run it again.", research.metric));
@@ -758,6 +782,77 @@ async fn report(ctx: &Ctx<'_>, research: &Research) -> Option<(String, String)> 
         text.push(line);
     }
     Some((text.join("\n\n"), summary.join(", ")))
+}
+
+/// Asks whether a finished run really tested its idea. A run can print the metric while
+/// its change never took effect (an option not read, a default used, no steps taken), and
+/// its number then says nothing about the idea. Records what the check found on the run,
+/// or why there was no check, and returns a note for the model when it doubts the run.
+/// The node stays frozen either way: the note says to read before trusting the number.
+async fn check_run(
+    ctx: &Ctx<'_>,
+    research: &Research,
+    run: Uuid,
+    node: &Node,
+    diff: &str,
+    log: &str,
+    value: f64,
+) -> Option<String> {
+    let ask = ctx.ask?;
+    let settings = ask.settings().await?;
+    if !settings.on() || !settings.check_runs {
+        return None;
+    }
+    let description: String = sqlx::query_scalar("SELECT description FROM experiments WHERE id=$1")
+        .bind(node.id)
+        .fetch_one(ctx.pool)
+        .await
+        .unwrap_or_default();
+    let state = json!({
+        "goal": research.goal,
+        "idea": {"title": node.title, "description": description},
+        "change_from_parent": super::head(diff, CHECK_DIFF),
+        "output": super::tail(log, CHECK_LOG),
+        "result": format!("{}={}", research.metric, number(value)),
+    });
+    let questions = json!({"tested": {
+        "type": "boolean",
+        "instructions": "This is one run in a research project. It measured one idea: the change from its parent's code, described under idea and shown under change_from_parent. Judge from the change and the run's output whether the run really tested that idea.",
+        "criteria": {
+            "true": "Yes: nothing in the output contradicts that the change took effect, and where the output shows settings or behavior the change affects, they match the idea.",
+            "false": "No: the output shows the change did not take effect or the run did no real work: it printed a default or the parent's value instead of the changed one, warned that an option was unknown or unused, never reached the changed code, or did nothing (zero steps, no data)."
+        }
+    }});
+    let found = ask
+        .ask(&settings, state, questions, CHECK_TIMEOUT)
+        .await
+        .and_then(|response| crate::decisions::yes_no(&response, "tested"));
+    let (decision, note) = match found {
+        Ok(v) => {
+            let who = if v.model.is_empty() {
+                "A check".to_string()
+            } else {
+                format!("A check by {}", v.model)
+            };
+            let note = (v.yes < 0.5).then(|| format!(
+                "\n{who} doubts this run tested its idea: it gives {:.0}% that it did. Before trusting {}={}, read the output with run_log and compare it with the change. If the change did not take effect, the node is still frozen: put the fix in a child and run that.",
+                v.yes * 100.0,
+                research.metric,
+                number(value)
+            ));
+            (
+                json!({"model": v.model, "tested": v.yes, "confidence": v.confidence}),
+                note,
+            )
+        }
+        Err(why) => (json!({"skipped": why}), None),
+    };
+    let _ = sqlx::query("UPDATE research_runs SET decision=$2 WHERE id=$1")
+        .bind(run)
+        .bind(decision)
+        .execute(ctx.pool)
+        .await;
+    note
 }
 
 async fn wait(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome {

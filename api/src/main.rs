@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
         (gateway, _) => gateway,
     };
     let mut state = AppState::new(auth, pool.clone(), gateway, config.max_streams);
+    state.decisions = obleth_chat::decisions::Decisions::new(pool.clone(), secret_key.clone());
     state.admin_gateway_url = config.admin_gateway_url;
     // One bucket holds Knowledge documents and, when set, every other file's bytes.
     let objects = obleth_chat::knowledge::ObjectStore::from_env()?;

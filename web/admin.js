@@ -4,14 +4,14 @@ import { esc, icon, displayName, when, badge, btn, empty, errorBox, field, textI
 const tabs = [['users','users','People'],['groups','grid','Groups'],['models','cube','Models'],['usage','chart','Usage & limits'],['audit','clock','Activity'],['system','server','System']];
 const generation = [['systemPrompt','System instructions'],['reasoningEffort','Thinking effort'],['temperature','Temperature'],['topP','Top P'],['maxTokens','Output token limit']];
 export function createAdmin({ api, state, capabilities, render, modal, close, toast, onIdentityChanged, onCatalogChanged }) {
-  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, sequence: 0, pending: null };
+  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, sequence: 0, pending: null };
   const isAdmin = () => state.user?.role === 'admin';
   const tabFromHash = () => tabs.some(t => t[0] === adminLocation(location.hash).section) ? adminLocation(location.hash).section : 'users';
   const userById = id => local.users.find(u => u.id === id);
   const modelById = id => local.models.find(m => m.id === id);
   const groupId = () => adminLocation(location.hash).groupId;
   const gatewayUrl = () => capabilities.adminGatewayUrl || capabilities.gatewayAdminUrl || '';
-  function clear() { local.sequence++; Object.assign(local, { users: [], groups: [], models: [], events: [], members: [], usage: [], limits: null, health: null, retention: null, embedding: null, memberCursor: null, group: null, query: '', error: '', loading: false, pending: null }); }
+  function clear() { local.sequence++; Object.assign(local, { users: [], groups: [], models: [], events: [], members: [], usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, memberCursor: null, group: null, query: '', error: '', loading: false, pending: null }); }
   async function load({ append = false, query = local.query } = {}) {
     if (!isAdmin()) { clear(); return; }
     const sequence = ++local.sequence; local.tab = tabFromHash(); local.loading = true; local.error = ''; local.query = query; render();
@@ -29,9 +29,9 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       }
       if (local.tab === 'usage') { const [u, l] = await Promise.all([api.request(`/api/admin/usage${query ? '?q=' + encodeURIComponent(query) : ''}`), api.request('/api/admin/limits')]); if (sequence !== local.sequence) return; local.usage = u.users || []; local.hasMore = !!u.hasMore; local.limits = l; }
       if (local.tab === 'system') {
-        local.retention = null; local.embedding = null; local.health = null;
-        const [r, e, h] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null, api.request('/api/admin/health').catch(() => null)]); if (sequence !== local.sequence) return;
-        local.retention = r; local.embedding = e; local.health = h;
+        local.retention = null; local.embedding = null; local.health = null; local.decisions = null;
+        const [r, e, h, d] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null, api.request('/api/admin/health').catch(() => null), api.request('/api/admin/decisions').catch(err => ({ error: err.message }))]); if (sequence !== local.sequence) return;
+        local.retention = r; local.embedding = e; local.health = h; local.decisions = d;
       }
       if (local.tab === 'audit') { const r = await api.request(`/api/admin/audit?limit=50${append && local.nextCursor ? '&before=' + encodeURIComponent(local.nextCursor) : ''}`); if (sequence !== local.sequence) return; local.events = append ? [...local.events, ...(r.events || [])] : r.events || []; local.nextCursor = r.nextCursor; }
     } catch (e) { if (sequence === local.sequence && e.name !== 'AbortError') local.error = e.message; }
@@ -86,6 +86,28 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     const prefix = (id, label, value, help) => field(id, label, `<textarea class="form-control" id="${id}" name="${id}" rows="2" maxlength="500" spellcheck="false">${esc(value)}</textarea>`, help);
     return `<section class="setting-card card embedding-card"><div class="spread"><h2>Knowledge search</h2>${badge(i.pendingDocuments || i.pendingSavedItems ? 'Indexing' : 'Up to date')}</div><p>Chat turns documents and saved items into vectors with an embedding model, so search can find passages by meaning.</p><p class="inline-note">${esc(status)}</p><form id="admin-embedding-form">${field('embedding-model', 'Embedding model', `<select class="form-control" id="embedding-model" name="embedding-model" data-previous="${esc(current)}">${models.map(option).join('')}</select>`, e.models ? 'Embedding models your gateway offers.' : 'The gateway could not list its embedding models, so only the current and default models are shown.')}${prefix('embedding-query', 'Search prefix', e.effective.queryPrefix, 'Put before each search. Chat fills in the prefix the model’s makers publish; change it only if the model’s documentation says otherwise.')}${prefix('embedding-document', 'Passage prefix', e.effective.documentPrefix, 'Put before each passage and saved item. Many models use none.')}<p class="inline-note retention-note">Changing the model or a prefix makes Chat index every document and saved item again: vectors from different models can’t be compared. Until that finishes, search finds only what has been redone, and a large library takes a while and uses the gateway’s embedding capacity.</p><div class="form-error" role="alert"></div><div class="modal-actions">${btn('Use defaults', 'admin-embedding-defaults', { tone: 'small' })}<button class="btn primary" type="submit">Save</button></div></form></section>`;
   }
+  const decisionsUsage = endpoint => ({ gateway: 'Questions go to the gateway as the person they are for, so they count toward that person’s usage and limits.', custom: 'Questions go with this endpoint’s key, so their usage counts against the key, not against people.', off: 'Nothing is asked. Features that use decisions run without them.' })[endpoint] || '';
+  function decisionsCard() {
+    const d = local.decisions;
+    if (!d) return '';
+    if (d.error) return `<section class="setting-card card"><h2>Decisions</h2>${errorBox(d.error)}</section>`;
+    const option = ([id, label]) => `<option value="${id}" ${id === d.endpoint ? 'selected' : ''}>${label}</option>`;
+    const keyHelp = d.keyUnreadable ? 'The saved key can’t be read because the installation’s secret key changed. Enter it again.' : d.hasKey ? 'A key is saved. Leave this blank to keep it.' : d.canStoreKey ? 'Sent as a bearer token. Leave blank if the endpoint needs none.' : 'Saving a key needs OBLETH_CHAT_SECRET_KEY_FILE, which encrypts it.';
+    const endpoint = field('decisions-endpoint', 'Ask', `<select class="form-control" id="decisions-endpoint" name="decisions-endpoint">${[['gateway', 'This gateway'], ['custom', 'Another endpoint'], ['off', 'Off']].map(option).join('')}</select>`, decisionsUsage(d.endpoint));
+    const custom = `<div class="decisions-custom" ${d.endpoint === 'custom' ? '' : 'hidden'}>${field('decisions-url', 'Endpoint URL', textInput('decisions-url', d.url || '', 'type="url" maxlength="2048" placeholder="https://decisions.example.com" spellcheck="false" autocomplete="off"'), 'An address that takes POST requests in the verdicts format. An address with no path, or one ending in /v1, gets /v1/verdicts added.')}${field('decisions-key', 'Key', textInput('decisions-key', '', `type="password" maxlength="4096" autocomplete="off" ${d.canStoreKey ? '' : 'disabled'} placeholder="${d.hasKey && !d.keyUnreadable ? 'Saved key kept' : ''}"`), keyHelp)}${d.hasKey ? checkbox('decisions-remove-key', 'Remove the saved key') : ''}</div>`;
+    const model = field('decisions-model', 'Model', `${textInput('decisions-model', d.model || '', 'maxlength="160" list="decisions-models" placeholder="The endpoint’s default" spellcheck="false" autocomplete="off"')}<datalist id="decisions-models">${(d.models || []).map(id => `<option value="${esc(id)}"></option>`).join('')}</datalist>`, 'Leave blank to let the endpoint choose. The model must return token probabilities (logprobs): most self-hosted servers do, and many hosted APIs don’t.');
+    return `<section class="setting-card card decisions-card"><div class="spread"><h2>Decisions</h2>${badge(d.endpoint === 'off' ? 'Off' : 'On')}</div><p>Short yes/no and pick-one questions Chat asks a model, such as whether a research run really tested its idea. Chat asks them in the verdicts format, so your gateway or any service that speaks it can answer. When decisions are off or fail, work goes on without them.</p><form id="admin-decisions-form">${endpoint}${custom}${model}${checkbox('decisions-check-runs', 'Check research runs', d.checkRuns, 'When a run finishes, ask whether it really tested its idea, and tell the chat when it may not have. The result shows on the project’s Research tab.')}<p class="inline-note decisions-result" aria-live="polite"></p><div class="form-error" role="alert"></div><div class="modal-actions">${btn('Check', 'admin-decisions-check', { tone: 'small' })}<button class="btn primary" type="submit">Save</button></div></form></section>`;
+  }
+  // The form as a settings change. The URL and key count only for another endpoint, and a
+  // blank key keeps the saved one.
+  function decisionsBody(form) {
+    const body = { endpoint: getValue(form, 'decisions-endpoint'), model: getValue(form, 'decisions-model').trim() || null, checkRuns: isChecked(form, 'decisions-check-runs') };
+    if (body.endpoint !== 'custom') return body;
+    const url = getValue(form, 'decisions-url').trim(), key = getValue(form, 'decisions-key').trim();
+    if (url) body.url = url;
+    if (key) body.key = key; else if (isChecked(form, 'decisions-remove-key')) body.key = null;
+    return body;
+  }
   // Everything else about the installation is set where Chat runs, so the tab points there.
   // Whether this replica runs workspaces, and if not, why.
   function workspaceStatus() {
@@ -97,7 +119,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
   function system() {
     const docs = 'https://www.obleth.com/docs/run-chat', link = ([glyph, label, path, note]) => `<a class="setting-line docs-link" href="${docs}${path}" target="_blank" rel="noopener">${icon(glyph)}<div class="grow"><h3>${label}</h3><p>${note}</p></div>${icon('external')}</a>`;
     const pages = [['cube', 'Connect the gateway', '/connect-gateway', 'Model access and inference through Obleth'], ['lock', 'Accounts and sign-in', '/accounts', 'Local accounts and single sign-on'], ['book', 'Knowledge', '/enable-knowledge', 'Collections and saved items in S3'], ['terminal', 'Workspaces and the browser', '/enable-workspaces', workspaceStatus()], ['link', 'Connections and clusters', '/enable-connections', 'MCP servers, Slurm and Kubernetes'], ['shield', 'Reverse proxies', '/reverse-proxies', 'Client addresses and sign-in limits'], ['chart', 'Operate Chat', '/operations', 'Health checks, metrics and backups'], ['settings', 'Environment variables', '/environment-variables', 'Every setting in one list']];
-    return `<div class="admin-system-grid">${retentionCard()}${embeddingCard()}<section class="setting-card card"><h2>Set where Chat runs</h2><p>The rest is configured with environment variables when Chat is deployed. These guides show how.</p>${pages.map(link).join('')}</section></div>`;
+    return `<div class="admin-system-grid">${retentionCard()}${embeddingCard()}${decisionsCard()}<section class="setting-card card"><h2>Set where Chat runs</h2><p>The rest is configured with environment variables when Chat is deployed. These guides show how.</p>${pages.map(link).join('')}</section></div>`;
   }
 
   function view() {
@@ -134,6 +156,14 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     'admin-create-user': () => accountDialog(), 'admin-invite-user': () => accountDialog(true),
     'admin-manage-user': el => manageUser(userById(el.dataset.id)),
     'admin-embedding-defaults': async () => { const d = local.embedding?.defaults; if (d) await saveEmbedding({ model: null, queryPrefix: null, documentPrefix: null }, d); },
+    'admin-decisions-check': async el => {
+      const form = el.closest('form'), out = form.querySelector('.decisions-result');
+      out.textContent = 'Asking…';
+      try {
+        const r = await api.request('/api/admin/decisions/check', { method: 'POST', body: decisionsBody(form) }), who = r.model || 'The endpoint', yes = Math.round((r.yes || 0) * 100);
+        out.textContent = !r.ok ? `No answer: ${r.error}` : r.yes >= 0.5 ? `Working. ${who} answered a sample true statement correctly (${yes}% yes) in ${r.ms} ms.` : `${who} answered a sample true statement wrongly (${yes}% yes). Try another model.`;
+      } catch (e) { out.textContent = `No answer: ${e.message}`; }
+    },
     'admin-confirm': async () => { const action = local.pending; local.pending = null; if (action) await action(); },
     'admin-copy-link': async () => { const value = document.querySelector('#one-time-link').value; try { await navigator.clipboard.writeText(value); toast('One-time link copied'); } catch { document.querySelector('#one-time-link').select(); toast('Select and copy this link'); } },
     'admin-toggle-user': el => { const u = userById(el.dataset.id), enabled = u.enabled === false; confirm(enabled ? 'Enable this account?' : 'Disable this account?', enabled ? 'This person will be able to sign in again.' : 'This person will be signed out and unable to sign in until the account is enabled again.', enabled ? 'Enable account' : 'Disable account', async () => { await api.request(`/api/admin/users/${encodeURIComponent(u.id)}`, { method: 'PATCH', body: { enabled } }); close(); if (u.id === state.user.id) await onIdentityChanged(); else await load(); toast(enabled ? 'Account enabled' : 'Account disabled'); }); },
@@ -160,6 +190,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       await saveEmbedding({ model: pick(next.model, d.model), queryPrefix: pick(next.queryPrefix, own.queryPrefix), documentPrefix: pick(next.documentPrefix, own.documentPrefix) }, next);
       return;
     }
+    if (form.id === 'admin-decisions-form') { local.decisions = await api.request('/api/admin/decisions', { method: 'PATCH', body: decisionsBody(form) }); render(); toast('Decisions saved'); return; }
     if (form.id === 'admin-retention-form') {
       const body = Object.fromEntries([['conversationDays','retention-conversations'],['unusedFileDays','retention-files'],['auditDays','retention-audit']].map(([key,id]) => [key,getValue(form,id).trim() ? Number(getValue(form,id)) : null]));
       const save = async () => { const r = await api.request('/api/admin/retention', { method: 'PATCH', body }); local.retention = r; close(); render(); toast('Retention policy saved'); };
@@ -206,6 +237,11 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
   function input(event) {
     if (event.target.id === 'model-visibility') document.querySelector('.model-visibility-groups').hidden = event.target.value !== 'groups';
     if (event.target.id === 'embedding-model') modelPrefixes(event.target);
+    if (event.target.id === 'decisions-endpoint') {
+      const form = event.target.form;
+      form.querySelector('.decisions-custom').hidden = event.target.value !== 'custom';
+      event.target.closest('.management-field').querySelector('.field-help').textContent = decisionsUsage(event.target.value);
+    }
   }
   return { view, load, clear, actions, submit, input };
 }

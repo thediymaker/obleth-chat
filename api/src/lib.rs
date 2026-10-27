@@ -6,6 +6,7 @@ pub mod browser;
 pub mod code;
 pub mod config;
 pub mod connections;
+pub mod decisions;
 pub mod error;
 pub mod files;
 pub mod gateway;
@@ -78,11 +79,13 @@ pub struct AppState {
     pub browsers: Option<browser::Browsers>,
     pub connections: Option<connections::Connections>,
     pub knowledge: Option<knowledge::Knowledge>,
+    pub decisions: decisions::Decisions,
 }
 impl AppState {
     pub fn new(auth: Auth, pool: PgPool, gateway: Option<Gateway>, max_streams: usize) -> Self {
         Self {
             auth,
+            decisions: decisions::Decisions::new(pool.clone(), None),
             store: Store::new(pool),
             gateway,
             metrics: Metrics::new(),
@@ -116,6 +119,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let steering = steer::router(state.clone());
     let knowledge = knowledge::router(state.clone());
     let embedding = knowledge::embedding::router(state.clone());
+    let decisions = decisions::router(state.clone());
     let mcp = mcp::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
@@ -171,6 +175,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(steering)
         .merge(knowledge)
         .merge(embedding)
+        .merge(decisions)
         .merge(mcp)
         .fallback_service(static_files(static_dir))
         .layer(DefaultBodyLimit::max(128 * 1024))
@@ -2420,6 +2425,11 @@ async fn run_generation(
                             user: user.id,
                             conversation: id,
                             project: project.id,
+                            ask: Some(decisions::Asker {
+                                decisions: &s.decisions,
+                                gateway: Some(&gateway),
+                                user: &user,
+                            }),
                         };
                         research::tools::run(&ctx, &call.name, &call.arguments).await
                     }

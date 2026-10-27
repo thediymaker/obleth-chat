@@ -2,7 +2,9 @@
 
 Each release's section is also its GitHub Release notes.
 
-## Unreleased
+## v0.7.0
+
+Administrators choose where Chat asks its short yes/no questions, and research checks whether each run tested its idea.
 
 **New**
 

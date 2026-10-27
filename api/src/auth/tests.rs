@@ -3531,13 +3531,20 @@ async fn a_caller_that_goes_away_does_not_lose_a_rotated_token() {
     issuer
         .refresh_delay
         .store(300, std::sync::atomic::Ordering::SeqCst);
-    // The caller is dropped while the provider rotates the token.
-    assert!(tokio::time::timeout(
-        Duration::from_millis(50),
-        grants.access_token(user.id, None)
-    )
-    .await
-    .is_err());
+    // The caller is dropped once the provider has the token and is rotating it.
+    let caller = tokio::spawn({
+        let grants = grants.clone();
+        async move { grants.access_token(user.id, None).await }
+    });
+    for _ in 0..200 {
+        if !issuer.presented.lock().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(issuer.presented.lock().await.len(), 1);
+    caller.abort();
+    assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
     // Shutdown waits for it.
     grants.finish().await;
     let saved: bool = sqlx::query_scalar(

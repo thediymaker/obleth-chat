@@ -7,13 +7,13 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{check, for_project, launch, Research, GIT, MAX_RUNNING};
+use super::{check, for_project, launch, paper, Research, GIT, MAX_RUNNING};
 use crate::sandbox::{
     tools::{sh, Outcome},
     Sandbox, Sandboxes,
 };
 
-pub const NAMES: [&str; 7] = [
+pub const NAMES: [&str; 8] = [
     "research_setup",
     "research_status",
     "experiment_create",
@@ -21,6 +21,7 @@ pub const NAMES: [&str; 7] = [
     "experiment_run",
     "experiment_wait",
     "run_log",
+    "read_paper",
 ];
 pub fn is_tool(name: &str) -> bool {
     NAMES.contains(&name)
@@ -41,6 +42,12 @@ pub(crate) const BRANCH_CARRY: &str = "git stash push -q -u -m research-carry &&
 pub(crate) const BRANCH: &str = "git checkout -q -b \"$1\" \"$2\"";
 pub(crate) const CHECKOUT: &str = "git checkout -q \"$1\"";
 /// Commits branch $1's work when it is checked out, then prints its commit.
+/// Fetches page $1 into the research's paper folder unless it is there already, then
+/// prints it. Exits 3 when it can't be fetched, with curl's reason.
+pub(crate) const FETCH_PAGE: &str = "d=\"${OBLETH_RESEARCH_DIR:-/workspace/.obleth-research}/$OBLETH_SLUG/papers\"\n\
+        f=\"$d/$(printf %s \"$1\" | sha256sum | cut -c1-16).html\"\n\
+        if [ ! -s \"$f\" ]; then mkdir -p \"$d\" && curl -fsSL --proto '=http,https' --proto-redir '=http,https' --max-time 60 --max-filesize 16000000 -A 'obleth-chat read_paper' -o \"$f.part\" -- \"$1\" && mv \"$f.part\" \"$f\" || { rm -f \"$f.part\"; exit 3; }; fi\n\
+        cat \"$f\"";
 pub(crate) const COMMIT_FOR_RUN: &str = "if [ \"$(git rev-parse --abbrev-ref HEAD)\" = \"$1\" ] && [ -n \"$(git status --porcelain)\" ]; then git add -A && git commit -q -m \"$2\" || exit 1; fi\ngit rev-parse --short=12 \"$1\"";
 
 const WAIT_DEFAULT: u64 = 600;
@@ -50,6 +57,8 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of a run's change and output the check reads.
 const CHECK_DIFF: usize = 16 * 1024;
 const CHECK_LOG: usize = 8 * 1024;
+/// Largest page read_paper reads, with room for the shell's own output.
+const PAGE_LIMIT: usize = 16_100_000;
 /// Siblings the placement check reads when an idea goes under the baseline.
 const CHECK_SIBLINGS: usize = 12;
 
@@ -79,6 +88,12 @@ pub fn definitions() -> Vec<Value> {
             "parameters":{"type":"object","properties":{"experiment":node("The node to run")},"required":["experiment"],"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"experiment_wait","description":"Wait until the next run finishes and get its results, compared with its parent and the best so far. Returns early on the first finish; call it again for the next one. Says drained when no runs are going.",
             "parameters":{"type":"object","properties":{"seconds":{"type":"integer","description":"How long to wait at most, up to 1800 (default 600)"}},"additionalProperties":false}}}),
+        json!({"type":"function","function":{"name":"read_paper","description":"Read a paper or any web page with headings by section, such as an arXiv paper an idea comes from. The first read returns its outline and the sections that best answer what you are looking for; call again with sections to read others. Cite what you use by section, such as §3.2.",
+            "parameters":{"type":"object","properties":{
+                "url":{"type":"string","description":"The page: an arXiv link (abs, pdf or html) or any web page with headings"},
+                "looking_for":{"type":"string","description":"What you want from it, such as: the learning-rate schedule and warmup they trained with"},
+                "sections":{"type":"array","items":{"type":"string"},"description":"Sections to read in full, by id or number from the outline, such as [\"s7\", \"3.2\"]"}},
+                "required":["url"],"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"run_log","description":"The last lines of a run's output.",
             "parameters":{"type":"object","properties":{
                 "run":{"type":"integer","description":"The run number"},
@@ -162,7 +177,8 @@ pub async fn prompt(pool: &PgPool, standing: &Standing, sandbox: &Sandbox) -> St
 4. A run that crashes, runs out of memory or times out answered nothing: the node stays open. Check it out, fix it and run it again. After two repairs in a row that answer nothing, or the same failure on a second node, stop and ask the person.\n\
 5. Each run starts from a clean checkout of the node's commit in its own folder, without untracked or ignored files such as downloaded data. The project's .venv and node_modules are linked into it: install packages in the project folder beforehand, not in the run command. Use absolute paths under {dir} for shared data such as model weights. Make the code print its settings and final metrics.\n\
 6. The loop: read research_status, create one round's children, edit each on its branch, start their runs (up to {max} at once), then call experiment_wait. Each time a run finishes, read its result before anything else and decide: repair the node, run the next option, promote the winner (the next round branches from it), or stop. Stop when the goal is met or after about three runs in a row without a gain.\n\
-7. Report only results you read from runs, citing them as \"run N\", and label inferences as such. When a round ends or you stop, give one line per node: what it tested, its status and its result.{last}",
+7. Report only results you read from runs, citing them as \"run N\", and label inferences as such. When a round ends or you stop, give one line per node: what it tested, its status and its result.\n\
+8. When an idea comes from a paper, read it with read_paper, saying what you are looking for, and take settings from the section that gives them, citing it (§3.2) in the node's description.{last}",
         goal = research.goal,
         metric = research.metric,
         better = if research.direction == "min" { "lower" } else { "higher" },
@@ -403,6 +419,7 @@ pub async fn run(ctx: &Ctx<'_>, name: &str, arguments: &str) -> Outcome {
         "experiment_run" => start(ctx, &research.unwrap(), &args).await,
         "experiment_wait" => wait(ctx, &research.unwrap(), &args).await,
         "run_log" => log(ctx, &research.unwrap(), &args).await,
+        "read_paper" => read_paper(ctx, &research.unwrap(), &args).await,
         _ => outcome(
             false,
             "Unknown tool",
@@ -714,6 +731,134 @@ async fn place(
         }
         Err(why) => (json!({"skipped": why}), None),
     })
+}
+
+/// The page at `url`, fetched in the workspace once and read from there after.
+async fn fetch(ctx: &Ctx<'_>, url: &str) -> Result<String, String> {
+    let script = crate::sandbox::tools::in_project(ctx.sb, ctx.sandbox, FETCH_PAGE);
+    let out = tokio::time::timeout(
+        Duration::from_secs(90),
+        ctx.sb.exec_with(
+            ctx.sandbox,
+            &["sh", "-c", &script, "sh", url],
+            None,
+            PAGE_LIMIT,
+        ),
+    )
+    .await
+    .map_err(|_| "Fetching it took longer than 90 seconds.".to_string())?
+    .map_err(|e| format!("The workspace could not fetch it: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    match out.exit_code {
+        Some(0) if !out.truncated => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Some(0) => Err("The page is larger than 16 MB.".into()),
+        _ if url.starts_with("https://arxiv.org/html/") && stderr.contains("404") => Err("arXiv has no HTML version of this paper; it makes one only when it can convert the paper's LaTeX. Download the PDF in the workspace with run_command and read it with a PDF-to-text tool instead.".into()),
+        _ => Err(format!("It could not be fetched: {}", stderr.trim().chars().take(300).collect::<String>())),
+    }
+}
+
+async fn read_paper(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome {
+    let url = match paper::source(args["url"].as_str().unwrap_or("")) {
+        Ok(url) => url,
+        Err(e) => return outcome(false, "No paper link", e),
+    };
+    let html = match fetch(ctx, &url).await {
+        Ok(html) => html,
+        Err(e) => return outcome(false, "Paper not read", format!("{url}: {e}")),
+    };
+    let paper = paper::Paper::from_html(&html);
+    if paper.sections.is_empty() {
+        return outcome(false, "No sections", format!("{url} has no headings to read it by. Read its text with run_command and curl instead."));
+    }
+    let title = paper.title.clone().unwrap_or_else(|| url.clone());
+    let wanted: Vec<String> = args["sections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .or_else(|| v.as_f64().map(|n| n.to_string()))
+        })
+        .take(8)
+        .collect();
+    let looking_for = text(args, "looking_for", 500);
+    let mut picks: Vec<(usize, Option<f64>)> = vec![];
+    let mut missing = vec![];
+    let mut found = String::new();
+    let mut note = String::new();
+    if !wanted.is_empty() {
+        for key in &wanted {
+            match paper.find(key) {
+                Some(i) if !picks.iter().any(|(p, _)| *p == i) => picks.push((i, None)),
+                Some(_) => {}
+                None => missing.push(key.as_str()),
+            }
+        }
+    } else if !looking_for.is_empty() {
+        let settings = match ctx.ask {
+            Some(ask) => ask.settings().await.map(|s| (ask, s)),
+            None => None,
+        };
+        match settings {
+            Some((ask, settings)) if settings.on() && settings.pick_sections => {
+                match paper::pick(ask, &settings, &paper, &looking_for, &research.goal).await {
+                    Ok((model, ranked)) => {
+                        picks = paper::top(&ranked).into_iter().map(|(i, p)| (i, Some(p))).collect();
+                        found = format!(
+                            " for “{looking_for}”{}",
+                            if model.is_empty() { String::new() } else { format!(", picked by {model}") }
+                        );
+                    }
+                    Err(why) => note = format!("\n\nSections weren't picked for you ({why}). Name the ones you want from the outline in sections."),
+                }
+            }
+            _ => note = "\n\nName the sections you want from the outline in sections.".into(),
+        }
+    }
+    if picks.is_empty() && missing.is_empty() {
+        picks.push((paper.start(), None));
+    }
+    let shown = picks
+        .iter()
+        .map(|(i, p)| {
+            format!(
+                "### {} · {}{}\n{}",
+                paper::id(*i),
+                paper.heading(*i),
+                p.map(|p| format!(" · {:.0}%", p * 100.0))
+                    .unwrap_or_default(),
+                paper.body(*i)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let outline = if wanted.is_empty() {
+        format!("\n\n## Outline\n{}", paper.outline())
+    } else {
+        String::new()
+    };
+    if !missing.is_empty() {
+        note.push_str(&format!(
+            "\n\nNo section matches {}; use ids or numbers from the outline.",
+            missing
+                .iter()
+                .map(|m| format!("“{m}”"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let count = paper.sections.len();
+    let summary = match picks.len() {
+        0 => format!("Read “{title}”"),
+        1 => format!("Read “{title}” · {}", paper.heading(picks[0].0)),
+        n => format!("Read {n} sections of “{title}”"),
+    };
+    outcome(
+        !picks.is_empty(),
+        summary,
+        format!("“{title}” ({url}), {count} sections.{outline}\n\n## Sections{found}\n{shown}{note}\n\nRead others with read_paper and sections. Cite what you use by section, such as §3.2."),
+    )
 }
 
 async fn checkout(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome {
@@ -1125,6 +1270,7 @@ pub fn summary(name: &str, args: &Value) -> String {
         "experiment_run" => "Starting a run".into(),
         "experiment_wait" => "Waiting for a run to finish".into(),
         "run_log" => format!("Reading run {}'s output", args["run"].as_i64().unwrap_or(0)),
+        "read_paper" => "Reading a paper".into(),
         _ => name.into(),
     }
 }
@@ -1362,5 +1508,58 @@ mod tests {
             find(&nodes, "Baseline").unwrap().branch,
             "research/baseline"
         );
+    }
+
+    #[test]
+    fn a_page_is_fetched_once_into_the_workspace() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = served.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = [0; 2048];
+                let n = stream.read(&mut request).unwrap_or(0);
+                let found = String::from_utf8_lossy(&request[..n]).starts_with("GET /paper ");
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (status, body) = if found {
+                    ("200 OK", "<h1>Paper</h1><h2>1 Method</h2><p>Warmup.</p>")
+                } else {
+                    ("404 Not Found", "missing")
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let root = std::env::temp_dir().join(format!("research-{}", Uuid::new_v4().simple()));
+        let (dir, runs) = (root.join("demo"), root.join("runs"));
+        let url = format!("http://127.0.0.1:{port}/paper");
+        let first = local(&dir, &runs, FETCH_PAGE, &[&url], None);
+        assert_eq!(
+            first,
+            ("<h1>Paper</h1><h2>1 Method</h2><p>Warmup.</p>".into(), 0)
+        );
+        // Read again, it comes from the workspace.
+        assert_eq!(local(&dir, &runs, FETCH_PAGE, &[&url], None), first);
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let (out, code) = local(
+            &dir,
+            &runs,
+            FETCH_PAGE,
+            &[&format!("http://127.0.0.1:{port}/gone")],
+            None,
+        );
+        assert_eq!(code, 3);
+        assert!(out.contains("404"), "{out}");
+        let (_, code) = local(&dir, &runs, FETCH_PAGE, &["file:///etc/hostname"], None);
+        assert_eq!(code, 3);
+        let papers = runs.join("demo/papers");
+        assert_eq!(std::fs::read_dir(&papers).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

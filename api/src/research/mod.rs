@@ -6,6 +6,7 @@
 //!
 //! The rules the model follows come from alphaXiv's OpenResearch playbook (MIT).
 
+pub mod paper;
 pub mod report;
 pub mod tools;
 

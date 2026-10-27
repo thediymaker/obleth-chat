@@ -236,6 +236,152 @@ fn html_text(html: &str) -> String {
     decode(&strip_tags(&text))
 }
 
+/// A part of a document under one heading.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Section {
+    /// The heading's level, 1 to 6.
+    pub level: u8,
+    /// The headings above it and its own, outermost first.
+    pub path: Vec<String>,
+    pub text: String,
+}
+
+/// An HTML document split at its h1 to h6 headings. A page's only h1 is its title and
+/// kept apart, so it doesn't head every path; headings before it are the site's, not
+/// the document's. Math keeps its TeX (`alttext`)
+/// rather than the text of its MathML, and table cells are separated with |.
+pub fn html_sections(html: &str) -> (Option<String>, Vec<Section>) {
+    let mut html = html.to_owned();
+    for tag in [
+        "script", "style", "noscript", "template", "nav", "footer", "button", "svg", "dialog",
+        "form",
+    ] {
+        html = remove_blocks(&html, tag);
+    }
+    let html = math_tex(&html);
+    let lower = html.to_ascii_lowercase();
+    // Each heading: where its tag opens, where it closes, its level and its text.
+    let mut heads: Vec<(usize, usize, u8, String)> = Vec::new();
+    let mut at = 0;
+    while let Some(start) = lower[at..].find("<h").map(|i| at + i) {
+        let bytes = lower.as_bytes();
+        let level = bytes.get(start + 2).copied().filter(u8::is_ascii_digit);
+        let after = bytes.get(start + 3).copied();
+        let found = level
+            .filter(|l| (b'1'..=b'6').contains(l))
+            .filter(|_| after.is_some_and(|c| c == b'>' || c.is_ascii_whitespace()))
+            .and_then(|l| {
+                let open = tag_end(&html, start)?;
+                let close = format!("</h{}>", l as char);
+                let end = lower[open..].find(&close).map(|i| open + i)?;
+                Some((open, end, end + close.len(), l - b'0'))
+            });
+        match found {
+            Some((open, end, after, level)) => {
+                let title = one_line(&html_text(&html[open..end]));
+                if !title.is_empty() {
+                    heads.push((start, after, level, title));
+                }
+                at = after;
+            }
+            None => at = start + 2,
+        }
+    }
+    let at_title = match heads.iter().filter(|h| h.2 == 1).count() {
+        1 => heads.iter().position(|h| h.2 == 1),
+        _ => None,
+    };
+    let title = at_title.map(|t| heads[t].3.clone());
+    let skip = at_title.map_or(0, |t| t + 1);
+    let mut sections = Vec::new();
+    // Text before the first heading, or between the title and it, is kept when it says something.
+    let first = heads.get(skip).map_or(html.len(), |h| h.0);
+    let before = at_title.map_or(0, |t| heads[t].1);
+    let lead = section_text(&html[before.min(first)..first]);
+    if lead.chars().filter(|c| c.is_alphanumeric()).count() >= 200 {
+        sections.push(Section {
+            level: 1,
+            path: vec!["Start".into()],
+            text: lead,
+        });
+    }
+    let mut stack: Vec<(u8, String)> = Vec::new();
+    for (k, (_, after, level, heading)) in heads.iter().enumerate().skip(skip) {
+        while stack.last().is_some_and(|(l, _)| l >= level) {
+            stack.pop();
+        }
+        stack.push((*level, heading.clone()));
+        let end = heads.get(k + 1).map_or(html.len(), |h| h.0);
+        sections.push(Section {
+            level: *level,
+            path: stack.iter().map(|(_, h)| h.clone()).collect(),
+            text: section_text(&html[*after..end]),
+        });
+    }
+    (title, sections)
+}
+
+fn section_text(html: &str) -> String {
+    let html = replace_ci(&replace_ci(html, "</td>", " | "), "</th>", " | ");
+    paragraphs(&html_text(&html)).join("\n\n")
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Where the tag opening at `start` ends, just past its `>`, skipping quoted values.
+fn tag_end(html: &str, start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (i, c) in html[start..].char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '>') => return Some(start + i + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// An attribute's raw value in an opening tag.
+fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(i) = lower[at..].find(name).map(|i| at + i) {
+        let before = lower[..i].chars().last();
+        let rest = lower[i + name.len()..].trim_start();
+        if before.is_some_and(char::is_whitespace) && rest.starts_with('=') {
+            let value = tag[tag.len() - rest.len() + 1..].trim_start();
+            let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            return value[1..].find(quote).map(|end| &value[1..1 + end]);
+        }
+        at = i + name.len();
+    }
+    None
+}
+
+/// Math as its TeX: `<math alttext="x^2">…</math>` becomes ` $x^2$ `.
+fn math_tex(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut at = 0;
+    while let Some(start) = lower[at..].find("<math").map(|i| at + i) {
+        let Some(open) = tag_end(html, start) else {
+            break;
+        };
+        out.push_str(&html[at..start]);
+        if let Some(tex) = attribute(&html[start..open], "alttext") {
+            out.push_str(&format!(" ${}$ ", tex.trim()));
+        }
+        at = lower[open..]
+            .find("</math>")
+            .map_or(open, |i| open + i + "</math>".len());
+    }
+    out.push_str(&html[at..]);
+    out
+}
+
 fn replace_ci(text: &str, from: &str, to: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
@@ -288,7 +434,8 @@ fn decode(text: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let end = rest[..rest.len().min(12)].find(';');
+        // An entity ends within a few bytes; ';' is one byte, so this never splits a character.
+        let end = rest.bytes().take(12).position(|b| b == b';');
         let decoded = end.and_then(|end| {
             let entity = &rest[1..end];
             let c = match entity {
@@ -434,6 +581,62 @@ mod tests {
         assert_eq!(kind("notes.md", ""), Some(Kind::Text));
         assert_eq!(kind("report.docx", ""), Some(Kind::Docx));
         assert_eq!(kind("photo.jpg", "image/jpeg"), None);
+    }
+
+    #[test]
+    fn web_pages_split_at_their_headings() {
+        // The shape arXiv's HTML papers have.
+        let html = r#"<html><head><style>h1{}</style></head><body><dialog><h2>Report an issue</h2><form><h3>Details</h3></form></dialog><nav class="ltx_TOC"><a>1 Introduction</a></nav>
+<h1 class="ltx_title">Warmup <em>matters</em></h1><div class="ltx_authors">A. Author</div>
+<div class="ltx_abstract"><h6>Abstract</h6><p>We study warmup.</p></div>
+<section><h2><span class="ltx_tag">1 </span>Introduction</h2><p>Training is hard.</p></section>
+<section><h2>2 Method</h2><h3 class="x" data-note="a>b">2.1 Schedule</h3><p>We use <math alttext="\eta_t = t/T" display="inline"><mi>η</mi><mo>=</mo></math> for 500 steps.</p>
+<table><tr><th>lr</th><th>loss</th></tr><tr><td>3e-4</td><td>2.41</td></tr></table>
+<h3>2.2 Data</h3><p>Deduplicated &amp; filtered.</p></section>
+<h2>References</h2><p>[1] Someone.</p><footer>arXiv footer</footer></body></html>"#;
+        let (title, sections) = html_sections(html);
+        assert_eq!(title.as_deref(), Some("Warmup matters"));
+        let paths: Vec<String> = sections.iter().map(|s| s.path.join(" › ")).collect();
+        assert_eq!(
+            paths,
+            [
+                "Abstract",
+                "1 Introduction",
+                "2 Method",
+                "2 Method › 2.1 Schedule",
+                "2 Method › 2.2 Data",
+                "References"
+            ]
+        );
+        assert_eq!(sections[0].level, 6);
+        assert_eq!(sections[0].text, "We study warmup.");
+        assert_eq!(sections[2].text, "");
+        assert_eq!(
+            sections[3].text,
+            "We use $\\eta_t = t/T$ for 500 steps.\n\nlr | loss |\n\n3e-4 | 2.41 |"
+        );
+        assert_eq!(sections[4].text, "Deduplicated & filtered.");
+        assert!(!sections
+            .iter()
+            .any(|s| s.text.contains("footer") || s.text.contains("1 Introduction")));
+        // With no title and text before the first heading, that text is kept.
+        let lead = format!("<p>{}</p><h2>Next</h2><p>More.</p>", "word ".repeat(60));
+        let (title, sections) = html_sections(&lead);
+        assert_eq!(title, None);
+        assert_eq!(sections[0].path, ["Start"]);
+        assert_eq!(sections[1].path, ["Next"]);
+        // A page without headings has no sections beyond its text.
+        assert_eq!(html_sections("<p>short</p>").1, []);
+    }
+
+    #[test]
+    fn an_ampersand_before_wide_characters_is_kept() {
+        assert_eq!(
+            decode("R&D team 用户手册 &amp; 指南"),
+            "R&D team 用户手册 & 指南"
+        );
+        assert_eq!(decode("&用户"), "&用户");
+        assert_eq!(html_text("<p>Q&A：用户</p>").trim(), "Q&A：用户");
     }
 
     #[test]

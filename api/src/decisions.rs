@@ -96,6 +96,8 @@ pub struct Settings {
     pub check_tree: bool,
     /// Ask whether a research report's statements are supported by the runs.
     pub check_reports: bool,
+    /// Ask which sections of a paper answer what the chat is looking for.
+    pub pick_sections: bool,
 }
 
 impl Settings {
@@ -131,6 +133,7 @@ struct Row {
     check_runs: bool,
     check_tree: bool,
     check_reports: bool,
+    pick_sections: bool,
 }
 
 #[derive(Clone)]
@@ -157,7 +160,7 @@ impl Decisions {
 
     async fn row(&self) -> Result<Row, sqlx::Error> {
         sqlx::query_as(
-            "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports FROM decisions WHERE id",
+            "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports, pick_sections FROM decisions WHERE id",
         )
             .fetch_one(&self.pool)
             .await
@@ -189,6 +192,7 @@ impl Decisions {
             check_runs: row.check_runs,
             check_tree: row.check_tree,
             check_reports: row.check_reports,
+            pick_sections: row.pick_sections,
         }
     }
 
@@ -307,6 +311,60 @@ async fn read_capped(response: Response) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// A pick-one verdict.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picked {
+    /// The endpoint's name for the model that answered.
+    pub model: String,
+    /// Every option with its probability, most likely first.
+    pub options: Vec<(String, f64)>,
+    pub confidence: f64,
+}
+
+/// Question `id`'s pick-one verdict in a verdicts response.
+pub fn choice(response: &Value, id: &str) -> Result<Picked, String> {
+    let verdict = &response["verdicts"][id];
+    if verdict.is_null() {
+        return Err("The answer has no verdict for the question".into());
+    }
+    if verdict["answered"] == json!(false) {
+        return Err("The model gave no answer".into());
+    }
+    let mut options: Vec<(String, f64)> = match verdict["probabilities"].as_object() {
+        Some(map) => map
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), v.as_f64().filter(|p| (0.0..=1.0).contains(p))?)))
+            .collect(),
+        None => verdict["value"]
+            .as_str()
+            .map(|v| vec![(v.to_owned(), 1.0)])
+            .unwrap_or_default(),
+    };
+    if options.is_empty() {
+        return Err("The answer is not a pick-one verdict".into());
+    }
+    options.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let top = options[0].1;
+    Ok(Picked {
+        model: model_name(response),
+        confidence: verdict["confidence"]
+            .as_f64()
+            .unwrap_or(top)
+            .clamp(0.0, 1.0),
+        options,
+    })
+}
+
+fn model_name(response: &Value) -> String {
+    response["model"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(160)
+        .collect()
+}
+
 /// Question `id`'s yes/no verdict in a verdicts response.
 pub fn yes_no(response: &Value, id: &str) -> Result<YesNo, String> {
     let verdict = &response["verdicts"][id];
@@ -326,13 +384,7 @@ pub fn yes_no(response: &Value, id: &str) -> Result<YesNo, String> {
         .filter(|p| (0.0..=1.0).contains(p))
         .ok_or("The answer is not a yes/no verdict")?;
     Ok(YesNo {
-        model: response["model"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(160)
-            .collect(),
+        model: model_name(response),
         yes,
         // A service that doesn't say how sure it is is as sure as its answer is far from a coin flip.
         confidence: verdict["confidence"]
@@ -381,6 +433,7 @@ struct Patch {
     check_runs: Option<bool>,
     check_tree: Option<bool>,
     check_reports: Option<bool>,
+    pick_sections: Option<bool>,
 }
 
 fn bad(message: impl Into<String>) -> ApiError {
@@ -389,7 +442,7 @@ fn bad(message: impl Into<String>) -> ApiError {
 
 fn patch(body: &Value) -> Result<Patch, ApiError> {
     let fields = body.as_object().ok_or_else(|| {
-        bad("Send an object with endpoint, url, key, model, checkRuns, checkTree or checkReports")
+        bad("Send an object with endpoint, url, key, model, checkRuns, checkTree, checkReports or pickSections")
     })?;
     if let Some(key) = fields.keys().find(|k| {
         ![
@@ -400,6 +453,7 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
             "checkRuns",
             "checkTree",
             "checkReports",
+            "pickSections",
         ]
         .contains(&k.as_str())
     }) {
@@ -452,6 +506,7 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
         ("checkRuns", &mut patch.check_runs),
         ("checkTree", &mut patch.check_tree),
         ("checkReports", &mut patch.check_reports),
+        ("pickSections", &mut patch.pick_sections),
     ] {
         if let Some(value) = fields.get(name) {
             *field = Some(
@@ -488,6 +543,9 @@ impl Patch {
         }
         if let Some(check_reports) = self.check_reports {
             row.check_reports = check_reports;
+        }
+        if let Some(pick_sections) = self.pick_sections {
+            row.pick_sections = pick_sections;
         }
         if row.endpoint == "custom" && row.url.is_none() {
             return Err(bad("Enter the endpoint's URL"));
@@ -541,6 +599,7 @@ async fn document(s: &AppState, user: &Identity) -> Result<Value, ApiError> {
         "checkRuns": row.check_runs,
         "checkTree": row.check_tree,
         "checkReports": row.check_reports,
+        "pickSections": row.pick_sections,
         "canStoreKey": d.secret.is_some(),
         "gateway": s.gateway.is_some(),
         "models": models,
@@ -570,7 +629,7 @@ async fn save(
     };
     let mut tx = crate::operations::admin_transaction(&s.store.pool, user.id).await?;
     let row: Row = sqlx::query_as(
-        "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports FROM decisions WHERE id FOR UPDATE",
+        "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports, pick_sections FROM decisions WHERE id FOR UPDATE",
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -579,7 +638,7 @@ async fn save(
         row.api_key = sealed;
     }
     sqlx::query(
-        "UPDATE decisions SET endpoint=$1, url=$2, api_key=$3, model=$4, check_runs=$5, check_tree=$6, check_reports=$7, updated_at=NOW() WHERE id",
+        "UPDATE decisions SET endpoint=$1, url=$2, api_key=$3, model=$4, check_runs=$5, check_tree=$6, check_reports=$7, pick_sections=$8, updated_at=NOW() WHERE id",
     )
     .bind(&row.endpoint)
     .bind(&row.url)
@@ -588,13 +647,14 @@ async fn save(
     .bind(row.check_runs)
     .bind(row.check_tree)
     .bind(row.check_reports)
+    .bind(row.pick_sections)
     .execute(&mut *tx)
     .await?;
     // The key itself never reaches the audit log; only that it changed.
     sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'decisions.update','site',$3)")
         .bind(Uuid::new_v4())
         .bind(user.id)
-        .bind(json!({"endpoint": row.endpoint, "url": row.url, "model": row.model, "checkRuns": row.check_runs, "checkTree": row.check_tree, "checkReports": row.check_reports, "keyChanged": patch.key.is_some(), "hasKey": row.api_key.is_some()}))
+        .bind(json!({"endpoint": row.endpoint, "url": row.url, "model": row.model, "checkRuns": row.check_runs, "checkTree": row.check_tree, "checkReports": row.check_reports, "pickSections": row.pick_sections, "keyChanged": patch.key.is_some(), "hasKey": row.api_key.is_some()}))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -701,14 +761,37 @@ mod tests {
     }
 
     #[test]
+    fn choice_ranks_the_options() {
+        let response = json!({"model": "judge-31b", "verdicts": {"section": {"type": "choice", "value": "s3", "probabilities": {"s1": 0.05, "s3": 0.7, "s2": 0.25}, "confidence": 0.8}}});
+        let picked = choice(&response, "section").unwrap();
+        assert_eq!(picked.model, "judge-31b");
+        assert_eq!(
+            picked.options,
+            [("s3".into(), 0.7), ("s2".into(), 0.25), ("s1".into(), 0.05)]
+        );
+        assert_eq!(picked.confidence, 0.8);
+        let bare = json!({"verdicts": {"section": {"value": "s2"}}});
+        assert_eq!(
+            choice(&bare, "section").unwrap().options,
+            [("s2".into(), 1.0)]
+        );
+        let unanswered = json!({"verdicts": {"section": {"value": "s1", "answered": false}}});
+        assert!(choice(&unanswered, "section").is_err());
+        assert!(choice(&json!({"verdicts": {"section": {}}}), "section").is_err());
+    }
+
+    #[test]
     fn patches_take_only_known_settings() {
-        let p = patch(&json!({"endpoint": "custom", "url": "https://d.example.com", "key": " sk-1 ", "model": "", "checkRuns": false, "checkTree": false, "checkReports": true})).unwrap();
+        let p = patch(&json!({"endpoint": "custom", "url": "https://d.example.com", "key": " sk-1 ", "model": "", "checkRuns": false, "checkTree": false, "checkReports": true, "pickSections": false})).unwrap();
         assert_eq!(p.endpoint, Some("custom"));
         assert_eq!(p.url.unwrap().as_str(), "https://d.example.com/v1/verdicts");
         assert_eq!(p.key, Some(Some("sk-1".into())));
         assert_eq!(p.model, Some(None));
         assert_eq!(p.check_runs, Some(false));
-        assert_eq!((p.check_tree, p.check_reports), (Some(false), Some(true)));
+        assert_eq!(
+            (p.check_tree, p.check_reports, p.pick_sections),
+            (Some(false), Some(true), Some(false))
+        );
         assert_eq!(patch(&json!({"key": null})).unwrap().key, Some(None));
         for wrong in [
             json!({"endpoint": "elsewhere"}),
@@ -717,6 +800,7 @@ mod tests {
             json!({"model": "a\nb"}),
             json!({"checkRuns": "yes"}),
             json!({"checkTree": 1}),
+            json!({"pickSections": null}),
             json!({"secret": 1}),
             json!([]),
         ] {
@@ -734,6 +818,7 @@ mod tests {
             check_runs: true,
             check_tree: true,
             check_reports: true,
+            pick_sections: true,
         };
         assert!(patch(&json!({"endpoint": "custom"}))
             .unwrap()

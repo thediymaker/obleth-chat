@@ -5,8 +5,8 @@ import { icon, esc } from './manage-ui.js';
 // When it is done: what changed and whether it works, checkpoints, and a "Show
 // work" trace in which each thought sits before the step it led to.
 
-const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', run_in_terminal: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', report_check: 'shield', delegate: 'users', output_limit: 'info', connection: 'info', thinking_limit: 'info', check: 'check', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
-const RESEARCH = new Set(['research_setup', 'research_status', 'experiment_create', 'experiment_checkout', 'experiment_run', 'experiment_wait', 'run_log', 'report_check']);
+const TOOL_ICONS = { search_knowledge: 'book', write_file: 'edit', edit_file: 'edit', read_file: 'file', list_files: 'grid', run_command: 'terminal', run_in_terminal: 'terminal', start_server: 'play', server_logs: 'file', plan: 'grid', research_setup: 'flask', research_status: 'grid', experiment_create: 'branch', experiment_checkout: 'branch', experiment_run: 'play', experiment_wait: 'clock', run_log: 'file', read_paper: 'book', report_check: 'shield', delegate: 'users', output_limit: 'info', connection: 'info', thinking_limit: 'info', check: 'check', browser_search: 'search', browser_open: 'globe', browser_click: 'cursor', browser_type: 'edit', browser_read: 'file', browser_scroll: 'down', browser_back: 'globe' };
+const RESEARCH = new Set(['research_setup', 'research_status', 'experiment_create', 'experiment_checkout', 'experiment_run', 'experiment_wait', 'run_log', 'read_paper', 'report_check']);
 const kindOf = e => e.kind || 'tool';
 // Work on a cluster or other service goes through its own stages: look, ask, act,
 // then check what the change did.

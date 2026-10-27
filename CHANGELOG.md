@@ -2,6 +2,20 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**New**
+
+- **Research reads papers by section.** `read_paper` takes a link to a paper, or any web page with headings, and what the chat is looking for in it. arXiv abstract and PDF links read arXiv's HTML version. The page is fetched in the workspace, once, and kept there. Chat splits it at its headings, keeping math as TeX. One pick-one decision over the outline ranks the sections, and the likeliest three come back in full, with the outline and each pick's probability. A document with more than 255 sections is narrowed by its top-level sections first. Asked for `sections` by id, number or heading, it returns those. The research rules ask the chat to take a paper's settings from the section that gives them and cite it. Administrators turn the picking off with **Pick sections of papers**; the chat then gets the outline and names the sections itself.
+
+**Fixed**
+
+- A Word or HTML file in which an `&` is followed closely by Chinese, Japanese or other multi-byte text stopped Knowledge indexing on the replica that read it, and on each replica that retried it, until Chat restarted. Such files are read correctly now, and each file is read in its own task, so a file that fails unexpectedly is marked failed on its own.
+
+**Upgrading**
+
+- Migration 048 adds `decisions.pick_sections` (on).
+
 ## v0.8.0
 
 Research checks where each new experiment goes in the tree, and whether a reply's statements match its runs.

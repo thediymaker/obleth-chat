@@ -309,6 +309,11 @@ code{font-size:.9em}
 .attachment-chip>.icon{width:17px;height:17px;color:var(--muted)}
 .attachment-chip strong{display:block;font-size:var(--fs-sm);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .attachment-chip small{font-size:var(--fs-2xs);color:var(--faint);display:block;margin-top:2px}
+.attachment-chip .chip-open{display:block;max-width:100%;padding:0;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.attachment-chip .chip-open:hover strong{text-decoration:underline}
+.pasted-text{max-height:60vh;margin:0;padding:12px 14px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:var(--fs-xs);color:var(--text-2);background:var(--bg);border:1px solid var(--line-soft);border-radius:var(--radius-sm)}
+.prompt-count{margin-left:auto;font-size:var(--fs-2xs);color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.prompt-count:empty{display:none}
 .attachment-chip .icon-btn{width:24px;height:24px}
 .attachment-chip .icon-btn .icon{width:13px;height:13px}
 .upload-status{font-size:var(--fs-sm);color:var(--muted);padding:8px 0}

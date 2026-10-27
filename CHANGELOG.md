@@ -8,6 +8,10 @@ Each release's section is also its GitHub Release notes.
 
 - **Research reads papers by section.** `read_paper` takes a link to a paper, or any web page with headings, and what the chat is looking for in it. arXiv abstract and PDF links read arXiv's HTML version. The page is fetched in the workspace, once, and kept there. Chat splits it at its headings, keeping math as TeX. One pick-one decision over the outline ranks the sections, and the likeliest three come back in full, with the outline and each pick's probability. A document with more than 255 sections is narrowed by its top-level sections first. Asked for `sections` by id, number or heading, it returns those. The research rules ask the chat to take a paper's settings from the section that gives them and cite it. Administrators turn the picking off with **Pick sections of papers**; the chat then gets the outline and names the sections itself.
 
+**Changed**
+
+- **Long pastes become attachments.** Pasting more than 4,000 characters into the message box, or enough to pass its 12,000-character limit, attaches the text as a file named "Pasted text" instead of cutting it off where the box ends. Click the attachment's name to read it, or remove it. Text over what a conversation can hold (100 KiB) is refused with a message. The box shows how many characters it holds once it is near the limit.
+
 **Fixed**
 
 - A Word or HTML file in which an `&` is followed closely by Chinese, Japanese or other multi-byte text stopped Knowledge indexing on the replica that read it, and on each replica that retried it, until Chat restarted. Such files are read correctly now, and each file is read in its own task, so a file that fails unexpectedly is marked failed on its own.

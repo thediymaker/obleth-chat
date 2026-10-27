@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ApiClient, capabilities, readEvents } from '../web/client.js';
-import { markdown } from '../web/connected.js';
+import { markdown, pastesAsFile, promptCount } from '../web/connected.js';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
 const stream = chunks => new ReadableStream({ start(controller) { chunks.forEach(chunk => controller.enqueue(chunk)); controller.close(); } });
@@ -70,4 +70,15 @@ test('HTML and code fences from model content remain inert', () => {
   assert(!html.includes('<script>'));
   assert(html.includes('&lt;svg'));
   assert(html.includes('<strong>hello</strong>'));
+});
+
+test('a paste goes in as a file when it is long or would pass the box limit', () => {
+  const box = (value, start = value.length, end = start) => ({ value, selectionStart: start, selectionEnd: end });
+  assert.equal(pastesAsFile('a'.repeat(4000), box('')), false);
+  assert.equal(pastesAsFile('a'.repeat(4001), box('')), true);
+  assert.equal(pastesAsFile('a'.repeat(3000), box('b'.repeat(9500))), true);
+  // Replacing a selection frees what it covered.
+  assert.equal(pastesAsFile('a'.repeat(3000), box('b'.repeat(9500), 0, 1000)), false);
+  assert.equal(promptCount(10799), '');
+  assert.equal(promptCount(12000), `${(12000).toLocaleString()} / ${(12000).toLocaleString()}`);
 });

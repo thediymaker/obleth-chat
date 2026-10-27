@@ -10,6 +10,8 @@ pub struct Config {
     pub gateway_url: Option<Url>,
     pub admin_gateway_url: Option<String>,
     pub signing_key_file: Option<PathBuf>,
+    /// Whose token gateway calls carry: Chat's signed one, or the person's own.
+    pub gateway_auth: GatewayAuth,
     pub gateway_issuer: String,
     pub gateway_audience: String,
     pub max_streams: usize,
@@ -23,6 +25,28 @@ pub struct Config {
     pub connections: ConnectionsMode,
     /// Whether a chat may switch to Auto mode, where tools run without asking.
     pub auto_mode: bool,
+}
+/// OBLETH_CHAT_GATEWAY_AUTH: `sign` (the default) sends a token Chat signs with
+/// its gateway signing key; `forward` sends the access token the identity provider
+/// issued to the signed-in person.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GatewayAuth {
+    Sign,
+    Forward,
+}
+impl GatewayAuth {
+    pub fn from_env() -> Result<Self> {
+        match env::var("OBLETH_CHAT_GATEWAY_AUTH")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            None | Some("sign") => Ok(Self::Sign),
+            Some("forward") => Ok(Self::Forward),
+            Some(_) => bail!("OBLETH_CHAT_GATEWAY_AUTH must be sign or forward"),
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConnectionsMode {
@@ -69,8 +93,15 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
-        if gateway_url.is_some() != signing_key_file.is_some() {
-            bail!("Configure both OBLETH_CHAT_GATEWAY_URL and OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE, or neither");
+        let gateway_auth = GatewayAuth::from_env()?;
+        // Forwarding people's own tokens needs no signing key; one that is set still
+        // signs for local accounts.
+        match (gateway_url.is_some(), signing_key_file.is_some(), gateway_auth) {
+            (true, true, _) | (false, false, GatewayAuth::Sign) | (true, false, GatewayAuth::Forward) => {}
+            (false, _, GatewayAuth::Forward) => {
+                bail!("OBLETH_CHAT_GATEWAY_AUTH=forward needs OBLETH_CHAT_GATEWAY_URL")
+            }
+            _ => bail!("Configure both OBLETH_CHAT_GATEWAY_URL and OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE, or neither"),
         }
         let gateway_issuer = env::var("OBLETH_CHAT_GATEWAY_ISSUER").unwrap_or(origin);
         let issuer_url = Url::parse(&gateway_issuer).context("Invalid gateway issuer URL")?;
@@ -100,6 +131,7 @@ impl Config {
             gateway_url,
             admin_gateway_url,
             signing_key_file,
+            gateway_auth,
             gateway_issuer,
             gateway_audience,
             max_streams: number("OBLETH_CHAT_MAX_STREAMS", 128, 1, 4096)? as usize,

@@ -89,6 +89,7 @@ async fn fixture(pool: &PgPool, delay: Duration) -> (AppState, Fake, tokio::task
             bootstrap_password: None,
             oidc: None,
             login_rate_per_minute: 100,
+            ..AuthConfig::default()
         },
     )
     .await

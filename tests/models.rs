@@ -97,6 +97,7 @@ async fn fixture(pool: PgPool) -> Fixture {
             bootstrap_password: None,
             oidc: None,
             login_rate_per_minute: 1000,
+            ..AuthConfig::default()
         },
     )
     .await

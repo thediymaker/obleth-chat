@@ -349,6 +349,7 @@ async fn fixture_with(pool: PgPool, clusters: bool) -> Fixture {
             bootstrap_password: Some(PASSWORD.into()),
             oidc: None,
             login_rate_per_minute: 1000,
+            ..AuthConfig::default()
         },
     )
     .await

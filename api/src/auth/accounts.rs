@@ -124,6 +124,7 @@ async fn revoke_session(
     )
     .await?;
     tx.commit().await?;
+    auth.after_sign_out();
     let mut response = StatusCode::NO_CONTENT.into_response();
     if current {
         response.headers_mut().insert(
@@ -164,6 +165,7 @@ async fn revoke_others(
     )
     .await?;
     tx.commit().await?;
+    auth.after_sign_out();
     Ok(StatusCode::NO_CONTENT)
 }
 async fn admin_revoke_sessions(
@@ -186,6 +188,7 @@ async fn admin_revoke_sessions(
     )
     .await?;
     tx.commit().await?;
+    auth.after_sign_out();
     Ok(StatusCode::NO_CONTENT)
 }
 async fn require_user(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<(), ApiError> {
@@ -599,6 +602,7 @@ async fn invite(
     Json(input): Json<InviteInput>,
 ) -> Result<Response, ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
+    auth.require_passwords()?;
     let username = normalize_username(&input.username)?;
     let name = validate_display_name(input.display_name.as_deref().unwrap_or(&username))?;
     let role = Role::requested(input.role.as_deref())?.unwrap_or(Role::User);
@@ -634,6 +638,7 @@ async fn access_link(
     Json(input): Json<AccessInput>,
 ) -> Result<Response, ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
+    auth.require_passwords()?;
     if !["invite", "reset"].contains(&input.kind.as_str()) {
         return Err(ApiError::bad("Link kind must be invite or reset"));
     }
@@ -678,6 +683,7 @@ async fn activate(
     Json(input): Json<ActivateInput>,
 ) -> Result<Response, ApiError> {
     auth.check_origin(&headers)?;
+    auth.require_passwords()?;
     if input.token.len() != 43
         || !input
             .token
@@ -747,5 +753,6 @@ async fn activate(
     )
     .await?;
     tx.commit().await?;
+    auth.after_sign_out();
     Ok(auth.session_response(user, &token, lifetime, false))
 }

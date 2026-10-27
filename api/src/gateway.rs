@@ -1,4 +1,7 @@
-use crate::{auth::Identity, error::ApiError};
+use crate::{
+    auth::{grants::Grants, Identity},
+    error::ApiError,
+};
 use anyhow::{bail, Context, Result};
 use axum::http::StatusCode;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -23,7 +26,11 @@ use uuid::Uuid;
 pub struct Gateway {
     client: Client,
     base: Url,
-    signer: Arc<Signer>,
+    /// Signs Chat's own token. Optional when people's provider tokens are forwarded;
+    /// it then serves only local accounts.
+    signer: Option<Arc<Signer>>,
+    /// People's provider tokens (OBLETH_CHAT_GATEWAY_AUTH=forward).
+    grants: Option<Grants>,
 }
 
 /// For Auto, a thinking effort other than the default tells the gateway's router how
@@ -98,6 +105,19 @@ impl Gateway {
         let kid = URL_SAFE_NO_PAD.encode(Sha256::digest(format!("{n}.{e}").as_bytes()));
         let jwks = json!({"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":kid,"n":n,"e":e}]});
         let key = EncodingKey::from_rsa_pem(pem).context("Invalid RSA signing key")?;
+        let mut gateway = Self::forwarding(base)?;
+        gateway.signer = Some(Arc::new(Signer {
+            key,
+            kid,
+            issuer,
+            audience,
+            jwks,
+        }));
+        Ok(gateway)
+    }
+    /// A gateway without Chat's signing key, for forwarding people's own tokens;
+    /// add them with `forward_tokens`.
+    pub fn forwarding(base: Url) -> Result<Self> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
@@ -105,14 +125,15 @@ impl Gateway {
         Ok(Self {
             client,
             base,
-            signer: Arc::new(Signer {
-                key,
-                kid,
-                issuer,
-                audience,
-                jwks,
-            }),
+            signer: None,
+            grants: None,
         })
+    }
+    /// Sends each person who signed in with the identity provider to the gateway
+    /// with their own provider access token.
+    pub fn forward_tokens(mut self, grants: Grants) -> Self {
+        self.grants = Some(grants);
+        self
     }
     pub async fn from_file(
         base: Url,
@@ -129,21 +150,55 @@ impl Gateway {
             audience,
         )
     }
+    /// Chat's public signing keys; empty without a signing key.
     pub fn jwks(&self) -> Value {
-        self.signer.jwks.clone()
+        match &self.signer {
+            Some(signer) => signer.jwks.clone(),
+            None => json!({"keys":[]}),
+        }
     }
-    fn token(&self, user: &Identity) -> Result<String, ApiError> {
+    pub fn signs(&self) -> bool {
+        self.signer.is_some()
+    }
+    /// The Authorization header for a call made for `user`. Someone who signs in
+    /// with the identity provider gets their own provider token whenever tokens are
+    /// forwarded, never Chat's; everyone else gets Chat's signed token.
+    pub(crate) async fn authorization(
+        &self,
+        user: &Identity,
+    ) -> Result<reqwest::header::HeaderValue, ApiError> {
+        if let Some(grants) = &self.grants {
+            if let Some(token) = grants.access_token(user.id).await? {
+                return token.authorization();
+            }
+        }
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            ApiError(
+                StatusCode::FORBIDDEN,
+                "This account can't use the models here. Sign in with single sign-on instead."
+                    .into(),
+            )
+        })?;
+        let mut value = reqwest::header::HeaderValue::from_str(&format!(
+            "Bearer {}",
+            self.token(signer, user)?
+        ))
+        .map_err(|_| ApiError::internal())?;
+        value.set_sensitive(true);
+        Ok(value)
+    }
+    fn token(&self, signer: &Signer, user: &Identity) -> Result<String, ApiError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| ApiError::internal())?
             .as_secs();
         let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(self.signer.kid.clone());
+        header.kid = Some(signer.kid.clone());
         jsonwebtoken::encode(
             &header,
             &Claims {
-                iss: &self.signer.issuer,
-                aud: &self.signer.audience,
+                iss: &signer.issuer,
+                aud: &signer.audience,
                 sub: user.id.to_string(),
                 username: &user.username,
                 iat: now,
@@ -151,7 +206,7 @@ impl Gateway {
                 exp: now + 300,
                 jti: Uuid::new_v4().to_string(),
             },
-            &self.signer.key,
+            &signer.key,
         )
         .map_err(|_| ApiError::internal())
     }
@@ -159,7 +214,10 @@ impl Gateway {
         let response = self
             .client
             .get(self.base.join("v1/models").unwrap())
-            .bearer_auth(self.token(user)?)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(user).await?,
+            )
             .timeout(Duration::from_secs(15))
             .send()
             .await
@@ -205,7 +263,10 @@ impl Gateway {
         let response = self
             .client
             .post(self.base.join("v1/embeddings").unwrap())
-            .bearer_auth(self.token(user)?)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(user).await?,
+            )
             .timeout(std::time::Duration::from_secs(120))
             .json(&json!({"model":model,"input":input,"encoding_format":"float"}))
             .send()
@@ -248,7 +309,10 @@ impl Gateway {
         let response = self
             .client
             .post(self.base.join("v1/chat/completions").unwrap())
-            .bearer_auth(self.token(user)?)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(user).await?,
+            )
             .header("x-obleth-session-id", conversation.to_string())
             .headers(effort_header(&body))
             .json(&body)
@@ -281,7 +345,10 @@ impl Gateway {
         let response = self
             .client
             .get(self.base.join(path).unwrap())
-            .bearer_auth(self.token(user)?)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(user).await?,
+            )
             .timeout(Duration::from_secs(15))
             .send()
             .await

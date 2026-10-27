@@ -1,10 +1,16 @@
 use super::*;
 use axum::{extract::Query, response::Redirect};
 use openidconnect::{
-    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
-    AccessTokenHash, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
-    EndpointNotSet, EndpointSet, IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    core::{
+        CoreAuthDisplay, CoreAuthenticationFlow, CoreClaimName, CoreClaimType, CoreClient,
+        CoreClientAuthMethod, CoreErrorResponseType, CoreGrantType, CoreJsonWebKey,
+        CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm, CoreJwsSigningAlgorithm,
+        CoreResponseMode, CoreResponseType, CoreSubjectIdentifierType,
+    },
+    AccessToken, AccessTokenHash, AdditionalProviderMetadata, AuthorizationCode, ClientId,
+    ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet, EndpointSet, IssuerUrl, Nonce,
+    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, ProviderMetadata, RedirectUrl,
+    RefreshToken, RequestTokenError, RevocationUrl, Scope, TokenResponse,
 };
 use tokio::sync::Mutex;
 
@@ -17,11 +23,58 @@ type DiscoveredClient = CoreClient<
     EndpointMaybeSet,
 >;
 
+/// Discovery fields beyond the core set: the RFC 7009 revocation endpoint.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RevocationMetadata {
+    revocation_endpoint: Option<String>,
+}
+impl AdditionalProviderMetadata for RevocationMetadata {}
+
+type Metadata = ProviderMetadata<
+    RevocationMetadata,
+    CoreAuthDisplay,
+    CoreClientAuthMethod,
+    CoreClaimName,
+    CoreClaimType,
+    CoreGrantType,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJweKeyManagementAlgorithm,
+    CoreJsonWebKey,
+    CoreResponseMode,
+    CoreResponseType,
+    CoreSubjectIdentifierType,
+>;
+
+/// What discovery found: the client, the ID token algorithms Chat accepts from this
+/// provider, and where it revokes tokens, if it says.
+#[derive(Clone)]
+struct Discovered {
+    client: DiscoveredClient,
+    algorithms: Vec<CoreJwsSigningAlgorithm>,
+    revocation: Option<RevocationUrl>,
+}
+
 pub(super) struct Oidc {
     config: OidcConfig,
     origin: String,
     http: reqwest::Client,
-    cache: Mutex<(std::time::Instant, DiscoveredClient)>,
+    cache: Mutex<(std::time::Instant, Discovered)>,
+}
+
+/// Why a refresh did not produce a token.
+pub(super) enum RefreshFailure {
+    /// The provider refused the grant or Chat's client: the sign-in is over.
+    Rejected,
+    /// The provider could not be reached or failed; the grant may still be good.
+    Unavailable,
+}
+
+/// A refreshed access token, and the refresh token to use next when the provider
+/// rotated it.
+pub(super) struct Refreshed {
+    pub access: AccessToken,
+    pub refresh: Option<RefreshToken>,
+    pub expires_in: Option<Duration>,
 }
 
 impl Oidc {
@@ -31,16 +84,16 @@ impl Oidc {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .build()?;
-        let client = discover(config, origin, &http).await?;
+        let discovered = discover(config, origin, &http).await?;
         Ok(Self {
             config: config.clone(),
             origin: origin.into(),
             http,
-            cache: Mutex::new((std::time::Instant::now(), client)),
+            cache: Mutex::new((std::time::Instant::now(), discovered)),
         })
     }
 
-    async fn client(&self) -> Result<DiscoveredClient, ApiError> {
+    async fn discovered(&self) -> Result<Discovered, ApiError> {
         let mut cache = self.cache.lock().await;
         // Refresh discovery/JWKS regularly so provider key rotation does not require
         // a deployment. A failed refresh fails closed without exposing its response.
@@ -58,17 +111,97 @@ impl Oidc {
         }
         Ok(cache.1.clone())
     }
+
+    /// Trades a refresh token for a new access token.
+    pub(super) async fn refresh(&self, token: &str) -> Result<Refreshed, RefreshFailure> {
+        let discovered = self
+            .discovered()
+            .await
+            .map_err(|_| RefreshFailure::Unavailable)?;
+        let response = discovered
+            .client
+            .exchange_refresh_token(&RefreshToken::new(token.into()))
+            .map_err(|_| RefreshFailure::Unavailable)?
+            .request_async(&self.http)
+            .await;
+        match response {
+            Ok(tokens) => Ok(Refreshed {
+                access: tokens.access_token().clone(),
+                refresh: tokens.refresh_token().cloned(),
+                expires_in: tokens.expires_in(),
+            }),
+            Err(RequestTokenError::ServerResponse(error))
+                if matches!(
+                    error.error(),
+                    CoreErrorResponseType::InvalidGrant | CoreErrorResponseType::InvalidClient
+                ) =>
+            {
+                Err(RefreshFailure::Rejected)
+            }
+            Err(_) => Err(RefreshFailure::Unavailable),
+        }
+    }
+
+    /// Revokes a refresh token at the provider's revocation endpoint (RFC 7009).
+    /// Returns false when the provider could not take it now; a provider without a
+    /// revocation endpoint has nothing to do.
+    pub(super) async fn revoke(&self, token: &str) -> bool {
+        let Ok(discovered) = self.discovered().await else {
+            return false;
+        };
+        let Some(url) = discovered.revocation else {
+            return true;
+        };
+        // client_secret_basic, with the id and secret form-encoded first (RFC 6749
+        // 2.3.1), as the token endpoint gets them.
+        let encode = |value: &str| {
+            url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+        };
+        let response = self
+            .http
+            .post(url.url().clone())
+            .basic_auth(
+                encode(&self.config.client_id),
+                Some(encode(&self.config.client_secret)),
+            )
+            .form(&[("token", token), ("token_type_hint", "refresh_token")])
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        // An unknown or already revoked token is a success too (RFC 7009 2.2).
+        matches!(response, Ok(response) if response.status().is_success())
+    }
+}
+
+/// ID token algorithms Chat accepts: the asymmetric ones, never a MAC keyed with the
+/// client secret and never `none`.
+fn asymmetric(algorithm: &CoreJwsSigningAlgorithm) -> bool {
+    use CoreJwsSigningAlgorithm as A;
+    matches!(
+        algorithm,
+        A::RsaSsaPkcs1V15Sha256
+            | A::RsaSsaPkcs1V15Sha384
+            | A::RsaSsaPkcs1V15Sha512
+            | A::RsaSsaPssSha256
+            | A::RsaSsaPssSha384
+            | A::RsaSsaPssSha512
+            | A::EcdsaP256Sha256
+            | A::EcdsaP384Sha384
+            | A::EcdsaP521Sha512
+            | A::EdDsa
+    )
 }
 
 async fn discover(
     config: &OidcConfig,
     origin: &str,
     http: &reqwest::Client,
-) -> anyhow::Result<DiscoveredClient> {
-    let metadata =
-        CoreProviderMetadata::discover_async(IssuerUrl::new(config.issuer.clone())?, http)
-            .await
-            .map_err(|_| anyhow::anyhow!("OIDC discovery failed for the configured issuer"))?;
+) -> anyhow::Result<Discovered> {
+    // Keys come only from the discovered jwks_uri; header jku or x5u are never used.
+    // The JWKS may live on another host than the issuer.
+    let metadata = Metadata::discover_async(IssuerUrl::new(config.issuer.clone())?, http)
+        .await
+        .map_err(|_| anyhow::anyhow!("OIDC discovery failed for the configured issuer"))?;
     validate_transport(metadata.authorization_endpoint().url())?;
     validate_transport(metadata.jwks_uri().url())?;
     validate_transport(
@@ -77,14 +210,37 @@ async fn discover(
             .context("OIDC issuer does not provide a token endpoint")?
             .url(),
     )?;
-    Ok(CoreClient::from_provider_metadata(
+    let algorithms: Vec<_> = metadata
+        .id_token_signing_alg_values_supported()
+        .iter()
+        .filter(|algorithm| asymmetric(algorithm))
+        .cloned()
+        .collect();
+    if algorithms.is_empty() {
+        bail!("The OIDC issuer offers no asymmetric ID token signing algorithm");
+    }
+    let revocation = match &metadata.additional_metadata().revocation_endpoint {
+        Some(endpoint) => {
+            let url = RevocationUrl::new(endpoint.clone())
+                .context("The OIDC revocation endpoint must be a URL")?;
+            validate_transport(url.url())?;
+            Some(url)
+        }
+        None => None,
+    };
+    let client = CoreClient::from_provider_metadata(
         metadata,
         ClientId::new(config.client_id.clone()),
         Some(ClientSecret::new(config.client_secret.clone())),
     )
     .set_redirect_uri(RedirectUrl::new(format!(
         "{origin}/api/auth/oidc/callback"
-    ))?))
+    ))?);
+    Ok(Discovered {
+        client,
+        algorithms,
+        revocation,
+    })
 }
 
 pub(super) async fn login(State(auth): State<Auth>, caller: Client) -> Result<Response, ApiError> {
@@ -92,15 +248,23 @@ pub(super) async fn login(State(auth): State<Auth>, caller: Client) -> Result<Re
     // A separate bucket keeps redirects from consuming the password-login budget.
     auth.throttle("oidc", &caller, None).await?;
     let browser = random_token();
-    let client = provider.client().await?;
+    let client = provider.discovered().await?.client;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    // The library adds openid itself.
     let (url, state, nonce) = client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
             Nonce::new_random,
         )
-        .add_scope(Scope::new("profile".into()))
+        .add_scopes(
+            provider
+                .config
+                .scopes
+                .iter()
+                .filter(|scope| *scope != "openid")
+                .map(|scope| Scope::new(scope.clone())),
+        )
         .set_pkce_challenge(challenge)
         .url();
     sqlx::query("DELETE FROM oidc_transactions WHERE expires_at <= NOW()")
@@ -161,7 +325,8 @@ pub(super) async fn callback(
         .code
         .filter(|s| !s.is_empty() && s.len() <= 8192)
         .ok_or_else(ApiError::forbidden)?;
-    let client = provider.client().await?;
+    let discovered = provider.discovered().await?;
+    let client = discovered.client;
     let tokens = client
         .exchange_code(AuthorizationCode::new(code))
         .map_err(|_| ApiError::internal())?
@@ -176,7 +341,11 @@ pub(super) async fn callback(
             )
         })?;
     let id_token = tokens.id_token().ok_or_else(ApiError::unauthorized)?;
-    let verifier = client.id_token_verifier();
+    // Only the asymmetric algorithms the provider advertises; the library would
+    // otherwise also accept an HMAC keyed with the client secret.
+    let verifier = client
+        .id_token_verifier()
+        .set_allowed_algs(discovered.algorithms);
     let nonce = Nonce::new(transaction.nonce);
     // openidconnect validates signature, issuer, audience, expiry, and nonce.
     let claims = id_token.claims(&verifier, &nonce).map_err(|_| {
@@ -214,9 +383,25 @@ pub(super) async fn callback(
     if subject.is_empty() || subject.len() > 255 {
         return Err(ApiError::unauthorized());
     }
-    let lifetime = (claims.expiration() - Utc::now())
-        .num_seconds()
-        .min(auth.config.session_hours as i64 * 3600);
+    // Forwarding the provider's tokens needs a refresh token to keep them current.
+    let refresh = match (&auth.grants, tokens.refresh_token()) {
+        (Some(_), None) => {
+            tracing::warn!("the identity provider issued no refresh token; check offline_access");
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "The identity provider did not allow Chat to stay signed in".into(),
+            ));
+        }
+        (_, refresh) => refresh,
+    };
+    // A session is capped at the ID token's expiry, except while the provider's
+    // grant is kept: then the provider ends the sign-in when it ends the grant.
+    let lifetime = match auth.grants {
+        Some(_) => auth.config.session_hours as i64 * 3600,
+        None => (claims.expiration() - Utc::now())
+            .num_seconds()
+            .min(auth.config.session_hours as i64 * 3600),
+    };
     if lifetime <= 0 {
         return Err(ApiError::unauthorized());
     }
@@ -273,9 +458,24 @@ pub(super) async fn callback(
             .await?;
     }
     let token = random_token();
-    auth.insert_session(&mut tx, identity.id, &token, lifetime, &headers)
+    let session = auth
+        .insert_session(&mut tx, identity.id, &token, lifetime, &headers)
         .await?;
+    if let (Some(grants), Some(refresh)) = (&auth.grants, refresh) {
+        grants
+            .store(
+                &mut tx,
+                identity.id,
+                session,
+                subject,
+                tokens.access_token(),
+                refresh,
+                tokens.expires_in(),
+            )
+            .await?;
+    }
     tx.commit().await?;
+    auth.after_sign_out();
     let mut response = Redirect::to("/").into_response();
     response.headers_mut().append(
         header::SET_COOKIE,

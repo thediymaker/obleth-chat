@@ -151,6 +151,28 @@ npm run start:api
 # http://localhost:8085, sign in as admin
 ```
 
+## Forwarding provider tokens
+
+By default Chat signs its own short-lived token for each gateway call, and the gateway trusts Chat's issuer. With an OIDC provider that issues access tokens your gateway already accepts, Chat can instead send each person's own token, so the gateway sees the person rather than Chat and Chat holds no key that can act as anyone:
+
+```bash
+OBLETH_CHAT_OIDC_ISSUER=https://id.example.edu
+OBLETH_CHAT_OIDC_CLIENT_ID=obleth-chat
+OBLETH_CHAT_OIDC_CLIENT_SECRET=…
+OBLETH_CHAT_OIDC_SCOPES="openid profile email offline_access"
+OBLETH_CHAT_GATEWAY_AUTH=forward
+OBLETH_CHAT_SECRET_KEY_FILE=/run/secrets/obleth-chat/secret_key   # openssl rand -hex 32
+OBLETH_CHAT_SESSION_HOURS=2160
+```
+
+- The gateway must trust the provider: its issuer, its JWKS and the audience of its access tokens. Chat passes the token through unchanged.
+- Chat keeps each sign-in's access and refresh tokens encrypted with the secret key, refreshes the access token shortly before it expires (one replica at a time), and sends it only in the gateway's `Authorization` header. MCP servers, workspaces, previews and the browser never see it.
+- The provider decides how long a sign-in lasts. When it refuses a refresh, Chat ends that sign-in and the API tokens made in it. Signing out, revoking a session, disabling an account or a session expiring revokes the refresh token at the provider's `revocation_endpoint` when discovery lists one. Sessions are not capped by the ID token's expiry, so installs usually set long sessions such as 2160 hours.
+- Auto mode, research, Knowledge indexing and API-token chats use the person's most recently refreshed sign-in. With none left they stop with "Sign in again to continue".
+- People who sign in with a password use Chat's signed token if `OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE` is still set; without it they cannot reach the models. Someone linked to the provider never gets Chat's token.
+- To go provider-only, link existing administrators with **Link single sign-on**, then set `OBLETH_CHAT_PASSWORD_SIGN_IN=false` and remove the bootstrap password. Chat then offers only the provider's button.
+- Set the secret key before removing the signing key: saved connection tokens move to the secret key when Chat starts, and stay readable with either key until they have.
+
 ## Branding and appearance
 
 Edit [web/site.config.js](web/site.config.js) and reload the page. This public, commented configuration controls the site name and subtitle, assistant name, browser title and description, logo and favicon, greeting and assistant icons, the sign-in and home page text, and the sign-in footer links. You can also view the deployed file at `/site.config.js`. No build is needed when editing the served file; never put secrets in it.

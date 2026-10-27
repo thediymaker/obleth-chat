@@ -17,6 +17,7 @@ fn config() -> AuthConfig {
         bootstrap_password: Some(PASSWORD.into()),
         oidc: None,
         login_rate_per_minute: 300,
+        ..AuthConfig::default()
     }
 }
 
@@ -240,7 +241,10 @@ async fn local_auth_origin_csrf_and_account_isolation() {
     let auth = Auth::new(db.pool.clone(), config()).await.unwrap();
     let app = auth.router();
     let (_, _, body) = call(&app, "GET", "/api/session", None, None, None, Value::Null).await;
-    assert_eq!(body, json!({"authenticated": false, "oidcEnabled": false}));
+    assert_eq!(
+        body,
+        json!({"authenticated": false, "oidcEnabled": false, "passwordSignIn": true})
+    );
     for origin in [None, Some("https://attacker.example"), Some("null")] {
         let (status, _, _) = call(
             &app,
@@ -684,6 +688,17 @@ struct FakeIssuer {
     key: Arc<jsonwebtoken::EncodingKey>,
     jwks: Value,
     codes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, OidcCode>>>,
+    /// Refresh tokens the provider would still accept; each works once.
+    live: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Access and refresh tokens in the order they were issued.
+    access: Arc<tokio::sync::Mutex<Vec<String>>>,
+    refresh: Arc<tokio::sync::Mutex<Vec<String>>>,
+    /// Refresh tokens presented to the token endpoint, and to the revocation endpoint.
+    presented: Arc<tokio::sync::Mutex<Vec<String>>>,
+    revoked: Arc<tokio::sync::Mutex<Vec<String>>>,
+    /// How refresh requests go: ok, invalid_grant or unavailable.
+    refresh_mode: Arc<tokio::sync::Mutex<&'static str>>,
+    refresh_delay: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl FakeIssuer {
@@ -702,13 +717,22 @@ impl FakeIssuer {
             key: Arc::new(jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap()),
             jwks: json!({"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"test-key","n":URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),"e":URL_SAFE_NO_PAD.encode(public.e().to_bytes_be())}]}),
             codes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            live: Default::default(),
+            access: Default::default(),
+            refresh: Default::default(),
+            presented: Default::default(),
+            revoked: Default::default(),
+            refresh_mode: Arc::new(tokio::sync::Mutex::new("ok")),
+            refresh_delay: Default::default(),
         };
         let app = Router::new()
             .route("/.well-known/openid-configuration", get(|State(s): State<FakeIssuer>| async move {
-                Json(json!({"issuer":s.origin,"authorization_endpoint":format!("{}/authorize",s.origin),"token_endpoint":format!("{}/token",s.origin),"jwks_uri":format!("{}/jwks",s.origin),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"],"token_endpoint_auth_methods_supported":["client_secret_basic"],"code_challenge_methods_supported":["S256"]}))
+                // A careless provider may advertise MAC and unsigned ID tokens too.
+                Json(json!({"issuer":s.origin,"authorization_endpoint":format!("{}/authorize",s.origin),"token_endpoint":format!("{}/token",s.origin),"jwks_uri":format!("{}/jwks",s.origin),"revocation_endpoint":format!("{}/revoke",s.origin),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","HS256","none"],"token_endpoint_auth_methods_supported":["client_secret_basic"],"code_challenge_methods_supported":["S256"]}))
             }))
             .route("/jwks", get(|State(s): State<FakeIssuer>| async move { Json(s.jwks) }))
             .route("/token", post(fake_token))
+            .route("/revoke", post(fake_revoke))
             .with_state(state.clone());
         let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (state, handle)
@@ -761,6 +785,9 @@ async fn fake_token(
     axum::Form(form): axum::Form<std::collections::HashMap<String, String>>,
 ) -> Response {
     assert_eq!(headers[header::AUTHORIZATION], "Basic Y2hhdDpzZWNyZXQ=");
+    if form["grant_type"] == "refresh_token" {
+        return fake_refresh(state, &form["refresh_token"]).await;
+    }
     assert_eq!(form["grant_type"], "authorization_code");
     let code = form.get("code").unwrap();
     let Some((nonce, challenge, mode, subject)) = state.codes.lock().await.remove(code) else {
@@ -800,7 +827,72 @@ async fn fake_token(
         let prefix = token.rsplit_once('.').unwrap().0;
         token = format!("{prefix}.{}", URL_SAFE_NO_PAD.encode([0u8; 256]));
     }
-    Json(json!({"access_token":"unused-test-access-token","token_type":"Bearer","expires_in":600,"id_token":token})).into_response()
+    // Signed with the client secret, which the client also knows.
+    if mode == "hs256" {
+        token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+        )
+        .unwrap();
+    }
+    if mode == "none" {
+        token = format!(
+            "{}.{}.",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#),
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+    }
+    let mut body = state.issue().await;
+    body["id_token"] = json!(token);
+    Json(body).into_response()
+}
+
+impl FakeIssuer {
+    /// A new access token and single-use refresh token.
+    async fn issue(&self) -> Value {
+        let (access, refresh) = (
+            format!("at-{}", random_token()),
+            format!("rt-{}", random_token()),
+        );
+        self.access.lock().await.push(access.clone());
+        self.refresh.lock().await.push(refresh.clone());
+        self.live.lock().await.insert(refresh.clone());
+        json!({"access_token":access,"token_type":"Bearer","expires_in":600,"refresh_token":refresh})
+    }
+}
+
+/// Rotates refresh tokens and refuses one presented twice, as providers that detect
+/// theft do.
+async fn fake_refresh(state: FakeIssuer, token: &str) -> Response {
+    state.presented.lock().await.push(token.to_owned());
+    let delay = state
+        .refresh_delay
+        .load(std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(delay)).await;
+    let mode = *state.refresh_mode.lock().await;
+    if mode == "unavailable" {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    if mode == "invalid_grant" || !state.live.lock().await.remove(token) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid_grant"})),
+        )
+            .into_response();
+    }
+    Json(state.issue().await).into_response()
+}
+
+async fn fake_revoke(
+    State(state): State<FakeIssuer>,
+    headers: HeaderMap,
+    axum::Form(form): axum::Form<std::collections::HashMap<String, String>>,
+) -> StatusCode {
+    assert_eq!(headers[header::AUTHORIZATION], "Basic Y2hhdDpzZWNyZXQ=");
+    state.live.lock().await.remove(&form["token"]);
+    state.revoked.lock().await.push(form["token"].clone());
+    StatusCode::OK
 }
 
 #[tokio::test]
@@ -815,6 +907,7 @@ async fn oidc_validates_tokens_pkce_state_replay_and_explicit_provisioning() {
         client_id: "chat".into(),
         client_secret: "secret".into(),
         allow_signup: true,
+        scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
     });
     let auth = Auth::new(db.pool.clone(), cfg.clone()).await.unwrap();
     let app = auth.router();
@@ -878,6 +971,8 @@ async fn oidc_validates_tokens_pkce_state_replay_and_explicit_provisioning() {
         "multiple-audiences",
         "access-hash",
         "signature",
+        "hs256",
+        "none",
     ] {
         let (browser, path) = issuer.flow(&app, mode, "student-subject").await;
         let (status, _, _) =
@@ -1894,6 +1989,7 @@ async fn oidc_group_mapping_changes_only_managed_memberships_and_never_roles() {
         client_id: "chat".into(),
         client_secret: "secret".into(),
         allow_signup: true,
+        scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
     });
     let mut auth = Auth::new(db.pool.clone(), cfg).await.unwrap();
     auth.group_policy = Arc::new(
@@ -2412,6 +2508,7 @@ async fn access_links_cannot_add_passwords_after_oidc_linking_and_replace_the_br
         client_id: "chat".into(),
         client_secret: "secret".into(),
         allow_signup: false,
+        scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
     });
     let auth = Auth::new(db.pool.clone(), cfg).await.unwrap();
     let app = auth.router();
@@ -2528,6 +2625,701 @@ async fn access_links_cannot_add_passwords_after_oidc_linking_and_replace_the_br
         "activation revokes the session the browser presented"
     );
     assert_eq!(sessions(ac).await, StatusCode::OK);
+    task.abort();
+    db.close().await;
+}
+
+fn forward_config(issuer: &FakeIssuer) -> AuthConfig {
+    let mut cfg = config();
+    cfg.oidc = Some(OidcConfig {
+        issuer: issuer.origin.clone(),
+        client_id: "chat".into(),
+        client_secret: "secret".into(),
+        allow_signup: true,
+        scopes: parse_scopes("openid profile offline_access").unwrap(),
+    });
+    cfg.forward_tokens = true;
+    cfg.secret_key = Some(SecretKey::from_bytes([9u8; 32]));
+    cfg
+}
+
+/// Signs in through the provider and returns the session cookie, its CSRF token and
+/// the person.
+async fn oidc_session(
+    app: &Router,
+    issuer: &FakeIssuer,
+    subject: &str,
+) -> (String, String, Identity) {
+    let (browser, path) = issuer.flow(app, "valid", subject).await;
+    let (status, headers, _) =
+        call(app, "GET", &path, None, Some(&browser), None, Value::Null).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&headers);
+    let (_, _, session) = call(
+        app,
+        "GET",
+        "/api/session",
+        None,
+        Some(&cookie),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(session["authenticated"], true, "{session}");
+    let csrf = session["csrfToken"].as_str().unwrap().to_owned();
+    (
+        cookie,
+        csrf,
+        serde_json::from_value(session["user"].clone()).unwrap(),
+    )
+}
+
+/// A gateway that lists one model, fails chats, and records each Authorization.
+async fn fake_gateway() -> (
+    Url,
+    Arc<tokio::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let seen: Arc<tokio::sync::Mutex<Vec<String>>> = Arc::default();
+    let record = |seen: Arc<tokio::sync::Mutex<Vec<String>>>, headers: HeaderMap| async move {
+        let value = headers[header::AUTHORIZATION].to_str().unwrap().to_owned();
+        seen.lock().await.push(value);
+    };
+    let app = Router::new()
+        .route(
+            "/v1/models",
+            get(
+                move |State(seen): State<Arc<tokio::sync::Mutex<Vec<String>>>>,
+                      headers: HeaderMap| async move {
+                    record(seen, headers).await;
+                    Json(json!({"data":[{"id":"fixture-model"}]}))
+                },
+            ),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |State(seen): State<Arc<tokio::sync::Mutex<Vec<String>>>>,
+                      headers: HeaderMap| async move {
+                    record(seen, headers).await;
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+            ),
+        )
+        .with_state(seen.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, seen, task)
+}
+
+async fn signing_key() -> String {
+    use rsa::pkcs8::EncodePrivateKey;
+    tokio::task::spawn_blocking(|| {
+        rsa::RsaPrivateKey::new(&mut OsRng, 2048)
+            .unwrap()
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap()
+            .to_string()
+    })
+    .await
+    .unwrap()
+}
+
+async fn expire_soon(pool: &PgPool, filter: &str) {
+    sqlx::query(&format!(
+        "UPDATE oidc_grants SET access_expires_at = NOW() + INTERVAL '30 seconds' {filter}"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[test]
+fn forwarding_and_passwords_off_need_their_settings() {
+    let oidc = || OidcConfig {
+        issuer: "https://id.example.com".into(),
+        client_id: "chat".into(),
+        client_secret: "secret".into(),
+        allow_signup: false,
+        scopes: parse_scopes("profile offline_access").unwrap(),
+    };
+    assert_eq!(oidc().scopes, ["openid", "profile", "offline_access"]);
+    assert!(parse_scopes("openid \"quoted\"").is_err());
+    let mut forward = config();
+    forward.forward_tokens = true;
+    forward.oidc = Some(oidc());
+    assert!(forward.clone().validated().is_err(), "needs a secret key");
+    forward.secret_key = Some(SecretKey::from_bytes([1u8; 32]));
+    forward.session_hours = 2160;
+    assert!(forward.clone().validated().is_ok());
+    forward.oidc.as_mut().unwrap().scopes = parse_scopes("profile").unwrap();
+    assert!(forward.clone().validated().is_err(), "needs offline_access");
+    forward.oidc = None;
+    assert!(forward.validated().is_err(), "needs OIDC");
+    let mut long = config();
+    long.session_hours = 2160;
+    assert!(
+        long.validated().is_err(),
+        "long sessions only with forwarded tokens"
+    );
+
+    let mut closed = config();
+    closed.password_sign_in = false;
+    assert!(closed.clone().validated().is_err(), "needs OIDC");
+    closed.oidc = Some(oidc());
+    assert!(
+        closed.clone().validated().is_err(),
+        "a bootstrap password is refused, not ignored"
+    );
+    closed.bootstrap_username = None;
+    closed.bootstrap_password = None;
+    assert!(closed.validated().is_ok());
+}
+
+#[tokio::test]
+async fn forwarded_provider_tokens_reach_the_gateway_and_rotate_before_expiry() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let auth = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let app = auth.router();
+    let (_, _, user) = oidc_session(&app, &issuer, "student").await;
+    // The grant decides how long the sign-in lasts, not the ID token's 10 minutes.
+    let lifetime: f64 = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM (expires_at-created_at))::FLOAT8 FROM auth_sessions WHERE user_id=$1",
+    )
+    .bind(user.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(lifetime > 11.0 * 3600.0, "{lifetime}");
+    let access = issuer.access.lock().await.clone();
+    let refresh = issuer.refresh.lock().await.clone();
+    let (sealed_access, sealed_refresh): (Vec<u8>, Vec<u8>) =
+        sqlx::query_as("SELECT access_token, refresh_token FROM oidc_grants WHERE user_id=$1")
+            .bind(user.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(!String::from_utf8_lossy(&sealed_access).contains(&access[0]));
+    assert!(!String::from_utf8_lossy(&sealed_refresh).contains(&refresh[0]));
+
+    let (base, seen, gateway_task) = fake_gateway().await;
+    let pem = signing_key().await;
+    let gateway =
+        crate::gateway::Gateway::new(base.clone(), pem.as_bytes(), ORIGIN.into(), "obleth".into())
+            .unwrap()
+            .forward_tokens(auth.grants().unwrap());
+    let last = || async { seen.lock().await.last().cloned().unwrap() };
+    gateway.models(&user).await.unwrap();
+    assert_eq!(last().await, format!("Bearer {}", access[0]));
+
+    // A local account still gets Chat's signed token.
+    let (_, _, admin) = sign_in(&app, "admin", PASSWORD).await;
+    let admin: Identity = serde_json::from_value(admin).unwrap();
+    gateway.models(&admin).await.unwrap();
+    let signed = last().await;
+    assert!(signed.starts_with("Bearer ey") && !access.iter().any(|a| signed.ends_with(a)));
+
+    // Near expiry the token is refreshed first, and the refresh token rotates.
+    expire_soon(&db.pool, "").await;
+    gateway.models(&user).await.unwrap();
+    expire_soon(&db.pool, "").await;
+    gateway.models(&user).await.unwrap();
+    gateway.models(&user).await.unwrap();
+    let access = issuer.access.lock().await.clone();
+    let refresh = issuer.refresh.lock().await.clone();
+    assert_eq!(
+        *issuer.presented.lock().await,
+        [refresh[0].clone(), refresh[1].clone()]
+    );
+    assert_eq!(last().await, format!("Bearer {}", access[2]));
+
+    // Without a signing key, local accounts can't reach the models at all.
+    let forwarding = crate::gateway::Gateway::forwarding(base)
+        .unwrap()
+        .forward_tokens(auth.grants().unwrap());
+    assert_eq!(
+        forwarding.models(&admin).await.unwrap_err().0,
+        StatusCode::FORBIDDEN
+    );
+    forwarding.models(&user).await.unwrap();
+    assert_eq!(last().await, format!("Bearer {}", access[2]));
+
+    // Someone with an identity never falls back to Chat's token.
+    let calls = seen.lock().await.len();
+    sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1")
+        .bind(user.id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let error = gateway.models(&user).await.unwrap_err();
+    assert_eq!(
+        (error.0, error.1.as_str()),
+        (StatusCode::UNAUTHORIZED, grants::SIGN_IN_AGAIN)
+    );
+    assert_eq!(seen.lock().await.len(), calls);
+    gateway_task.abort();
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn two_replicas_present_a_refresh_token_only_once() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let first = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let second = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let (_, _, user) = oidc_session(&first.router(), &issuer, "student").await;
+    expire_soon(&db.pool, "").await;
+    // Both start before either finishes.
+    issuer
+        .refresh_delay
+        .store(300, std::sync::atomic::Ordering::SeqCst);
+    let (one, two) = (first.grants().unwrap(), second.grants().unwrap());
+    let (a, b) = tokio::join!(one.access_token(user.id), two.access_token(user.id));
+    let header = |token: Option<grants::ProviderToken>| token.unwrap().authorization().unwrap();
+    let (a, b) = (header(a.unwrap()), header(b.unwrap()));
+    let access = issuer.access.lock().await.clone();
+    assert_eq!(a, b);
+    assert_eq!(a, format!("Bearer {}", access[1]).as_str());
+    assert_eq!(
+        *issuer.presented.lock().await,
+        [issuer.refresh.lock().await[0].clone()]
+    );
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_refused_grant_ends_its_sign_in_and_tokens_then_another_takes_over() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let auth = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let app = auth.router();
+    let grants = auth.grants().unwrap();
+    let (_, _, user) = oidc_session(&app, &issuer, "student").await;
+    let (laptop, laptop_csrf, _) = oidc_session(&app, &issuer, "student").await;
+    let (status, _, made) = call(
+        &app,
+        "POST",
+        "/api/auth/tokens",
+        Some(ORIGIN),
+        Some(&laptop),
+        Some(&laptop_csrf),
+        json!({"name":"laptop","days":1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let (newest, newest_session): (Uuid, Uuid) =
+        sqlx::query_as("SELECT id, session_id FROM oidc_grants ORDER BY refreshed_at DESC LIMIT 1")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    expire_soon(&db.pool, &format!("WHERE id='{newest}'")).await;
+
+    // A provider that can't answer keeps the grant.
+    *issuer.refresh_mode.lock().await = "unavailable";
+    let Err(error) = grants.access_token(user.id).await else {
+        panic!("an unavailable provider gives no token");
+    };
+    assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM oidc_grants")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(count().await, 2);
+
+    // A refusal ends that sign-in and the token made in it; the other grant serves.
+    *issuer.refresh_mode.lock().await = "invalid_grant";
+    let token = grants.access_token(user.id).await.unwrap().unwrap();
+    let access = issuer.access.lock().await.clone();
+    assert_eq!(
+        token.authorization().unwrap(),
+        format!("Bearer {}", access[0]).as_str()
+    );
+    assert_eq!(count().await, 1);
+    let ended: bool =
+        sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM auth_sessions WHERE id=$1)")
+            .bind(newest_session)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(ended);
+    let revoked: bool = sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM api_tokens")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(revoked, "the token made in the ended sign-in ends with it");
+    let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oidc_revocations")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 0, "a refused token needs no revocation");
+    let audited: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE action='sign_in_ended'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(audited, 1);
+    let (_, _, session) = call(
+        &app,
+        "GET",
+        "/api/session",
+        None,
+        Some(&laptop),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(session["authenticated"], false);
+
+    // With no grant left, the person must sign in again.
+    expire_soon(&db.pool, "").await;
+    let Err(error) = grants.access_token(user.id).await else {
+        panic!("no grant is left");
+    };
+    assert_eq!(
+        (error.0, error.1.as_str()),
+        (StatusCode::UNAUTHORIZED, grants::SIGN_IN_AGAIN)
+    );
+    assert_eq!(count().await, 0);
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn ending_a_sign_in_revokes_its_refresh_token_at_the_provider() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let auth = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let app = auth.router();
+    let revoked = |n: usize| {
+        let issuer = issuer.clone();
+        async move {
+            for _ in 0..100 {
+                if issuer.revoked.lock().await.len() >= n {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            issuer.revoked.lock().await.clone()
+        }
+    };
+
+    let (cookie, csrf, user) = oidc_session(&app, &issuer, "student").await;
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        "/api/auth/logout",
+        Some(ORIGIN),
+        Some(&cookie),
+        Some(&csrf),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let refresh = issuer.refresh.lock().await.clone();
+    assert_eq!(revoked(1).await, [refresh[0].clone()]);
+
+    // A session that expired is swept and revoked too.
+    oidc_session(&app, &issuer, "student").await;
+    sqlx::query("UPDATE auth_sessions SET expires_at = NOW() - INTERVAL '1 second'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    auth.grants().unwrap().sweep().await;
+    let refresh = issuer.refresh.lock().await.clone();
+    assert_eq!(revoked(2).await[1], refresh[1]);
+
+    // And so is every sign-in of an account an administrator disables.
+    oidc_session(&app, &issuer, "student").await;
+    let (admin, admin_csrf, _) = sign_in(&app, "admin", PASSWORD).await;
+    let (status, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/admin/users/{}", user.id),
+        Some(ORIGIN),
+        Some(&admin),
+        Some(&admin_csrf),
+        json!({"enabled":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let refresh = issuer.refresh.lock().await.clone();
+    assert_eq!(revoked(3).await[2], refresh[2]);
+    for _ in 0..100 {
+        let left: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM oidc_grants) + (SELECT COUNT(*) FROM oidc_revocations)",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if left == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oidc_revocations")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn turning_passwords_off_closes_every_password_path() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let mut cfg = forward_config(&issuer);
+    cfg.forward_tokens = false;
+    // While passwords are on, the bootstrap administrator is linked to single sign-on.
+    let open = Auth::new(db.pool.clone(), cfg.clone())
+        .await
+        .unwrap()
+        .router();
+    let (ac, at, admin) = sign_in(&open, "admin", PASSWORD).await;
+    let (status, _, _) = call(
+        &open,
+        "POST",
+        "/api/admin/oidc-identities",
+        Some(ORIGIN),
+        Some(&ac),
+        Some(&at),
+        json!({"userId":admin["id"],"subject":"admin-subject"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let member = managed_user(&open, &ac, &at, "member", "user", true).await;
+
+    cfg.password_sign_in = false;
+    assert!(
+        Auth::new(db.pool.clone(), cfg.clone()).await.is_err(),
+        "a bootstrap password is refused"
+    );
+    cfg.bootstrap_username = None;
+    cfg.bootstrap_password = None;
+    let app = Auth::new(db.pool.clone(), cfg).await.unwrap().router();
+    let (status, _, body) = call(
+        &app,
+        "POST",
+        "/api/auth/login",
+        Some(ORIGIN),
+        None,
+        None,
+        json!({"username":"admin","password":PASSWORD}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (_, _, session) = call(&app, "GET", "/api/session", None, None, None, Value::Null).await;
+    assert_eq!(
+        (
+            session["passwordSignIn"].clone(),
+            session["oidcEnabled"].clone()
+        ),
+        (json!(false), json!(true))
+    );
+    let (cookie, csrf, _) = oidc_session(&app, &issuer, "admin-subject").await;
+    let member_id = member["id"].as_str().unwrap();
+    for (method, path, body) in [
+        (
+            "POST",
+            "/api/auth/password".to_string(),
+            json!({"currentPassword":PASSWORD,"newPassword":"another long password 1"}),
+        ),
+        (
+            "POST",
+            format!("/api/admin/users/{member_id}/password"),
+            json!({"newPassword":"another long password 1"}),
+        ),
+        (
+            "POST",
+            "/api/admin/users".to_string(),
+            json!({"username":"with-password","password":PASSWORD}),
+        ),
+        (
+            "POST",
+            "/api/admin/invitations".to_string(),
+            json!({"username":"invited"}),
+        ),
+        (
+            "POST",
+            format!("/api/admin/users/{member_id}/access-link"),
+            json!({"kind":"reset"}),
+        ),
+        (
+            "POST",
+            "/api/auth/activate".to_string(),
+            json!({"token":random_token(),"newPassword":"another long password 1"}),
+        ),
+    ] {
+        let (status, _, body) = call(
+            &app,
+            method,
+            &path,
+            Some(ORIGIN),
+            Some(&cookie),
+            Some(&csrf),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+    }
+    // Accounts are made without a password and linked to single sign-on.
+    let (status, _, created) = call(
+        &app,
+        "POST",
+        "/api/admin/users",
+        Some(ORIGIN),
+        Some(&cookie),
+        Some(&csrf),
+        json!({"username":"sso-only","forcePasswordChange":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        "/api/admin/oidc-identities",
+        Some(ORIGIN),
+        Some(&cookie),
+        Some(&csrf),
+        json!({"userId":created["id"],"subject":"sso-only-subject"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (local, forced): (bool, bool) = sqlx::query_as("SELECT password_hash IS NOT NULL, password_change_required FROM users WHERE username='sso-only'")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(!local && !forced);
+    let forced: bool =
+        sqlx::query_scalar("SELECT password_change_required FROM users WHERE username='member'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(!forced, "no one waits on a password change they can't make");
+    task.abort();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn auto_mode_stops_when_its_owner_has_no_grant_left() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let auth = Auth::new(db.pool.clone(), forward_config(&issuer))
+        .await
+        .unwrap();
+    let (base, seen, gateway_task) = fake_gateway().await;
+    let gateway = crate::gateway::Gateway::forwarding(base)
+        .unwrap()
+        .forward_tokens(auth.grants().unwrap());
+    let key = SecretKey::from_bytes([9u8; 32]);
+    let mut state = crate::AppState::new(auth, db.pool.clone(), Some(gateway), 4);
+    state.followups_enabled = false;
+    state.connections = Some(
+        crate::connections::Connections::with_keys(db.pool.clone(), None, Some(key), true).unwrap(),
+    );
+    let app = crate::router(state.clone(), "web".into());
+    let (cookie, csrf, user) = oidc_session(&app, &issuer, "student").await;
+    let (status, _, created) = call(
+        &app,
+        "POST",
+        "/api/conversations",
+        Some(ORIGIN),
+        Some(&cookie),
+        Some(&csrf),
+        json!({"title":"Overnight","model":"fixture-model"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["conversation"]["id"].as_str().unwrap().to_owned();
+    // The turn stops with a gateway failure, which Auto mode would nudge.
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/conversations/{id}/messages"))
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::COOKIE, &cookie)
+        .header("x-csrf-token", &csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"content":"run all night","model":"fixture-model"}).to_string(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    let access = issuer.access.lock().await.clone();
+    assert!(seen
+        .lock()
+        .await
+        .iter()
+        .all(|h| *h == format!("Bearer {}", access[0])));
+    let messages = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+    };
+    let before = messages().await;
+    sqlx::query(
+        "UPDATE conversations SET auto_approve=TRUE, updated_at=NOW()-INTERVAL '5 minutes'",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // The provider ends the grant overnight.
+    *issuer.refresh_mode.lock().await = "invalid_grant";
+    expire_soon(&db.pool, "").await;
+    crate::autopilot::tick(&state).await.unwrap();
+    let nudges: i32 = sqlx::query_scalar("SELECT auto_nudges FROM conversations WHERE id=$1::uuid")
+        .bind(&id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        nudges,
+        crate::autopilot::MAX_NUDGES,
+        "Auto mode stops instead of nudging again"
+    );
+    assert_eq!(messages().await, before);
+    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions WHERE user_id=$1")
+        .bind(user.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(sessions, 0);
+    gateway_task.abort();
     task.abort();
     db.close().await;
 }

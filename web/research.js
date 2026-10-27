@@ -105,6 +105,12 @@ export function createResearch({ api, state, render, toast, startResearch, works
   function diff(text) {
     return text ? `<pre class="research-diff">${text.split('\n').slice(0, 400).map(l => `<span class="${l.startsWith('+') && !l.startsWith('+++') ? 'add' : l.startsWith('-') && !l.startsWith('---') ? 'del' : l.startsWith('@@') ? 'hunk' : ''}">${esc(l)}</span>`).join('\n')}</pre>` : '';
   }
+  // What the decisions check found: whether the run really tested its idea, or why it wasn't asked.
+  function check(d) {
+    if (d.skipped) return esc(`Skipped: ${d.skipped}`);
+    const found = `${Math.round(d.tested * 100)}% that it did${d.model ? ` · ${d.model}` : ''}`;
+    return d.tested >= 0.5 ? esc(`Tested its idea · ${found}`) : `${badge('May not have tested its idea', 'amber')} ${esc(found)}`;
+  }
   function detail() {
     const e = local.data.experiments.find(x => x.id === local.selected);
     if (!e) return '';
@@ -114,7 +120,7 @@ export function createResearch({ api, state, render, toast, startResearch, works
     let body = '';
     if (summary) {
       const values = Object.entries(summary.metrics || {}).sort(([a], [b]) => (b === metric) - (a === metric)).slice(0, 12);
-      const facts = [[metric, summary.status === 'running' ? 'running…' : fmt(summary.metric)], ['Status', summary.status + (summary.exitCode != null && summary.exitCode !== 0 ? ` · exit ${summary.exitCode}` : '')], ['Commit', `<span class="mono">${esc(summary.commit)}</span>`], ['Time', `${minutes(summary.startedAt, summary.finishedAt)}${summary.finishedAt ? '' : ' so far'}`], ...(summary.diffStat ? [['Change', esc(summary.diffStat)]] : [])];
+      const facts = [[metric, summary.status === 'running' ? 'running…' : fmt(summary.metric)], ['Status', summary.status + (summary.exitCode != null && summary.exitCode !== 0 ? ` · exit ${summary.exitCode}` : '')], ['Commit', `<span class="mono">${esc(summary.commit)}</span>`], ['Time', `${minutes(summary.startedAt, summary.finishedAt)}${summary.finishedAt ? '' : ' so far'}`], ...(summary.diffStat ? [['Change', esc(summary.diffStat)]] : []), ...(summary.decision ? [['Check', check(summary.decision)]] : [])];
       body = `<div class="research-facts">${facts.map(([k, v]) => `<div class="detail-row"><span>${esc(k)}</span><span>${k === metric || k === 'Status' || k === 'Time' ? esc(v) : v}</span></div>`).join('')}</div>${values.length > 1 ? `<span class="eyebrow">Values it printed</span><div class="research-values">${values.map(([k, v]) => `<span><b>${esc(k)}</b>${esc(fmt(v))}</span>`).join('')}</div>` : ''}${run?.diff ? `<span class="eyebrow">Change from parent</span>${diff(run.diff)}` : ''}<span class="eyebrow">Output</span>${run ? `<pre class="research-log">${esc((run.log || '').split('\n').slice(-60).join('\n')) || 'Nothing printed yet.'}</pre>` : '<p class="inline-note">Loading…</p>'}${run?.canCancel ? btn('Stop this run', 'research-cancel', { icon: 'stop', tone: 'small danger', attrs: `data-id="${esc(summary.id)}"` }) : ''}`;
     }
     return `<section class="card project-section research-detail"><span class="eyebrow">${e.parentId ? 'Experiment' : 'Baseline'}</span><h3>${esc(e.title)}</h3><p class="faint mono">${esc(e.branch)} · ${e.frozen ? 'frozen' : 'open'}</p>${e.description ? `<p class="research-description">${esc(e.description)}</p>` : ''}${list}${body}</section>`;

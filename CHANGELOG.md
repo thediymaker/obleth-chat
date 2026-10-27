@@ -2,6 +2,17 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**New**
+
+- **Decisions: where Chat sends short yes/no and pick-one questions.** Administrators choose in **Settings › Administration › System › Decisions**: the gateway (the default), as the person each question is for, so it counts toward their usage; another endpoint with its own key, so usage counts against that key; or off. Questions use the verdicts format (`POST /v1/verdicts`), so any service that speaks it can answer. An address with no path, or one ending in `/v1`, gets `/v1/verdicts` added. The key is sealed with `OBLETH_CHAT_SECRET_KEY_FILE`, never shown or logged, and redirects aren't followed, so it goes only where the administrator pointed it. **Model** left blank lets the endpoint choose; the model must return token probabilities (logprobs). **Check** asks a sample question with the form's values before they are saved. When decisions are off or fail, work goes on without them.
+- **Research checks whether each run tested its idea.** When the chat reads a finished run on a changed node, Chat asks whether the run really tested its idea, from the node's description, its change from the parent and the end of its output. When the answer leans no, `experiment_wait` tells the chat to read the output before trusting the number and to put any fix in a child; the node stays frozen either way. The project's Research tab shows the check on each run, or why it was skipped. Administrators turn it off with **Check research runs**.
+
+**Upgrading**
+
+- Migration 046 adds the `decisions` settings (the gateway, with run checks on) and `research_runs.decision`. With a gateway that has no `/v1/verdicts`, run checks are recorded as skipped; choose **Off** to stop asking.
+
 ## v0.6.0
 
 Chat can send each person's own identity provider token to the gateway, and can run with single sign-on only.

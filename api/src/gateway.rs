@@ -300,6 +300,30 @@ impl Gateway {
         }
         Ok(rows.into_iter().map(|(_, v)| v).collect())
     }
+    /// Asks the gateway's /v1/verdicts, as the user.
+    pub async fn verdicts(
+        &self,
+        user: &Identity,
+        body: &Value,
+        timeout: Duration,
+    ) -> Result<Value, ApiError> {
+        let response = self
+            .client
+            .post(self.base.join("v1/verdicts").unwrap())
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(user).await?,
+            )
+            .timeout(timeout)
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| unavailable())?;
+        if !response.status().is_success() {
+            return Err(upstream_error(response).await);
+        }
+        response.json().await.map_err(|_| unavailable())
+    }
     pub async fn chat(
         &self,
         user: &Identity,

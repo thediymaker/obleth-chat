@@ -432,7 +432,16 @@ async fn finish(
     }
 }
 
-fn tail(text: &str, limit: usize) -> String {
+/// The first `limit` bytes of `text`, cut at a character boundary.
+pub(crate) fn head(text: &str, limit: usize) -> &str {
+    let mut end = limit.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+pub(crate) fn tail(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_owned();
     }
@@ -508,12 +517,12 @@ pub async fn state_json(pool: &PgPool, research: &Research) -> Result<Value, Api
         .iter()
         .map(|r| json!({"id":r.get::<Uuid,_>("id"),"parentId":r.get::<Option<Uuid>,_>("parent_id"),"title":r.get::<String,_>("title"),"description":r.get::<String,_>("description"),"branch":r.get::<String,_>("branch"),"frozen":r.get::<bool,_>("frozen"),"createdAt":r.get::<chrono::DateTime<chrono::Utc>,_>("created_at")}))
         .collect();
-    let runs: Vec<Value> = sqlx::query("SELECT id,experiment_id,number,commit_sha,status,exit_code,metric,metrics,diff_stat,started_at,finished_at FROM research_runs WHERE research_id=$1 ORDER BY number")
+    let runs: Vec<Value> = sqlx::query("SELECT id,experiment_id,number,commit_sha,status,exit_code,metric,metrics,diff_stat,decision,started_at,finished_at FROM research_runs WHERE research_id=$1 ORDER BY number")
         .bind(research.id)
         .fetch_all(pool)
         .await?
         .iter()
-        .map(|r| json!({"id":r.get::<Uuid,_>("id"),"experimentId":r.get::<Uuid,_>("experiment_id"),"number":r.get::<i32,_>("number"),"commit":r.get::<String,_>("commit_sha"),"status":r.get::<String,_>("status"),"exitCode":r.get::<Option<i32>,_>("exit_code"),"metric":r.get::<Option<f64>,_>("metric"),"metrics":r.get::<Value,_>("metrics"),"diffStat":r.get::<String,_>("diff_stat"),"startedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("started_at"),"finishedAt":r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("finished_at")}))
+        .map(|r| json!({"id":r.get::<Uuid,_>("id"),"experimentId":r.get::<Uuid,_>("experiment_id"),"number":r.get::<i32,_>("number"),"commit":r.get::<String,_>("commit_sha"),"status":r.get::<String,_>("status"),"exitCode":r.get::<Option<i32>,_>("exit_code"),"metric":r.get::<Option<f64>,_>("metric"),"metrics":r.get::<Value,_>("metrics"),"diffStat":r.get::<String,_>("diff_stat"),"decision":r.get::<Option<Value>,_>("decision"),"startedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("started_at"),"finishedAt":r.get::<Option<chrono::DateTime<chrono::Utc>>,_>("finished_at")}))
         .collect();
     let workspace: Option<(Uuid, String)> = match research.conversation_id {
         Some(c) => {

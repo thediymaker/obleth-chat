@@ -18,12 +18,15 @@ function helpLine(login) {
 
 function signIn(state, config) {
   const login = config.login;
-  // With single sign-on the provider is the main way in and passwords come second.
-  const sso = state.oidc ? `<a class="btn primary" href="/api/auth/oidc/login">${icon('signin')}${esc(login.ssoLabel)}</a>${login.ssoHint ? `<p class="auth-hint">${copy(login.ssoHint)}</p>` : ''}<div class="auth-divider">or sign in with a password</div>` : '';
+  // With single sign-on the provider is the main way in and passwords come second;
+  // with passwords turned off it is the only way in.
+  const passwords = !(state.oidc && state.passwords === false);
+  const sso = state.oidc ? `<a class="btn primary" href="/api/auth/oidc/login">${icon('signin')}${esc(login.ssoLabel)}</a>${login.ssoHint ? `<p class="auth-hint">${copy(login.ssoHint)}</p>` : ''}${passwords ? '<div class="auth-divider">or sign in with a password</div>' : ''}` : '';
   const notice = state.loginNotice ? `<p class="auth-notice" role="status">${esc(state.loginNotice)}</p>` : '';
   const error = state.loginError ? `<div class="auth-error" role="alert">${icon('info')}<span>${esc(state.loginError)}</span></div>` : '';
   const label = state.busy ? 'Signing in…' : state.oidc ? 'Sign in with password' : 'Sign in';
-  return `${intro(login.title ? copy(login.title) : `Sign in to ${esc(config.siteName)}`, copy(login.description))}${notice}${error}${sso}<form id="login-form">${field('username', 'Username', `name="username" autocomplete="username" maxlength="128" required${state.oidc ? '' : ' autofocus'}`)}${field('password', 'Password', 'name="password" type="password" autocomplete="current-password" required')}<button class="btn${state.oidc ? '' : ' primary'}" type="submit" ${state.busy ? 'disabled' : ''}>${label}</button></form>${helpLine(login)}`;
+  const form = passwords ? `<form id="login-form">${field('username', 'Username', `name="username" autocomplete="username" maxlength="128" required${state.oidc ? '' : ' autofocus'}`)}${field('password', 'Password', 'name="password" type="password" autocomplete="current-password" required')}<button class="btn${state.oidc ? '' : ' primary'}" type="submit" ${state.busy ? 'disabled' : ''}>${label}</button></form>` : '';
+  return `${intro(login.title ? copy(login.title) : `Sign in to ${esc(config.siteName)}`, copy(login.description))}${notice}${error}${sso}${form}${helpLine(login)}`;
 }
 
 const phases = {

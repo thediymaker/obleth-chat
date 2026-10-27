@@ -41,7 +41,7 @@ const moved = { playground: 'chat', classroom: 'groups' };
 
 export async function startConnected(capabilities) {
   const state = {
-    phase: 'loading', draftKey: 0, user: null, oidc: !!capabilities.integrations?.oidc?.configured,
+    phase: 'loading', draftKey: 0, user: null, oidc: !!capabilities.integrations?.oidc?.configured, passwords: capabilities.features?.localAuth !== false,
     chats: [], models: [], model: '', draft: '', error: '', catalogError: '', chatError: '',
     active: null, loadingChat: false, streaming: false, streamController: null, streamChatId: null,
     context: true, compact: false, users: null, busy: false, loginError: '', loginNotice: '', shared: null,
@@ -464,6 +464,7 @@ export async function startConnected(capabilities) {
       const result = await api.request('/api/session');
       if (epoch !== identityEpoch) return;
       state.oidc = result.oidcEnabled ?? state.oidc;
+      state.passwords = result.passwordSignIn ?? state.passwords;
       if (!result.authenticated) { state.phase = 'login'; render(); return; }
       state.user = result.user; api.csrfToken = result.csrfToken;
       if (result.passwordChangeRequired) { state.phase = 'password-required'; render(); return; }

@@ -35,6 +35,14 @@ test('single sign-on leads and passwords come second', () => {
   assert.doesNotMatch(html, /autofocus/);
 });
 
+test('with passwords turned off only the single sign-on button is offered', () => {
+  const html = authScreen({ phase: 'login', oidc: true, passwords: false }, config);
+  assert.match(html, /<a class="btn primary" href="\/api\/auth\/oidc\/login">/);
+  assert.doesNotMatch(html, /login-form|type="password"|or sign in with a password/);
+  // Without single sign-on there is nothing else to offer, so the form stays.
+  assert.match(authScreen({ phase: 'login', oidc: false, passwords: false }, config), /id="login-form"/);
+});
+
 test('a blank title names the site, and a session notice is not shown as an error', () => {
   const html = authScreen({ phase: 'login', loginNotice: 'Your session has expired.' }, normalizeBranding({ siteName: 'Acme <Chat>' }));
   assert.match(html, /<h1>Sign in to Acme &lt;Chat&gt;<\/h1>/);

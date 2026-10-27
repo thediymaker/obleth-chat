@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
         .connect(&config.database_url)
         .await?;
     MIGRATOR.run(&pool).await?;
+    let secret_key = auth_config.secret_key.clone();
     let auth = Auth::new(pool.clone(), auth_config).await?;
     let gateway = match (&config.gateway_url, &config.signing_key_file) {
         (Some(url), Some(path)) => Some(
@@ -35,7 +36,17 @@ async fn main() -> Result<()> {
             )
             .await?,
         ),
-        _ => None,
+        (Some(url), None) => Some(Gateway::forwarding(url.clone())?),
+        (None, _) => None,
+    };
+    // Forwarding people's provider tokens: grants are refreshed as gateway calls
+    // need them, and ended sign-ins are revoked at the provider.
+    let gateway = match (gateway, auth.grants()) {
+        (Some(gateway), Some(grants)) => {
+            tracing::info!("gateway calls carry each person's identity provider token");
+            Some(gateway.forward_tokens(grants))
+        }
+        (gateway, _) => gateway,
     };
     let mut state = AppState::new(auth, pool.clone(), gateway, config.max_streams);
     state.admin_gateway_url = config.admin_gateway_url;
@@ -51,6 +62,7 @@ async fn main() -> Result<()> {
         Ok(sandbox_config) => {
             let sandboxes =
                 obleth_chat::sandbox::Sandboxes::new(sandbox_config.clone(), pool.clone())?;
+            sandboxes.follow_sign_ins(state.auth.grants(), state.auth.password_sign_in());
             // Missing permissions turn workspaces off and say why; an API that doesn't
             // answer yet leaves them on, to fail with its own error when used.
             match sandboxes.check_access().await {
@@ -87,21 +99,37 @@ async fn main() -> Result<()> {
         }
         Err(reason) => state.workspaces_off = Some(reason),
     }
-    // Connections need the gateway; their token key is derived from its signing key.
-    if let (Some(path), true) = (
-        &config.signing_key_file,
-        config.connections != ConnectionsMode::Off,
-    ) {
-        let material = tokio::fs::read(path).await?;
-        state.connections = Some(
-            obleth_chat::connections::Connections::new(
-                pool.clone(),
-                &material,
-                config.connections_allow_private,
-            )?
-            .clusters(config.connections == ConnectionsMode::All)
-            .auto_mode(config.auto_mode),
-        );
+    if let Some(grants) = state.auth.grants() {
+        tokio::spawn(grants.worker(state.shutdown.clone()));
+    }
+    // Connections need the gateway. Their tokens are sealed with the secret key when
+    // one is set; tokens sealed with the key derived from the gateway signing key
+    // still open while that key is configured, and move to the secret key here.
+    if config.gateway_url.is_some()
+        && config.connections != ConnectionsMode::Off
+        && (config.signing_key_file.is_some() || secret_key.is_some())
+    {
+        let material = match &config.signing_key_file {
+            Some(path) => Some(tokio::fs::read(path).await?),
+            None => None,
+        };
+        let connections = obleth_chat::connections::Connections::with_keys(
+            pool.clone(),
+            material.as_deref(),
+            secret_key,
+            config.connections_allow_private,
+        )?
+        .clusters(config.connections == ConnectionsMode::All)
+        .auto_mode(config.auto_mode);
+        match connections.reseal().await {
+            Ok(0) => {}
+            Ok(moved) => tracing::info!(moved, "connection tokens moved to the secret key"),
+            Err(error) => {
+                tracing::warn!("could not move connection tokens to the secret key: {error:#}")
+            }
+        }
+        tokio::spawn(connections.clone().reseal_worker(state.shutdown.clone()));
+        state.connections = Some(connections);
         tracing::info!(
             clusters = config.connections == ConnectionsMode::All,
             "connections enabled"
@@ -130,6 +158,7 @@ async fn main() -> Result<()> {
         state.shutdown.clone(),
     ));
     let shutdown = state.shutdown.clone();
+    let closing = state.auth.grants();
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address=%config.listen,"obleth-chat listening; local accounts enabled");
     let app = router(state.clone(), config.static_dir)
@@ -148,21 +177,35 @@ async fn main() -> Result<()> {
                 let _ = tokio::signal::ctrl_c().await;
             }
             shutdown.cancel();
+            // No refresh starts from here: one could outlast the process.
+            if let Some(grants) = closing {
+                grants.close();
+            }
         })
         .await?;
-    let _ = tokio::time::timeout(Duration::from_secs(10), async {
-        while state.metrics.streams.get() > 0 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    // Refreshes under way save the refresh token the provider rotated while the
+    // streams and maintenance finish; they send nothing more once closed.
+    let refreshes = async {
+        if let Some(grants) = state.auth.grants() {
+            let _ = tokio::time::timeout(Duration::from_secs(30), grants.finish()).await;
         }
-    })
-    .await;
-    if tokio::time::timeout(Duration::from_secs(10), &mut maintenance)
-        .await
-        .is_err()
-    {
-        maintenance.abort();
-        let _ = maintenance.await;
-    }
+    };
+    let rest = async {
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            while state.metrics.streams.get() > 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        if tokio::time::timeout(Duration::from_secs(10), &mut maintenance)
+            .await
+            .is_err()
+        {
+            maintenance.abort();
+            let _ = maintenance.await;
+        }
+    };
+    tokio::join!(refreshes, rest);
     pool.close().await;
     Ok(())
 }

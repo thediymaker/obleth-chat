@@ -155,6 +155,7 @@ async fn person(pool: &PgPool) -> Identity {
         username: "jen".into(),
         display_name: "Jen".into(),
         role: Role::User,
+        session: None,
     }
 }
 

@@ -81,6 +81,7 @@ async fn person(pool: &PgPool, name: &str) -> Identity {
         username: name.to_lowercase(),
         display_name: name.into(),
         role: Role::User,
+        session: None,
     }
 }
 
@@ -600,6 +601,7 @@ mod http {
                 bootstrap_password: Some(PASSWORD.into()),
                 oidc: None,
                 login_rate_per_minute: 1000,
+                ..AuthConfig::default()
             },
         )
         .await
@@ -960,6 +962,7 @@ mod http {
                 bootstrap_password: Some(PASSWORD.into()),
                 oidc: None,
                 login_rate_per_minute: 1000,
+                ..AuthConfig::default()
             },
         )
         .await

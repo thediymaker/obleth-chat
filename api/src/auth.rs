@@ -39,8 +39,9 @@ use tokio::sync::Semaphore;
 use url::Url;
 use uuid::Uuid;
 
-use crate::error::ApiError;
+use crate::{error::ApiError, secrets::SecretKey};
 pub(crate) mod accounts;
+pub mod grants;
 mod group_policy;
 mod oidc;
 #[cfg(test)]
@@ -55,6 +56,29 @@ pub struct AuthConfig {
     pub bootstrap_password: Option<String>,
     pub oidc: Option<OidcConfig>,
     pub login_rate_per_minute: u32,
+    /// Whether people may use passwords at all (OBLETH_CHAT_PASSWORD_SIGN_IN).
+    pub password_sign_in: bool,
+    /// Keep each sign-in's provider tokens and send them to the gateway instead of
+    /// Chat's own signed token (OBLETH_CHAT_GATEWAY_AUTH=forward).
+    pub forward_tokens: bool,
+    /// Seals stored provider tokens (OBLETH_CHAT_SECRET_KEY_FILE).
+    pub secret_key: Option<SecretKey>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            origin: "http://localhost:8085".into(),
+            session_hours: 12,
+            bootstrap_username: None,
+            bootstrap_password: None,
+            oidc: None,
+            login_rate_per_minute: 300,
+            password_sign_in: true,
+            forward_tokens: false,
+            secret_key: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -63,6 +87,35 @@ pub struct OidcConfig {
     pub client_id: String,
     pub client_secret: String,
     pub allow_signup: bool,
+    /// Name accounts after the provider's `preferred_username` when it is free. Only
+    /// for providers that assign usernames themselves and never reuse them.
+    pub provider_usernames: bool,
+    /// Requested scopes; always includes `openid`.
+    pub scopes: Vec<String>,
+}
+
+/// Longest session that does not follow a provider grant.
+pub const PASSWORD_SESSION_HOURS: u32 = 168;
+
+/// The scopes Chat asks for when OBLETH_CHAT_OIDC_SCOPES is not set.
+pub const DEFAULT_OIDC_SCOPES: &str = "openid profile";
+
+/// Space-separated scopes, with `openid` always included. Each must be a scope token
+/// (RFC 6749 3.3).
+pub fn parse_scopes(value: &str) -> anyhow::Result<Vec<String>> {
+    let mut scopes = vec!["openid".to_owned()];
+    for scope in value.split_whitespace() {
+        if !scope
+            .bytes()
+            .all(|b| b == 0x21 || (0x23..=0x5b).contains(&b) || (0x5d..=0x7e).contains(&b))
+        {
+            bail!("OBLETH_CHAT_OIDC_SCOPES must list space-separated scope names");
+        }
+        if !scopes.iter().any(|s| s == scope) {
+            scopes.push(scope.to_owned());
+        }
+    }
+    Ok(scopes)
 }
 
 impl AuthConfig {
@@ -73,8 +126,14 @@ impl AuthConfig {
         let client_id = optional_env("OBLETH_CHAT_OIDC_CLIENT_ID");
         let client_secret = optional_env("OBLETH_CHAT_OIDC_CLIENT_SECRET");
         let allow_signup = optional_env("OBLETH_CHAT_OIDC_ALLOW_SIGNUP");
+        let scopes = optional_env("OBLETH_CHAT_OIDC_SCOPES");
+        let provider_usernames = optional_env("OBLETH_CHAT_OIDC_PROVIDER_USERNAMES");
         let oidc = match (issuer, client_id, client_secret) {
-            (None, None, None) if allow_signup.is_none() => None,
+            (None, None, None)
+                if allow_signup.is_none() && scopes.is_none() && provider_usernames.is_none() =>
+            {
+                None
+            }
             (Some(issuer), Some(client_id), Some(client_secret)) => Some(OidcConfig {
                 issuer, client_id, client_secret,
                 allow_signup: match allow_signup.as_deref().unwrap_or("false") {
@@ -82,6 +141,12 @@ impl AuthConfig {
                     "false" => false,
                     _ => bail!("OBLETH_CHAT_OIDC_ALLOW_SIGNUP must be true or false"),
                 },
+                provider_usernames: match provider_usernames.as_deref().unwrap_or("false") {
+                    "true" => true,
+                    "false" => false,
+                    _ => bail!("OBLETH_CHAT_OIDC_PROVIDER_USERNAMES must be true or false"),
+                },
+                scopes: parse_scopes(scopes.as_deref().unwrap_or(DEFAULT_OIDC_SCOPES))?,
             }),
             _ => bail!("OIDC requires OBLETH_CHAT_OIDC_ISSUER, OBLETH_CHAT_OIDC_CLIENT_ID and OBLETH_CHAT_OIDC_CLIENT_SECRET"),
         };
@@ -98,6 +163,16 @@ impl AuthConfig {
                 .map(|v| v.parse())
                 .transpose()?
                 .unwrap_or(300),
+            password_sign_in: match optional_env("OBLETH_CHAT_PASSWORD_SIGN_IN").as_deref() {
+                None | Some("true") => true,
+                Some("false") => false,
+                Some(_) => bail!("OBLETH_CHAT_PASSWORD_SIGN_IN must be true or false"),
+            },
+            forward_tokens: crate::config::GatewayAuth::from_env()?
+                == crate::config::GatewayAuth::Forward,
+            secret_key: optional_env("OBLETH_CHAT_SECRET_KEY_FILE")
+                .map(|path| SecretKey::from_file(std::path::Path::new(&path)))
+                .transpose()?,
         };
         config.validated()
     }
@@ -109,8 +184,16 @@ impl AuthConfig {
             bail!("OBLETH_CHAT_ORIGIN must be an origin without a path, query or fragment");
         }
         self.origin = url.origin().ascii_serialization();
-        if !(1..=168).contains(&self.session_hours) {
-            bail!("OBLETH_CHAT_SESSION_HOURS must be between 1 and 168");
+        // With forwarded tokens the provider ends a sign-in whenever it ends the
+        // grant, so those sessions may be set to last much longer. Password
+        // sessions stay capped at PASSWORD_SESSION_HOURS either way.
+        let max_hours = if self.forward_tokens {
+            8760
+        } else {
+            PASSWORD_SESSION_HOURS
+        };
+        if !(1..=max_hours).contains(&self.session_hours) {
+            bail!("OBLETH_CHAT_SESSION_HOURS must be between 1 and {max_hours}");
         }
         if !(1..=10_000).contains(&self.login_rate_per_minute) {
             bail!("OBLETH_CHAT_LOGIN_RATE_PER_MINUTE must be between 1 and 10000");
@@ -134,6 +217,30 @@ impl AuthConfig {
             }
             if config.client_id.is_empty() || config.client_secret.is_empty() {
                 bail!("OIDC client ID and secret cannot be empty");
+            }
+            if !config.scopes.iter().any(|s| s == "openid") {
+                bail!("OIDC scopes must include openid");
+            }
+        }
+        if !self.password_sign_in {
+            if self.oidc.is_none() {
+                bail!("OBLETH_CHAT_PASSWORD_SIGN_IN=false needs OIDC sign-in configured");
+            }
+            // Refused rather than ignored: the password would otherwise sit in the
+            // environment, ready to work again the day passwords are turned back on.
+            if self.bootstrap_password.is_some() {
+                bail!("Remove OBLETH_CHAT_BOOTSTRAP_USERNAME and OBLETH_CHAT_BOOTSTRAP_PASSWORD when OBLETH_CHAT_PASSWORD_SIGN_IN=false");
+            }
+        }
+        if self.forward_tokens {
+            let Some(config) = &self.oidc else {
+                bail!("OBLETH_CHAT_GATEWAY_AUTH=forward needs OIDC sign-in configured");
+            };
+            if !config.scopes.iter().any(|s| s == "offline_access") {
+                bail!("OBLETH_CHAT_GATEWAY_AUTH=forward needs offline_access in OBLETH_CHAT_OIDC_SCOPES");
+            }
+            if self.secret_key.is_none() {
+                bail!("OBLETH_CHAT_GATEWAY_AUTH=forward needs OBLETH_CHAT_SECRET_KEY_FILE");
             }
         }
         Ok(self)
@@ -176,6 +283,8 @@ pub struct Auth {
     pool: PgPool,
     config: Arc<AuthConfig>,
     oidc: Option<Arc<oidc::Oidc>>,
+    /// Provider tokens kept per sign-in, when they are forwarded to the gateway.
+    grants: Option<grants::Grants>,
     dummy_password_hash: Arc<String>,
     password_slots: Arc<Semaphore>,
     group_policy: Arc<group_policy::GroupPolicy>,
@@ -260,6 +369,11 @@ pub struct Identity {
     pub username: String,
     pub display_name: String,
     pub role: Role,
+    /// The browser session a request came from, or the one an API token was made
+    /// in. Gateway calls carry that sign-in's own provider token. Never serialized.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub session: Option<Uuid>,
 }
 
 impl Identity {
@@ -293,6 +407,7 @@ impl PasswordUser {
             username: self.username.clone(),
             display_name: self.display_name.clone(),
             role: self.role,
+            session: None,
         }
     }
 }
@@ -308,6 +423,20 @@ impl Auth {
             Some(provider) => Some(Arc::new(oidc::Oidc::new(provider, &config.origin).await?)),
             None => None,
         };
+        let grants = match (
+            &oidc,
+            &config.oidc,
+            &config.secret_key,
+            config.forward_tokens,
+        ) {
+            (Some(oidc), Some(provider), Some(key), true) => Some(grants::Grants::new(
+                pool.clone(),
+                key.clone(),
+                oidc.clone(),
+                provider.issuer.clone(),
+            )),
+            _ => None,
+        };
         let dummy_password_hash = hash_password(random_token())
             .await
             .map_err(|_| anyhow::anyhow!("Password hashing failed"))?;
@@ -315,12 +444,53 @@ impl Auth {
             pool,
             config: Arc::new(config),
             oidc,
+            grants,
             dummy_password_hash: Arc::new(dummy_password_hash),
             password_slots: Arc::new(Semaphore::new(4)),
             group_policy: Arc::new(group_policy),
             trusted_proxies: Arc::new(trusted_proxies),
         };
         auth.bootstrap().await?;
+        if !auth.config.password_sign_in {
+            // A forced change replaces a temporary password; with passwords off no
+            // one can use or change one, and the flag would also hold back their
+            // single sign-on.
+            let cleared = sqlx::query(
+                "UPDATE users SET password_change_required = FALSE WHERE password_change_required",
+            )
+            .execute(&auth.pool)
+            .await?
+            .rows_affected();
+            if cleared > 0 {
+                tracing::info!(
+                    cleared,
+                    "passwords are off; no account waits on a password change"
+                );
+            }
+            // Sign-ins made with a password, and the API tokens made in them, end
+            // too. Requests also refuse them, for any a replica that still allows
+            // passwords makes during a rolling update.
+            let mut tx = auth.pool.begin().await?;
+            let sessions = sqlx::query("DELETE FROM auth_sessions WHERE NOT single_sign_on")
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            let tokens = sqlx::query(
+                "UPDATE api_tokens SET revoked_at = NOW() WHERE NOT single_sign_on AND revoked_at IS NULL",
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            tx.commit().await?;
+            if sessions + tokens > 0 {
+                tracing::info!(
+                    sessions,
+                    tokens,
+                    "passwords are off; password sign-ins ended"
+                );
+                auth.after_sign_out();
+            }
+        }
         if let Some(config) = Arc::get_mut(&mut auth.config) {
             config.bootstrap_username = None;
             config.bootstrap_password = None;
@@ -330,6 +500,45 @@ impl Auth {
 
     pub fn oidc_enabled(&self) -> bool {
         self.oidc.is_some()
+    }
+
+    /// The provider tokens kept per sign-in, when Chat forwards them to the gateway.
+    pub fn grants(&self) -> Option<grants::Grants> {
+        self.grants.clone()
+    }
+
+    /// After a change that ended sign-ins commits, revokes their provider tokens in
+    /// the background, so signing out never waits on the provider.
+    pub(crate) fn after_sign_out(&self) {
+        if let Some(grants) = self.grants.clone() {
+            tokio::spawn(async move { grants.revoke_ended().await });
+        }
+    }
+
+    /// Seconds a session lasts when it did not begin with the identity provider.
+    /// Only a sign-in whose grant Chat keeps may last longer than the 168 hours
+    /// sessions were always capped at: the provider ends that one when it ends the
+    /// grant, while nothing outside Chat ends a password session.
+    fn password_session_lifetime(&self) -> i64 {
+        self.config.session_hours.min(PASSWORD_SESSION_HOURS) as i64 * 3600
+    }
+
+    /// Whether people may sign in with, set or reset a password.
+    pub fn password_sign_in(&self) -> bool {
+        self.config.password_sign_in
+    }
+
+    /// Every password path checks this first, so turning passwords off closes them
+    /// all at once.
+    fn require_passwords(&self) -> Result<(), ApiError> {
+        if self.config.password_sign_in {
+            Ok(())
+        } else {
+            Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "Passwords are turned off; sign in with single sign-on".into(),
+            ))
+        }
     }
     pub fn client_report(&self, extensions: &Extensions, headers: &HeaderMap) -> Value {
         let peer = extensions
@@ -369,18 +578,36 @@ impl Auth {
         mutation: bool,
         allow_password_change: bool,
     ) -> Result<Identity, ApiError> {
+        let identity = self
+            .ending_session(headers, mutation, allow_password_change)
+            .await?;
+        self.confirm_grant(identity.session).await?;
+        Ok(identity)
+    }
+
+    /// The session's person, without asking the provider about its grant. Only the
+    /// paths that end sign-ins use it directly, so signing out works while the
+    /// provider is down.
+    pub(super) async fn ending_session(
+        &self,
+        headers: &HeaderMap,
+        mutation: bool,
+        allow_password_change: bool,
+    ) -> Result<Identity, ApiError> {
         if mutation {
             self.check_origin(headers)?;
         }
         let token = self
             .session_token(headers)
             .ok_or_else(ApiError::unauthorized)?;
+        // With passwords off, only sessions that began with single sign-on count.
         let identity = sqlx::query_as::<_, SessionIdentity>(
-            "SELECT u.id, u.username, u.display_name, u.role, u.password_change_required FROM auth_sessions s \
+            "SELECT u.id, u.username, u.display_name, u.role, s.id AS session, u.password_change_required FROM auth_sessions s \
              JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 \
-             AND s.expires_at > NOW() AND u.enabled = TRUE",
+             AND s.expires_at > NOW() AND u.enabled = TRUE AND (s.single_sign_on OR $2)",
         )
         .bind(digest(&token))
+        .bind(self.config.password_sign_in)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
@@ -403,6 +630,23 @@ impl Auth {
             ));
         }
         Ok(identity.user)
+    }
+
+    /// In forward mode a sign-in lasts only as long as the provider keeps its grant:
+    /// once the access token has expired, the next request refreshes it, and a
+    /// refused grant ends the session (and the API tokens made in it) right away.
+    /// Only activity refreshes, so the provider's idle expiry still applies.
+    pub(crate) async fn confirm_grant(&self, session: Option<Uuid>) -> Result<(), ApiError> {
+        match (&self.grants, session) {
+            (Some(grants), Some(session)) => {
+                if grants.confirm(session).await? {
+                    Ok(())
+                } else {
+                    Err(ApiError::unauthorized())
+                }
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) async fn require_admin(
@@ -502,7 +746,7 @@ impl Auth {
         lifetime: i64,
         password_change_required: bool,
     ) -> Response {
-        let mut response = Json(json!({"authenticated": true, "user": user, "csrfToken": csrf_token(token), "oidcEnabled": self.oidc_enabled(), "passwordChangeRequired": password_change_required})).into_response();
+        let mut response = Json(json!({"authenticated": true, "user": user, "csrfToken": csrf_token(token), "oidcEnabled": self.oidc_enabled(), "passwordSignIn": self.password_sign_in(), "passwordChangeRequired": password_change_required})).into_response();
         response.headers_mut().insert(
             header::SET_COOKIE,
             self.cookie(self.session_cookie_name(), token, lifetime),
@@ -679,7 +923,8 @@ impl Auth {
         token: &str,
         lifetime: i64,
         headers: &HeaderMap,
-    ) -> Result<(), ApiError> {
+        single_sign_on: bool,
+    ) -> Result<Uuid, ApiError> {
         sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= NOW()")
             .execute(&mut **tx)
             .await?;
@@ -693,9 +938,8 @@ impl Auth {
             .filter(|c| !c.is_control())
             .take(256)
             .collect::<String>();
-        sqlx::query("INSERT INTO auth_sessions (token_hash, user_id, expires_at, user_agent) VALUES ($1, $2, NOW() + make_interval(secs => $3), $4)")
-            .bind(digest(token)).bind(user_id).bind(lifetime as f64).bind(user_agent).execute(&mut **tx).await?;
-        Ok(())
+        Ok(sqlx::query_scalar("INSERT INTO auth_sessions (token_hash, user_id, expires_at, user_agent, single_sign_on) VALUES ($1, $2, NOW() + make_interval(secs => $3), $4, $5) RETURNING id")
+            .bind(digest(token)).bind(user_id).bind(lifetime as f64).bind(user_agent).bind(single_sign_on).fetch_one(&mut **tx).await?)
     }
 }
 
@@ -963,16 +1207,23 @@ fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// The person signed in by session `id`, while the session is unexpired and the
-/// account enabled and not waiting on a password change. Sign-out, session
-/// revocation and disabling the account end it.
-pub(crate) async fn session_owner(pool: &PgPool, id: Uuid) -> Result<Option<Identity>, ApiError> {
+/// The person signed in by session `id`, while the session is unexpired, the
+/// account enabled and not waiting on a password change, and, with passwords off,
+/// the session began with single sign-on. Sign-out, session revocation and
+/// disabling the account end it.
+pub(crate) async fn session_owner(
+    pool: &PgPool,
+    id: Uuid,
+    password_sign_in: bool,
+) -> Result<Option<Identity>, ApiError> {
     Ok(sqlx::query_as::<_, Identity>(
-        "SELECT u.id, u.username, u.display_name, u.role FROM auth_sessions s \
+        "SELECT u.id, u.username, u.display_name, u.role, s.id AS session FROM auth_sessions s \
          JOIN users u ON u.id = s.user_id WHERE s.id = $1 \
-         AND s.expires_at > NOW() AND u.enabled = TRUE AND NOT u.password_change_required",
+         AND s.expires_at > NOW() AND u.enabled = TRUE AND NOT u.password_change_required \
+         AND (s.single_sign_on OR $2)",
     )
     .bind(id)
+    .bind(password_sign_in)
     .fetch_optional(pool)
     .await?)
 }
@@ -992,6 +1243,21 @@ pub(crate) async fn end_sign_ins(
         .rows_affected();
     tokens::revoke_all(tx, user).await?;
     Ok(sessions)
+}
+
+/// Ends one sign-in: its browser session and the personal API tokens made in it.
+pub(crate) async fn end_session(
+    tx: &mut Transaction<'_, Postgres>,
+    user: Uuid,
+    session: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query("DELETE FROM auth_sessions WHERE id = $1 AND user_id = $2")
+        .bind(session)
+        .bind(user)
+        .execute(&mut **tx)
+        .await?;
+    tokens::revoke_made_in(tx, user, &[session]).await?;
+    Ok(())
 }
 
 fn digest(secret: &str) -> Vec<u8> {
@@ -1075,10 +1341,10 @@ async fn session(State(auth): State<Auth>, headers: HeaderMap) -> Result<Respons
                     .bind(user.id)
                     .fetch_one(&auth.pool)
                     .await?;
-            json!({"authenticated": true, "user": user, "csrfToken": csrf_token(&auth.session_token(&headers).ok_or_else(ApiError::unauthorized)?), "oidcEnabled": auth.oidc_enabled(), "passwordChangeRequired": password_change_required})
+            json!({"authenticated": true, "user": user, "csrfToken": csrf_token(&auth.session_token(&headers).ok_or_else(ApiError::unauthorized)?), "oidcEnabled": auth.oidc_enabled(), "passwordSignIn": auth.password_sign_in(), "passwordChangeRequired": password_change_required})
         }
         Err(error) if error.0 == StatusCode::UNAUTHORIZED => {
-            json!({"authenticated": false, "oidcEnabled": auth.oidc_enabled()})
+            json!({"authenticated": false, "oidcEnabled": auth.oidc_enabled(), "passwordSignIn": auth.password_sign_in()})
         }
         Err(error) => return Err(error),
     };
@@ -1098,6 +1364,7 @@ async fn login(
     Json(input): Json<LoginInput>,
 ) -> Result<Response, ApiError> {
     auth.check_origin(&headers)?;
+    auth.require_passwords()?;
     let username = normalize_username(&input.username).unwrap_or_else(|_| "!invalid".into());
     auth.throttle("login", &client, Some(&username)).await?;
     if input.password.len() > 1024 {
@@ -1138,10 +1405,11 @@ async fn login(
             .await?;
     }
     let token = random_token();
-    let lifetime = auth.config.session_hours as i64 * 3600;
-    auth.insert_session(&mut tx, user.id, &token, lifetime, &headers)
+    let lifetime = auth.password_session_lifetime();
+    auth.insert_session(&mut tx, user.id, &token, lifetime, &headers, false)
         .await?;
     tx.commit().await?;
+    auth.after_sign_out();
     Ok(auth.session_response(
         user.identity(),
         &token,
@@ -1151,7 +1419,7 @@ async fn login(
 }
 
 async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Result<Response, ApiError> {
-    auth.require_session(&headers, true, true).await?;
+    auth.ending_session(&headers, true, true).await?;
     let token = auth
         .session_token(&headers)
         .ok_or_else(ApiError::unauthorized)?;
@@ -1159,6 +1427,7 @@ async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Result<Response
         .bind(digest(&token))
         .execute(&auth.pool)
         .await?;
+    auth.after_sign_out();
     Ok((
         [(
             header::SET_COOKIE,
@@ -1183,6 +1452,7 @@ async fn change_password(
     Json(input): Json<PasswordInput>,
 ) -> Result<Response, ApiError> {
     let identity = auth.require_session(&headers, true, true).await?;
+    auth.require_passwords()?;
     validate_password(&input.new_password)?;
     if input.current_password.len() > 1024 {
         return Err(ApiError::bad("Current password is incorrect"));
@@ -1215,8 +1485,8 @@ async fn change_password(
         .await?;
     end_sign_ins(&mut tx, identity.id).await?;
     let token = random_token();
-    let lifetime = auth.config.session_hours as i64 * 3600;
-    auth.insert_session(&mut tx, identity.id, &token, lifetime, &headers)
+    let lifetime = auth.password_session_lifetime();
+    auth.insert_session(&mut tx, identity.id, &token, lifetime, &headers, false)
         .await?;
     sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
         .bind(identity.id)
@@ -1232,6 +1502,7 @@ async fn change_password(
     )
     .await?;
     tx.commit().await?;
+    auth.after_sign_out();
     Ok(auth.session_response(identity, &token, lifetime, false))
 }
 
@@ -1283,7 +1554,9 @@ async fn list_users(
 struct CreateUserInput {
     username: String,
     display_name: Option<String>,
-    password: String,
+    /// Required while passwords are on; with them off, the account is created
+    /// without one, to be linked to a single sign-on identity.
+    password: Option<String>,
     role: Option<String>,
     #[serde(default)]
     force_password_change: bool,
@@ -1298,12 +1571,24 @@ async fn create_user(
     let username = normalize_username(&input.username)?;
     let display_name = validate_display_name(input.display_name.as_deref().unwrap_or(&username))?;
     let role = Role::requested(input.role.as_deref())?.unwrap_or(Role::User);
-    validate_password(&input.password)?;
-    let hash = auth.new_password_hash(input.password).await?;
+    let hash = match (input.password, auth.config.password_sign_in) {
+        (Some(password), true) => {
+            validate_password(&password)?;
+            Some(auth.new_password_hash(password).await?)
+        }
+        (None, true) => {
+            return Err(ApiError::bad(
+                "Password must contain at least 12 characters and at most 1024 bytes",
+            ))
+        }
+        (Some(_), false) => auth.require_passwords().map(|_| None)?,
+        (None, false) => None,
+    };
+    let force_password_change = input.force_password_change && hash.is_some();
     let mut tx = auth.pool.begin().await?;
     auth.lock_admin(&mut tx, admin.id).await?;
     let result = sqlx::query_as::<_, Identity>("INSERT INTO users (id, username, display_name, role, password_hash, password_change_required) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, display_name, role")
-        .bind(Uuid::new_v4()).bind(username).bind(display_name).bind(role).bind(hash).bind(input.force_password_change).fetch_one(&mut *tx).await;
+        .bind(Uuid::new_v4()).bind(username).bind(display_name).bind(role).bind(hash).bind(force_password_change).fetch_one(&mut *tx).await;
     match result {
         Ok(identity) => {
             auth.group_policy.initial(&mut tx, identity.id).await?;
@@ -1313,7 +1598,7 @@ async fn create_user(
                 "user_created",
                 "user",
                 Some(&identity.id.to_string()),
-                json!({"role":identity.role,"forcePasswordChange":input.force_password_change}),
+                json!({"role":identity.role,"forcePasswordChange":force_password_change}),
             )
             .await?;
             tx.commit().await?;
@@ -1367,8 +1652,9 @@ async fn update_user(
     let next_enabled = input.enabled.unwrap_or(enabled);
     let next_role = requested_role.unwrap_or(role);
     if enabled && role == Role::Admin && (!next_enabled || next_role != Role::Admin) {
-        let another_ready_admin: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u WHERE u.id<>$1 AND u.enabled AND u.role='admin' AND (u.password_hash IS NOT NULL OR EXISTS(SELECT 1 FROM oidc_identities o WHERE o.user_id=u.id)))")
-            .bind(id).fetch_one(&mut *tx).await?;
+        // A password counts only while passwords are on.
+        let another_ready_admin: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u WHERE u.id<>$1 AND u.enabled AND u.role='admin' AND (($2 AND u.password_hash IS NOT NULL) OR EXISTS(SELECT 1 FROM oidc_identities o WHERE o.user_id=u.id)))")
+            .bind(id).bind(auth.config.password_sign_in).fetch_one(&mut *tx).await?;
         if !another_ready_admin {
             return Err(ApiError::bad(
                 "At least one enabled administrator is required",
@@ -1386,6 +1672,7 @@ async fn update_user(
     }
     accounts::record_audit(&mut tx, Some(admin.id), "user_updated", "user", Some(&id.to_string()), json!({"enabled":next_enabled,"role":next_role,"displayNameChanged":display_name.is_some()})).await?;
     tx.commit().await?;
+    auth.after_sign_out();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1404,6 +1691,7 @@ async fn reset_password(
     Json(input): Json<ResetPasswordInput>,
 ) -> Result<StatusCode, ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
+    auth.require_passwords()?;
     if admin.id == id {
         return Err(ApiError::bad("Use change password for your own account"));
     }
@@ -1429,6 +1717,7 @@ async fn reset_password(
     )
     .await?;
     tx.commit().await?;
+    auth.after_sign_out();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1461,6 +1750,11 @@ async fn link_oidc_identity(
     }
     let mut tx = auth.pool.begin().await?;
     auth.lock_admin(&mut tx, admin.id).await?;
+    // The same lock as a first sign-in for this identity, so the two never race.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("oidc:{}:{}", provider.issuer, input.subject))
+        .execute(&mut *tx)
+        .await?;
     let user: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM users WHERE id = $1 AND enabled FOR UPDATE")
             .bind(input.user_id)
@@ -1468,6 +1762,23 @@ async fn link_oidc_identity(
             .await?;
     if user.is_none() {
         return Err(ApiError::not_found());
+    }
+    // When gateway calls carry provider tokens, an account with two identities at
+    // the provider would send one person's calls with the other's token.
+    if auth.grants.is_some() {
+        let linked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM oidc_identities WHERE user_id = $1 AND issuer = $2)",
+        )
+        .bind(input.user_id)
+        .bind(&provider.issuer)
+        .fetch_one(&mut *tx)
+        .await?;
+        if linked {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "This account is already linked to a single sign-on identity".into(),
+            ));
+        }
     }
     let inserted = sqlx::query("INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3) ON CONFLICT (issuer, subject) DO NOTHING")
         .bind(&provider.issuer).bind(&input.subject).bind(input.user_id).execute(&mut *tx).await?.rows_affected();

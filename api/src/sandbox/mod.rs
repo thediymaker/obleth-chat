@@ -226,6 +226,10 @@ struct Inner {
     checks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Preview sign-ins confirmed live, and when.
     sign_ins: Mutex<HashMap<preview::Grant, Instant>>,
+    /// Provider grants, when sign-ins follow them (OBLETH_CHAT_GATEWAY_AUTH=forward).
+    grants: std::sync::OnceLock<crate::auth::grants::Grants>,
+    /// Whether sessions that began with a password still count.
+    password_sessions: std::sync::atomic::AtomicBool,
 }
 
 impl Sandboxes {
@@ -245,8 +249,25 @@ impl Sandboxes {
                 confirmed: Mutex::default(),
                 checks: Mutex::default(),
                 sign_ins: Mutex::default(),
+                grants: std::sync::OnceLock::new(),
+                password_sessions: std::sync::atomic::AtomicBool::new(true),
             }),
         })
+    }
+    /// Ends a preview's access when the provider ends the grant of the sign-in it
+    /// was opened from, or, with passwords off, when that sign-in began with a
+    /// password, as every other request does.
+    pub fn follow_sign_ins(
+        &self,
+        grants: Option<crate::auth::grants::Grants>,
+        password_sign_in: bool,
+    ) {
+        if let Some(grants) = grants {
+            let _ = self.inner.grants.set(grants);
+        }
+        self.inner
+            .password_sessions
+            .store(password_sign_in, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn config(&self) -> &SandboxConfig {
         &self.inner.config

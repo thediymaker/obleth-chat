@@ -89,6 +89,7 @@ async fn fixture(pool: &PgPool, delay: Duration) -> (AppState, Fake, tokio::task
             bootstrap_password: None,
             oidc: None,
             login_rate_per_minute: 100,
+            ..AuthConfig::default()
         },
     )
     .await
@@ -126,6 +127,7 @@ async fn seed(pool: &PgPool) -> (Identity, Uuid, Uuid) {
             username: name,
             display_name: "Suggestions test".into(),
             role: Role::User,
+            session: None,
         },
         conversation,
         answer,

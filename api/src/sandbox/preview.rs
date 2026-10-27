@@ -96,7 +96,16 @@ fn verify_until(key: &[u8], token: &str, purpose: &str, slug: &str) -> Option<(G
 
 /// Whether the sign-in behind a grant is still live and may still use workspaces.
 async fn still_signed_in(sb: &Sandboxes, grant: Grant) -> Result<bool, ApiError> {
-    let owner = crate::auth::session_owner(&sb.inner.pool, grant.session).await?;
+    if let Some(grants) = sb.inner.grants.get() {
+        if !grants.confirm(grant.session).await? {
+            return Ok(false);
+        }
+    }
+    let passwords = sb
+        .inner
+        .password_sessions
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let owner = crate::auth::session_owner(&sb.inner.pool, grant.session, passwords).await?;
     Ok(owner.is_some_and(|who| who.id == grant.user && sb.allowed(&who)))
 }
 

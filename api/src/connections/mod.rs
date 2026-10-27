@@ -7,20 +7,20 @@ pub mod kubernetes;
 pub mod mcp;
 pub mod slurm;
 
-use crate::{auth::Identity, error::ApiError, AppState};
+use crate::{
+    auth::Identity,
+    error::ApiError,
+    secrets::{self, SecretKey},
+    AppState,
+};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     routing::{get, patch, post, put},
     Json, Router,
 };
-use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
-    XChaCha20Poly1305, XNonce,
-};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -40,7 +40,11 @@ pub const APPROVAL_WAIT: Duration = Duration::from_secs(15 * 60);
 #[derive(Clone)]
 pub struct Connections {
     pool: PgPool,
-    key: [u8; 32],
+    /// The key derived from the gateway signing key, which sealed tokens before the
+    /// installation had its own secret key. Format 1.
+    legacy: Option<[u8; 32]>,
+    /// The installation's secret key. Format 2; new tokens use it when it is set.
+    secret: Option<SecretKey>,
     clients: mcp::Clients,
     /// Lets people's own connections reach private addresses (development only).
     private_allowed: bool,
@@ -164,16 +168,118 @@ impl Connections {
     /// no further secret needs provisioning. Replacing that key makes saved tokens
     /// unreadable; people then re-enter them.
     pub fn new(pool: PgPool, key_material: &[u8], private_allowed: bool) -> anyhow::Result<Self> {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key_material)?;
-        mac.update(b"obleth-chat connection tokens v1");
+        Self::with_keys(pool, Some(key_material), None, private_allowed)
+    }
+
+    /// Seals tokens with the installation's secret key when it is set, and still
+    /// opens tokens sealed with the key derived from the gateway signing key while
+    /// that key is configured. `reseal` moves those to the secret key.
+    pub fn with_keys(
+        pool: PgPool,
+        key_material: Option<&[u8]>,
+        secret: Option<SecretKey>,
+        private_allowed: bool,
+    ) -> anyhow::Result<Self> {
+        let legacy = match key_material {
+            Some(material) => {
+                let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(material)?;
+                mac.update(b"obleth-chat connection tokens v1");
+                Some(mac.finalize().into_bytes().into())
+            }
+            None => None,
+        };
+        if legacy.is_none() && secret.is_none() {
+            anyhow::bail!("Connections need a secret key or the gateway signing key");
+        }
         Ok(Self {
             pool,
-            key: mac.finalize().into_bytes().into(),
+            legacy,
+            secret,
             clients: mcp::Clients::new(private_allowed)?,
             private_allowed,
             clusters: true,
             auto_mode: true,
         })
+    }
+
+    /// Re-encrypts tokens still sealed with the key derived from the gateway signing
+    /// key under the secret key, so the signing key can be removed. Each row changes
+    /// only if it still holds what was read, so replicas starting together, or a
+    /// second run, change nothing twice. Returns how many tokens moved.
+    pub async fn reseal(&self) -> anyhow::Result<u64> {
+        if self.secret.is_none() {
+            return Ok(0);
+        }
+        let mut moved = 0;
+        let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
+            "SELECT id, token FROM connections WHERE token IS NOT NULL AND get_byte(token, 0) = 1",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let credentials: Vec<(Uuid, Uuid, Vec<u8>)> = sqlx::query_as(
+            "SELECT connection_id, user_id, token FROM connection_credentials WHERE get_byte(token, 0) = 1",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() && credentials.is_empty() {
+            return Ok(0);
+        }
+        if self.legacy.is_none() {
+            tracing::warn!(
+                count = rows.len() + credentials.len(),
+                "saved connection tokens were sealed with the gateway signing key, which is not configured; people need to enter them again"
+            );
+            return Ok(0);
+        }
+        for (id, sealed) in rows {
+            let Some(token) = self.unseal(id.as_bytes(), &sealed) else {
+                continue;
+            };
+            moved += sqlx::query("UPDATE connections SET token=$2 WHERE id=$1 AND token=$3")
+                .bind(id)
+                .bind(self.seal(id.as_bytes(), &token))
+                .bind(&sealed)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        }
+        for (connection, user, sealed) in credentials {
+            let aad = credential_aad(connection, user);
+            let Some(token) = self.unseal(&aad, &sealed) else {
+                continue;
+            };
+            moved += sqlx::query("UPDATE connection_credentials SET token=$3 WHERE connection_id=$1 AND user_id=$2 AND token=$4")
+                .bind(connection)
+                .bind(user)
+                .bind(self.seal(&aad, &token))
+                .bind(&sealed)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        }
+        Ok(moved)
+    }
+
+    /// While both keys are set, moves tokens to the secret key every few minutes.
+    /// During a rolling update, replicas still running a release without the secret
+    /// key keep sealing with the signing key, so one pass at startup is not enough.
+    pub async fn reseal_worker(self, shutdown: tokio_util::sync::CancellationToken) {
+        if self.secret.is_none() || self.legacy.is_none() {
+            return;
+        }
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+            }
+            match self.reseal().await {
+                Ok(0) => {}
+                Ok(moved) => tracing::info!(moved, "connection tokens moved to the secret key"),
+                Err(error) => {
+                    tracing::warn!("could not move connection tokens to the secret key: {error:#}")
+                }
+            }
+        }
     }
 
     /// Lets people switch a chat to Auto mode (the default) or not.
@@ -212,30 +318,19 @@ impl Connections {
     /// Encrypts a token bound to `aad`: the connection id, plus the user id for a
     /// person's credentials on a shared cluster.
     fn seal(&self, aad: &[u8], token: &str) -> Vec<u8> {
-        let mut nonce = [0u8; 24];
-        rand::thread_rng().fill_bytes(&mut nonce);
-        let sealed = XChaCha20Poly1305::new((&self.key).into())
-            .encrypt(
-                &XNonce::from(nonce),
-                Payload {
-                    msg: token.as_bytes(),
-                    aad,
-                },
-            )
-            .expect("encryption with a valid key cannot fail");
-        [&[1u8][..], &nonce, &sealed].concat()
+        match (&self.secret, &self.legacy) {
+            (Some(key), _) => key.seal(2, aad, token.as_bytes()),
+            (None, Some(key)) => secrets::seal_with(key, 1, aad, token.as_bytes()),
+            (None, None) => unreachable!("a connection key is always configured"),
+        }
     }
 
     fn unseal(&self, aad: &[u8], sealed: &[u8]) -> Option<String> {
-        let (version, rest) = sealed.split_first()?;
-        if *version != 1 || rest.len() < 24 {
-            return None;
-        }
-        let (nonce, body) = rest.split_at(24);
-        let nonce: [u8; 24] = nonce.try_into().ok()?;
-        let plain = XChaCha20Poly1305::new((&self.key).into())
-            .decrypt(&XNonce::from(nonce), Payload { msg: body, aad })
-            .ok()?;
+        let plain = match sealed.first()? {
+            1 => secrets::open_with(self.legacy.as_ref()?, 1, aad, sealed)?,
+            2 => self.secret.as_ref()?.open(2, aad, sealed)?,
+            _ => return None,
+        };
         String::from_utf8(plain).ok()
     }
 

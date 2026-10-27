@@ -12,7 +12,7 @@ use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::auth::{Identity, Role};
+use crate::auth::{grants::SIGN_IN_AGAIN, Identity, Role};
 use crate::{launch_turn, models, AppState, Launch};
 
 /// Nudges in a row before Chat leaves the chat for the person.
@@ -45,13 +45,16 @@ impl Nudge {
 }
 
 /// Decides whether a chat's last reply needs a nudge. A reply the person stopped
-/// never does.
+/// never does, nor one that stopped because they must sign in again.
 pub fn nudge_for(
     status: &str,
     error: Option<&str>,
     content: &str,
     runs_going: bool,
 ) -> Option<Nudge> {
+    if error.is_some_and(|e| e.starts_with(SIGN_IN_AGAIN)) {
+        return None;
+    }
     match status {
         "interrupted" | "error" if error != Some("Response stopped") => Some(Nudge::Stopped(
             error.unwrap_or("it was interrupted").to_owned(),
@@ -167,6 +170,16 @@ pub async fn tick(s: &AppState) -> Result<(), sqlx::Error> {
             Ok(_) => {
                 tracing::info!(conversation = %id, nudge = count, "auto mode nudged a stopped turn")
             }
+            // Without a way to reach the models for this person, nudging again
+            // would only fail again: the chat waits until they sign in and write.
+            Err(error) if error.1.starts_with(SIGN_IN_AGAIN) => {
+                tracing::info!(conversation = %id, "auto mode stopped: its owner must sign in again");
+                sqlx::query("UPDATE conversations SET auto_nudges = $2 WHERE id = $1")
+                    .bind(id)
+                    .bind(MAX_NUDGES)
+                    .execute(&s.store.pool)
+                    .await?;
+            }
             Err(error) => {
                 tracing::warn!(conversation = %id, "auto mode could not nudge: {}", error.1)
             }
@@ -187,6 +200,8 @@ async fn identity(s: &AppState, user: Uuid) -> Result<Option<Identity>, sqlx::Er
         username,
         display_name,
         role,
+        // Auto mode runs on its own, without a sign-in.
+        session: None,
     }))
 }
 
@@ -230,6 +245,11 @@ mod tests {
             Some(Nudge::RunsGoing)
         );
         assert_eq!(nudge_for("completed", None, "All done.", false), None);
+        assert_eq!(
+            nudge_for("error", Some(SIGN_IN_AGAIN), "", true),
+            None,
+            "no one can reach the models for this chat until its owner signs in"
+        );
         assert!(Nudge::Stopped("It broke.".into())
             .message()
             .contains("(It broke)"));

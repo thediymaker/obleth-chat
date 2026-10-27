@@ -97,6 +97,7 @@ async fn fixture(pool: PgPool) -> Fixture {
             bootstrap_password: None,
             oidc: None,
             login_rate_per_minute: 1000,
+            ..AuthConfig::default()
         },
     )
     .await
@@ -121,6 +122,7 @@ async fn session(pool: &PgPool, role: Role) -> Session {
         username: format!("test_{}", id.simple()),
         display_name: "Fixture account".into(),
         role,
+        session: None,
     };
     sqlx::query("INSERT INTO users(id,username,display_name,role)VALUES($1,$2,$3,$4)")
         .bind(id)

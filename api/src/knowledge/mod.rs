@@ -227,7 +227,16 @@ impl Knowledge {
             let vectors = gateway
                 .embeddings(&owner, &embedding.model, &input)
                 .await
-                .map_err(|e| anyhow::anyhow!("The embedding model is unavailable ({})", e.1))?;
+                .map_err(
+                    |e| match e.1.starts_with(crate::auth::grants::SIGN_IN_AGAIN) {
+                        // Retrying can't help until the owner signs in, so say that.
+                        true => anyhow::anyhow!(
+                            "{}: the file's owner must sign in before it can be indexed",
+                            crate::auth::grants::SIGN_IN_AGAIN
+                        ),
+                        false => anyhow::anyhow!("The embedding model is unavailable ({})", e.1),
+                    },
+                )?;
             let start = batch * EMBED_BATCH;
             let ordinals: Vec<i32> = (start..start + chunk.len()).map(|i| i as i32).collect();
             let pages: Vec<Option<i32>> = chunk.iter().map(|p| p.page).collect();
@@ -480,6 +489,7 @@ async fn identity(pool: &PgPool, id: Uuid) -> anyhow::Result<Identity> {
         } else {
             Role::User
         },
+        session: None,
     })
 }
 

@@ -2,7 +2,9 @@
 
 Each release's section is also its GitHub Release notes.
 
-## Unreleased
+## v0.8.0
+
+Research checks where each new experiment goes in the tree, and whether a reply's statements match its runs.
 
 **New**
 

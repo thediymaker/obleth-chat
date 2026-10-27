@@ -2,6 +2,28 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+Chat can send each person's own identity provider token to the gateway, and can run with single sign-on only.
+
+**New**
+
+- **Forward people's own tokens to the gateway.** With `OBLETH_CHAT_GATEWAY_AUTH=forward`, a gateway call carries the access token the OIDC provider issued to the signed-in person instead of a token Chat signs, so the gateway sees the person and Chat holds no key that can act as anyone. Chat keeps each sign-in's tokens encrypted, refreshes the access token shortly before it expires under a row lock (so two replicas never present the same refresh token), and sends it only to the gateway. Auto mode, research, Knowledge indexing and API-token chats use the person's most recently refreshed sign-in. When the provider refuses a refresh, Chat ends that sign-in and the API tokens made in it, and work with no sign-in left stops with "Sign in again to continue": Auto mode stops nudging, and Knowledge marks the file failed. Someone linked to the provider never gets Chat's signed token; local password accounts still do while a signing key is set. Forward mode needs OIDC with `offline_access` and `OBLETH_CHAT_SECRET_KEY_FILE`; the gateway signing key becomes optional. The gateway must trust the provider's issuer, keys and audience. See the README.
+- **Signing out revokes the provider's refresh token.** In forward mode, every way a sign-in ends (signing out, revoking a session, signing out other devices, a password change or reset, an administrator disabling the account or ending its sessions, a session expiring) revokes its refresh token at the provider's `revocation_endpoint` when discovery lists one, in the background so signing out never waits.
+- **Sessions follow the provider in forward mode.** They last `OBLETH_CHAT_SESSION_HOURS` (now up to 8760) rather than ending with the ID token, since the provider can end them at any time; installs usually set something like 2160 hours.
+- **`OBLETH_CHAT_PASSWORD_SIGN_IN=false` turns passwords off.** Password sign-in, password changes, administrator resets, invitations and reset links all refuse, the sign-in page shows only the single sign-on button, and administrators create accounts without a password and link them to single sign-on. It needs OIDC, and Chat refuses to start with a bootstrap password rather than leave one waiting in the environment. Pending forced password changes are cleared, since no one could make them. Link existing administrators before turning passwords off.
+- **`OBLETH_CHAT_OIDC_SCOPES`** sets the scopes Chat asks for (default `openid profile`; `openid` is always included).
+- **`OBLETH_CHAT_SECRET_KEY_FILE`**: a 32-byte key (raw, hex or base64; `openssl rand -hex 32`) for what Chat stores encrypted. When set, saved connection tokens are sealed with it, and tokens sealed with the key derived from the gateway signing key move to it at startup, once, even with several replicas starting together. Until they move they still open with the signing key.
+
+**Fixed**
+
+- **ID tokens must use an asymmetric algorithm.** Chat accepts only the RSA, RSA-PSS, ECDSA and EdDSA algorithms the provider advertises. A provider advertising HS256 let an ID token signed with the client secret through; HS* and `none` are now always refused. Keys still come only from the discovered `jwks_uri`, which may be on another host than the issuer.
+
+**Upgrading**
+
+- Migration `044` runs when Chat starts: it adds `oidc_grants` and `oidc_revocations`.
+- `/api/session` and `/api/capabilities` report `passwordSignIn`; `features.localAuth` follows it.
+
 ## v0.5.2
 
 Security fixes for workspace previews, uploads, personal tokens, sign-in limits and shared chats, and a simpler sign-in page.

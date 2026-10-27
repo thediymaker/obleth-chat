@@ -202,7 +202,10 @@ impl Turn {
     /// The number a passage is cited by, reusing it when the same passage comes back.
     fn number(&mut self, hit: Hit) -> usize {
         if let Some(i) = self.sources.iter().position(|s| {
-            s.document == hit.document && s.page == hit.page && s.content == hit.content
+            s.document == hit.document
+                && s.page == hit.page
+                && s.section == hit.section
+                && s.content == hit.content
         }) {
             return i + 1;
         }
@@ -340,10 +343,14 @@ fn label(hit: &Hit) -> String {
     if hit.saved {
         return format!("saved: {}", hit.name);
     }
-    match hit.page {
+    let mut label = match hit.page {
         Some(page) => format!("{}, page {page}", hit.name),
         None => hit.name.clone(),
+    };
+    if let Some(section) = &hit.section {
+        label.push_str(&format!(", “{section}”"));
     }
+    label
 }
 
 /// What to search for: the latest message, with the one before it when the latest is
@@ -394,6 +401,7 @@ mod tests {
             collection: Uuid::nil(),
             name: "Notes.pdf".into(),
             page: Some(page),
+            section: (page == 2).then(|| "2 Method › 2.1 Schedule".to_owned()),
             content: format!("text {page}"),
             matched: "meaning",
             saved: false,
@@ -411,7 +419,9 @@ mod tests {
         };
         assert_eq!(turn.number(hit(2)), 2);
         assert_eq!(turn.number(hit(1)), 1);
-        assert!(turn.prompt().contains("[2] Notes.pdf, page 2\ntext 2"));
+        assert!(turn
+            .prompt()
+            .contains("[2] Notes.pdf, page 2, “2 Method › 2.1 Schedule”\ntext 2"));
         assert_eq!(turn.entry()["items"].as_array().unwrap().len(), 2);
     }
 }

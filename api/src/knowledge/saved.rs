@@ -386,6 +386,7 @@ impl Knowledge {
                     collection: Uuid::nil(),
                     name: r.get("title"),
                     page: None,
+                    section: None,
                     content,
                     matched: match (meaning, by_words) {
                         (true, true) => "meaning + words",

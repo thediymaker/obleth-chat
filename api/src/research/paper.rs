@@ -33,7 +33,15 @@ pub struct Paper {
 
 impl Paper {
     pub fn from_html(html: &str) -> Self {
-        let (title, sections) = html_sections(html);
+        let (title, mut sections) = html_sections(html);
+        // Text before the first heading is a section when it says something.
+        sections.retain_mut(|s| {
+            if !s.path.is_empty() {
+                return true;
+            }
+            (s.level, s.path) = (1, vec!["Start".into()]);
+            s.text.chars().filter(|c| c.is_alphanumeric()).count() >= 200
+        });
         Self { title, sections }
     }
 

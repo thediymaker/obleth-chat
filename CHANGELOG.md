@@ -7,6 +7,7 @@ Each release's section is also its GitHub Release notes.
 **New**
 
 - **Research reads papers by section.** `read_paper` takes a link to a paper, or any web page with headings, and what the chat is looking for in it. arXiv abstract and PDF links read arXiv's HTML version. The page is fetched in the workspace, once, and kept there. Chat splits it at its headings, keeping math as TeX. One pick-one decision over the outline ranks the sections, and the likeliest three come back in full, with the outline and each pick's probability. A document with more than 255 sections is narrowed by its top-level sections first. Asked for `sections` by id, number or heading, it returns those. The research rules ask the chat to take a paper's settings from the section that gives them and cite it. Administrators turn the picking off with **Pick sections of papers**; the chat then gets the outline and names the sections itself.
+- **Knowledge keeps the section each passage sits under.** PDFs are split at their bookmarks, Word files at their heading styles, Markdown at its `#` headings and HTML at `h1`–`h6`, and a passage never spans two sections. Citations, the sources under a reply and Knowledge search show the section ("2 Method › 2.1 Schedule") with the file and page, and the chat sees it with each passage. Keyword search reads a section's headings as part of its passages, so a word only the heading has finds them. Passages are embedded as before. Files without headings are read as before, and files indexed before this have no sections until they are uploaded again.
 
 **Fixed**
 
@@ -15,6 +16,7 @@ Each release's section is also its GitHub Release notes.
 **Upgrading**
 
 - Migration 048 adds `decisions.pick_sections` (on).
+- Migration 049 adds `knowledge_passages.section` and rebuilds the keyword index of `knowledge_passages` to include it. The table is rewritten once.
 
 ## v0.8.0
 

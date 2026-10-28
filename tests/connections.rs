@@ -1776,6 +1776,37 @@ async fn a_slurm_cluster_brings_job_output_back(pool: PgPool) {
         .unwrap();
     assert!(text.contains("Chat has no output for job 9"), "{text}");
     assert_eq!(f.objects.lock().unwrap().len(), 1);
+
+    // An output file name Chat can't follow runs the job as asked, and says its
+    // output won't come back instead of promising it.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_padded",
+        "slurm__submit",
+        json!({"script":"echo hi","output":"out-%4j.txt"}),
+    )]);
+    let (padded, stream) = send(&f, &admin, "Submit with a padded id").await;
+    assert_eq!(pending(&pool).await, "call_padded");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{padded}/approvals"),
+        json!({"callId":"call_padded","decision":"allow"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains("Its output will not come back to Chat"),
+        "{text}"
+    );
+    let submitted = cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit");
+    let body: Value = serde_json::from_str(submitted[1]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["script"], "#!/bin/bash\necho hi");
+    assert_eq!(body["job"]["standard_output"], "out-%4j.txt");
 }
 
 #[sqlx::test(migrations = "./migrations")]

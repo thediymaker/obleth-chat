@@ -9,6 +9,7 @@ import { createAdmin } from './admin.js';
 import { createHistory } from './history.js';
 import { createAttachments } from './attachments.js';
 import { createLoad, WAIT_NOTICE_MS } from './load.js';
+import { createFollow } from './follow.js';
 import { createWorkspace } from './workspace.js';
 import { createBrowser } from './browser.js';
 import { createConnections } from './connections.js';
@@ -93,6 +94,7 @@ export async function startConnected(capabilities) {
   };
   const attachments = createAttachments({ api, state, render, modal, close, toast: message => toast(message) });
   const load = createLoad({ api, state, modelName: id => modelName(id) });
+  const following = createFollow();
   // A reply to send again, with the model picked from its waiting notice, once it has stopped.
   let switchAfterStop = null;
   const browserView = createBrowser({ api, state, route, toast: message => toast(message), chatPath, capabilities, render: () => render(), send: text => send(text), modal: (...args) => modal(...args), close: () => close(), assistantName: () => branding.assistantName });
@@ -612,9 +614,9 @@ export async function startConnected(capabilities) {
           if (sequence !== loadSequence || !state.shared) return;
           const next = signatureOf(r.conversation);
           if (next !== sharedSignature) {
-            const list = $('#messages'), near = !list || list.scrollHeight - list.scrollTop - list.clientHeight < 160;
+            const follow = following.on();
             sharedSignature = next; Object.assign(state, { active: r.conversation, shared: r.share }); render();
-            if (near) scrollToEnd();
+            if (follow) scrollToEnd();
           }
         } catch (e) {
           if (e.status === 404 && sequence === loadSequence) { Object.assign(state, { active: null, shared: null, chatError: 'This chat is no longer shared with you.' }); render(); return; }
@@ -625,6 +627,7 @@ export async function startConnected(capabilities) {
   }
   // Opening a conversation shows its latest message; a second frame catches late layout.
   function scrollToEnd() {
+    following.resume();
     const end = () => window.scrollTo(0, document.documentElement.scrollHeight);
     requestAnimationFrame(() => { end(); requestAnimationFrame(end); });
   }
@@ -802,12 +805,12 @@ export async function startConnected(capabilities) {
       phase: 'sending', kind, prompt, attached, beforeMessageIds: selected?.messages?.map(m => m.id) || [], stopRequested: false, stopSent: false };
     operations.set(op.key, op); if (selected) touchConversation(selected.id);
     if (kind === 'send') { state.draft = ''; attachments.consume(); }
-    state.error = ''; close(); render();
+    state.error = ''; close(); render(); scrollToEnd();
     let paintTimer, paintCost = 0;
     const paint = () => {
       clearTimeout(paintTimer); paintTimer = null;
       if (!operationIsCurrent(op) || state.active !== op.conversation || route().page !== 'chat' || !op.assistant) return;
-      const follow = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160, started = performance.now();
+      const follow = following.on(), started = performance.now();
       updateMessage(op.assistant, op.conversation.messages.indexOf(op.assistant));
       paintCost = performance.now() - started;
       if (follow) requestAnimationFrame(() => window.scrollTo(0, document.documentElement.scrollHeight));

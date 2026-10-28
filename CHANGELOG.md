@@ -2,6 +2,15 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.9.3
+
+Slurm clusters read only the person's own jobs, and Chat caps what it reads from any cluster.
+
+**Fixed**
+
+- **A large Slurm cluster ran Chat out of memory.** A cluster's status, and the `jobs` and status tools, read slurmrestd's list of every job on the cluster and kept only the person's; on a large cluster that list is hundreds of megabytes. The person's running and pending jobs now come from Slurm accounting, filtered by their user name, and the queue's size from the scheduler's statistics (`/diag`). The `jobs` tool no longer lists other users' jobs.
+- **Every Slurm and Kubernetes answer is capped at 32 MiB** as it is read. A larger one is refused with a message that names the limit, instead of being held in memory.
+
 ## v0.9.2
 
 Slurm clusters work with slurmrestd v0.0.43 to v0.0.45, and a cluster can set its REST API version.

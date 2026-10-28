@@ -89,8 +89,8 @@ async fn mcp(
     }
 }
 
-/// slurmrestd (v0.0.42) and a Kubernetes API server for account "alice", recording
-/// every request.
+/// slurmrestd (v0.0.45, and the older v0.0.42) and a Kubernetes API server for
+/// account "alice", recording every request.
 async fn cluster(
     axum::extract::State(seen): axum::extract::State<Seen>,
     request: Request<Body>,
@@ -120,7 +120,10 @@ async fn cluster(
             .into_response()
     };
     if let Some(rest) = path.strip_prefix("/slurm/") {
-        let Some(rest) = rest.strip_prefix("v0.0.42/") else {
+        let Some(rest) = rest
+            .strip_prefix("v0.0.45/")
+            .or_else(|| rest.strip_prefix("v0.0.42/"))
+        else {
             return missing();
         };
         // Like slurmrestd, ping answers without checking the token.
@@ -1404,7 +1407,7 @@ async fn a_shared_slurm_cluster_runs_jobs_with_each_persons_own_token(pool: PgPo
     ]);
     let (_, stream) = send(&f, &admin, "Show my jobs and submit hello").await;
     assert_eq!(pending(&pool).await, "call_submit");
-    assert!(cluster_requests(&f, "POST", "/slurm/v0.0.42/job/submit").is_empty());
+    assert!(cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit").is_empty());
     let (_, chats) = call(&f.app, "GET", "/api/conversations", Value::Null, &admin).await;
     let chat = chats["conversations"][0]["id"].as_str().unwrap().to_owned();
     let (status, _) = call(
@@ -1424,7 +1427,7 @@ async fn a_shared_slurm_cluster_runs_jobs_with_each_persons_own_token(pool: PgPo
     assert!(text.contains("6 mine [COMPLETED]"), "{text}");
     assert!(!text.contains("theirs"), "{text}");
     assert!(text.contains("Submitted job 8 as alice"), "{text}");
-    let submitted = cluster_requests(&f, "POST", "/slurm/v0.0.42/job/submit");
+    let submitted = cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit");
     assert_eq!(submitted.len(), 1);
     assert_eq!(
         (
@@ -1579,6 +1582,98 @@ async fn a_kubernetes_connection_lists_and_applies_with_the_persons_token(pool: 
         .await
         .unwrap();
     assert_eq!(asked, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_slurm_cluster_uses_the_api_version_set_on_it(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let create = |version: &str| json!({"kind":"slurm","name":"Slurm","url":f.cluster_url,"shared":true,"options":{"apiVersion":version}});
+    let (status, refused) =
+        call(&f.app, "POST", "/api/connections", create("0.0.45"), &admin).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    // A version the server does not offer is caught when the cluster is saved.
+    let (status, missing) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        create("v0.0.46"),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{missing}");
+    assert!(
+        missing["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("does not offer the Slurm REST API v0.0.46"),
+        "{missing}"
+    );
+
+    // Set to the older version the server still offers: Chat uses it, not the newest.
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        create("v0.0.42"),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    assert_eq!(shared["apiVersion"], "v0.0.42");
+    let id = shared["id"].as_str().unwrap().to_owned();
+    let (status, mine) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    let slurm_paths = || -> Vec<String> {
+        f.cluster_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| {
+                r["path"]
+                    .as_str()
+                    .filter(|p| p.starts_with("/slurm/"))
+                    .map(str::to_owned)
+            })
+            .collect()
+    };
+    assert!(
+        !slurm_paths()
+            .iter()
+            .any(|p| p.starts_with("/slurm/v0.0.45/")),
+        "{:?}",
+        slurm_paths()
+    );
+    assert!(!cluster_requests(&f, "GET", "/slurm/v0.0.42/partitions").is_empty());
+
+    // Cleared, Chat finds the newest version again.
+    let (status, cleared) = call(
+        &f.app,
+        "PATCH",
+        &format!("/api/connections/{id}"),
+        json!({"options":{"apiVersion":""}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["apiVersion"], Value::Null);
+    let (status, _) = call(
+        &f.app,
+        "GET",
+        &format!("/api/connections/{id}/status"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!cluster_requests(&f, "GET", "/slurm/v0.0.45/partitions").is_empty());
 }
 
 #[sqlx::test(migrations = "./migrations")]

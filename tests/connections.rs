@@ -185,7 +185,12 @@ async fn cluster(
             // Finished long ago: only accounting still has it.
             ("GET", "slurmdb", "job/77") => Json(json!({"jobs":[{"job_id":77,"name":"old-run","user":"alice","account":"lab","partition":"debug","nodes":"n1","state":{"current":["COMPLETED"],"reason":"None"},"exit_code":{"status":["SUCCESS"],"return_code":{"set":true,"infinite":false,"number":0}},"time":{"elapsed":125,"submission":100,"start":110,"end":235,"limit":{"set":true,"infinite":false,"number":30}},"working_directory":"/home/alice","stdout_expanded":"/home/alice/slurm-77.out"}]})).into_response(),
             ("GET", "slurm", "partitions") => Json(json!({"partitions":[{"name":"debug","partition":{"state":["UP"]},"cpus":{"total":2}}]})).into_response(),
-            ("GET", "slurm", "nodes") => Json(json!({"nodes":[{"name":"n1","state":["MIXED"],"cpus":4,"alloc_cpus":1,"real_memory":8000,"alloc_memory":2000,"partitions":["debug"]}]})).into_response(),
+            ("GET", "slurm", "nodes") => Json(json!({"nodes":[
+                {"name":"n1","state":["MIXED"],"cpus":4,"alloc_cpus":1,"real_memory":8000,"alloc_memory":2000,"gres":"gpu:a100:2(S:0)","gres_used":"gpu:a100:1(IDX:0)","partitions":["debug"]},
+                {"name":"n2","state":["IDLE","DRAIN"],"cpus":8,"alloc_cpus":0,"real_memory":16000,"alloc_memory":0,"partitions":["debug"]},
+                // In a partition the person's account doesn't see.
+                {"name":"n3","state":["IDLE"],"cpus":16,"alloc_cpus":0,"real_memory":32000,"alloc_memory":0,"partitions":["hidden"]}
+            ]})).into_response(),
             ("POST", "slurm", "job/submit") => Json(json!({"job_id":8,"errors":[]})).into_response(),
             _ => missing(),
         };
@@ -2029,8 +2034,32 @@ async fn cluster_status_shows_what_the_persons_account_sees(pool: PgPool) {
     assert_eq!(code, StatusCode::OK);
     assert_eq!(status["state"], "connected", "{status}");
     let s = &status["status"];
-    assert_eq!(s["totals"]["cpus"], 4);
-    assert_eq!(s["totals"]["allocCpus"], 1);
+    // Counts, not every node: the drained node is in the totals but never idle, and
+    // a node only in a partition the account doesn't see is left out.
+    assert!(s.get("nodes").is_none(), "{s}");
+    let t = &s["totals"];
+    assert_eq!(
+        (
+            t["nodes"].clone(),
+            t["idleNodes"].clone(),
+            t["unavailableNodes"].clone()
+        ),
+        (json!(2), json!(0), json!(1))
+    );
+    assert_eq!(
+        (
+            t["cpus"].clone(),
+            t["allocCpus"].clone(),
+            t["idleCpus"].clone()
+        ),
+        (json!(12), json!(1), json!(3))
+    );
+    assert_eq!(
+        (t["gpus"].clone(), t["idleGpus"].clone()),
+        (json!(2), json!(1))
+    );
+    assert_eq!(s["partitions"][0]["name"], "debug");
+    assert_eq!(s["partitions"][0]["idleCpus"], 3);
     // The queue's size comes from the scheduler's statistics.
     assert_eq!(
         (s["queue"]["running"].clone(), s["queue"]["pending"].clone()),
@@ -2061,6 +2090,20 @@ async fn cluster_status_shows_what_the_persons_account_sees(pool: PgPool) {
         ["users=alice&state=RUNNING", "users=alice&state=PENDING"]
     );
     assert!(cluster_requests(&f, "GET", "/slurm/v0.0.45/jobs").is_empty());
+    // A second look within half a minute asks for partitions with the person's own
+    // token again, but takes the nodes from the first.
+    let (code, again) = call(
+        &f.app,
+        "GET",
+        &format!("/api/connections/{slurm}/status"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(again["status"]["totals"], *t);
+    assert_eq!(cluster_requests(&f, "GET", "/slurm/v0.0.45/nodes").len(), 1);
+    assert!(cluster_requests(&f, "GET", "/slurm/v0.0.45/partitions").len() >= 2);
 
     let (_, kube) = call(&f.app, "POST", "/api/connections", json!({"kind":"kubernetes","name":"Kube","url":f.cluster_url,"token":KUBE_TOKEN,"options":{"namespace":"team"}}), &admin).await;
     let kube = kube["id"].as_str().unwrap().to_owned();

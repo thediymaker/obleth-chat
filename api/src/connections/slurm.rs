@@ -3,9 +3,13 @@
 //! offers (v0.0.45 to v0.0.40). It never lists every job on the cluster, which on a
 //! large cluster is hundreds of megabytes: a person's jobs come from the accounting
 //! database filtered by user, and the queue's size from the scheduler's statistics.
+//! Nodes are listed at most once every 30 seconds per cluster, for everyone, and
+//! people and the model get what each partition can run now, not every node.
 use super::mcp::Tool;
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 use url::Url;
 
 const VERSIONS: [&str; 6] = [
@@ -36,7 +40,7 @@ fn tool(
 /// back to Chat.
 pub fn tools(output: bool) -> Vec<Tool> {
     let mut tools = vec![
-        tool("cluster", "Cluster", "Partitions and nodes of the Slurm cluster: state, CPUs and memory in use, and time limits.", true, json!({}), &[]),
+        tool("cluster", "Cluster", "The Slurm cluster's partitions: idle nodes, CPUs and GPUs, time limits, and the queue's size. Name a partition to also list its nodes.", true, json!({"partition":{"type":"string","description":"Also list this partition's nodes, one line each"}}), &[]),
         tool("jobs", "Jobs", "Your running and pending Slurm jobs. For one job, including a finished one, use Job details.", true, json!({"state":{"type":"string","enum":["RUNNING","PENDING"],"description":"Only jobs in this state"}}), &[]),
         tool("job", "Job details", "Details of one job: state, reason, resources, working directory and output files.", true, json!({"job_id":{"type":"integer"}}), &["job_id"]),
         tool("submit", "Submit job", "Submit a batch script as your account. Output goes to slurm-<job id>.out in the working directory unless output is set.", false, json!({
@@ -115,6 +119,173 @@ fn duration(seconds: i64) -> String {
     } else {
         format!("{m}m{s:02}s")
     }
+}
+
+/// How long one look at a cluster's nodes and queue serves everyone. Listing every
+/// node is the heaviest call the Clusters page and the Cluster tool make, and Slurm
+/// answers it the same for every account.
+const SHARED_FOR: Duration = Duration::from_secs(30);
+
+/// One cluster's latest look at its nodes and queue, taken by one person at a time.
+type Look = Arc<tokio::sync::Mutex<Option<Arc<Snapshot>>>>;
+/// Each cluster's latest look, by the cluster's address.
+static SNAPSHOTS: Mutex<BTreeMap<String, Look>> = Mutex::new(BTreeMap::new());
+
+/// A cluster's nodes and the queue's size, as one look at the scheduler saw them.
+struct Snapshot {
+    at: Instant,
+    nodes: Vec<Node>,
+    running: Option<i64>,
+    pending: Option<i64>,
+}
+
+/// Node state flags that keep a node from starting jobs. `sinfo` counts these nodes
+/// as "other", neither allocated nor idle.
+const UNUSABLE: [&str; 11] = [
+    "DOWN",
+    "DRAIN",
+    "FAIL",
+    "FUTURE",
+    "DYNAMIC_FUTURE",
+    "NOT_RESPONDING",
+    "MAINTENANCE",
+    "INVALID",
+    "INVALID_REG",
+    "UNKNOWN",
+    "REBOOT_ISSUED",
+];
+
+/// One node, with only what the summaries need.
+struct Node {
+    name: String,
+    state: String,
+    partitions: Vec<String>,
+    /// Can start jobs: not down, drained, failing or in maintenance.
+    usable: bool,
+    cpus: i64,
+    alloc_cpus: i64,
+    memory_mb: i64,
+    alloc_memory_mb: i64,
+    gpus: i64,
+    alloc_gpus: i64,
+}
+
+impl Node {
+    fn read(n: &Value) -> Self {
+        let state = text(&n["state"]);
+        let partitions = match &n["partitions"] {
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            Value::String(s) => s.split(',').map(str::to_owned).collect(),
+            _ => vec![],
+        };
+        Self {
+            name: text(&n["name"]),
+            usable: !state.split([',', '+']).any(|flag| UNUSABLE.contains(&flag)),
+            state,
+            partitions,
+            cpus: num(&n["cpus"]).unwrap_or(0),
+            alloc_cpus: num(&n["alloc_cpus"]).unwrap_or(0),
+            memory_mb: num(&n["real_memory"]).unwrap_or(0),
+            alloc_memory_mb: num(&n["alloc_memory"]).unwrap_or(0),
+            gpus: gpus(n["gres"].as_str().unwrap_or("")),
+            alloc_gpus: gpus(n["gres_used"].as_str().unwrap_or("")),
+        }
+    }
+
+    fn in_partition(&self, name: &str) -> bool {
+        self.partitions.iter().any(|p| p == name)
+    }
+}
+
+/// The GPUs in a node's `gres` or `gres_used`, such as `gpu:a100:4(S:0-1)` or
+/// `gpu:h100:2(IDX:0-1),gpu:a30:1(IDX:N/A)`.
+fn gpus(gres: &str) -> i64 {
+    let mut plain = String::new();
+    let mut depth = 0usize;
+    for c in gres.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            c if depth == 0 => plain.push(c),
+            _ => {}
+        }
+    }
+    plain
+        .split(',')
+        .filter_map(|entry| {
+            let mut parts = entry.trim().split(':');
+            (parts.next()? == "gpu")
+                .then(|| parts.next_back().and_then(|n| n.parse().ok()).unwrap_or(1))
+        })
+        .sum()
+}
+
+/// What a set of nodes can run now, counted the way `sinfo` counts: idle CPUs and
+/// GPUs are those free on nodes that can start jobs, and an idle node has nothing
+/// running.
+#[derive(Default)]
+struct Capacity {
+    nodes: i64,
+    idle_nodes: i64,
+    unusable_nodes: i64,
+    cpus: i64,
+    alloc_cpus: i64,
+    idle_cpus: i64,
+    memory_mb: i64,
+    alloc_memory_mb: i64,
+    gpus: i64,
+    alloc_gpus: i64,
+    idle_gpus: i64,
+}
+
+impl Capacity {
+    fn add(&mut self, n: &Node) {
+        self.nodes += 1;
+        self.cpus += n.cpus;
+        self.alloc_cpus += n.alloc_cpus;
+        self.memory_mb += n.memory_mb;
+        self.alloc_memory_mb += n.alloc_memory_mb;
+        self.gpus += n.gpus;
+        self.alloc_gpus += n.alloc_gpus;
+        if n.usable {
+            self.idle_cpus += (n.cpus - n.alloc_cpus).max(0);
+            self.idle_gpus += (n.gpus - n.alloc_gpus).max(0);
+            if n.alloc_cpus == 0 {
+                self.idle_nodes += 1;
+            }
+        } else {
+            self.unusable_nodes += 1;
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "nodes": self.nodes, "idleNodes": self.idle_nodes, "unavailableNodes": self.unusable_nodes,
+            "cpus": self.cpus, "allocCpus": self.alloc_cpus, "idleCpus": self.idle_cpus,
+            "memoryMb": self.memory_mb, "allocMemoryMb": self.alloc_memory_mb,
+            "gpus": self.gpus, "allocGpus": self.alloc_gpus, "idleGpus": self.idle_gpus,
+        })
+    }
+}
+
+/// One partition the person's account sees, and what its nodes can run now.
+struct Partition {
+    name: String,
+    state: String,
+    max_time: String,
+    capacity: Capacity,
+}
+
+/// The partitions a person sees, all of their nodes together, and the look at the
+/// cluster those come from.
+struct Summary {
+    partitions: Vec<Partition>,
+    total: Capacity,
+    snapshot: Arc<Snapshot>,
 }
 
 impl Client {
@@ -288,7 +459,7 @@ impl Client {
 
     pub async fn call(&mut self, tool: &str, args: &Value) -> Result<(bool, String), String> {
         match tool {
-            "cluster" => self.cluster().await.map(|t| (true, t)),
+            "cluster" => self.cluster(args).await.map(|t| (true, t)),
             "jobs" => self.jobs(args).await.map(|t| (true, t)),
             "job" => self.job(args).await.map(|t| (true, t)),
             "submit" => self.submit(args, None).await.map(|(t, _)| (true, t)),
@@ -302,38 +473,151 @@ impl Client {
         }
     }
 
-    async fn cluster(&mut self) -> Result<String, String> {
+    async fn cluster(&mut self, args: &Value) -> Result<String, String> {
+        let summary = self.summary().await?;
+        let gpus = |c: &Capacity| {
+            if c.gpus > 0 {
+                format!(", GPUs {}/{} idle", c.idle_gpus, c.gpus)
+            } else {
+                String::new()
+            }
+        };
+        let mut out = vec!["Partitions (name, state, idle nodes and CPUs of all, max time). Nodes that are down, drained or in maintenance never count as idle:".to_string()];
+        for p in &summary.partitions {
+            let c = &p.capacity;
+            out.push(format!(
+                "- {}: {}, nodes {}/{} idle, CPUs {}/{} idle{}, max {}",
+                p.name,
+                p.state,
+                c.idle_nodes,
+                c.nodes,
+                c.idle_cpus,
+                c.cpus,
+                gpus(c),
+                p.max_time
+            ));
+        }
+        let t = &summary.total;
+        let count = |n: Option<i64>| n.map_or("?".into(), |n| n.to_string());
+        out.push(format!(
+            "Cluster: {} nodes ({} idle, {} down, drained or in maintenance), CPUs {}/{} idle{}, memory {}/{} MB in use. Queue: {} running, {} pending.",
+            t.nodes,
+            t.idle_nodes,
+            t.unusable_nodes,
+            t.idle_cpus,
+            t.cpus,
+            gpus(t),
+            t.alloc_memory_mb,
+            t.memory_mb,
+            count(summary.snapshot.running),
+            count(summary.snapshot.pending)
+        ));
+        if let Some(name) = args["partition"].as_str().filter(|n| !n.is_empty()) {
+            if !summary.partitions.iter().any(|p| p.name == name) {
+                out.push(format!(
+                    "There is no partition named {name} that your account sees."
+                ));
+            } else {
+                out.push(format!(
+                    "Nodes in {name} (name, state, CPUs in use/total, memory in use/total MB, GPUs in use/total):"
+                ));
+                for n in summary
+                    .snapshot
+                    .nodes
+                    .iter()
+                    .filter(|n| n.in_partition(name))
+                {
+                    out.push(format!(
+                        "- {}: {}, CPUs {}/{}, memory {}/{} MB, GPUs {}/{}",
+                        n.name,
+                        n.state,
+                        n.alloc_cpus,
+                        n.cpus,
+                        n.alloc_memory_mb,
+                        n.memory_mb,
+                        n.alloc_gpus,
+                        n.gpus
+                    ));
+                }
+            }
+        }
+        Ok(out.join("\n"))
+    }
+
+    /// The cluster's nodes and the queue's size, asked with this person's token at
+    /// most once every SHARED_FOR for everyone who looks at the cluster.
+    async fn snapshot(&mut self) -> Result<Arc<Snapshot>, String> {
+        let slot = SNAPSHOTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(self.base.to_string())
+            .or_default()
+            .clone();
+        // One look at a time per cluster: whoever waits gets the look just taken.
+        let mut slot = slot.lock().await;
+        if let Some(snapshot) = slot.as_ref().filter(|s| s.at.elapsed() < SHARED_FOR) {
+            return Ok(snapshot.clone());
+        }
+        let nodes = self.call_api(reqwest::Method::GET, "nodes", None).await?;
+        let diag = self
+            .call_api(reqwest::Method::GET, "diag", None)
+            .await
+            .unwrap_or(Value::Null);
+        let snapshot = Arc::new(Snapshot {
+            at: Instant::now(),
+            nodes: nodes["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(Node::read)
+                .collect(),
+            running: num(&diag["statistics"]["jobs_running"]),
+            pending: num(&diag["statistics"]["jobs_pending"]),
+        });
+        *slot = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    /// Each partition the person's account sees, with what its nodes can run now, and
+    /// the same for all of those nodes together. Partitions are asked with the
+    /// person's own token every time, so each person sees only what Slurm shows them,
+    /// and the token is checked even when the nodes come from someone else's look.
+    async fn summary(&mut self) -> Result<Summary, String> {
         let partitions = self
             .call_api(reqwest::Method::GET, "partitions", None)
             .await?;
-        let nodes = self.call_api(reqwest::Method::GET, "nodes", None).await?;
-        let mut out = vec!["Partitions (name, state, nodes, CPUs, max time):".to_string()];
-        for p in partitions["partitions"].as_array().into_iter().flatten() {
-            out.push(format!(
-                "- {}: {}, nodes {}, {} CPUs, max {}",
-                text(&p["name"]),
-                text(&p["partition"]["state"]),
-                text(&p["nodes"]["configured"]),
-                num(&p["cpus"]["total"]).map_or("?".into(), |n| n.to_string()),
-                minutes(&p["maximums"]["time"])
-            ));
+        let snapshot = self.snapshot().await?;
+        let partitions: Vec<Partition> = partitions["partitions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let name = text(&p["name"]);
+                let mut capacity = Capacity::default();
+                for n in snapshot.nodes.iter().filter(|n| n.in_partition(&name)) {
+                    capacity.add(n);
+                }
+                Partition {
+                    state: text(&p["partition"]["state"]),
+                    max_time: minutes(&p["maximums"]["time"]),
+                    name,
+                    capacity,
+                }
+            })
+            .collect();
+        let mut total = Capacity::default();
+        for n in snapshot
+            .nodes
+            .iter()
+            .filter(|n| partitions.iter().any(|p| n.in_partition(&p.name)))
+        {
+            total.add(n);
         }
-        out.push(
-            "Nodes (name, state, CPUs in use/total, memory in use/total MB, partitions):".into(),
-        );
-        for n in nodes["nodes"].as_array().into_iter().flatten() {
-            out.push(format!(
-                "- {}: {}, CPUs {}/{}, memory {}/{} MB, {}",
-                text(&n["name"]),
-                text(&n["state"]),
-                num(&n["alloc_cpus"]).unwrap_or(0),
-                num(&n["cpus"]).unwrap_or(0),
-                num(&n["alloc_memory"]).unwrap_or(0),
-                num(&n["real_memory"]).unwrap_or(0),
-                text(&n["partitions"])
-            ));
-        }
-        Ok(out.join("\n"))
+        Ok(Summary {
+            partitions,
+            total,
+            snapshot,
+        })
     }
 
     /// The person's running and pending jobs, newest first, from the accounting
@@ -563,64 +847,30 @@ impl Client {
 }
 
 impl Client {
-    /// Partitions, nodes, the queue and the person's own jobs, for the Clusters page.
+    /// What each partition can run now, the queue and the person's own jobs, for the
+    /// Clusters page.
     pub async fn status(&mut self) -> Result<Value, String> {
-        let partitions = self
-            .call_api(reqwest::Method::GET, "partitions", None)
-            .await?;
-        let nodes = self.call_api(reqwest::Method::GET, "nodes", None).await?;
-        // The queue's size from the scheduler's statistics, not by listing every job.
-        let diag = self
-            .call_api(reqwest::Method::GET, "diag", None)
-            .await
-            .unwrap_or(Value::Null);
+        let summary = self.summary().await?;
         let mine = self.own_jobs(&ACTIVE).await?;
-        let list = |v: &Value, key: &str| v[key].as_array().cloned().unwrap_or_default();
-        let partitions: Vec<Value> = list(&partitions, "partitions")
+        let mine: Vec<Value> = mine.iter().take(25).map(own_job).collect();
+        let partitions: Vec<Value> = summary
+            .partitions
             .iter()
             .map(|p| {
-                json!({
-                    "name": text(&p["name"]),
-                    "state": text(&p["partition"]["state"]),
-                    "nodes": num(&p["nodes"]["total"]),
-                    "cpus": num(&p["cpus"]["total"]),
-                    "maxTime": minutes(&p["maximums"]["time"]),
-                })
+                let mut v = p.capacity.json();
+                v["name"] = json!(p.name);
+                v["state"] = json!(p.state);
+                v["maxTime"] = json!(p.max_time);
+                v
             })
             .collect();
-        let nodes: Vec<Value> = list(&nodes, "nodes")
-            .iter()
-            .map(|n| {
-                json!({
-                    "name": text(&n["name"]),
-                    "state": text(&n["state"]),
-                    "cpus": num(&n["cpus"]).unwrap_or(0),
-                    "allocCpus": num(&n["alloc_cpus"]).unwrap_or(0),
-                    "memoryMb": num(&n["real_memory"]).unwrap_or(0),
-                    "allocMemoryMb": num(&n["alloc_memory"]).unwrap_or(0),
-                    "partitions": text(&n["partitions"]),
-                })
-            })
-            .collect();
-        let sum = |key: &str| {
-            nodes
-                .iter()
-                .map(|n| n[key].as_i64().unwrap_or(0))
-                .sum::<i64>()
-        };
-        let mine: Vec<Value> = mine.iter().take(25).map(own_job).collect();
         Ok(json!({
             "user": self.user,
             "partitions": partitions,
-            "totals": {
-                "nodes": nodes.len(),
-                "cpus": sum("cpus"), "allocCpus": sum("allocCpus"),
-                "memoryMb": sum("memoryMb"), "allocMemoryMb": sum("allocMemoryMb"),
-            },
-            "nodes": nodes,
+            "totals": summary.total.json(),
             "queue": {
-                "running": num(&diag["statistics"]["jobs_running"]),
-                "pending": num(&diag["statistics"]["jobs_pending"]),
+                "running": summary.snapshot.running,
+                "pending": summary.snapshot.pending,
             },
             "jobs": mine,
         }))
@@ -819,6 +1069,31 @@ mod tests {
         // Job output only reads.
         assert_eq!(tools(true).len(), tools(false).len() + 1);
         assert_eq!(tools(true).iter().filter(|t| !t.read_only).count(), 2);
+    }
+
+    #[test]
+    fn nodes_count_gpus_and_what_can_start_jobs_the_way_sinfo_does() {
+        assert_eq!(gpus("gpu:a100:4(S:0-1)"), 4);
+        assert_eq!(gpus("gpu:h100:2(IDX:0-1),gpu:a30:1(IDX:N/A),shard:8"), 3);
+        assert_eq!(gpus("gpu:a100:0(IDX:N/A)"), 0);
+        assert_eq!(gpus("gpu(S:0,1)"), 1);
+        assert_eq!(gpus(""), 0);
+        let node = |state: Value, alloc: i64| {
+            Node::read(
+                &json!({"name":"n","state":state,"cpus":8,"alloc_cpus":alloc,"real_memory":1000,"alloc_memory":0,"gres":"gpu:a100:2(S:0)","gres_used":"gpu:a100:1(IDX:0)","partitions":["p"]}),
+            )
+        };
+        let mut c = Capacity::default();
+        c.add(&node(json!(["IDLE"]), 0));
+        c.add(&node(json!(["MIXED", "PLANNED"]), 6));
+        c.add(&node(json!(["IDLE", "DRAIN"]), 0));
+        c.add(&node(json!(["DOWN", "NOT_RESPONDING"]), 0));
+        c.add(&node(json!("IDLE+MAINTENANCE"), 0));
+        assert_eq!((c.nodes, c.idle_nodes, c.unusable_nodes), (5, 1, 3));
+        assert_eq!((c.cpus, c.alloc_cpus, c.idle_cpus), (40, 6, 10));
+        assert_eq!((c.gpus, c.alloc_gpus, c.idle_gpus), (10, 5, 2));
+        assert!(node(json!(["IDLE"]), 0).in_partition("p"));
+        assert!(!node(json!(["IDLE"]), 0).in_partition("q"));
     }
 
     /// Runs the job script Chat submits the way Slurm would: its output going to the

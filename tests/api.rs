@@ -994,3 +994,24 @@ async fn metrics_need_the_configured_token(pool: PgPool) {
     assert!(String::from_utf8_lossy(&body).contains("obleth_chat_http_requests_total"));
     task.abort();
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn import_route_takes_another_apps_export_past_the_old_size_limit(pool: PgPool) {
+    let (app, _state, _fake, task) = fixture(pool).await;
+    let (cookie, csrf, _) = login(&app, "test-admin").await;
+    // Larger than the 10 MiB Chat's own exports are held to.
+    let export = json!([{"id": "big", "title": "Big", "meta": {"pad": "x".repeat(12 * 1024 * 1024)},
+        "chat": {"history": {"currentId": "a", "messages": {
+            "u": {"id": "u", "parentId": null, "role": "user", "content": "hello"},
+            "a": {"id": "a", "parentId": "u", "role": "assistant", "content": "hi", "model": "llama3"}}}}}]);
+    let mut request = req("POST", "/api/conversations/import", export, &cookie, &csrf);
+    request
+        .headers_mut()
+        .insert("content-type", "application/octet-stream".parse().unwrap());
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let summary = value(response).await;
+    assert_eq!(summary["source"], "open-webui");
+    assert_eq!(summary["imported"], 1);
+    task.abort();
+}

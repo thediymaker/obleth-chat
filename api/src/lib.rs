@@ -13,6 +13,7 @@ pub mod files;
 pub mod gateway;
 pub mod groups;
 pub mod images;
+pub mod imports;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod mcp;
@@ -146,10 +147,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/api/conversations/{id}/branches", get(branches))
         .route("/api/conversations/bulk", post(bulk))
         .route("/api/conversations/export", post(export))
-        .route(
-            "/api/conversations/import",
-            post(import).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
-        )
+        .route("/api/conversations/import", post(import))
         .route("/api/conversations/{id}/messages", post(send))
         .route("/api/conversations/{id}/stop", post(lifecycle::stop))
         .route(
@@ -436,15 +434,31 @@ async fn export(
     let u = s.auth.require(&headers, true).await?;
     Ok(Json(s.store.export(u.id, &body.ids).await?))
 }
+/// Takes the export file as it is: Chat's own JSON, Open WebUI's JSON, or a ChatGPT
+/// or Claude.ai export zip or its conversations.json. The body is read only after
+/// sign-in is checked, since it may be up to 200 MB.
 async fn import(
     State(s): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<store::ChatArchive>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
+    body: axum::body::Body,
+) -> Result<(StatusCode, Json<store::ImportSummary>), ApiError> {
     let u = s.auth.require(&headers, true).await?;
+    // Waits its turn before reading the body, so waiting uploads hold no memory.
+    let _turn = imports::RUNNING
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let body = axum::body::to_bytes(body, imports::MAX_IMPORT_BYTES)
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Choose an export of 200 MB or less".into(),
+            )
+        })?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({"conversations":s.store.import(u.id,body).await?})),
+        Json(s.store.import_upload(u.id, body).await?),
     ))
 }
 async fn delete(

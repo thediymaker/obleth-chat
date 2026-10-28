@@ -1,4 +1,24 @@
 import { esc, icon, when, btn, badge, empty, errorBox, field, formEnd } from './manage-ui.js';
+
+const MAX_IMPORT_BYTES = 200 * 1024 * 1024;
+const SOURCES = { 'open-webui': 'Open WebUI', chatgpt: 'ChatGPT', claude: 'Claude' };
+const count = (n, one, many = `${one}s`) => `${Number(n).toLocaleString('en-US')} ${n === 1 ? one : many}`;
+const were = n => n === 1 ? 'was' : 'were';
+/** What an import did, in plain sentences. */
+export function importSummary(r) {
+  const from = SOURCES[r.source] ? ` from ${SOURCES[r.source]}` : '';
+  const lines = [];
+  if (r.imported) lines.push(`Imported ${count(r.imported, 'chat')}${from}.`);
+  else if (r.alreadyImported && !r.failed) lines.push(`Nothing new to import${from}. ${r.alreadyImported === 1 ? 'That chat is' : `All ${count(r.alreadyImported, 'chat')} are`} already here.`);
+  else lines.push(`No chats were imported${from}.`);
+  if (r.imported && r.alreadyImported) lines.push(`${count(r.alreadyImported, 'chat')} ${were(r.alreadyImported)} already here.`);
+  if (r.overLimit) lines.push(`${count(r.overLimit, 'older chat')} ${were(r.overLimit)} left out because you can keep up to 1,000 chats. Delete some and import the file again to add them.`);
+  if (r.alternativesLeftOut) lines.push(`${count(r.alternativesLeftOut, 'alternative reply or edit', 'alternative replies or edits')} ${were(r.alternativesLeftOut)} left out.`);
+  if (r.messagesLeftOut) lines.push(`The earliest ${count(r.messagesLeftOut, 'message')} of very long chats ${were(r.messagesLeftOut)} left out.`);
+  if (r.empty) lines.push(`${count(r.empty, 'empty chat')} ${were(r.empty)} skipped.`);
+  if (r.failed) lines.push(`${count(r.failed, 'chat')} could not be imported: ${String(r.error || 'something went wrong').replace(/\.?$/, '.')} Import the same file again to add ${r.failed === 1 ? 'it' : 'them'}.`);
+  return lines;
+}
 export function createHistory({ api, state, render, modal, close, toast, refreshSidebar }) {
   const local = { query: '', archived: 'false', offset: 0, conversations: [], total: 0, hasMore: false, loading: false, error: '', sequence: 0, selected: new Set() };
   async function load() {
@@ -24,7 +44,7 @@ export function createHistory({ api, state, render, modal, close, toast, refresh
     'history-bulk-archive': () => bulk(local.archived === 'true' ? 'unarchive' : 'archive'),
     'history-delete': () => modal(`Delete ${local.selected.size} conversation${local.selected.size === 1 ? '' : 's'}?`, `<p>This permanently deletes the selected conversations and their messages.</p><div class="modal-actions">${btn('Keep conversations', 'close')}${btn('Delete conversations', 'history-confirm-delete', { tone: 'danger' })}</div>`),
     'history-confirm-delete': () => bulk('delete'),
-    'history-import': () => modal('Import conversations', `<form id="history-import-form"><p class="inline-note">Choose an Obleth Chat export. Imported conversations are added to your account as separate copies.</p>${field('history-file', 'Export file', '<input id="history-file" name="history-file" type="file" class="form-control" accept=".json,application/json" required>', 'Maximum 10 MB. Existing conversations are kept.')}${formEnd('Import conversations')}</form>`),
+    'history-import': () => modal('Import conversations', `<form id="history-import-form"><p class="inline-note">Bring your chats over from Chat, Open WebUI, ChatGPT or Claude. They are added to your account, and your existing conversations are kept.</p>${field('history-file', 'Export file', '<input id="history-file" name="history-file" type="file" class="form-control" accept=".json,.zip,application/json,application/zip" required>', 'Open WebUI: Settings, Data Controls, Export Chats. ChatGPT and Claude: the zip from Export data, or the conversations.json file inside it. Up to 200 MB.')}<p class="inline-note" id="history-import-status" role="status" hidden>Importing… A large export can take a few minutes.</p>${formEnd('Import conversations')}</form>`),
   };
   function input(event) {
     if (event.target.id === 'history-select-all') { local.selected = new Set(event.target.checked ? local.conversations.map(c => c.id) : []); render(); }
@@ -32,7 +52,18 @@ export function createHistory({ api, state, render, modal, close, toast, refresh
   }
   async function submit(form) {
     if (form.id === 'history-search-form') { local.query = form.elements.query.value.trim(); local.archived = form.elements.archived.value; local.offset = 0; await load(); }
-    if (form.id === 'history-import-form') { const sequence = local.sequence, file = form.elements['history-file'].files[0]; if (!file) return; if (file.size > 10 * 1024 * 1024) throw new Error('Choose an export smaller than 10 MB.'); let body; try { const text = await file.text(); if (sequence !== local.sequence) return; body = JSON.parse(text); } catch { throw new Error('This file is not valid JSON. Choose an Obleth Chat export.'); } const r = await api.request('/api/conversations/import', { method: 'POST', body }); close(); await refreshSidebar(); await load(); toast(`Imported ${r.conversations?.length || 0} conversations`); }
+    if (form.id === 'history-import-form') {
+      const sequence = local.sequence, file = form.elements['history-file'].files[0]; if (!file) return;
+      if (file.size > MAX_IMPORT_BYTES) throw new Error(/\.zip$/i.test(file.name) ? 'This export is larger than 200 MB. Unzip it and choose the conversations.json file inside.' : 'Choose an export of 200 MB or less.');
+      // The file goes as it is, only to this Chat; the server reads its format.
+      const status = form.querySelector?.('#history-import-status'); if (status) status.hidden = false;
+      let r;
+      try { r = await api.request('/api/conversations/import', { method: 'POST', raw: file, contentType: file.type || 'application/octet-stream' }); }
+      finally { if (status) status.hidden = true; }
+      if (sequence !== local.sequence) return;
+      close(); await refreshSidebar(); await load();
+      modal('Import finished', `${importSummary(r).map(line => `<p>${esc(line)}</p>`).join('')}<div class="modal-actions">${btn('Done', 'close', { tone: 'primary' })}</div>`);
+    }
   }
   function clear() { local.sequence++; Object.assign(local, { query: '', archived: 'false', offset: 0, conversations: [], total: 0, hasMore: false, error: '', loading: false, selected: new Set() }); }
   return { view, load, clear, actions, submit, input, update, exportChats };

@@ -24,6 +24,7 @@ import { createResearch } from './research.js';
 import { createTurn, duration, gist, latest, steerPlaceholder } from './turn.js';
 import { generationValues } from './generation.js';
 import { canonicalSettingsHash, settingsTabs } from './settings-navigation.js';
+import { feedbackButtons, feedbackForm, feedbackDetails, nextRating } from './feedback.js';
 import { conversationBusy, isPendingMessage, mergeProgress, renderSignature, responseVersion, suggestionsPending } from './conversation-state.js';
 export { markdown } from './markdown.js';
 
@@ -332,7 +333,7 @@ export async function startConnected(capabilities) {
   function message(m, index) {
     if (m.role === 'user' && String(m.content || '').startsWith(NUDGE)) return `<article class="message auto-nudge" data-message="${index}"><p>${icon('refresh')}<span><strong>Auto mode</strong> ${esc(m.content.slice(NUDGE.length))}</span></p></article>`;
     const key = m.id || `pending-${index}`, details = turnDetails(m, key);
-    const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' && !state.shared ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${m.id && !state.streaming && !state.switchingVersion && !state.shared ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
+    const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' && !state.shared ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${feedbackButtons(m, index, state.shared)}${m.id && !state.streaming && !state.switchingVersion && !state.shared ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
     const status = m.role === 'assistant' ? `<span class="response-meta ${isPendingMessage(m) ? 'is-generating' : ''} ${m.status === 'error' ? 'is-error' : ''}" ${isPendingMessage(m) ? 'role="status"' : ''}>${esc(responseStatus(m))}</span>` : '';
     return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(state.shared ? owner().initials : initials())}</span>${state.shared ? esc(owner().name) : 'You'}` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) && !state.shared ? turnView.steerForm(m) : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? loadNotice(m, index) + knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion && !state.shared ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
   }
@@ -777,6 +778,21 @@ export async function startConnected(capabilities) {
       }
     }
   }
+  /** Rates a reply up or down, or clears the rating when its thumb is clicked again. Returns the new rating. */
+  async function rate(index, clicked) {
+    const m = state.active?.messages?.[index];
+    if (!m?.id) return 0;
+    const next = nextRating(m.feedback?.rating || 0, clicked);
+    if (!next) { await api.request(`${chatPath(state.active.id)}/messages/${encodeURIComponent(m.id)}/feedback`, { method: 'DELETE' }); m.feedback = null; render(); return 0; }
+    await saveRating(index, { rating: next });
+    return next;
+  }
+  async function saveRating(index, body) {
+    const c = state.active, m = c?.messages?.[index];
+    if (!m?.id) return;
+    const r = await api.request(`${chatPath(c.id)}/messages/${encodeURIComponent(m.id)}/feedback`, { method: 'PUT', body });
+    m.feedback = r.feedback; render();
+  }
   async function forkAndSend(messageId, mode, content) {
     const c = state.active;
     if (!c || state.streaming || state.switchingVersion) return;
@@ -977,6 +993,8 @@ export async function startConnected(capabilities) {
       panel.hidden = !open; el.setAttribute('aria-expanded', String(open));
     },
     'copy-message': el => copy(state.active.messages[Number(el.dataset.index)].content),
+    'rate-up': el => rate(Number(el.dataset.index), 1),
+    'rate-down': async el => { const index = Number(el.dataset.index); if (await rate(index, -1) === -1) modal('What went wrong?', feedbackForm(state.active.messages[index], index)); },
     'copy-code': el => copy($('code', el.closest('.code-block')).textContent),
     'save-code': el => { const block = el.closest('.code-block'), body = $('code', block).textContent, language = $('.code-label span', block)?.textContent || ''; saveFromChat(el, { kind: 'code', body, language: language === 'text' ? '' : language, title: (body.match(/(?:def|function|fn|func|class|const|let)\s+([A-Za-z_$][\w$]*)/) || [])[1] || body.split('\n').find(l => l.trim())?.trim().slice(0, 80) || 'Code' }); },
     'save-message': el => { const m = state.active.messages[Number(el.dataset.index)]; saveFromChat(el, { kind: 'excerpt', body: m.content, title: state.active.title }); },
@@ -1075,6 +1093,7 @@ export async function startConnected(capabilities) {
     if (submit) submit.disabled = true;
     try {
       if (form.id.startsWith('history-')) { await historyView.submit(form); return; }
+      if (form.id === 'feedback-form') { await saveRating(Number(form.dataset.index), feedbackDetails(form)); close(); toast('Thanks for the feedback'); return; }
       if (form.id === 'edit-message-form') { await forkAndSend(form.dataset.id, 'edit', $('#edited-message').value); return; }
       if (form.id.startsWith('personal-')) { await personal.submit(form); return; }
       if (form.id.startsWith('knowledge-')) { await knowledgeView.submit(form); return; }

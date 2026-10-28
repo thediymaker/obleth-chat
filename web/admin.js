@@ -1,17 +1,18 @@
 import { adminLocation } from './settings-navigation.js';
+import { reasonLabel } from './feedback.js';
 import { esc, icon, displayName, when, badge, btn, empty, errorBox, field, textInput, checkbox, formEnd, getValue, isChecked, titleCase } from './manage-ui.js';
 
-const tabs = [['users','users','People'],['groups','grid','Groups'],['models','cube','Models'],['usage','chart','Usage & limits'],['audit','clock','Activity'],['system','server','System']];
+const tabs = [['users','users','People'],['groups','grid','Groups'],['models','cube','Models'],['usage','chart','Usage & limits'],['feedback','thumbsUp','Feedback'],['audit','clock','Activity'],['system','server','System']];
 const generation = [['systemPrompt','System instructions'],['reasoningEffort','Thinking effort'],['temperature','Temperature'],['topP','Top P'],['maxTokens','Output token limit']];
 export function createAdmin({ api, state, capabilities, render, modal, close, toast, onIdentityChanged, onCatalogChanged }) {
-  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, sequence: 0, pending: null };
+  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, feedback: null, feedbackDays: 30, sequence: 0, pending: null };
   const isAdmin = () => state.user?.role === 'admin';
   const tabFromHash = () => tabs.some(t => t[0] === adminLocation(location.hash).section) ? adminLocation(location.hash).section : 'users';
   const userById = id => local.users.find(u => u.id === id);
   const modelById = id => local.models.find(m => m.id === id);
   const groupId = () => adminLocation(location.hash).groupId;
   const gatewayUrl = () => capabilities.adminGatewayUrl || capabilities.gatewayAdminUrl || '';
-  function clear() { local.sequence++; Object.assign(local, { users: [], groups: [], models: [], events: [], members: [], usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, memberCursor: null, group: null, query: '', error: '', loading: false, pending: null }); }
+  function clear() { local.sequence++; Object.assign(local, { users: [], groups: [], models: [], events: [], members: [], usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, feedback: null, memberCursor: null, group: null, query: '', error: '', loading: false, pending: null }); }
   async function load({ append = false, query = local.query } = {}) {
     if (!isAdmin()) { clear(); return; }
     const sequence = ++local.sequence; local.tab = tabFromHash(); local.loading = true; local.error = ''; local.query = query; render();
@@ -28,6 +29,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
         local.models = results[0].models || []; local.groups = results[1].groups || [];
       }
       if (local.tab === 'usage') { const [u, l] = await Promise.all([api.request(`/api/admin/usage${query ? '?q=' + encodeURIComponent(query) : ''}`), api.request('/api/admin/limits')]); if (sequence !== local.sequence) return; local.usage = u.users || []; local.hasMore = !!u.hasMore; local.limits = l; }
+      if (local.tab === 'feedback') { const r = await api.request(`/api/admin/feedback?days=${local.feedbackDays}`); if (sequence !== local.sequence) return; local.feedback = r; }
       if (local.tab === 'system') {
         local.retention = null; local.embedding = null; local.health = null; local.decisions = null;
         const [r, e, h, d] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null, api.request('/api/admin/health').catch(() => null), api.request('/api/admin/decisions').catch(err => ({ error: err.message }))]); if (sequence !== local.sequence) return;
@@ -66,6 +68,19 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
   }
   function audit() {
     return `<div class="management-toolbar"><p class="inline-note">Administrative changes and account security events. Conversation content stays private.</p>${btn('Refresh', 'admin-refresh', { icon: 'refresh', tone: 'small' })}</div>${local.events.length ? `<div class="audit-list">${local.events.map(e => `<article class="audit-event"><span class="audit-dot"></span><div class="grow"><div class="spread"><h3>${esc(titleCase(e.action))}</h3><time>${esc(when(e.createdAt))}</time></div><p>${esc(e.actorName || 'System')} <span>· ${esc(e.targetType || 'account')}${e.targetId ? ' · ' + esc(e.targetId) : ''}</span></p>${e.metadata && Object.keys(e.metadata).length ? `<details><summary>Details</summary><pre>${esc(JSON.stringify(e.metadata, null, 2))}</pre></details>` : ''}</div></article>`).join('')}</div>${local.nextCursor ? `<div class="load-more">${btn(local.loading ? 'Loading…' : 'Load older activity', 'admin-more-audit', { tone: 'small', attrs: local.loading ? 'disabled' : '' })}</div>` : ''}` : empty('No activity yet', 'Account and administration events will appear here.')}`;
+  }
+  // What people thought of replies, per model. No conversation or person is shown: the
+  // server sends only ratings, reasons, comments, models and dates.
+  function feedback() {
+    const f = local.feedback || { models: [], reasons: [], comments: [] }, days = local.feedbackDays;
+    const percent = share => `${Math.round(share * 100)}%`;
+    const periods = [7, 30, 90].map(d => `<button type="button" class="filter-chip ${d === days ? 'active' : ''}" data-action="admin-feedback-days" data-days="${d}" aria-pressed="${d === days}">${d} days</button>`).join('');
+    const toolbar = `<div class="management-toolbar"><div class="row" role="group" aria-label="Period">${periods}</div>${f.models.length ? `<a class="btn small" href="/api/admin/feedback/models.csv?days=${days}" download>${icon('download')}Download CSV</a>` : ''}</div><p class="inline-note management-note">Thumbs up and down people gave replies in the last ${days} days. You see the model, the rating, the reasons and any comment, never the conversation or who gave it.</p>`;
+    if (!f.models.length) return toolbar + empty('No feedback yet', `Nobody rated a reply in the last ${days} days.`);
+    const table = `<div class="table-wrap"><table class="management-table"><thead><tr><th>Model</th><th>Up</th><th>Down</th><th>Share up</th></tr></thead><tbody>${f.models.map(m => `<tr><td><strong>${esc(m.model)}</strong></td><td>${Number(m.up).toLocaleString()}</td><td>${Number(m.down).toLocaleString()}</td><td>${percent(m.upShare)}</td></tr>`).join('')}</tbody></table></div>`;
+    const reasons = `<section class="card feedback-card"><h2>Why replies got a thumbs down</h2>${f.reasons.length ? `<ul class="feedback-counts">${f.reasons.map(r => `<li><span>${esc(reasonLabel(r.reason))}</span><strong>${Number(r.count).toLocaleString()}</strong></li>`).join('')}</ul>` : '<p class="inline-note">No reasons given.</p>'}</section>`;
+    const comments = `<section class="card feedback-card"><h2>Recent comments</h2>${f.comments.length ? `<div class="audit-list">${f.comments.map(c => `<article class="audit-event"><span class="audit-dot"></span><div class="grow"><p>${esc(c.comment)}</p><small class="faint">${esc([c.model, c.rating > 0 ? 'Thumbs up' : 'Thumbs down', ...(c.reasons || []).map(reasonLabel), when(c.at)].join(' · '))}</small></div></article>`).join('')}</div>` : '<p class="inline-note">No comments.</p>'}</section>`;
+    return `${toolbar}${table}<div class="feedback-grid">${reasons}${comments}</div>`;
   }
   function retentionCard() {
     const r = local.retention;
@@ -125,7 +140,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
   function view() {
     if (!isAdmin()) return `<div class="settings-access-denied">${empty('Administrator access required', 'Your personal account settings are available below.', '<a class="btn" href="#settings">Open Settings</a>')}</div>`;
     local.tab = tabFromHash();
-    return shell(local.loading && !({ users: local.users.length, groups: local.groups.length || local.group, models: local.models.length, audit: local.events.length, usage: local.limits, system: true }[local.tab]) ? '' : ({ users: people, groups, models, audit, usage, system }[local.tab])());
+    return shell(local.loading && !({ users: local.users.length, groups: local.groups.length || local.group, models: local.models.length, audit: local.events.length, usage: local.limits, feedback: local.feedback, system: true }[local.tab]) ? '' : ({ users: people, groups, models, audit, usage, feedback, system }[local.tab])());
   }
   // Any change to what makes the vectors re-indexes everything, so it is confirmed first.
   async function saveEmbedding(body, next) {
@@ -151,6 +166,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     modal(`Configure ${m.name || m.id}`, `<form id="admin-model-form" data-id="${esc(m.id)}"><p class="inline-note model-id">${esc(m.id)}</p>${field('model-name', 'Display name', textInput('model-name', m.name || m.id, 'maxlength="128" required'))}${field('model-description', 'Description', `<textarea class="form-control" id="model-description" name="model-description" maxlength="2048" rows="2">${esc(m.description || '')}</textarea>`)}<div class="form-columns">${field('model-tags', 'Tags', textInput('model-tags', (m.tags || []).join(', '), 'maxlength="512"'), 'Separate tags with commas.')}${field('model-order', 'Sort order', textInput('model-order', m.order || 0, 'type="number" step="1" min="-10000" max="10000" required'))}</div>${checkbox('model-enabled', 'Enabled', m.enabled !== false, 'Allow requests to this model.')}${checkbox('model-published', 'Published', m.published !== false, 'Show this model in the account catalog.')}${checkbox('model-default', 'Default model', !!m.isDefault, 'Auto routes to this model when the account can access it.')}${checkbox('model-worker', 'Worker', !!m.worker, 'Other models can hand tasks to this one, several at once, to explore a workspace and report back. Choose fast, efficient models.')}${field('model-visibility', 'Visible to', `<select id="model-visibility" name="model-visibility" class="form-control"><option value="all" ${m.visibility === 'all' ? 'selected' : ''}>Everyone</option><option value="admins" ${m.visibility === 'admins' ? 'selected' : ''}>Administrators</option><option value="groups" ${m.visibility === 'groups' ? 'selected' : ''}>Selected groups</option></select>`)}<div class="model-visibility-groups" ${m.visibility === 'groups' ? '' : 'hidden'}><p class="inline-note">Choose the groups that can use this model.</p>${local.groups.map(g => checkbox(`model-group-${g.id}`, g.name, (m.groupIds || []).includes(g.id))).join('') || '<p class="inline-note">Create a group before selecting group-only access.</p>'}</div><div class="form-section-heading"><h3>Generation defaults</h3><p class="inline-note">Uncheck a control to lock it to the model default.</p></div>${field('model-systemPrompt', 'System instructions', `<textarea class="form-control" name="model-systemPrompt" id="model-systemPrompt" rows="3" maxlength="8192">${esc(d.systemPrompt || '')}</textarea>`)}<div class="form-columns">${field('model-reasoningEffort', 'Thinking effort', `<select class="form-control" id="model-reasoningEffort" name="model-reasoningEffort">${['none','low','medium','high'].map(v => `<option ${d.reasoningEffort === v ? 'selected' : ''}>${v}</option>`).join('')}</select>`)}${field('model-temperature', 'Temperature', textInput('model-temperature', d.temperature ?? .7, 'type="number" min="0" max="2" step="0.1" required'))}${field('model-topP', 'Top P', textInput('model-topP', d.topP ?? 1, 'type="number" min="0.01" max="1" step="0.01" required'))}${field('model-maxTokens', 'Output token limit', textInput('model-maxTokens', d.maxTokens || '', 'type="number" min="0" max="262144" placeholder="The model’s own limit"'))}</div><div class="override-list">${generation.map(([key,label]) => checkbox(`allow-${key}`, `Users may change ${label.toLowerCase()}`, (m.allowedOverrides || []).includes(key))).join('')}</div>${formEnd('Save model policy')}</form>`);
   }
   const actions = {
+    'admin-feedback-days': el => { local.feedbackDays = Number(el.dataset.days) || 30; return load(); },
     'admin-refresh': () => load(), 'admin-edit-limits': () => limitsDialog(), 'admin-user-limits': el => limitsDialog(el.dataset.id),
     'admin-remove-limits': async el => { await api.request(`/api/admin/limits/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' }); close(); await load(); toast('Account uses workspace limits'); }, 'admin-more-audit': () => load({ append: true }),
     'admin-create-user': () => accountDialog(), 'admin-invite-user': () => accountDialog(true),

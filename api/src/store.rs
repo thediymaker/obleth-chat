@@ -120,6 +120,10 @@ pub struct Message {
     pub follow_ups: Value,
     pub follow_ups_status: String,
     pub activity: Value,
+    /// The owner's own rating of a reply; never shown to someone the chat is shared with.
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<crate::feedback::Feedback>,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow)]
@@ -875,6 +879,7 @@ impl Store {
             follow_ups: json!([]),
             follow_ups_status: "idle".into(),
             activity: json!([]),
+            feedback: None,
         });
         attached.insert(user_id, files);
         Ok(Turn {
@@ -1135,7 +1140,13 @@ async fn read_conversation(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(ApiError::not_found)?;
-    let messages = read_messages(tx, owner, id).await?;
+    let mut messages = read_messages(tx, owner, id).await?;
+    let ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
+    for rating in crate::feedback::for_messages(tx, owner, &ids).await? {
+        if let Some(m) = messages.iter_mut().find(|m| m.id == rating.message_id) {
+            m.feedback = Some(rating);
+        }
+    }
     let (active_generation_id,generation_cancel_requested,share_scope):(Option<Uuid>,bool,String)=sqlx::query_as("SELECT active_generation,generation_cancel_requested,share_scope FROM conversations WHERE id=$1 AND owner_id=$2").bind(id).bind(owner).fetch_one(&mut **tx).await?;
     Ok(Conversation {
         id: row.id,
@@ -1397,6 +1408,7 @@ mod replay_tests {
             follow_ups: json!([]),
             follow_ups_status: "idle".into(),
             activity,
+            feedback: None,
         }
     }
 

@@ -17,6 +17,8 @@ const paths = {
   pin: '<path d="m15 3 6 6-3 1-4 4-1 5-3-3-6 6m3-9 5-1 4-4Z"/>',
   archive: '<rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v13h14V8M9 12h6"/>',
   bookmark: '<path d="M6 3h12v18l-6-4-6 4Z"/>',
+  thumbsUp: '<path d="M7 10v11m0-11 4-8a3 3 0 0 1 3 3v4h5.4a2 2 0 0 1 2 2.4l-1.5 8A2 2 0 0 1 17.9 21H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/>',
+  thumbsDown: '<path d="M17 14V3m0 11-4 8a3 3 0 0 1-3-3v-4H4.6a2 2 0 0 1-2-2.4l1.5-8A2 2 0 0 1 6.1 3H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1Z"/>',
   gauge: '<path d="M4 19a10 10 0 1 1 16 0M12 5v2M5.6 8.6 7 10m10-1-5 5M4 14h2m12 0h2"/><circle cx="12" cy="14" r="2"/>',
   orbit: '<circle cx="12" cy="12" r="3"/><ellipse cx="12" cy="12" rx="10" ry="5" transform="rotate(-38 12 12)"/><path d="m18 3 1 1M5 19l1 1"/>',
   edit: '<path d="m14 5 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14Zm0 0v6h6"/>',

@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Changed**
+
+- **Model load tints the model's icon** instead of adding a dot: amber while the model is busy, red while it is full, faint while it has no servers. Load reads "37 running on 32 slots", which stays true while servers being removed finish their requests and the slots already count only the rest.
+
 ## v0.9.0
 
 Research reads papers by section, Knowledge cites the section a passage comes from, long pastes become attachments, and Chat shows how busy each model is.

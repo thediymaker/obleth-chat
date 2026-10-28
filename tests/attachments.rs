@@ -1062,5 +1062,8 @@ async fn upload_bodies_are_read_only_after_sign_in_and_within_the_limit(pool: Pg
     let response = app.clone().oneshot(post(Some(&user.cookie))).await.unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert!(String::from_utf8_lossy(&body).contains("20.0 MB or less"), "{body:?}");
+    assert!(
+        String::from_utf8_lossy(&body).contains("20.0 MB or less"),
+        "{body:?}"
+    );
 }

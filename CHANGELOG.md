@@ -2,6 +2,27 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.9.4
+
+Slurm clusters can bring a job's output back to Chat, Job details reads jobs the scheduler has forgotten, and the chat suggests research for long tuning work.
+
+**New**
+
+- **Bring job output back.** An option on each Slurm cluster, offered when Chat has file storage (`OBLETH_CHAT_S3_*`) and off until an administrator turns it on. Each job Chat submits on such a cluster gets a link, valid for 7 days, that can upload one object to Chat's storage. The job runs the person's script unchanged; as it ends, including when it is cancelled or reaches its time limit, it uploads the last 1 MiB of its output file with `curl` and keeps the script's exit code. The output file follows the job's `--output` pattern (`%j`, `%x`, `%u`, `%A`, `%a`, `%N`), or Slurm's default `slurm-%j.out`. The new read-only **Job output** tool shows the end of what the job printed, and says when the job hasn't ended yet or ended without its output arriving. Output is kept for 30 days, and goes sooner with its cluster or person. The cluster's compute nodes must reach the storage and have `curl`.
+
+**Changed**
+
+- **The chat suggests research for tuning work.** When research is offered, the chat is asked to suggest a research project before tuning something, sweeping parameters or leaving a run going overnight, instead of doing that work in a plain chat.
+- **The Steer box's example fits the reply.** The placeholder follows what the reply is doing, such as "ask for 4 hours, not 1" while it works on a Slurm cluster or "add tests before you finish" in a workspace.
+
+**Fixed**
+
+- **Job details lost finished jobs.** The scheduler forgets a job a few minutes after it ends, so Job details then failed for it. It now reads such a job from Slurm accounting: its state, exit code, run time and output file.
+
+**Upgrading**
+
+- Migration 050 adds `slurm_job_outputs`.
+
 ## v0.9.3
 
 Slurm clusters read only the person's own jobs, Chat caps what it reads from any cluster, and research runs that end as Chat checks on them are no longer marked lost.

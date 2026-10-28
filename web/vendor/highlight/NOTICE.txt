@@ -1,0 +1,23 @@
+highlight.js 11.12.0
+https://github.com/highlightjs/highlight.js/releases/tag/11.12.0
+https://highlightjs.org/
+
+highlight-11.12.0.min.js is es/highlight.min.js from the published npm package
+@highlightjs/cdn-assets@11.12.0: the core with its common languages. languages/
+holds that package's es/languages grammars for languages the common set leaves
+out; Chat loads one only when a code block names it. The only changes are the
+renamed core file and removed sourceMappingURL comments. Colors come from
+Chat's own stylesheet, not a highlight.js theme.
+No CDN requests or npm install are required by Obleth Chat at build/runtime.
+
+Upstream tarball:
+https://registry.npmjs.org/@highlightjs/cdn-assets/-/cdn-assets-11.12.0.tgz
+SHA-512 integrity:
+sha512-KvOKXODaiFmId9xaq3xc5xCL66wVLUuOngDbO9B/kewbFTqdGbn2nJxNhN3H5R1cgDTVj6R8vH0zgiNDEGjpDw==
+
+highlight.js is BSD-3-Clause licensed; see LICENSE. It has no bundled
+dependencies.
+
+Update by downloading a reviewed tagged npm release with npm pack
+--ignore-scripts, verifying the registry integrity, and replacing these files
+and the license. Run tests/markdown.test.mjs after updates.

@@ -1,0 +1,25 @@
+Mermaid 12.2.0
+https://github.com/mermaid-js/mermaid/releases/tag/mermaid%4012.2.0
+https://mermaid.js.org/
+
+mermaid.esm.min.mjs and chunks/mermaid.esm.min/ are the minified ESM
+distribution from the published npm package mermaid@12.2.0, unchanged except
+for removed sourceMappingURL comments. The entry loads the chunk for each
+diagram type only when a diagram of that type is drawn.
+No CDN requests or npm install are required by Obleth Chat at build/runtime.
+
+Upstream tarball:
+https://registry.npmjs.org/mermaid/-/mermaid-12.2.0.tgz
+SHA-512 integrity:
+sha512-w7nr/SFrLO7BaVTs3dQTvYSV6nYSBj0Yy9DjBhsIJtAcHqRzXSq4Pg32ujHZ/AdWsAMNEvvhbm5dt9E2tOiHzw==
+
+Mermaid is MIT licensed; see LICENSE. The license notices of the dependencies
+bundled into the distribution are in DEPENDENCY-LICENSES.txt. Among them,
+chunks/mermaid.esm.min/elk-*.mjs is elkjs, under the Eclipse Public License
+2.0; it is loaded only for diagrams that ask for the ELK layout, and its source
+is available at https://github.com/kieler/elkjs. DOMPurify is under the Apache
+License 2.0 or the Mozilla Public License 2.0.
+
+Update by downloading a reviewed tagged npm release with npm pack
+--ignore-scripts, verifying the registry integrity, and replacing the entry,
+all chunks and the license notices. Run tests/markdown.test.mjs after updates.

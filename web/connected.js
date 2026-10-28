@@ -4,6 +4,7 @@ import { themeControl } from './theme-control.js';
 import { authScreen } from './sign-in.js';
 import { ApiClient, readEvents } from './client.js';
 import { markdown } from './markdown.js';
+import { watchDrawings, toggleDrawing, downloadDrawing } from './rendered.js';
 import { createSettings } from './settings.js';
 import { createAdmin } from './admin.js';
 import { createHistory } from './history.js';
@@ -981,6 +982,8 @@ export async function startConnected(capabilities) {
     },
     'copy-message': el => copy(state.active.messages[Number(el.dataset.index)].content),
     'copy-code': el => copy($('code', el.closest('.code-block')).textContent),
+    'toggle-drawing': el => toggleDrawing(el),
+    'download-drawing': el => downloadDrawing(el),
     'save-code': el => { const block = el.closest('.code-block'), body = $('code', block).textContent, language = $('.code-label span', block)?.textContent || ''; saveFromChat(el, { kind: 'code', body, language: language === 'text' ? '' : language, title: (body.match(/(?:def|function|fn|func|class|const|let)\s+([A-Za-z_$][\w$]*)/) || [])[1] || body.split('\n').find(l => l.trim())?.trim().slice(0, 80) || 'Code' }); },
     'save-message': el => { const m = state.active.messages[Number(el.dataset.index)]; saveFromChat(el, { kind: 'excerpt', body: m.content, title: state.active.title }); },
     'selection-save': () => { const pick = selection.pick; hideSelection(); if (pick) saveFromChat(pick.anchor, { kind: 'excerpt', body: pick.text, title: pick.text.split(/[.\n]/)[0].slice(0, 80) }); },
@@ -1053,6 +1056,8 @@ export async function startConnected(capabilities) {
     menu.style.top = `${Math.max(8, rect.top - menu.offsetHeight - 6)}px`;
     $('button', menu)?.focus({ preventScroll: true });
   }
+  // Math, highlighting and drawings fill in as replies arrive.
+  watchDrawings($('#app'));
   async function copy(text) {
     try { await navigator.clipboard.writeText(text); toast('Copied to clipboard'); }
     catch { modal('Copy text', `<textarea class="form-control" rows="8" readonly>${esc(text)}</textarea>`); }

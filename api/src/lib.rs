@@ -190,6 +190,9 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
 static CSP: std::sync::OnceLock<HeaderValue> = std::sync::OnceLock::new();
 /// Chat may frame its workspace previews, which live on their own origins, and hand
 /// a preview its entry ticket.
+/// What the web app draws from a reply, so models use it when it helps.
+const FORMATS_PROMPT: &str = "Chat shows your reply as Markdown and draws: math in $...$ or $$...$$ (KaTeX, with \\ce{} for chemistry); diagrams and charts in ```mermaid blocks (flowchart, sequence, class, state, ER, gantt, pie, xychart for bar and line charts, sankey, mindmap, timeline); molecules in ```smiles blocks, one SMILES per line, optionally followed by a name; drawings in ```svg blocks; and data in ```csv blocks, shown as a table. Use one when it shows something more clearly than prose.";
+
 fn content_security_policy(sandboxes: Option<&sandbox::Sandboxes>) -> HeaderValue {
     let previews = sandboxes.and_then(|sb| {
         let c = sb.config();
@@ -1436,6 +1439,7 @@ async fn run_generation(
                 .as_str()
                 .is_some_and(|c| c.contains(store::RECORD))
     });
+    preamble.push(FORMATS_PROMPT.into());
     if recalled {
         preamble.push(format!("Earlier replies in this conversation may end with a bracketed note that starts with \"{}\". Chat adds it so you remember which tools ran; you did not write it and the person does not see it. Never write such a note yourself: your tools report their own results.", store::RECORD));
     }

@@ -1,0 +1,24 @@
+KaTeX 0.19.0
+https://github.com/KaTeX/KaTeX/releases/tag/v0.19.0
+https://katex.org/
+
+Files from the published npm package katex@0.19.0 (dist/): the ESM build
+katex.mjs, the mhchem extension contrib/mhchem.mjs (chemistry with \ce and \pu),
+katex.min.css and the woff2 fonts. The stylesheet also names woff and ttf
+fonts, which are not shipped: every browser Chat supports uses the woff2 files
+listed first. The only change is removing sourceMappingURL comments.
+No CDN requests or npm install are required by Obleth Chat at build/runtime.
+
+Upstream tarball:
+https://registry.npmjs.org/katex/-/katex-0.19.0.tgz
+SHA-512 integrity:
+sha512-v6Tznz3zJ7u3niRCoDTsumM2+HA2XXcCu+WAacCeHD2z3p9A9Ks987o5FzfTGBN0e8A0vjEgIDvLbICrXpdw/Q==
+
+KaTeX is MIT licensed; see LICENSE. contrib/mhchem.mjs is adapted from the
+MathJax mhchem extension (Copyright (c) 2011-2015 The MathJax Consortium,
+Copyright (c) 2015-2018 Martin Hensel), Apache License 2.0, as stated in its
+header. The browser build has no bundled dependencies.
+
+Update by downloading a reviewed tagged npm release with npm pack
+--ignore-scripts, verifying the registry integrity, and replacing these files
+and the license. Run tests/markdown.test.mjs after updates.

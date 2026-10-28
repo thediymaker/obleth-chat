@@ -28,6 +28,10 @@ impl Outputs {
         connection: Uuid,
         args: &Value,
     ) -> Result<(bool, String), String> {
+        if !slurm::output_followed(args) {
+            let (text, _) = client.submit(args, None).await?;
+            return Ok((true, format!("{text} Its output will not come back to Chat: Chat follows an output file name only when it is a plain path whose patterns are %j, %x, %u, %A, %a or %N.")));
+        }
         let key = format!(
             "job-output/{}/{connection}/{}",
             self.user,

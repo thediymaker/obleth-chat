@@ -629,6 +629,12 @@ impl Client {
 
 /// Slurm's own default output file, in the working directory.
 const DEFAULT_OUTPUT: &str = "slurm-%j.out";
+
+/// Whether Chat can follow the job's output file pattern, so the job can send its
+/// output back.
+pub(super) fn output_followed(args: &Value) -> bool {
+    output_path(args["output"].as_str().unwrap_or(DEFAULT_OUTPUT)).is_some()
+}
 /// The most of a job's output that comes back: its last 1 MiB.
 pub const RETURNED_OUTPUT: usize = 1024 * 1024;
 

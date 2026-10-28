@@ -2,6 +2,50 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.10.0
+
+Replies draw math, code, diagrams, charts, molecules and tables. A message can carry PDF, Word, PowerPoint and Excel files. Replies can be rated, chats can be temporary, and chat history comes over from Open WebUI, ChatGPT and Claude.
+
+**New**
+
+- **Replies draw more than Markdown.**
+  - Math with KaTeX, including mhchem's `\ce{}` and `\pu{}`: `$…$` and `\(…\)` inline; `$$…$$`, `\[…\]` and ```` ```math ```` blocks for display. Prices such as "$5 and $10" stay text.
+  - Highlighted code, with extra grammars loaded by name: Julia, Fortran, MATLAB, LaTeX, Dockerfile, Stata, SAS, Verilog and more.
+  - Mermaid diagrams and charts in ```` ```mermaid ```` blocks.
+  - Molecules from SMILES in ```` ```smiles ```` blocks.
+  - SVG drawings in ```` ```svg ```` blocks, shown as images.
+  - Tables from ```` ```csv ```` and ```` ```tsv ```` blocks.
+  - A drawn block appears once its fence closes and keeps a toolbar to switch to its code, download, copy and save. The libraries ship with Chat and load the first time a reply needs them, and the content security policy is unchanged. Every chat's instructions gain one line telling the model what Chat draws.
+- **Documents in a message.** PDF, Word, PowerPoint and Excel files (`.pdf`, `.docx`, `.pptx`, `.xlsx`, up to 20 MiB) attach like other files. Their text is read once, on upload, with a marker where each page, slide or sheet starts.
+  - A document whose text fits in 75 KB is sent whole. With Knowledge set up, a longer one is indexed for that chat and searched, with citations; without Knowledge it is refused with a message that names the limit.
+  - Scanned PDFs and the older `.doc`, `.ppt` and `.xls` formats are refused with a message. Knowledge collections now take PowerPoint and Excel files too.
+- **Rate a reply.** Thumbs up or down on finished replies in your own chats; thumbs down offers reasons and a comment. Administrators see ratings per model, the reasons and recent comments over 7, 30 or 90 days in **Settings › Administration › Feedback**, with a CSV download. They never see the chat, the reply or who rated it.
+- **Temporary chats.** A toggle beside the model picker on a new chat. A temporary chat stays out of your chats and search. It can't be shared, exported, branched, moved into a project or saved to the Library. It is deleted when you leave it, and by the server after 23 quiet hours.
+- **Import from other apps.** **All chats › Import** reads Open WebUI's chat export, and ChatGPT's and Claude's data exports (the zip or its `conversations.json`), up to 200 MB and 5,000 conversations.
+  - Each chat keeps the path its app was showing, and edits and regenerated replies become versions. Each reply keeps the name of the model that wrote it.
+  - Images and files become a placeholder line.
+  - Importing the same file again adds only what's new.
+
+**Changed**
+
+- **Scrolling up while a reply is written stays put.** The page used to snap back to the end whenever you were within 160 px of it. Now it stops following as soon as you scroll up, by wheel, touch, keyboard or the scrollbar, and follows again once you scroll back to the end, send a message or open a chat.
+- **Large requests are bounded per server.** An upload's body is read only after sign-in, eight at a time, up to about 28 MB for a document. History imports run one at a time, from reading the upload to saving it.
+
+**Fixed**
+
+- **A live shared chat scrolled to its end on every refresh.** It measured an element that doesn't scroll, so it always counted as being at the end. It now follows the same rule as your own chats.
+- **A Slurm job whose output file name Chat can't follow said its output would come back.** On a cluster set to bring output back, a pattern such as `%4j` ran the job without the upload step but still pointed the model at Job output. The job now runs as asked and the result says its output won't come back.
+
+**Upgrading**
+
+- Migrations 051 to 054:
+  - 051 adds `message_feedback`.
+  - 052 adds `conversations.temporary` and `left_at`.
+  - 053 adds `document` attachments: `extracted_text`, `parts` and `searched`; `knowledge_collections.attachment_id` and `conversation_id`; and makes `knowledge_documents.object_key` nullable.
+  - 054 adds `conversations.import_key`.
+- Behind a reverse proxy, allow request bodies of about 28 MB for `POST /api/attachments` and 200 MB for `POST /api/conversations/import`, with a timeout long enough to save a large import.
+- Documents are read with `pdftotext` and `unzip`, which the published image has.
+
 ## v0.9.4
 
 Slurm clusters can bring a job's output back to Chat, Job details reads jobs the scheduler has forgotten, and the chat suggests research for long tuning work.

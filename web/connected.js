@@ -21,7 +21,7 @@ import { createSharing } from './sharing.js';
 import { createCode } from './code.js';
 import { createQuestions } from './questions.js';
 import { createResearch } from './research.js';
-import { createTurn, duration, gist, latest } from './turn.js';
+import { createTurn, duration, gist, latest, steerPlaceholder } from './turn.js';
 import { generationValues } from './generation.js';
 import { canonicalSettingsHash, settingsTabs } from './settings-navigation.js';
 import { conversationBusy, isPendingMessage, mergeProgress, renderSignature, responseVersion, suggestionsPending } from './conversation-state.js';
@@ -334,7 +334,7 @@ export async function startConnected(capabilities) {
     const key = m.id || `pending-${index}`, details = turnDetails(m, key);
     const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' && !state.shared ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${m.id && !state.streaming && !state.switchingVersion && !state.shared ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
     const status = m.role === 'assistant' ? `<span class="response-meta ${isPendingMessage(m) ? 'is-generating' : ''} ${m.status === 'error' ? 'is-error' : ''}" ${isPendingMessage(m) ? 'role="status"' : ''}>${esc(responseStatus(m))}</span>` : '';
-    return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(state.shared ? owner().initials : initials())}</span>${state.shared ? esc(owner().name) : 'You'}` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) && !state.shared ? turnView.steerForm() : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? loadNotice(m, index) + knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion && !state.shared ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
+    return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(state.shared ? owner().initials : initials())}</span>${state.shared ? esc(owner().name) : 'You'}` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) && !state.shared ? turnView.steerForm(m) : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? loadNotice(m, index) + knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion && !state.shared ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
   }
   /** Under a reply that waits for a free slot, or that the gateway gave up on: why, and a model to switch to. */
   function loadNotice(m, index) {
@@ -373,7 +373,10 @@ export async function startConnected(capabilities) {
         article._turn = signature;
       }
       const form = $('.steer-form', article);
-      if (turnView.live(m) && !form && !state.shared) $('.turn-work', article).insertAdjacentHTML('afterend', turnView.steerForm());
+      if (turnView.live(m) && !form && !state.shared) $('.turn-work', article).insertAdjacentHTML('afterend', turnView.steerForm(m));
+      // The example follows the work as the reply moves on.
+      const steer = form && $('#steer-text', form), hint = steer && steerPlaceholder(m);
+      if (steer && steer.placeholder !== hint) steer.placeholder = hint;
       if (!turnView.live(m) && form) form.remove();
     }
     let panel = turnView.applies(m) ? null : $('.thinking-panel', article);

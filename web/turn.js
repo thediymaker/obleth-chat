@@ -29,6 +29,18 @@ export function duration(ms) {
   const s = Math.round(ms / 1000);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
 }
+/** An example for the Steer box that fits the reply's work, most specific first. */
+export function steerExample(m) {
+  const steps = m ? workOf(m).steps : [];
+  const has = test => steps.some(test);
+  if (has(e => RESEARCH.has(e.tool))) return 'try a larger batch size next';
+  if (has(e => e.service === 'slurm')) return 'ask for 4 hours, not 1';
+  if (has(e => e.service === 'kubernetes')) return 'use 2 replicas instead';
+  if (has(BROWSING)) return 'check the pricing page too';
+  if (has(e => FILE_TOOLS.has(e.tool) || /^(run_command|run_in_terminal|start_server|list_files|read_file)$/.test(e.tool || ''))) return 'add tests before you finish';
+  return 'keep it short';
+}
+export const steerPlaceholder = m => `Add a note without stopping, like “${steerExample(m)}”`;
 const clock = ms => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 /** The first sentence of a thought, without markdown, for its one-line row. */
@@ -397,8 +409,8 @@ export function createTurn({ state, markdown, chatPath, route, previews = () => 
     const notes = (queued.get(conversation()) || []).filter(n => !work.entries.some(e => kindOf(e) === 'note' && e.summary === n));
     return `<section class="run-card" aria-label="Working"><div class="run-head"><span class="run-pulse${waiting[0] ? ' is-ask' : ''}" aria-hidden="true"></span><div class="grow"><strong>${esc(now)}</strong><small><span data-since="${new Date(began).toISOString()}">${esc(clock(Date.now() - began))}</span> · ${plural(s.steps, 'step')}${s.files.length ? ` · ${plural(s.files.length, 'file')} changed` : ''}</small></div>${target(lastStep, draft)}</div>${phases.length > 1 ? `<ol class="run-rail" aria-label="Stages">${railHtml}</ol>` : ''}${pane}<div class="run-thought">${icon('orbit')}<span class="run-thought-text${ticker ? '' : ' is-empty'}">${esc(ticker || 'No thinking yet')}</span></div><div class="run-section"><div class="spread"><span class="eyebrow">Recent steps</span><button type="button" class="tr-link" data-action="trace-toggle" data-id="${esc(m.id || 'live')}" aria-expanded="${isOpen}">${isOpen ? 'Hide steps' : `Show all ${s.steps}`}</button></div><ol class="run-steps">${recent.map(recentRow).join('')}</ol></div>${notes.map(n => `<p class="run-queued">${icon('clock')}<span><span class="run-queued-label">Queued for the next step</span>${esc(n)}</span></p>`).join('')}</section>${isOpen ? trace(m, work) : ''}`;
   }
-  function steerForm() {
-    return `<form class="steer-form" id="steer-form" data-conversation="${esc(conversation() || '')}"><label for="steer-text">Steer</label><input id="steer-text" name="steer-text" autocomplete="off" maxlength="2000" placeholder="Add a note without stopping, like “make the mane darker”" value="${esc(steerDraft)}"><button class="btn small primary" type="submit">Send at next step</button></form>`;
+  function steerForm(m) {
+    return `<form class="steer-form" id="steer-form" data-conversation="${esc(conversation() || '')}"><label for="steer-text">Steer</label><input id="steer-text" name="steer-text" autocomplete="off" maxlength="2000" placeholder="${esc(steerPlaceholder(m))}" value="${esc(steerDraft)}"><button class="btn small primary" type="submit">Send at next step</button></form>`;
   }
 
   // ---- When it is done ----

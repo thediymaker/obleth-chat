@@ -44,7 +44,7 @@ Replies draw math, code, diagrams, charts, molecules and tables. A message can c
   - 053 adds `document` attachments: `extracted_text`, `parts` and `searched`; `knowledge_collections.attachment_id` and `conversation_id`; and makes `knowledge_documents.object_key` nullable.
   - 054 adds `conversations.import_key`.
 - Behind a reverse proxy, allow request bodies of about 28 MB for `POST /api/attachments` and 200 MB for `POST /api/conversations/import`, with a timeout long enough to save a large import.
-- Documents are read with `pdftotext` and `unzip`, which the published image has.
+- Documents are read with `pdftotext` and `unzip`, which the published image has. Each one is written to `/tmp` while it is read, so `/tmp` must hold several 20 MiB files at once. A 16 MiB in-memory `/tmp`, as the example deployments had, refuses larger documents and Knowledge files. `deploy/k8s.yaml` now gives it 1 GiB on disk and `deploy/compose.connected.yaml` 512 MiB.
 
 ## v0.9.4
 

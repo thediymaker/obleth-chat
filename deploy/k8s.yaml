@@ -216,10 +216,11 @@ spec:
           secret:
             secretName: obleth-chat-gateway-signing-key
             defaultMode: 0440
+        # Documents and Knowledge files are written here while they are read, up to
+        # eight uploads of 20 MiB at once, so it is on disk rather than in memory.
         - name: tmp
           emptyDir:
-            medium: Memory
-            sizeLimit: 16Mi
+            sizeLimit: 1Gi
 ---
 apiVersion: v1
 kind: Service

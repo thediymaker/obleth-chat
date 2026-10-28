@@ -70,7 +70,8 @@ services:
       - "host.docker.internal:host-gateway"
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=16m
+      # Documents and Knowledge files are written here while they are read.
+      - /tmp:rw,noexec,nosuid,size=512m
     cap_drop:
       - ALL
     security_opt:

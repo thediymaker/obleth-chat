@@ -29,6 +29,9 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+mod office;
+use office::docx;
+
 const ORIGIN: &str = "http://localhost:8085";
 const PASSWORD: &str = "fixture-only-password-42";
 
@@ -2598,4 +2601,269 @@ async fn pdf_bookmarks_become_sections(pool: PgPool) {
     assert!(stored[0].2.contains("four hundred nodes"), "{stored:?}");
     assert!(!stored[0].2.contains("ninety days"), "{stored:?}");
     assert!(stored[1].2.contains("ninety days"), "{stored:?}");
+}
+
+fn attachment(name: &str, bytes: &[u8]) -> Value {
+    use base64::Engine;
+    json!({"name":name,"mimeType":"application/octet-stream","dataBase64":base64::engine::general_purpose::STANDARD.encode(bytes)})
+}
+
+/// Sends a message with files and returns the request the model got.
+async fn send_with(
+    f: &Fixture,
+    session: &Session,
+    content: &str,
+    files: &[&str],
+) -> (String, Value) {
+    let (_, chat) = call(
+        &f.app,
+        "POST",
+        "/api/conversations",
+        json!({"title":"Documents","model":"fixture-model"}),
+        session,
+    )
+    .await;
+    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
+    let before = f.chats.lock().unwrap().len();
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            Body::from(
+                json!({"content":content,"model":"fixture-model","attachmentIds":files})
+                    .to_string(),
+            ),
+            "application/json",
+            session,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    let request = f.chats.lock().unwrap()[before].clone();
+    (id, request)
+}
+
+fn user_text(request: &Value) -> String {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_str())
+        .unwrap()
+        .to_owned()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn documents_in_a_chat_are_read_whole_with_their_markers(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let word = docx(&[
+        "Budget plan for the new lab.".into(),
+        "Rent is 1200 a month &amp; power is extra.".into(),
+    ]);
+    let (status, uploaded) = call(
+        &f.app,
+        "POST",
+        "/api/attachments",
+        attachment("plan.docx", &word),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{uploaded}");
+    assert_eq!(uploaded["kind"], "document");
+    assert_eq!(
+        uploaded["mimeType"],
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    assert!(uploaded.get("searched").is_none(), "{uploaded}");
+    let mut files = vec![uploaded["id"].as_str().unwrap().to_owned()];
+    let with_pdf = pdf_available();
+    if with_pdf {
+        let lecture = pdf(&[
+            "Lecture seven covers the second law of thermodynamics. Heat flows from hot to cold on its own. This page introduces reservoirs",
+            "Refrigerators move heat from a cold reservoir to a hot one by doing work. Their coefficient of performance can exceed one",
+        ]);
+        let (status, uploaded) = call(
+            &f.app,
+            "POST",
+            "/api/attachments",
+            attachment("Lecture 07.pdf", &lecture),
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{uploaded}");
+        assert_eq!(uploaded["parts"], 2);
+        files.push(uploaded["id"].as_str().unwrap().to_owned());
+        // A PDF of pictures has nothing to read.
+        let (status, refused) = call(
+            &f.app,
+            "POST",
+            "/api/attachments",
+            attachment("scan.pdf", &pdf(&["", ""])),
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refused["error"], "This PDF has no text to read; it may be a scan.",
+            "{refused}"
+        );
+    }
+    // Neither is a file Chat can read as its extension says.
+    let (status, refused) = call(
+        &f.app,
+        "POST",
+        "/api/attachments",
+        attachment("notes.docx", b"plain text, not a Word file"),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("This Word file could not be read"),
+        "{refused}"
+    );
+
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let (id, request) = send_with(&f, &admin, "What do these say?", &refs).await;
+    let text = user_text(&request);
+    assert!(
+        text.starts_with("What do these say?")
+            && text.contains("Attached file \"plan.docx\":\nBudget plan for the new lab.\n\nRent is 1200 a month & power is extra.\nEnd of attached file."),
+        "{text}"
+    );
+    if with_pdf {
+        assert!(
+            text.contains("Attached file \"Lecture 07.pdf\" (2 pages):\n[Page 1]\nLecture seven")
+                && text.contains("[Page 2]\nRefrigerators move heat"),
+            "{text}"
+        );
+    }
+    // The chat shows the files, and the original downloads as it was uploaded.
+    let (_, detail) = call(
+        &f.app,
+        "GET",
+        &format!("/api/conversations/{id}"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    let shown = &detail["conversation"]["messages"][0]["attachments"];
+    assert_eq!(shown[0]["name"], "plan.docx", "{detail}");
+    assert_eq!(shown[0]["kind"], "document");
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/api/attachments/{}", files[0]),
+            Body::empty(),
+            "application/json",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment;"));
+    assert_eq!(
+        &response.into_body().collect().await.unwrap().to_bytes()[..],
+        &word[..]
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_long_document_is_searched_by_its_chat_and_goes_with_it(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    // Well past what a model reads whole, with one paragraph worth finding.
+    let mut paragraphs: Vec<String> = (0..1000)
+        .map(|n| format!("Paragraph {n} describes routine maintenance of the cooling loop, pumps and valves in the plant room."))
+        .collect();
+    paragraphs.insert(
+        600,
+        "The Carnot engine efficiency limit is one minus the ratio of the cold to the hot reservoir temperature.".into(),
+    );
+    let report = docx(&paragraphs);
+    let (status, uploaded) = call(
+        &f.app,
+        "POST",
+        "/api/attachments",
+        attachment("plant report.docx", &report),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{uploaded}");
+    assert_eq!(uploaded["searched"], true);
+    let file = uploaded["id"].as_str().unwrap().to_owned();
+    // Its collection is the chat's, not one of the person's own.
+    let (_, listed) = call(
+        &f.app,
+        "GET",
+        "/api/knowledge/collections",
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert!(
+        listed["collections"].as_array().unwrap().is_empty(),
+        "{listed}"
+    );
+
+    let (id, request) = send_with(&f, &admin, "What is the Carnot limit?", &[&file]).await;
+    let text = user_text(&request);
+    assert!(
+        text.contains("Attached file \"plant report.docx\" is too long to read whole")
+            && !text.contains("Paragraph 3 describes"),
+        "{text}"
+    );
+    let system = request["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("# From the person's documents")
+            && system.contains("plant report.docx")
+            && system.contains("The Carnot engine efficiency limit is one minus"),
+        "{system}"
+    );
+    assert!(request["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["function"]["name"] == "search_knowledge"));
+    let collections = |pool: PgPool| {
+        let file: uuid::Uuid = file.parse().unwrap();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM knowledge_collections WHERE attachment_id=$1",
+            )
+            .bind(file)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(collections(pool.clone()).await, 1);
+    // The same file in a second chat is indexed again for that chat.
+    let (other, _) = send_with(&f, &admin, "Summarise the report", &[&file]).await;
+    assert_eq!(collections(pool.clone()).await, 2);
+    for chat in [id, other] {
+        let (status, _) = call(
+            &f.app,
+            "DELETE",
+            &format!("/api/conversations/{chat}"),
+            Value::Null,
+            &admin,
+        )
+        .await;
+        assert!(status.is_success());
+    }
+    assert_eq!(collections(pool.clone()).await, 0);
 }

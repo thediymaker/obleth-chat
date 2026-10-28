@@ -201,7 +201,7 @@ async fn attachment(
     let data = s
         .store
         .files
-        .read(data, key, crate::attachments::MAX_IMAGE_BYTES)
+        .read(data, key, crate::attachments::MAX_FILE_BYTES)
         .await?;
     crate::attachments::file_response(&name, &mime, data)
 }

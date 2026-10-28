@@ -407,10 +407,10 @@ impl Store {
                     key,
                     crate::files::attachment_key(viewer, new),
                     &mime,
-                    attachments::MAX_IMAGE_BYTES,
+                    attachments::MAX_FILE_BYTES,
                 )
                 .await?;
-            sqlx::query("INSERT INTO attachments (id, owner_id, name, mime_type, kind, size, data, object_key, sha256) SELECT $1, $2, name, mime_type, kind, size, $4, $5, sha256 FROM attachments WHERE id = $3")
+            sqlx::query("INSERT INTO attachments (id, owner_id, name, mime_type, kind, size, data, object_key, sha256, extracted_text, parts, searched) SELECT $1, $2, name, mime_type, kind, size, $4, $5, sha256, extracted_text, parts, searched FROM attachments WHERE id = $3")
                 .bind(new)
                 .bind(viewer)
                 .bind(old)
@@ -763,7 +763,7 @@ impl Store {
         let mut text_bytes = 0usize;
         let mut image_bytes = 0usize;
         for file in context_files {
-            if file.meta.kind == "text" {
+            if file.meta.kind != "image" {
                 text_bytes += file.context_bytes();
             } else {
                 image_bytes += file.context_bytes();

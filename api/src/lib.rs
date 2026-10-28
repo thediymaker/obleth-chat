@@ -1251,6 +1251,49 @@ pub(crate) async fn launch_workspace(
     Ok((running, sandboxes))
 }
 
+/// Longest a turn waits for its long documents to finish indexing before it searches
+/// what is ready. Indexing starts on upload, so this is rarely needed.
+const ATTACHED_WAIT: Duration = Duration::from_secs(120);
+
+/// The collections of long documents in the turn's messages, once their indexing has
+/// finished or ATTACHED_WAIT has passed. The turn's lease is renewed meanwhile.
+async fn attached_documents(
+    s: &AppState,
+    k: &knowledge::Knowledge,
+    user: &Identity,
+    id: Uuid,
+    turn: &Turn,
+) -> Vec<Uuid> {
+    let mut files: Vec<Uuid> = turn
+        .attachments
+        .values()
+        .flatten()
+        .filter(|f| f.searched())
+        .map(|f| f.meta.id)
+        .collect();
+    files.sort();
+    files.dedup();
+    if files.is_empty() {
+        return vec![];
+    }
+    let collections = match k.attached(user.id, id, &files).await {
+        Ok(collections) => collections,
+        Err(error) => {
+            tracing::warn!("could not find a chat's attached documents: {}", error.1);
+            return vec![];
+        }
+    };
+    let started = Instant::now();
+    while started.elapsed() < ATTACHED_WAIT && k.indexing(&collections).await {
+        let lease = lifecycle::heartbeat(&s.store.pool, user.id, id, turn.generation_id).await;
+        if !matches!(lease, Ok(None)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    collections
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_generation(
     s: AppState,
@@ -1271,6 +1314,7 @@ async fn run_generation(
     // Passages from the chat's knowledge collections, found before the model starts.
     let mut knowledge_turn = match &s.knowledge {
         Some(k) => {
+            let attached = attached_documents(&s, k, &user, id, &turn).await;
             let messages: Vec<(String, String)> = turn
                 .messages
                 .iter()
@@ -1282,6 +1326,7 @@ async fn run_generation(
                 &gateway,
                 &user,
                 id,
+                &attached,
                 &messages,
                 tools,
                 library,
@@ -1357,7 +1402,7 @@ async fn run_generation(
         }
         let files = turn.attachments.get(&m.id);
         let content = if let Some(files) = files.filter(|files| !files.is_empty()) {
-            if files.iter().all(|f| f.meta.kind == "text") {
+            if files.iter().all(|f| f.meta.kind != "image") {
                 let mut text = m.content.clone();
                 for file in files {
                     if let Some(context) = file.text_context() {

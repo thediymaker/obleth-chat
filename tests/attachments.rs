@@ -21,6 +21,8 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+mod office;
+
 const ORIGIN: &str = "http://localhost:8085";
 const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQq8AAAAASUVORK5CYII=";
@@ -961,4 +963,74 @@ async fn store_counts_replayed_files_and_rejects_foreign_ids_atomically(pool: Pg
     .await
     .unwrap();
     assert_eq!(pending, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn documents_too_long_to_read_whole_are_refused_without_knowledge(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let document = |name: &str, bytes: &[u8]| json!({"name":name,"mimeType":"application/octet-stream","dataBase64":STANDARD.encode(bytes)});
+    let unzip = obleth_chat::knowledge::extract::Tools::from_env().unzip;
+    if std::process::Command::new(&unzip)
+        .arg("-v")
+        .output()
+        .is_ok()
+    {
+        let long: Vec<String> = (0..1200)
+            .map(|n| format!("Line {n} of a long report about pumps, valves and the cooling loop."))
+            .collect();
+        let (status, refused) = call(
+            &app,
+            &alice,
+            "POST",
+            "/api/attachments",
+            document("report.docx", &office::docx(&long)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("This Word file has ")
+                && message.ends_with(
+                    "of text, and Chat can read up to 75 KB of a document in a conversation. Attach a shorter part of it."
+                ),
+            "{message}"
+        );
+        // A short one is read whole and kept with its text.
+        let id = uploaded(
+            &app,
+            &alice,
+            document("memo.docx", &office::docx(&["Short memo.".into()])),
+        )
+        .await;
+        let (text, searched): (Option<String>, bool) =
+            sqlx::query_as("SELECT extracted_text, searched FROM attachments WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((text.as_deref(), searched), (Some("Short memo."), false));
+    }
+    let (status, refused) = call(
+        &app,
+        &alice,
+        "POST",
+        "/api/attachments",
+        document("old.doc", b"\xd0\xcf\x11\xe0"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("save this file as .docx, .pptx or .xlsx"));
+    let (status, _) = call(
+        &app,
+        &alice,
+        "POST",
+        "/api/attachments",
+        document("big.pdf", &vec![b'%'; attachments::MAX_DOCUMENT_BYTES + 1]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

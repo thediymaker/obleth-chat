@@ -45,11 +45,15 @@ export function createClusters({ api, route, render, connections }) {
 
   function slurm(s) {
     const t = s.totals || {};
-    const tiles = `<div class="cluster-stats">${meter('CPUs in use', t.allocCpus, t.cpus, `${number(t.allocCpus)} / ${number(t.cpus)}`)}${meter('Memory in use', t.allocMemoryMb, t.memoryMb, `${gib(t.allocMemoryMb || 0)} / ${gib(t.memoryMb || 0)}`)}${stat('Nodes', number(t.nodes), `${(s.partitions || []).length} partition${(s.partitions || []).length === 1 ? '' : 's'}`)}${stat('Queue', `${number(s.queue?.running)} running`, `${number(s.queue?.pending)} pending`)}</div>`;
+    const parts = s.partitions || [];
+    const gpus = t.gpus > 0;
+    const idle = (n, all) => `${number(n)} <small>of ${number(all)}</small>`;
+    const nodeNote = [`${number(t.idleNodes)} idle`, t.unavailableNodes ? `${number(t.unavailableNodes)} unavailable` : ''].filter(Boolean).join(' · ');
+    const tiles = `<div class="cluster-stats">${meter('CPUs in use', t.allocCpus, t.cpus, `${number(t.allocCpus)} / ${number(t.cpus)}`)}${gpus ? meter('GPUs in use', t.allocGpus, t.gpus, `${number(t.allocGpus)} / ${number(t.gpus)}`) : ''}${meter('Memory in use', t.allocMemoryMb, t.memoryMb, `${gib(t.allocMemoryMb || 0)} / ${gib(t.memoryMb || 0)}`)}${stat('Nodes', number(t.nodes), nodeNote)}${stat('Queue', `${number(s.queue?.running)} running`, `${number(s.queue?.pending)} pending`)}</div>`;
     const jobs = table(['Job', 'State', 'Partition', 'Time', 'Nodes or reason'], (s.jobs || []).map(j => [`<strong>${esc(j.id)}</strong><small>${esc(j.name)}</small>`, state(j.state), esc(j.partition), `${esc(j.elapsed)} <small>of ${esc(j.timeLimit)}</small>`, esc(j.nodes || j.reason || '–')]), 'No running or pending jobs of yours.');
-    const partitions = table(['Partition', 'State', 'Nodes', 'CPUs', 'Max time'], (s.partitions || []).map(p => [`<strong>${esc(p.name)}</strong>`, state(p.state), number(p.nodes), number(p.cpus), esc(p.maxTime)]), 'No partitions.');
-    const nodes = table(['Node', 'State', 'CPUs in use', 'Memory in use', 'Partitions'], (s.nodes || []).map(n => [`<strong>${esc(n.name)}</strong>`, state(n.state), `${number(n.allocCpus)} / ${number(n.cpus)}`, `${gib(n.allocMemoryMb)} / ${gib(n.memoryMb)}`, esc(n.partitions)]), 'No nodes.');
-    return `${tiles}${section(`Your jobs as ${s.user}`, jobs, (s.jobs || []).length)}${section('Partitions', partitions)}${section('Nodes', nodes, (s.nodes || []).length)}`;
+    const partitions = table(['Partition', 'State', 'Idle nodes', 'Idle CPUs', ...(gpus ? ['Idle GPUs'] : []), 'Max time'], parts.map(p => [`<strong>${esc(p.name)}</strong>`, state(p.state), idle(p.idleNodes, p.nodes), idle(p.idleCpus, p.cpus), ...(gpus ? [p.gpus ? idle(p.idleGpus, p.gpus) : '–'] : []), esc(p.maxTime)]), 'No partitions.');
+    const note = parts.length ? '<p class="inline-note">Idle means free to start a job now. Nodes that are down, drained or in maintenance never count as idle.</p>' : '';
+    return `${tiles}${section(`Your jobs as ${s.user}`, jobs, (s.jobs || []).length)}${section('Partitions', partitions + note, parts.length)}`;
   }
 
   const QUOTA = { 'requests.cpu': 'CPU requested', cpu: 'CPU requested', 'requests.memory': 'Memory requested', memory: 'Memory requested', pods: 'Pod quota', 'limits.cpu': 'CPU limits', 'limits.memory': 'Memory limits', 'requests.storage': 'Storage', persistentvolumeclaims: 'Volumes' };

@@ -2,6 +2,18 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.9.2
+
+Slurm clusters work with slurmrestd v0.0.43 to v0.0.45, and a cluster can set its REST API version.
+
+**Fixed**
+
+- **Slurm clusters on newer slurmrestd.** Chat looked only for REST API v0.0.40 to v0.0.42, so a slurmrestd that has dropped those answered every call with "does not offer the Slurm REST API v0.0.40 or newer". Chat now looks for v0.0.45 down to v0.0.40 and uses the newest one the server answers.
+
+**New**
+
+- **REST API version on a Slurm cluster.** Optional, such as `v0.0.46`. When set, Chat uses only that version, so a newer slurmrestd works without a Chat release; empty keeps finding the newest. A version the server doesn't offer is refused when the cluster or a person's token is saved.
+
 ## v0.9.1
 
 Model load tints the model's own icon instead of adding a dot.

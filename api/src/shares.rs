@@ -105,6 +105,9 @@ async fn set_sharing(
     let user = s.auth.require(&headers, true).await?;
     let pool = &s.store.pool;
     let current = owned(pool, &user, id).await?;
+    if body.scope != "none" && crate::store::is_temporary(pool, user.id, id).await? {
+        return Err(ApiError::bad("A temporary chat can't be shared"));
+    }
     let group = match body.scope.as_str() {
         "none" | "signed_in" => None,
         "group" => {

@@ -1,7 +1,7 @@
 //! Optional retention, disabled until an administrator explicitly sets a policy.
 //! Every cleanup is bounded, serialized across replicas, and uses the same owner
 //! row locks as chat/file writes. An active writer is skipped rather than blocked.
-use crate::{error::ApiError, AppState};
+use crate::{error::ApiError, store::Store, AppState};
 use axum::{extract::State, http::HeaderMap, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -163,6 +163,20 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
     sqlx::query("INSERT INTO audit_events(id,action,target_type,metadata)VALUES($1,'retention.cleanup','site',$2)").bind(Uuid::new_v4()).bind(result).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Some(report))
+}
+/// Deletes temporary chats that were left or went quiet, every minute; see
+/// Store::sweep_temporary. Replicas may sweep at once: each deletion re-checks under
+/// the owner's lock.
+pub async fn temporary_worker(store: Store, shutdown: CancellationToken) {
+    let mut timer = tokio::time::interval(Duration::from_secs(60));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! { _=shutdown.cancelled()=>break, _=timer.tick()=>{} }
+        tokio::select! {
+            _=shutdown.cancelled()=>break,
+            result=store.sweep_temporary()=>if result.is_err() { tracing::warn!("Temporary chat cleanup failed; it will retry in a minute"); }
+        }
+    }
 }
 pub async fn worker(pool: PgPool, shutdown: CancellationToken) {
     let mut timer = tokio::time::interval(Duration::from_secs(3600));

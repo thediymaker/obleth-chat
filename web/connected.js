@@ -24,6 +24,7 @@ import { createResearch } from './research.js';
 import { createTurn, duration, gist, latest, steerPlaceholder } from './turn.js';
 import { generationValues } from './generation.js';
 import { canonicalSettingsHash, settingsTabs } from './settings-navigation.js';
+import { temporaryToggle, temporaryNote, chatMenuItems, leftTemporary } from './temporary.js';
 import { feedbackButtons, feedbackForm, feedbackDetails, nextRating } from './feedback.js';
 import { conversationBusy, isPendingMessage, mergeProgress, renderSignature, responseVersion, suggestionsPending } from './conversation-state.js';
 export { markdown } from './markdown.js';
@@ -55,9 +56,11 @@ export async function startConnected(capabilities) {
     active: null, loadingChat: false, streaming: false, streamController: null, streamChatId: null,
     context: true, compact: false, users: null, busy: false, loginError: '', loginNotice: '', shared: null,
     systemPrompt: '', temperature: 0.7, topP: 1, maxTokens: 0, reasoningEffort: 'medium', preferences: null, preferenceOverrides: {}, presets: [],
-    workspaceDraft: false, browserDraft: false, openActivity: new Set(),
+    workspaceDraft: false, browserDraft: false, temporaryDraft: false, openActivity: new Set(),
   };
   let toastTimer, loadSequence = 0, identityEpoch = 0, menuAnchor = null, sharedSignature = '';
+  // The temporary chat on screen, deleted once the person leaves it.
+  let temporaryOpen = null;
   let effortSaveQueue = Promise.resolve(), effortSequence = 0;
   const operations = new Map(), revisions = new Map(), watches = new Map(), versionSelections = new Map();
   let operationSequence = 0;
@@ -148,7 +151,7 @@ export async function startConnected(capabilities) {
     for (const op of operations.values()) op.controller?.abort();
     operations.clear(); revisions.clear(); versionSelections.clear();
     for (const timer of watches.values()) clearTimeout(timer); watches.clear();
-    Object.assign(state, { user: null, usage: null, chats: [], models: [], model: '', active: null, shared: null, users: null, draft: '', streaming: false, streamChatId: null, error: '', chatError: '', catalogError: '', systemPrompt: '', reasoningEffort: 'medium', temperature: 0.7, topP: 1, maxTokens: 0, compact: false, context: true, preferences: null, preferenceOverrides: {}, presets: [], workspaceDraft: false, browserDraft: false });
+    Object.assign(state, { user: null, usage: null, chats: [], models: [], model: '', active: null, shared: null, users: null, draft: '', streaming: false, streamChatId: null, error: '', chatError: '', catalogError: '', systemPrompt: '', reasoningEffort: 'medium', temperature: 0.7, topP: 1, maxTokens: 0, compact: false, context: true, preferences: null, preferenceOverrides: {}, presets: [], workspaceDraft: false, browserDraft: false, temporaryDraft: false });
     state.openActivity.clear(); workspace.reset(); browserView.reset();
     document.body.classList.remove('collapsed', 'sidebar-open');
     delete capabilities.adminGatewayUrl; delete capabilities.gatewayAdminUrl;
@@ -241,7 +244,7 @@ export async function startConnected(capabilities) {
     // What the model can use sits in one dock; on ones show their names while there is room.
     const dock = `${workspace.toggleButton()}${browserView.toggleButton()}${connectionsView.composerButton()}`;
     const knowledge = route().id ? '' : knowledgeView.pill(false);
-    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${codeView.composerChip()}${knowledge ? `<div class="composer-chips">${knowledge}</div>` : ''}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="${PROMPT_LIMIT}" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar(knowledgeView.enabled())}${dock ? `<div class="dock" role="group" aria-label="What the model can use">${dock}</div>` : ''}</div><span class="prompt-count" id="prompt-count" title="Longer text is attached as a file when you paste it">${promptCount(state.draft.length)}</span>${engineButton(available)}${sendButton(op, available)}</div></form><div class="composer-hint">${esc(hint)}</div>`;
+    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${codeView.composerChip()}${knowledge ? `<div class="composer-chips">${knowledge}</div>` : ''}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="${PROMPT_LIMIT}" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar(knowledgeView.enabled())}${dock ? `<div class="dock" role="group" aria-label="What the model can use">${dock}</div>` : ''}</div><span class="prompt-count" id="prompt-count" title="Longer text is attached as a file when you paste it">${promptCount(state.draft.length)}</span>${home && !projectsView.hasDraft() ? temporaryToggle(state.temporaryDraft) : ''}${engineButton(available)}${sendButton(op, available)}</div></form><div class="composer-hint">${esc(hint)}</div>`;
   }
   /** One pill for the model and its thinking effort; it opens the model list with effort and the other parameters. */
   function engineButton(available) {
@@ -271,7 +274,7 @@ export async function startConnected(capabilities) {
     return `<div class="send-wrap ${level}">${ring}<button class="send-btn" type="${state.streaming ? 'button' : 'submit'}" ${state.streaming ? 'data-action="stop"' : ''} ${(state.streaming ? op?.stopRequested : state.switchingVersion || !available || attachments.busy()) ? 'disabled' : ''} aria-label="${state.streaming ? 'Stop response' : 'Send message'}" aria-describedby="context-card">${icon(state.streaming ? 'stop' : 'arrow')}</button>${card}</div>`;
   }
   function home() {
-    return `<div class="home"><div class="home-heading">${branding.home.eyebrow ? `<div class="greeting-mark">${brandIcon('greeting')}${brandCopy(branding.home.eyebrow)}</div>` : ''}${branding.home.title ? `<h1>${brandCopy(branding.home.title)}</h1>` : ''}${branding.home.description ? `<p>${brandCopy(branding.home.description)}</p>` : ''}</div>${alert(state.catalogError, 'refresh')}${composer(true)}<div class="shortcuts">${[...(workspace.enabled() ? [['terminal', 'Build an app', 'Describe it, then watch it run in a live preview.', 'Build me a site for ', true], ['branch', 'Explore a repo', 'Get a tour of a codebase, or a list of its issues.', 'Explain this codebase to me: ', true]] : [['code', 'Build something', 'Go from a question to working code.', 'Help me plan a small coding project. Start by asking what I want to build.']]), ['chat', 'Think it through', 'Find a fresh way into a tricky problem.', 'Help me think through a problem. Ask me what I am working on.'], ...(workspace.enabled() ? [] : [['book', 'Learn something', 'Make a complex idea feel approachable.', 'Help me learn something new. Ask what topic interests me.']])].map(([i, title, copy, prompt, space]) => `<button class="shortcut" data-action="starter" data-prompt="${esc(prompt)}" ${space ? 'data-workspace="1"' : ''}>${icon(i)}<h3>${title}</h3><p>${copy}</p></button>`).join('')}</div><section class="home-recents"><div class="section-title"><h2>${state.chats.length ? 'Pick up where you left off' : 'A fresh start, just for you.'}</h2>${state.chats.length ? btn('All conversations', 'search', { icon: 'right', tone: 'ghost small', type: '' }) : ''}</div><div class="resume-list">${state.chats.slice(0, 4).map(c => `<a class="resume-row" href="#chat/${encodeURIComponent(c.id)}">${icon('chat')}<div class="grow"><div class="resume-title">${esc(c.title)}</div><div class="resume-desc">${esc(modelName(c.model))}</div></div>${icon('right')}</a>`).join('')}</div>${!state.chats.length ? '<p class="inline-note">Your conversations appear here after your first message.</p>' : ''}</section>${branding.home.footer ? `<div class="home-foot">${brandCopy(branding.home.footer)}</div>` : ''}</div>`;
+    return `<div class="home"><div class="home-heading">${branding.home.eyebrow ? `<div class="greeting-mark">${brandIcon('greeting')}${brandCopy(branding.home.eyebrow)}</div>` : ''}${branding.home.title ? `<h1>${brandCopy(branding.home.title)}</h1>` : ''}${branding.home.description ? `<p>${brandCopy(branding.home.description)}</p>` : ''}</div>${alert(state.catalogError, 'refresh')}${temporaryDraft() ? temporaryNote(false) : ''}${composer(true)}<div class="shortcuts">${[...(workspace.enabled() ? [['terminal', 'Build an app', 'Describe it, then watch it run in a live preview.', 'Build me a site for ', true], ['branch', 'Explore a repo', 'Get a tour of a codebase, or a list of its issues.', 'Explain this codebase to me: ', true]] : [['code', 'Build something', 'Go from a question to working code.', 'Help me plan a small coding project. Start by asking what I want to build.']]), ['chat', 'Think it through', 'Find a fresh way into a tricky problem.', 'Help me think through a problem. Ask me what I am working on.'], ...(workspace.enabled() ? [] : [['book', 'Learn something', 'Make a complex idea feel approachable.', 'Help me learn something new. Ask what topic interests me.']])].map(([i, title, copy, prompt, space]) => `<button class="shortcut" data-action="starter" data-prompt="${esc(prompt)}" ${space ? 'data-workspace="1"' : ''}>${icon(i)}<h3>${title}</h3><p>${copy}</p></button>`).join('')}</div><section class="home-recents"><div class="section-title"><h2>${state.chats.length ? 'Pick up where you left off' : 'A fresh start, just for you.'}</h2>${state.chats.length ? btn('All conversations', 'search', { icon: 'right', tone: 'ghost small', type: '' }) : ''}</div><div class="resume-list">${state.chats.slice(0, 4).map(c => `<a class="resume-row" href="#chat/${encodeURIComponent(c.id)}">${icon('chat')}<div class="grow"><div class="resume-title">${esc(c.title)}</div><div class="resume-desc">${esc(modelName(c.model))}</div></div>${icon('right')}</a>`).join('')}</div>${!state.chats.length ? '<p class="inline-note">Your conversations appear here after your first message.</p>' : ''}</section>${branding.home.footer ? `<div class="home-foot">${brandCopy(branding.home.footer)}</div>` : ''}</div>`;
   }
   function effortDescription() {
     return { none: 'Ask for a direct answer. Some models still reason.', low: 'Quick reasoning for everyday questions.', medium: 'A balance of depth and response time.', high: 'More room to work through complex problems.' }[state.reasoningEffort];
@@ -333,7 +336,7 @@ export async function startConnected(capabilities) {
   function message(m, index) {
     if (m.role === 'user' && String(m.content || '').startsWith(NUDGE)) return `<article class="message auto-nudge" data-message="${index}"><p>${icon('refresh')}<span><strong>Auto mode</strong> ${esc(m.content.slice(NUDGE.length))}</span></p></article>`;
     const key = m.id || `pending-${index}`, details = turnDetails(m, key);
-    const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' && !state.shared ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${feedbackButtons(m, index, state.shared)}${m.id && !state.streaming && !state.switchingVersion && !state.shared ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
+    const assistantActions = `${iconButton('copy', 'copy-message', 'Copy response', `data-index="${index}"`)}${m.id && libraryView.enabled() && m.status === 'completed' && !state.shared && !state.active?.temporary ? iconButton('bookmark', 'save-message', 'Save to Library', `data-index="${index}"`) : ''}${feedbackButtons(m, index, state.shared)}${m.id && !state.streaming && !state.switchingVersion && !state.shared ? `${iconButton('refresh', 'retry-message', m.status === 'completed' ? 'Regenerate response' : 'Retry response', `data-index="${index}"`)}${state.active?.temporary ? '' : iconButton('branch', 'branch', 'Branch conversation', `data-index="${index}"`)}` : ''}${details ? iconButton('info', 'toggle-details', 'Response details', `data-key="${esc(key)}" aria-controls="details-${esc(key)}" aria-expanded="${detailsOpen.has(key)}"`) : ''}`;
     const status = m.role === 'assistant' ? `<span class="response-meta ${isPendingMessage(m) ? 'is-generating' : ''} ${m.status === 'error' ? 'is-error' : ''}" ${isPendingMessage(m) ? 'role="status"' : ''}>${esc(responseStatus(m))}</span>` : '';
     return `<article class="message ${m.role === 'user' ? 'user' : 'assistant'}" data-message="${index}"><div class="message-heading">${m.role === 'user' ? `<span class="avatar">${esc(state.shared ? owner().initials : initials())}</span>${state.shared ? esc(owner().name) : 'You'}` : `${brandLogo() || brandIcon('assistant')}${esc(branding.assistantName)}`}</div><div class="message-text">${m.role === 'assistant' ? turnView.applies(m) ? turnView.before(m) + (turnView.live(m) && !state.shared ? turnView.steerForm(m) : '') : thinking(m, index) + workspace.activity(m) : ''}<div class="answer-content">${answerContent(m)}</div>${m.role === 'assistant' ? loadNotice(m, index) + knowledgeView.sources(m) + savedNotes(m) + questionsView.card(m, index) + questionsView.workspaceCard(m, index) + questionsView.researchCard(m, index) + browserView.card(m, index) : ''}${turnView.applies(m) ? turnView.after(m) : ''}${attachments.messageFiles(m)}</div><div class="message-actions">${m.role === 'assistant' ? assistantActions : m.id && !state.streaming && !state.switchingVersion && !state.shared ? iconButton('edit', 'edit-message', 'Edit and resend message', `data-index="${index}"`) : ''}${versionControls(m)}${status}</div>${details}${followUps(m,index)}</article>`;
   }
@@ -465,7 +468,7 @@ export async function startConnected(capabilities) {
       const sh = state.shared, where = sh.scope === 'group' && sh.groupName ? `shared with ${esc(sh.groupName)}` : 'shared by link';
       return `<div class="chat-layout chat-readonly"><div class="chat-column"><div class="conversation-header"><div class="conversation-header-title"><h2>${esc(c.title)}</h2>${badge(`Shared by ${sh.ownerName}`)}</div><div class="row">${btn('Fork', 'shared-fork', { icon: 'branch', tone: 'small', type: '' })}</div></div><div class="messages" id="messages">${(c.messages || []).map(message).join('')}${!c.messages?.length ? '<div class="empty">Nothing here yet. New messages show up as they arrive.</div>' : ''}</div><div class="shared-bar">${icon('lock')}<span class="grow">You are reading ${esc(sh.ownerName)}’s chat, ${where}. It updates as they keep going.</span>${btn('Fork to continue', 'shared-fork', { icon: 'branch', tone: 'primary small', type: '' })}</div></div></div>`;
     }
-    return `<div class="chat-layout"><div class="chat-column"><div class="conversation-header"><div class="conversation-header-title"><h2>${esc(c.title)}</h2>${c.archived ? badge('Archived') : ''}${c.shareScope && c.shareScope !== 'none' ? `<button type="button" class="badge-button" data-action="share-chat" data-id="${esc(c.id)}" title="Change who can see it">${badge('Shared', 'accent')}</button>` : ''}</div><div class="row">${iconButton('link', 'share-chat', 'Share chat', `data-id="${esc(c.id)}"`)}${iconButton('branch', 'alternatives', 'Conversation alternatives')}${iconButton('more', 'chat-menu', 'Conversation options', `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div></div><div class="chat-line">${projectsView.pill()}${knowledgeView.pill()}</div><div class="messages" id="messages">${(c.messages || []).map(message).join('')}${!c.messages?.length ? '<div class="empty">A new conversation, ready for your first idea.</div>' : ''}</div><div class="chat-composer-wrap">${alert(state.catalogError, 'refresh')}${composer()}</div></div></div>`;
+    return `<div class="chat-layout"><div class="chat-column"><div class="conversation-header"><div class="conversation-header-title"><h2>${esc(c.title)}</h2>${c.temporary ? badge('Temporary') : ''}${c.archived ? badge('Archived') : ''}${c.shareScope && c.shareScope !== 'none' ? `<button type="button" class="badge-button" data-action="share-chat" data-id="${esc(c.id)}" title="Change who can see it">${badge('Shared', 'accent')}</button>` : ''}</div><div class="row">${c.temporary ? '' : `${iconButton('link', 'share-chat', 'Share chat', `data-id="${esc(c.id)}"`)}${iconButton('branch', 'alternatives', 'Conversation alternatives')}`}${iconButton('more', 'chat-menu', 'Conversation options', `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div></div><div class="chat-line">${c.temporary ? '' : projectsView.pill()}${knowledgeView.pill()}</div><div class="messages" id="messages">${(c.messages || []).map(message).join('')}${!c.messages?.length ? '<div class="empty">A new conversation, ready for your first idea.</div>' : ''}</div><div class="chat-composer-wrap">${alert(state.catalogError, 'refresh')}${c.temporary ? temporaryNote() : ''}${composer()}</div></div></div>`;
   }
   function unavailable(page) {
     const copy = {
@@ -540,6 +543,8 @@ export async function startConnected(capabilities) {
     if (route().page === 'activate' && route().id) { clearPrivateState(); state.phase = 'activate'; render(); return; }
     if (state.phase !== 'ready') return;
     document.body.classList.remove('sidebar-open');
+    const left = leftTemporary(temporaryOpen, route());
+    if (left) leaveTemporary(left);
     let { page, id } = route();
     // Section pages open their first tab.
     const first = { compute: computeTabs()[0]?.[0] }[page];
@@ -577,7 +582,7 @@ export async function startConnected(capabilities) {
       if ((revisions.get(id) || 0) !== revision) { if (operations.get(id)?.conversation) c = operations.get(id).conversation; else { scheduleWatch(id, 0); return; } }
       const desiredEffort = pendingEfforts.get(id) || requestedEffort;
       if (desiredEffort) c.reasoningEffort = desiredEffort.value;
-      state.active = c; workspace.load(c.id); browserView.load(c.id); connectionsView.loadChat(c.id); knowledgeView.loadChat(c.id); projectsView.loadChat(c.id);
+      state.active = c; if (c.temporary) temporaryOpen = c.id; workspace.load(c.id); browserView.load(c.id); connectionsView.loadChat(c.id); knowledgeView.loadChat(c.id); projectsView.loadChat(c.id);
       if (c.model && state.models.some(m => m.id === c.model)) state.model = c.model;
       resetGeneration({ ...(c.settings || {}), ...(efforts.includes(c.reasoningEffort) ? { reasoningEffort: c.reasoningEffort } : {}) });
       observeConversation(c);
@@ -632,7 +637,18 @@ export async function startConnected(capabilities) {
   async function refreshSidebar() {
     const r = await api.request('/api/conversations'); state.chats = r.conversations || [];
   }
+  /** A new chat from the home screen is temporary when the toggle is on, outside a project. */
+  function temporaryDraft() { return state.temporaryDraft && !projectsView.hasDraft(); }
+  /** The person left a temporary chat: stop following it and have the server delete it. */
+  function leaveTemporary(id) {
+    if (temporaryOpen === id) temporaryOpen = null;
+    const op = operations.get(id);
+    if (op) { op.controller?.abort(); operations.delete(id); }
+    clearTimeout(watches.get(id)); watches.delete(id);
+    return api.send(`${chatPath(id)}/leave`);
+  }
   function upsert(c) {
+    if (c.temporary) return;
     state.chats = [...(c.archived ? [] : [c]), ...state.chats.filter(other => other.id !== c.id)].sort((a,b) => Number(!!b.pinned) - Number(!!a.pinned));
   }
   function currentOperation() {
@@ -830,7 +846,8 @@ export async function startConnected(capabilities) {
     };
     try {
       if (!op.conversation) {
-        const c = unwrap(await api.request('/api/conversations', { method: 'POST', body: { title: (prompt || attached.map(a => a.name).join(', ')).slice(0,80), model: settings.model, reasoningEffort: settings.reasoningEffort }, signal: op.controller.signal }));
+        const c = unwrap(await api.request('/api/conversations', { method: 'POST', body: { title: (prompt || attached.map(a => a.name).join(', ')).slice(0,80), model: settings.model, reasoningEffort: settings.reasoningEffort, ...(temporaryDraft() ? { temporary: true } : {}) }, signal: op.controller.signal }));
+        if (c.temporary) temporaryOpen = c.id;
         if (!operationIsCurrent(op)) return;
         operations.delete(op.key); op.key = c.id; op.conversation = c; c.messages ||= []; operations.set(c.id, op); touchConversation(c.id); upsert(c);
         if (route().page === 'chat' && !route().id && state.draftKey === op.draftKey) { state.active = c; history.replaceState(null, '', `#chat/${encodeURIComponent(c.id)}`); }
@@ -903,6 +920,7 @@ export async function startConnected(capabilities) {
   /** Opens the save dialog for part of the current chat, linked to its message. */
   function saveFromChat(el, item) {
     if (!libraryView.enabled() || !state.active) return;
+    if (state.active.temporary) { toast('Nothing in a temporary chat can be saved to the Library.'); return; }
     const m = state.active.messages[Number(el.closest('[data-message]')?.dataset.message)];
     // From someone else's chat it is saved as the viewer's own, without a link back.
     if (state.shared) { libraryView.saveFrom(item); return; }
@@ -944,11 +962,12 @@ export async function startConnected(capabilities) {
     'project-menu': el => openListMenu(el, 'Project', `${projectsView.menuItems()}<button role="menuitem" class="menu-item" data-action="context">${icon('panel')}Chat details<kbd>⌘.</kbd></button>`),
     'composer-add': el => knowledgeView.enabled() ? openListMenu(el, 'Add to this message', `<button role="menuitem" class="menu-item" data-action="attach-files" ${attachments.full() ? 'disabled' : ''}>${icon('paperclip')}Attach files</button><button role="menuitem" class="menu-item" data-action="knowledge-picker">${icon('book')}Knowledge collections</button>`) : attachments.actions['attach-files'](),
     compact: () => savePreference({ density: state.compact ? 'comfortable' : 'compact' }),
+    'toggle-temporary': () => { state.temporaryDraft = !state.temporaryDraft; render(); requestAnimationFrame(() => $('#prompt')?.focus()); },
     'new-chat': () => { state.draftKey++; state.draft = ''; state.workspaceDraft = false; state.browserDraft = false; connectionsView.resetDraft(); knowledgeView.resetDraft(); projectsView.resetDraft(); codeView.resetDraft(); attachments.clear(); applyPreferences(state.preferences); go('chat'); requestAnimationFrame(() => $('#prompt')?.focus()); },
     starter: el => { if (route().page !== 'chat') { state.draftKey++; go('chat'); } state.draft = el.dataset.prompt; if (el.dataset.workspace && !route().id) state.workspaceDraft = true; render(); const prompt = $('#prompt'); if (prompt) { prompt.focus(); prompt.setSelectionRange(prompt.value.length, prompt.value.length); } },
     stop: stopCurrent,
     profile: openProfileMenu,
-    logout: async () => { await api.request('/api/auth/logout', { method: 'POST' }); expire(''); document.body.classList.remove('collapsed', 'sidebar-open'); },
+    logout: async () => { if (temporaryOpen) await leaveTemporary(temporaryOpen); await api.request('/api/auth/logout', { method: 'POST' }); expire(''); document.body.classList.remove('collapsed', 'sidebar-open'); },
     models: el => openModels(el),
     // The model you pick becomes your default, so new chats start with the last one you used.
     'switch-waiting': async el => {
@@ -1039,7 +1058,7 @@ export async function startConnected(capabilities) {
     if (!id) return;
     menu.setAttribute('aria-label', 'Conversation options');
     const c = state.chats.find(c => c.id === id) || state.active;
-    menu.innerHTML = [['edit', 'Rename', 'rename-chat'], ['pin', c?.pinned ? 'Unpin' : 'Pin', 'pin-chat'], ['archive', c?.archived ? 'Restore' : 'Archive', 'archive-chat'], ['link', 'Share…', 'share-chat'], ['download', 'Export JSON', 'export-chat'], ['trash', 'Delete', 'delete-chat']].map(([name, label, action]) => `<button role="menuitem" data-action="${action}" data-id="${esc(id)}" class="menu-item ${action === 'delete-chat' ? 'danger' : ''}" ${action === 'delete-chat' && state.streaming && state.streamChatId === id ? 'disabled' : ''}>${icon(name)}${label}</button>`).join('');
+    menu.innerHTML = chatMenuItems(c).map(([name, label, action]) => `<button role="menuitem" data-action="${action}" data-id="${esc(id)}" class="menu-item ${action === 'delete-chat' ? 'danger' : ''}" ${action === 'delete-chat' && state.streaming && state.streamChatId === id ? 'disabled' : ''}>${icon(name)}${label}</button>`).join('');
     menu.hidden = false; anchor.setAttribute('aria-expanded', 'true');
     const rect = anchor.getBoundingClientRect();
     menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -1245,5 +1264,7 @@ export async function startConnected(capabilities) {
   window.addEventListener('resize', () => { closeMenu(false); closeModels(false); });
   window.addEventListener('scroll', event => { if (modelPopover.contains(event.target)) return; closeMenu(false); closeModels(false); }, true);
   window.addEventListener('hashchange', navigate);
+  // Closing the tab leaves a temporary chat too.
+  window.addEventListener('pagehide', () => { if (temporaryOpen) leaveTemporary(temporaryOpen); });
   await session();
 }

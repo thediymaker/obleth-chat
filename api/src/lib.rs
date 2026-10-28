@@ -141,6 +141,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
             get(detail).patch(rename).delete(delete),
         )
         .route("/api/conversations/{id}/branch", post(branch))
+        .route("/api/conversations/{id}/leave", post(leave))
         .route("/api/conversations/{id}/fork", post(fork_turn))
         .route("/api/conversations/{id}/branches", get(branches))
         .route("/api/conversations/bulk", post(bulk))
@@ -330,6 +331,8 @@ struct Create {
     model: String,
     #[serde(default)]
     reasoning_effort: ReasoningEffort,
+    #[serde(default)]
+    temporary: bool,
 }
 async fn create(
     State(s): State<AppState>,
@@ -340,7 +343,7 @@ async fn create(
     Ok((
         StatusCode::CREATED,
         Json(
-            json!({"conversation":s.store.create_with_effort(u.id,&body.title,&body.model,body.reasoning_effort).await?}),
+            json!({"conversation":s.store.create_chat(u.id,&body.title,&body.model,body.reasoning_effort,body.temporary).await?}),
         ),
     ))
 }
@@ -448,6 +451,16 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     let u = s.auth.require(&headers, true).await?;
     s.store.delete(u.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+/// The person left a temporary chat: it goes now, or once its reply has stopped.
+async fn leave(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let u = s.auth.require(&headers, true).await?;
+    s.store.leave_temporary(u.id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize)]

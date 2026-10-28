@@ -453,6 +453,9 @@ async fn set_conversation_project(
     let pool = &s.store.pool;
     if let Some(project) = body.project_id {
         one(pool, user.id, project).await?;
+        if crate::store::is_temporary(pool, user.id, id).await? {
+            return Err(bad("A temporary chat can't be moved into a project"));
+        }
     }
     let done =
         sqlx::query("UPDATE conversations SET project_id = $3 WHERE id = $1 AND owner_id = $2")

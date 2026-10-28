@@ -177,7 +177,7 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     let user = s.auth.require(&headers, false).await?;
     let rows: Vec<(Uuid, Uuid, String, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT g.id, g.conversation_id, c.title, g.size, g.created_at FROM generated_images g
-         JOIN conversations c ON c.id = g.conversation_id WHERE g.owner_id=$1 ORDER BY g.created_at DESC LIMIT 200",
+         JOIN conversations c ON c.id = g.conversation_id WHERE g.owner_id=$1 AND NOT c.temporary ORDER BY g.created_at DESC LIMIT 200",
     )
     .bind(user.id)
     .fetch_all(&s.store.pool)

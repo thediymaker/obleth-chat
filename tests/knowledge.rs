@@ -2599,3 +2599,22 @@ async fn pdf_bookmarks_become_sections(pool: PgPool) {
     assert!(!stored[0].2.contains("ninety days"), "{stored:?}");
     assert!(stored[1].2.contains("ninety days"), "{stored:?}");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn nothing_in_a_temporary_chat_is_saved_to_the_library(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, chat) = call(
+        &f.app,
+        "POST",
+        "/api/conversations",
+        json!({"title":"Passing thought","model":"auto","temporary":true}),
+        &admin,
+    )
+    .await;
+    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
+    let (status, body) = call(&f.app, "POST", "/api/saved", json!({"kind":"excerpt","title":"Kept","body":"From a temporary chat","sourceConversationId":id}), &admin).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (_, listed) = call(&f.app, "GET", "/api/saved", Value::Null, &admin).await;
+    assert_eq!(listed["items"], json!([]));
+}

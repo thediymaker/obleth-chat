@@ -947,6 +947,15 @@ async fn validate_upload(
     if ["pdf", "docx", "pptx", "xlsx"].contains(&extension.as_str()) {
         return document(name, data, tools, searchable).await;
     }
+    // SVG can carry scripts, and archives are never text to read: whatever type they
+    // were sent with, they are files.
+    if [
+        "svg", "svgz", "zip", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "tar",
+    ]
+    .contains(&extension.as_str())
+    {
+        return Ok(file(name, data));
+    }
     let requested = body
         .mime_type
         .split(';')

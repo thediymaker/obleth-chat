@@ -46,7 +46,7 @@ export function createConnections({ api, state, capabilities, render, modal, clo
   function row(c) {
     const kind = KINDS[kindOf(c)], changes = (c.tools || []).filter(t => !t.readOnly).length;
     const who = !c.shared && native(c) && c.identity ? `as ${c.identity}` : '';
-    const facts = [!native(c) && c.serverName, who, c.apiVersion && `REST API ${c.apiVersion}`, changes ? `${changes} can make changes` : 'all read-only', c.checkedAt && `checked ${when(c.checkedAt)}`].filter(Boolean).join(' · ');
+    const facts = [!native(c) && c.serverName, who, c.apiVersion && `REST API ${c.apiVersion}`, c.returnOutput && 'job output comes back', changes ? `${changes} can make changes` : 'all read-only', c.checkedAt && `checked ${when(c.checkedAt)}`].filter(Boolean).join(' · ');
     const toggle = c.usable === false ? '' : `<button type="button" class="btn small ${c.active ? '' : 'primary'}" data-action="connection-toggle" data-id="${esc(c.id)}" aria-label="${c.active ? 'Stop using' : 'Use'} ${esc(c.name)} in my chats">${c.active ? 'On' : 'Off'}</button>`;
     return `<div class="connection-row ${c.active ? '' : 'is-off'}"><div class="connection-head">${icon(kind.glyph)}<div class="grow"><h3>${esc(c.name)} ${native(c) ? badge(kind.label.split(' ')[0]) : ''} ${c.shared ? badge('Shared') : ''} ${c.shared && !c.enabled ? badge('Off for everyone', 'amber') : ''}</h3><p class="connection-url" title="${esc(c.url)}">${esc(c.url)}</p><small>${esc(facts)}</small></div>${toggle}</div>${credential(c)}${tools(c)}${c.canManage ? `<div class="user-actions">${btn(native(c) ? 'Check' : 'Refresh tools', 'connection-refresh', { icon: 'refresh', tone: 'small ghost', attrs: `data-id="${esc(c.id)}"` })}${btn('Edit', 'connection-edit', { tone: 'small', attrs: `data-id="${esc(c.id)}"` })}${btn('Remove', 'connection-remove', { tone: 'small', attrs: `data-id="${esc(c.id)}"` })}</div>` : ''}</div>`;
   }
@@ -72,6 +72,7 @@ export function createConnections({ api, state, capabilities, render, modal, clo
       field('connection-name', 'Name', textInput('connection-name', c?.name || '', `maxlength="40" required placeholder="${esc(kind === 'mcp' ? 'Research tools' : kind === 'slurm' ? 'HPC cluster' : 'Lab cluster')}"`), 'Tools appear to the model under this name.'),
       field('connection-url', kind === 'mcp' ? 'Server URL' : kind === 'slurm' ? 'slurmrestd URL' : 'API server URL', textInput('connection-url', c?.url || '', `type="url" maxlength="2048" required placeholder="${esc(k.url)}"`), k.urlHelp),
       kind === 'slurm' ? field('connection-api-version', 'REST API version', textInput('connection-api-version', c?.apiVersion || '', 'maxlength="10" autocomplete="off" placeholder="Newest offered" pattern="v0\\.0\\.[0-9]{2,3}"'), 'Leave empty to use the newest one the server offers, from v0.0.40 to v0.0.45. Set it, such as v0.0.46, when the server runs a newer one.') : '',
+      kind === 'slurm' && capabilities.features?.jobOutput ? checkbox('connection-return-output', 'Bring job output back', !!c?.returnOutput, 'Each job submitted from Chat sends the last 1 MiB of its output to Chat’s file storage when it ends, so the model can read it. The compute nodes must be able to reach that storage.') : '',
       kind === 'kubernetes' ? field('connection-ca', 'Cluster CA certificate', `<textarea id="connection-ca" name="connection-ca" class="form-control mono" rows="3" maxlength="16384" placeholder="${c?.hasCa ? 'Saved. Leave empty to keep it' : '-----BEGIN CERTIFICATE-----'}"></textarea>`, 'PEM, from certificate-authority-data in your kubeconfig (base64-decoded). Leave empty if the server has a public certificate.') + (c?.hasCa ? checkbox('connection-clear-ca', 'Remove the saved certificate') : '') : '',
       !c && cluster && isAdmin() ? checkbox('connection-shared', 'Share with everyone', false, sharedNote) : '',
       kind === 'slurm' && !shared ? `<div class="connection-personal">${field('connection-user', 'Slurm user name', textInput('connection-user', c?.user || '', 'maxlength="63" autocomplete="off" placeholder="jdoe"'), 'The account the token belongs to. Jobs run as this user.')}</div>` : '',
@@ -116,7 +117,8 @@ export function createConnections({ api, state, capabilities, render, modal, clo
       if (!shared && kind === 'slurm') options.user = getValue(form, 'connection-user').trim();
       if (!shared && kind === 'kubernetes') options.namespace = getValue(form, 'connection-namespace').trim();
       if (kind === 'slurm') options.apiVersion = getValue(form, 'connection-api-version').trim();
-      const changed = !c || 'ca' in options || (options.user ?? c.user) !== c.user || (options.namespace ?? c.namespace) !== c.namespace || (kind === 'slurm' && options.apiVersion !== (c.apiVersion || ''));
+      if (kind === 'slurm' && capabilities.features?.jobOutput) options.returnOutput = isChecked(form, 'connection-return-output');
+      const changed = !c || 'ca' in options || (options.user ?? c.user) !== c.user || (options.namespace ?? c.namespace) !== c.namespace || (kind === 'slurm' && options.apiVersion !== (c.apiVersion || '')) || ('returnOutput' in options && options.returnOutput !== !!c.returnOutput);
       if (changed) body.options = options;
     }
     const item = await api.request(id ? `/api/connections/${encodeURIComponent(id)}` : '/api/connections', { method: id ? 'PATCH' : 'POST', body });

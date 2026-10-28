@@ -1,4 +1,5 @@
-//! A small S3 client for document files: put, get, delete and presigned downloads,
+//! A small S3 client for document files: put, get, delete, presigned downloads and
+//! presigned uploads,
 //! signed with AWS Signature Version 4. Works with S3, Cloudflare R2 and other
 //! S3-compatible stores using path-style addresses (`<endpoint>/<bucket>/<key>`).
 
@@ -112,6 +113,28 @@ impl ObjectStore {
         Ok(bytes.to_vec())
     }
 
+    /// Like `get`, but None when there is no such object.
+    pub async fn get_optional(&self, key: &str, limit: usize) -> Result<Option<Vec<u8>>> {
+        let url = self.object_url(key);
+        let headers = self.sign("GET", &url, UNSIGNED, Utc::now());
+        let response = self
+            .client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .context("object storage is unreachable")?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = check(response).await?;
+        let bytes = response.bytes().await.context("reading the object")?;
+        if bytes.len() > limit {
+            bail!("the stored file is larger than expected");
+        }
+        Ok(Some(bytes.to_vec()))
+    }
+
     pub async fn delete(&self, key: &str) -> Result<()> {
         let url = self.object_url(key);
         let headers = self.sign("DELETE", &url, UNSIGNED, Utc::now());
@@ -127,6 +150,20 @@ impl ObjectStore {
             return Ok(());
         }
         check(response).await.map(|_| ())
+    }
+
+    /// A link that can upload one object, with no other credential, until it expires.
+    pub fn presign_put(&self, key: &str, seconds: u64) -> Url {
+        presign(
+            "PUT",
+            self.object_url(key),
+            &self.region,
+            &self.access_key,
+            &self.secret_key,
+            Utc::now(),
+            seconds,
+            &[],
+        )
     }
 
     /// A short-lived link to the file under its name. PDFs and images open in the
@@ -149,6 +186,7 @@ impl ObjectStore {
             encode(name, true)
         );
         presign(
+            "GET",
             self.object_url(key),
             &self.region,
             &self.access_key,
@@ -220,7 +258,9 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
     bail!("object storage answered {status} {code}")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn presign(
+    method: &str,
     mut url: Url,
     region: &str,
     access_key: &str,
@@ -245,7 +285,7 @@ fn presign(
         }
     }
     let canonical = format!(
-        "GET\n{}\n{}\nhost:{}\n\nhost\n{UNSIGNED}",
+        "{method}\n{}\n{}\nhost:{}\n\nhost\n{UNSIGNED}",
         url.path(),
         canonical_query(&url),
         host(&url)
@@ -331,6 +371,7 @@ mod tests {
     fn presigned_urls_match_the_aws_example() {
         // From the AWS documentation for query-string authentication.
         let url = presign(
+            "GET",
             Url::parse("https://examplebucket.s3.amazonaws.com/test.txt").unwrap(),
             "us-east-1",
             "AKIAIOSFODNN7EXAMPLE",

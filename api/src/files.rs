@@ -135,6 +135,7 @@ impl Files {
         };
         let mut reported = false;
         loop {
+            expire_job_output(&self.pool).await;
             empty_trash(&self.pool, &store).await;
             let moved = match self.move_one(&store).await {
                 Ok(moved) => moved,
@@ -261,6 +262,18 @@ pub fn served_type(mime: &str) -> (&'static str, bool) {
             ("text/plain; charset=utf-8", false)
         }
         _ => ("application/octet-stream", false),
+    }
+}
+
+/// Job output that Slurm clusters bring back is kept 30 days; deleting the row trashes
+/// its object.
+async fn expire_job_output(pool: &PgPool) {
+    if let Err(error) =
+        sqlx::query("DELETE FROM slurm_job_outputs WHERE created_at < NOW() - INTERVAL '30 days'")
+            .execute(pool)
+            .await
+    {
+        tracing::warn!("could not expire job output: {error}");
     }
 }
 

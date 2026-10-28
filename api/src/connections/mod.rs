@@ -5,6 +5,7 @@
 //! waits for the person's Allow or Deny.
 pub mod kubernetes;
 pub mod mcp;
+mod output;
 pub mod slurm;
 
 use crate::{
@@ -77,6 +78,8 @@ pub struct Connections {
     clusters: bool,
     /// Whether a chat may run its tools without asking (OBLETH_CHAT_AUTO_MODE).
     auto_mode: bool,
+    /// The installation's object storage, where Slurm clusters can bring job output.
+    objects: Option<crate::knowledge::ObjectStore>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -131,6 +134,10 @@ impl Row {
     fn kind(&self) -> Kind {
         Kind::parse(&self.kind).unwrap_or(Kind::Mcp)
     }
+    /// A Slurm cluster set to bring each job's output back to Chat.
+    fn returns_output(&self) -> bool {
+        self.kind() == Kind::Slurm && self.options["returnOutput"] == true
+    }
     /// A shared cluster, or a shared MCP server set to personal tokens, runs with
     /// each person's own token rather than one for everyone.
     fn personal_tokens(&self) -> bool {
@@ -156,7 +163,7 @@ impl Row {
                 .flatten()
                 .filter_map(mcp::Tool::from_json)
                 .collect(),
-            Kind::Slurm => slurm::tools(),
+            Kind::Slurm => slurm::tools(self.returns_output()),
             Kind::Kubernetes => kubernetes::tools(),
         }
     }
@@ -226,6 +233,7 @@ impl Connections {
             private_allowed,
             clusters: true,
             auto_mode: true,
+            objects: None,
         })
     }
 
@@ -336,6 +344,17 @@ impl Connections {
 
     pub fn clusters_enabled(&self) -> bool {
         self.clusters
+    }
+
+    /// Object storage, which lets Slurm clusters bring job output back.
+    pub fn objects(mut self, objects: Option<crate::knowledge::ObjectStore>) -> Self {
+        self.objects = objects;
+        self
+    }
+
+    /// Whether a Slurm cluster may bring job output back.
+    pub fn job_output_available(&self) -> bool {
+        self.objects.is_some()
     }
 
     pub fn auto_mode_allowed(&self) -> bool {
@@ -519,6 +538,11 @@ impl Connections {
         let mut set = Toolset {
             servers: vec![],
             tools: vec![],
+            outputs: self.objects.clone().map(|store| output::Outputs {
+                pool: self.pool.clone(),
+                store,
+                user,
+            }),
         };
         let clusters = self.clusters;
         for row in rows
@@ -557,7 +581,7 @@ impl Connections {
                         ),
                     };
                     match self.cluster_client(&row, &url, token.unwrap_or_default()) {
-                        Ok(Native::Slurm(c)) => (Backend::Slurm(c), about),
+                        Ok(Native::Slurm(c)) => (Backend::Slurm(c, row.returns_output()), about),
                         Ok(Native::Kubernetes(c)) => (Backend::Kubernetes(c), about),
                         Err(error) => {
                             tracing::warn!(connection=%row.id, "connection unusable: {error}");
@@ -644,7 +668,8 @@ enum Backend {
         client: reqwest::Client,
         session: Option<mcp::Session>,
     },
-    Slurm(slurm::Client),
+    /// The client, and whether its jobs bring their output back.
+    Slurm(slurm::Client, bool),
     Kubernetes(kubernetes::Client),
 }
 struct Offered {
@@ -662,6 +687,8 @@ pub struct Outcome {
 pub struct Toolset {
     servers: Vec<Server>,
     tools: Vec<Offered>,
+    /// Where job output from Slurm clusters comes back, when there is object storage.
+    outputs: Option<output::Outputs>,
 }
 impl Toolset {
     pub fn is_empty(&self) -> bool {
@@ -724,7 +751,7 @@ impl Toolset {
         let offered = &self.tools[index];
         let service = match self.servers[offered.server].backend {
             Backend::Mcp { .. } => Kind::Mcp,
-            Backend::Slurm(_) => Kind::Slurm,
+            Backend::Slurm(..) => Kind::Slurm,
             Backend::Kubernetes(_) => Kind::Kubernetes,
         };
         json!({"service":service.as_str(),"action":offered.tool.name,"readOnly":offered.tool.read_only})
@@ -755,7 +782,9 @@ impl Toolset {
         };
         let offered = &self.tools[index];
         let name = offered.tool.name.clone();
+        let outputs = &self.outputs;
         let server = &mut self.servers[offered.server];
+        let connection = server.id;
         let result = match &mut server.backend {
             Backend::Mcp {
                 url,
@@ -787,7 +816,17 @@ impl Toolset {
                 }
                 result.map(|value| mcp::result_text(&value))
             }
-            Backend::Slurm(client) => client.call(&name, &arguments).await,
+            Backend::Slurm(client, returns) => match (name.as_str(), *returns, outputs) {
+                ("submit", true, Some(outputs)) => {
+                    outputs.submit(client, connection, &arguments).await
+                }
+                ("output", _, Some(outputs)) => outputs.read(client, connection, &arguments).await,
+                ("output", _, None) => Err(
+                    "This installation keeps no file storage, so job output cannot come back"
+                        .into(),
+                ),
+                _ => client.call(&name, &arguments).await,
+            },
             Backend::Kubernetes(client) => client.call(&name, &arguments).await,
         };
         match result {
@@ -922,6 +961,7 @@ fn view(row: &Row, user: &Identity) -> Value {
         "personalTokens": row.personal_tokens(),
         "confirmActions": row.confirm_actions, "hasToken": row.token.is_some(),
         "hasCa": row.options["ca"].is_string(), "apiVersion": row.options["apiVersion"],
+        "returnOutput": row.returns_output(),
         "user": settings["user"], "namespace": settings["namespace"], "identity": settings["identity"],
         "serverName": row.server_name, "checkedAt": row.checked_at, "tools": tools,
     })
@@ -1052,6 +1092,16 @@ fn clean_label(value: &str, what: &str) -> Result<String, ApiError> {
 
 /// Validated options for a connection kind: a CA for Kubernetes, the REST API version
 /// for Slurm, and the Slurm user or namespace a person's own cluster connection uses.
+/// Job output comes back through the installation's object storage.
+fn output_possible(connections: &Connections, options: &Value) -> Result<(), ApiError> {
+    if options["returnOutput"] == true && !connections.job_output_available() {
+        return Err(ApiError::bad(
+            "Bringing job output back needs file storage (OBLETH_CHAT_S3_*)",
+        ));
+    }
+    Ok(())
+}
+
 fn clean_options(kind: Kind, options: &Value, personal: bool) -> Result<Value, ApiError> {
     let mut clean = json!({});
     match kind {
@@ -1085,6 +1135,9 @@ fn clean_options(kind: Kind, options: &Value, personal: bool) -> Result<Value, A
             }
         }
         Kind::Slurm => {
+            if options["returnOutput"] == true {
+                clean["returnOutput"] = json!(true);
+            }
             if let Some(version) = options["apiVersion"]
                 .as_str()
                 .map(str::trim)
@@ -1152,6 +1205,7 @@ async fn create(
         return Err(ApiError::bad("Enter your token for this cluster"));
     }
     let mut options = clean_options(kind, &body.options, !body.shared)?;
+    output_possible(&connections, &options)?;
     let url = mcp::check_url(&body.url, body.shared || connections.private_allowed)
         .map_err(ApiError::bad)?;
     let owner = (!body.shared).then_some(user.id);
@@ -1285,12 +1339,14 @@ async fn update(
                 // Keep the saved CA and API version unless the edit names new ones
                 // ("" removes them).
                 let mut options = options.clone();
-                for key in ["ca", "apiVersion"] {
+                for key in ["ca", "apiVersion", "returnOutput"] {
                     if options.get(key).is_none() {
                         options[key] = row.options[key].clone();
                     }
                 }
-                clean_options(kind, &options, !row.shared())?
+                let options = clean_options(kind, &options, !row.shared())?;
+                output_possible(&connections, &options)?;
+                options
             }
             None => row.options.clone(),
         };

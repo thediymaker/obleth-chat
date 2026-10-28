@@ -128,6 +128,10 @@ pub fn workspace_entry(call_id: &str, arguments: &str) -> Value {
 /// model can suggest it, and the card's button sets the chat up for research.
 pub const RESEARCH_TOOL: &str = "suggest_research";
 
+/// Said in the system prompt while the tool is offered: from the tool list alone, models
+/// start a long tuning job in the chat itself, where nothing keeps or compares the tries.
+pub const RESEARCH_PROMPT: &str = "When the person wants something pushed as far as it will go over many measured tries, such as tuning or optimizing for speed, accuracy, size or cost, a parameter sweep, or a run left going overnight, call suggest_research before doing that work here. A research project keeps each try on its own branch, runs them the same way and charts the results; work done in a plain chat keeps none of that.";
+
 pub fn research_definition() -> Value {
     json!({"type":"function","function":{"name":RESEARCH_TOOL,
         "description":"Suggest turning this into a research project, where you try several alternatives as git branches, run each with the same command, and keep the best result as the starting point of the next round. Suggest it only when the person wants something measurably better (faster, more accurate, smaller, cheaper) and getting there takes several tries that can be measured by one number, not for a question with a known answer or a one-off change. The person sees a card with a button that moves the chat into a project, turns on a workspace and starts setting up the research. Your reply ends at the card.",

@@ -2,7 +2,8 @@
 //! servers, a scripted gateway that calls their tools, and the approval flow.
 //! Requires a disposable DATABASE_URL.
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
+    extract::{Path, State},
     http::{HeaderMap, Request, StatusCode},
     response::{sse::Event, IntoResponse, Response, Sse},
     routing::{get, post},
@@ -13,6 +14,7 @@ use obleth_chat::{
     auth::{Auth, AuthConfig},
     connections::Connections,
     gateway::Gateway,
+    knowledge::ObjectStore,
     router,
     secrets::SecretKey,
     AppState,
@@ -21,6 +23,7 @@ use rsa::{pkcs8::EncodePrivateKey, RsaPrivateKey};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::{
+    collections::HashMap,
     convert::Infallible,
     sync::{Arc, Mutex},
     time::Duration,
@@ -179,6 +182,8 @@ async fn cluster(
                     .collect();
                 Json(json!({"jobs":jobs})).into_response()
             }
+            // Finished long ago: only accounting still has it.
+            ("GET", "slurmdb", "job/77") => Json(json!({"jobs":[{"job_id":77,"name":"old-run","user":"alice","account":"lab","partition":"debug","nodes":"n1","state":{"current":["COMPLETED"],"reason":"None"},"exit_code":{"status":["SUCCESS"],"return_code":{"set":true,"infinite":false,"number":0}},"time":{"elapsed":125,"submission":100,"start":110,"end":235,"limit":{"set":true,"infinite":false,"number":30}},"working_directory":"/home/alice","stdout_expanded":"/home/alice/slurm-77.out"}]})).into_response(),
             ("GET", "slurm", "partitions") => Json(json!({"partitions":[{"name":"debug","partition":{"state":["UP"]},"cpus":{"total":2}}]})).into_response(),
             ("GET", "slurm", "nodes") => Json(json!({"nodes":[{"name":"n1","state":["MIXED"],"cpus":4,"alloc_cpus":1,"real_memory":8000,"alloc_memory":2000,"partitions":["debug"]}]})).into_response(),
             ("POST", "slurm", "job/submit") => Json(json!({"job_id":8,"errors":[]})).into_response(),
@@ -311,8 +316,28 @@ async fn chat(
     Sse::new(stream)
 }
 
+/// The fake object storage: key to bytes.
+type Objects = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+
+async fn put_object(State(o): State<Objects>, Path(key): Path<String>, body: Bytes) -> StatusCode {
+    o.lock().unwrap().insert(key, body.to_vec());
+    StatusCode::OK
+}
+async fn get_object(State(o): State<Objects>, Path(key): Path<String>) -> Response {
+    match o.lock().unwrap().get(&key) {
+        Some(bytes) => (StatusCode::OK, bytes.clone()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "<Error><Code>NoSuchKey</Code></Error>",
+        )
+            .into_response(),
+    }
+}
+
 struct Fixture {
     app: Router,
+    /// Object storage, where jobs bring their output back.
+    objects: Objects,
     state: AppState,
     mcp_url: String,
     /// slurmrestd and the Kubernetes API.
@@ -340,8 +365,13 @@ async fn fixture(pool: PgPool) -> Fixture {
     fixture_with(pool, true).await
 }
 
-/// `clusters`: whether Slurm and Kubernetes are offered (OBLETH_CHAT_CONNECTIONS).
 async fn fixture_with(pool: PgPool, clusters: bool) -> Fixture {
+    fixture_full(pool, clusters, true).await
+}
+
+/// `clusters`: whether Slurm and Kubernetes are offered (OBLETH_CHAT_CONNECTIONS).
+async fn fixture_full(pool: PgPool, clusters: bool, storage: bool) -> Fixture {
+    let objects: Objects = Arc::default();
     let mcp_seen: Seen = Arc::default();
     let cluster_seen: Seen = Arc::default();
     let gateway_seen: Seen = Arc::default();
@@ -356,6 +386,10 @@ async fn fixture_with(pool: PgPool, clusters: bool) -> Fixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mocks = Router::new()
+        .route(
+            "/bucket/{*key}",
+            get(get_object).put(put_object).with_state(objects.clone()),
+        )
         .route("/mcp", post(mcp).with_state(mcp_seen.clone()))
         .route(
             "/v1/models",
@@ -399,9 +433,19 @@ async fn fixture_with(pool: PgPool, clusters: bool) -> Fixture {
     state.connections = Some(
         Connections::new(pool, pem.as_bytes(), true)
             .unwrap()
-            .clusters(clusters),
+            .clusters(clusters)
+            .objects(storage.then(|| {
+                ObjectStore::new(
+                    format!("http://{address}").parse().unwrap(),
+                    "bucket".into(),
+                    "auto".into(),
+                    "fixture-key".into(),
+                    "fixture-secret".into(),
+                )
+            })),
     );
     Fixture {
+        objects,
         app: router(state.clone(), "web".into()),
         state,
         mcp_url: format!("http://{address}/mcp"),
@@ -1620,6 +1664,171 @@ async fn a_kubernetes_connection_lists_and_applies_with_the_persons_token(pool: 
         .await
         .unwrap();
     assert_eq!(asked, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_slurm_cluster_brings_job_output_back(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Slurm","url":f.cluster_url,"shared":true,"options":{"returnOutput":true}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    assert_eq!(shared["returnOutput"], true);
+    let tools: Vec<&str> = shared["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(tools.contains(&"output"), "{tools:?}");
+    let id = shared["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The job Slurm receives runs the script, then uploads its output to a link.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_submit",
+        "slurm__submit",
+        json!({"script":"echo hi","name":"hello"}),
+    )]);
+    let (_, stream) = send(&f, &admin, "Submit hello").await;
+    assert_eq!(pending(&pool).await, "call_submit");
+    let (_, chats) = call(&f.app, "GET", "/api/conversations", Value::Null, &admin).await;
+    let chat = chats["conversations"][0]["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{chat}/approvals"),
+        json!({"callId":"call_submit","decision":"allow"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains("read what it printed with Job output"),
+        "{text}"
+    );
+    let submitted = cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit");
+    let body: Value = serde_json::from_str(submitted[0]["body"].as_str().unwrap()).unwrap();
+    let script = body["script"].as_str().unwrap();
+    assert!(script.contains("\n#!/bin/bash\necho hi\n"), "{script}");
+    assert_eq!(body["job"]["standard_output"], "slurm-%j.out");
+    let upload = script
+        .split('\'')
+        .find(|part| part.starts_with("http://"))
+        .expect("an upload link")
+        .to_owned();
+    assert!(
+        upload.contains("/bucket/job-output/") && upload.contains("X-Amz-Signature="),
+        "{upload}"
+    );
+
+    // Until the job ends there is nothing to read.
+    let read = || {
+        *f.script.lock().unwrap() =
+            tool_script(&[("call_output", "slurm__output", json!({"job_id":8}))]);
+        async {
+            let (_, stream) = send(&f, &admin, "What did job 8 print?").await;
+            tokio::time::timeout(Duration::from_secs(20), stream)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+    let text = read().await;
+    assert!(text.contains("Job 8 has not ended yet"), "{text}");
+
+    // The job uploads the end of its output as it ends, and the model reads it.
+    let uploaded = reqwest::Client::new()
+        .put(&upload)
+        .body("hi from the job\n")
+        .send()
+        .await
+        .unwrap();
+    assert!(uploaded.status().is_success());
+    let text = read().await;
+    assert!(text.contains("Output of job 8:"), "{text}");
+    assert!(text.contains("hi from the job"), "{text}");
+    // Another job's output, or another person's, is not there to read.
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_output", "slurm__output", json!({"job_id":9}))]);
+    let (_, stream) = send(&f, &admin, "And job 9?").await;
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Chat has no output for job 9"), "{text}");
+    assert_eq!(f.objects.lock().unwrap().len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn job_details_come_from_accounting_once_the_scheduler_forgets_a_job(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Slurm","url":f.cluster_url,"shared":true}),
+        &admin,
+    )
+    .await;
+    let id = shared["id"].as_str().unwrap().to_owned();
+    call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    *f.script.lock().unwrap() = tool_script(&[("call_job", "slurm__job", json!({"job_id":77}))]);
+    let (_, stream) = send(&f, &admin, "How did job 77 go?").await;
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains("Job 77: old-run [COMPLETED], from accounting"),
+        "{text}"
+    );
+    assert!(text.contains("Exit code 0"), "{text}");
+    assert!(text.contains("ran 2m05s of 30m"), "{text}");
+    assert!(text.contains("/home/alice/slurm-77.out"), "{text}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn job_output_needs_file_storage(pool: PgPool) {
+    let f = fixture_full(pool, true, false).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, capabilities) = call(&f.app, "GET", "/api/capabilities", json!({}), &admin).await;
+    assert_eq!(capabilities["features"]["jobOutput"], false);
+    let (status, refused) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Slurm","url":f.cluster_url,"shared":true,"options":{"returnOutput":true}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
 }
 
 #[sqlx::test(migrations = "./migrations")]

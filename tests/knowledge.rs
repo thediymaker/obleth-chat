@@ -2709,11 +2709,11 @@ async fn documents_in_a_chat_are_read_whole_with_their_markers(pool: PgPool) {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
-            refused["error"], "This PDF has no text to read; it may be a scan.",
+            refused["error"]["message"], "This PDF has no text to read; it may be a scan.",
             "{refused}"
         );
     }
-    // Neither is a file Chat can read as its extension says.
+    // A file that isn't what its name says is refused.
     let (status, refused) = call(
         &f.app,
         "POST",

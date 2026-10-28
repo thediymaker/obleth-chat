@@ -2,7 +2,9 @@
 
 Each release's section is also its GitHub Release notes.
 
-## Unreleased
+## v0.9.0
+
+Research reads papers by section, Knowledge cites the section a passage comes from, long pastes become attachments, and Chat shows how busy each model is.
 
 **New**
 

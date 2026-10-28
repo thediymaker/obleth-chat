@@ -22,15 +22,19 @@ function setup(reply = answer, preferences = { favorites: ['glm', 'qwen'], defau
 }
 const waiting = (model, ms = 4000) => [{ role: 'assistant', status: 'streaming', settings: { model } }, 2, { waitingSince: Date.now() - ms }];
 
-test('only a busy, full or serverless model carries a mark', async () => {
+test('only a busy, full or serverless model has its icon tinted and a label', async () => {
   const { load } = setup();
   await load.refresh();
-  assert.equal(load.mark('qwen'), '');
-  assert.equal(load.mark('unknown'), '');
-  assert.match(load.mark('gemma'), /class="load-mark is-busy"[^>]*title="Busy: 9 of 10 in use"/);
-  assert.match(load.mark('glm'), /is-full[^>]*title="Full: 40 of 40 in use, 12 waiting"/);
-  assert.match(load.mark('cold'), /is-offline[^>]*title="No servers running right now"/);
+  for (const id of ['qwen', 'unknown']) { assert.equal(load.tint(id), ''); assert.equal(load.label(id), ''); }
+  assert.equal(load.tint('gemma'), 'load-busy');
+  assert.equal(load.label('gemma'), 'Busy: 9 running on 10 slots');
+  assert.equal(load.tint('glm'), 'load-full');
+  assert.equal(load.label('glm'), 'Full: 40 running on 40 slots, 12 waiting');
+  assert.equal(load.tint('cold'), 'load-offline');
+  assert.equal(load.label('cold'), 'No servers running right now');
   assert.equal(loadLabel(undefined), '');
+  // Servers being removed finish their requests while the slots count only the rest.
+  assert.equal(loadLabel({ state: 'full', slots: 32, inFlight: 37, waiting: 0 }), 'Full: 37 running on 32 slots');
 });
 
 test('load is fetched at most once per window, and a gateway without it is left alone', async () => {
@@ -51,7 +55,7 @@ test('a waiting reply says what holds it and offers a model that is not full', a
   await load.refresh();
   assert.equal(load.notice(...waiting('glm', 1000)), '', 'not before three seconds');
   const html = load.notice(...waiting('glm'));
-  assert.match(html, /glm-name is full right now: 40 of 40 in use, 12 waiting\. Your message is in line\./);
+  assert.match(html, /glm-name is full right now: 40 running on 40 slots, 12 waiting\. Your message is in line\./);
   // The first favorite is the full model itself, so the next one is offered.
   assert.match(html, /data-action="switch-waiting" data-index="2" data-value="qwen">Switch to qwen-name/);
   assert.match(load.notice(...waiting('cold')), /cold-name has no servers running right now/);

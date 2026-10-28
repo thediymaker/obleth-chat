@@ -6,13 +6,16 @@ export const WAIT_NOTICE_MS = 3000;
 // A gateway that can't say how busy its models are is asked again after this long.
 const UNAVAILABLE_MS = 5 * 60 * 1000;
 
-/** A model's load in words, for its mark and the waiting notice. Free says nothing. */
-export const loadLabel = l => !l ? '' : l.state === 'full' ? `Full: ${l.inFlight} of ${l.slots} in use${l.waiting ? `, ${l.waiting} waiting` : ''}`
-  : l.state === 'busy' ? `Busy: ${l.inFlight} of ${l.slots} in use` : l.state === 'offline' ? 'No servers running right now' : '';
+// How many run on how many slots. Running can pass slots for a while: when servers are
+// removed, the requests they hold finish while the slots already count only the rest.
+const running = l => `${l.inFlight} running on ${l.slots} slots`;
+/** A model's load in words, for its tooltip and the waiting notice. Free says nothing. */
+export const loadLabel = l => !l ? '' : l.state === 'full' ? `Full: ${running(l)}${l.waiting ? `, ${l.waiting} waiting` : ''}`
+  : l.state === 'busy' ? `Busy: ${running(l)}` : l.state === 'offline' ? 'No servers running right now' : '';
 
 /**
  * Live load per model, from the gateway through /api/models/load. Quiet by design: a
- * free model carries no mark, so the list only shows where something is busy or full.
+ * model's own icon turns amber while busy and red while full, and nothing changes while it is free.
  */
 export function createLoad({ api, state, modelName }) {
   let data = { available: null, models: {} }, fetchedAt = 0, pending = null;
@@ -27,16 +30,18 @@ export function createLoad({ api, state, modelName }) {
       .finally(() => { fetchedAt = Date.now(); pending = null; });
     return pending;
   }
-  function mark(id) {
-    const l = of(id);
-    if (!l || l.state === 'free') return '';
-    return `<span class="load-mark is-${esc(l.state)}" role="img" aria-label="${esc(loadLabel(l))}" title="${esc(loadLabel(l))}"></span>`;
+  /** The class that tints a model's icon while it is busy, full or has no servers. */
+  function tint(id) {
+    const state = of(id)?.state;
+    return ['busy', 'full', 'offline'].includes(state) ? `load-${state}` : '';
   }
+  /** A model's load in words while it isn't free, for its tooltip and screen readers. */
+  const label = id => loadLabel(of(id));
   /** What holds a reply that hasn't started: the person's own limit in its model, or a full model. */
   function holdup(model) {
     const l = of(model), you = l?.you;
     if (you?.limit && you.inFlight >= you.limit) return { own: true, text: `You have ${you.inFlight} of ${you.limit} requests running on ${modelName(model)}, so this one starts when one of them finishes.` };
-    if (l?.state === 'full') return { text: `${modelName(model)} is full right now: ${l.inFlight} of ${l.slots} in use${l.waiting ? `, ${l.waiting} waiting` : ''}. Your message is in line.` };
+    if (l?.state === 'full') return { text: `${modelName(model)} is full right now: ${running(l)}${l.waiting ? `, ${l.waiting} waiting` : ''}. Your message is in line.` };
     if (l?.state === 'offline') return { text: `${modelName(model)} has no servers running right now. Your message waits until one starts.` };
     return null;
   }
@@ -63,5 +68,5 @@ export function createLoad({ api, state, modelName }) {
   }
   /** Whether load is worth asking for while a reply waits. */
   const offered = () => data.available !== false;
-  return { refresh, mark, notice, offered, current: () => data };
+  return { refresh, tint, label, notice, offered, current: () => data };
 }

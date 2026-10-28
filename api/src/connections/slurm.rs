@@ -1,6 +1,8 @@
 //! Slurm through slurmrestd with a person's own JWT, so jobs run as their account.
 //! Chat uses the API version set on the cluster, or finds the newest one the server
-//! offers (v0.0.45 to v0.0.40).
+//! offers (v0.0.45 to v0.0.40). It never lists every job on the cluster, which on a
+//! large cluster is hundreds of megabytes: a person's jobs come from the accounting
+//! database filtered by user, and the queue's size from the scheduler's statistics.
 use super::mcp::Tool;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -10,6 +12,8 @@ const VERSIONS: [&str; 6] = [
     "v0.0.45", "v0.0.44", "v0.0.43", "v0.0.42", "v0.0.41", "v0.0.40",
 ];
 const TIMEOUT: Duration = Duration::from_secs(60);
+/// The most Chat reads of one slurmrestd answer.
+const MAX_BODY: usize = 32 * 1024 * 1024;
 
 fn tool(
     name: &str,
@@ -31,7 +35,7 @@ fn tool(
 pub fn tools() -> Vec<Tool> {
     vec![
         tool("cluster", "Cluster", "Partitions and nodes of the Slurm cluster: state, CPUs and memory in use, and time limits.", true, json!({}), &[]),
-        tool("jobs", "Jobs", "List Slurm jobs, by default only your own.", true, json!({"all_users":{"type":"boolean","description":"Include other users' jobs"},"state":{"type":"string","description":"Only jobs in this state, such as RUNNING or PENDING"}}), &[]),
+        tool("jobs", "Jobs", "Your running and pending Slurm jobs. For one job, including a finished one, use Job details.", true, json!({"state":{"type":"string","enum":["RUNNING","PENDING"],"description":"Only jobs in this state"}}), &[]),
         tool("job", "Job details", "Details of one job: state, reason, resources, working directory and output files.", true, json!({"job_id":{"type":"integer"}}), &["job_id"]),
         tool("submit", "Submit job", "Submit a batch script as your account. Output goes to slurm-<job id>.out in the working directory unless output is set.", false, json!({
             "script":{"type":"string","description":"The batch script, starting with #!/bin/bash. #SBATCH lines are not read; use the other fields."},
@@ -156,10 +160,15 @@ impl Client {
             }
         })?;
         let status = response.status().as_u16();
-        let bytes = response
-            .bytes()
+        let bytes = super::read_capped(response, MAX_BODY)
             .await
-            .map_err(|_| "slurmrestd closed the connection".to_string())?;
+            .map_err(|e| match e {
+                super::Read::Closed => "slurmrestd closed the connection".to_string(),
+                super::Read::TooLarge => format!(
+                    "slurmrestd's answer was larger than {} MiB, so Chat did not read it",
+                    MAX_BODY / 1024 / 1024
+                ),
+            })?;
         Ok((
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
@@ -182,15 +191,32 @@ impl Client {
         Err(not_offered())
     }
 
+    /// Calls the scheduler (slurmctld) part of the API.
     async fn call_api(
         &mut self,
         method: reqwest::Method,
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, String> {
+        self.request(method, "slurm", path, body).await
+    }
+
+    /// Calls the accounting (slurmdbd) part of the API.
+    async fn call_db(&mut self, path: &str) -> Result<Value, String> {
+        self.request(reqwest::Method::GET, "slurmdb", path, None)
+            .await
+    }
+
+    async fn request(
+        &mut self,
+        method: reqwest::Method,
+        api: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, String> {
         let v = self.version().await?;
         let (status, value) = self
-            .send(method, &format!("slurm/{v}/{path}"), body)
+            .send(method, &format!("{api}/{v}/{path}"), body)
             .await?;
         let errors: Vec<String> = value
             .get("errors")
@@ -304,40 +330,51 @@ impl Client {
         Ok(out.join("\n"))
     }
 
+    /// The person's running and pending jobs, newest first, from the accounting
+    /// database, which filters by user (the scheduler's job list cannot).
+    async fn own_jobs(&mut self, states: &[&str]) -> Result<Vec<Value>, String> {
+        let mut jobs = vec![];
+        for state in states {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("users", &self.user)
+                .append_pair("state", state)
+                .finish();
+            let data = self.call_db(&format!("jobs?{query}")).await?;
+            jobs.extend(data["jobs"].as_array().cloned().unwrap_or_default());
+        }
+        jobs.sort_by_key(|j| std::cmp::Reverse(num(&j["job_id"]).unwrap_or(0)));
+        Ok(jobs)
+    }
+
     async fn jobs(&mut self, args: &Value) -> Result<String, String> {
-        let all = args["all_users"].as_bool() == Some(true);
-        let state = args["state"].as_str().map(str::to_ascii_uppercase);
-        let data = self.call_api(reqwest::Method::GET, "jobs", None).await?;
-        let now = chrono::Utc::now().timestamp();
-        let lines: Vec<String> = data["jobs"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|j| all || j["user_name"].as_str() == Some(&self.user))
-            .filter(|j| {
-                state
-                    .as_ref()
-                    .is_none_or(|s| text(&j["job_state"]).contains(s.as_str()))
-            })
+        let state = args["state"]
+            .as_str()
+            .map(str::to_ascii_uppercase)
+            .filter(|s| ACTIVE.contains(&s.as_str()));
+        let states: Vec<&str> = match &state {
+            Some(s) => vec![s.as_str()],
+            None => ACTIVE.to_vec(),
+        };
+        let lines: Vec<String> = self
+            .own_jobs(&states)
+            .await?
+            .iter()
             .map(|j| {
-                let ran = ran(j, now);
-                let state = text(&j["job_state"]);
+                let job = own_job(j);
                 format!(
-                    "- {} {} [{}] user {}, partition {}, ran {} of {}, nodes {}{}",
-                    num(&j["job_id"]).unwrap_or(0),
-                    text(&j["name"]),
-                    state,
-                    text(&j["user_name"]),
-                    text(&j["partition"]),
-                    duration(ran),
-                    minutes(&j["time_limit"]),
-                    if text(&j["nodes"]).is_empty() {
-                        "-".into()
-                    } else {
-                        text(&j["nodes"])
-                    },
-                    match j["state_reason"].as_str() {
-                        Some(r) if r != "None" && !r.is_empty() => format!(", reason {r}"),
+                    "- {} {} [{}] partition {}, ran {} of {}, nodes {}{}",
+                    job["id"],
+                    job["name"].as_str().unwrap_or(""),
+                    job["state"].as_str().unwrap_or(""),
+                    job["partition"].as_str().unwrap_or(""),
+                    job["elapsed"].as_str().unwrap_or(""),
+                    job["timeLimit"].as_str().unwrap_or(""),
+                    job["nodes"]
+                        .as_str()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or("-"),
+                    match job["reason"].as_str() {
+                        Some(r) if !r.is_empty() => format!(", reason {r}"),
                         _ => String::new(),
                     }
                 )
@@ -345,9 +382,11 @@ impl Client {
             .collect();
         Ok(if lines.is_empty() {
             format!(
-                "No {}jobs{}.",
-                if all { "" } else { "of your " },
-                state.map(|s| format!(" in state {s}")).unwrap_or_default()
+                "No {} jobs of yours.",
+                state
+                    .as_deref()
+                    .unwrap_or("running or pending")
+                    .to_lowercase()
             )
         } else {
             lines.join("\n")
@@ -476,7 +515,12 @@ impl Client {
             .call_api(reqwest::Method::GET, "partitions", None)
             .await?;
         let nodes = self.call_api(reqwest::Method::GET, "nodes", None).await?;
-        let jobs = self.call_api(reqwest::Method::GET, "jobs", None).await?;
+        // The queue's size from the scheduler's statistics, not by listing every job.
+        let diag = self
+            .call_api(reqwest::Method::GET, "diag", None)
+            .await
+            .unwrap_or(Value::Null);
+        let mine = self.own_jobs(&ACTIVE).await?;
         let list = |v: &Value, key: &str| v[key].as_array().cloned().unwrap_or_default();
         let partitions: Vec<Value> = list(&partitions, "partitions")
             .iter()
@@ -510,36 +554,7 @@ impl Client {
                 .map(|n| n[key].as_i64().unwrap_or(0))
                 .sum::<i64>()
         };
-        let all = list(&jobs, "jobs");
-        let in_state = |state: &str| {
-            all.iter()
-                .filter(|j| text(&j["job_state"]).contains(state))
-                .count()
-        };
-        let now = chrono::Utc::now().timestamp();
-        let mut mine: Vec<&Value> = all
-            .iter()
-            .filter(|j| j["user_name"].as_str() == Some(&self.user))
-            .collect();
-        mine.sort_by_key(|j| std::cmp::Reverse(num(&j["job_id"]).unwrap_or(0)));
-        let mine: Vec<Value> = mine
-            .into_iter()
-            .take(25)
-            .map(|j| {
-                let ran = ran(j, now);
-                json!({
-                    "id": num(&j["job_id"]),
-                    "name": text(&j["name"]),
-                    "state": text(&j["job_state"]),
-                    "partition": text(&j["partition"]),
-                    "elapsed": if text(&j["job_state"]).contains("PENDING") { "-".into() } else { duration(ran) },
-                    "timeLimit": minutes(&j["time_limit"]),
-                    "nodes": text(&j["nodes"]),
-                    "reason": j["state_reason"].as_str().filter(|r| *r != "None").unwrap_or(""),
-                    "submitted": num(&j["submit_time"]),
-                })
-            })
-            .collect();
+        let mine: Vec<Value> = mine.iter().take(25).map(own_job).collect();
         Ok(json!({
             "user": self.user,
             "partitions": partitions,
@@ -549,24 +564,32 @@ impl Client {
                 "memoryMb": sum("memoryMb"), "allocMemoryMb": sum("allocMemoryMb"),
             },
             "nodes": nodes,
-            "queue": {"running": in_state("RUNNING"), "pending": in_state("PENDING"), "total": all.len()},
+            "queue": {
+                "running": num(&diag["statistics"]["jobs_running"]),
+                "pending": num(&diag["statistics"]["jobs_pending"]),
+            },
             "jobs": mine,
         }))
     }
 }
 
-/// How long a job has run. For a running job slurmrestd reports end_time as the
-/// expected end, so only a finished job's end time counts.
-fn ran(job: &Value, now: i64) -> i64 {
-    let start = num(&job["start_time"]).unwrap_or(0);
-    let end = num(&job["end_time"]).unwrap_or(0);
-    if start <= 0 || start > now {
-        0
-    } else if text(&job["job_state"]).contains("RUNNING") || end < start || end > now {
-        now - start
-    } else {
-        end - start
-    }
+/// The states the person's job list shows, asked for one at a time.
+const ACTIVE: [&str; 2] = ["RUNNING", "PENDING"];
+
+/// One of the person's jobs from the accounting database.
+fn own_job(j: &Value) -> Value {
+    let state = text(&j["state"]["current"]);
+    json!({
+        "id": num(&j["job_id"]),
+        "name": text(&j["name"]),
+        "state": state,
+        "partition": text(&j["partition"]),
+        "elapsed": if state.contains("PENDING") { "-".into() } else { duration(num(&j["time"]["elapsed"]).unwrap_or(0)) },
+        "timeLimit": minutes(&j["time"]["limit"]),
+        "nodes": text(&j["nodes"]).replace("None assigned", ""),
+        "reason": j["state"]["reason"].as_str().filter(|r| *r != "None").unwrap_or(""),
+        "submitted": num(&j["time"]["submission"]),
+    })
 }
 
 fn not_offered() -> String {
@@ -595,18 +618,6 @@ fn time(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn running_jobs_count_time_until_now_not_their_expected_end() {
-        let now = 10_000;
-        let running = json!({"job_state":["RUNNING"],"start_time":9_940,"end_time":11_740});
-        let finished = json!({"job_state":["COMPLETED"],"start_time":9_000,"end_time":9_120});
-        let pending = json!({"job_state":["PENDING"],"start_time":11_000,"end_time":12_800});
-        assert_eq!(
-            (ran(&running, now), ran(&finished, now), ran(&pending, now)),
-            (60, 120, 0)
-        );
-    }
 
     #[test]
     fn slurm_numbers_and_times_read_every_shape() {

@@ -37,6 +37,31 @@ const DETAIL_OUTPUT: usize = 4 * 1024;
 /// How long a tool call waits for Allow or Deny.
 pub const APPROVAL_WAIT: Duration = Duration::from_secs(15 * 60);
 
+/// Why a cluster's answer could not be read.
+pub(crate) enum Read {
+    Closed,
+    TooLarge,
+}
+
+/// Reads a Slurm or Kubernetes answer, giving up on one larger than `max` instead of
+/// holding it all in memory.
+pub(crate) async fn read_capped(response: reqwest::Response, max: usize) -> Result<Vec<u8>, Read> {
+    use futures_util::StreamExt;
+    if response.content_length().is_some_and(|n| n > max as u64) {
+        return Err(Read::TooLarge);
+    }
+    let mut body = vec![];
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| Read::Closed)?;
+        if body.len() + chunk.len() > max {
+            return Err(Read::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 #[derive(Clone)]
 pub struct Connections {
     pool: PgPool,

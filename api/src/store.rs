@@ -38,6 +38,9 @@ pub const MAX_CONVERSATIONS_PER_USER: i64 = 1_000;
 /// The background worker renews this lease while it is alive; a failed worker
 /// becomes recoverable on the next read within 45 seconds.
 pub const GENERATION_LEASE_SECONDS: i32 = 45;
+/// A temporary chat nobody left explicitly is deleted after this many hours without
+/// activity, so with the sweep's pace it is gone within a day.
+pub const TEMPORARY_CHAT_HOURS: i32 = 23;
 
 /// Chat and reply settings that other people may see and take into a fork: the
 /// model and how it samples. Instructions such as the system prompt stay private
@@ -120,6 +123,10 @@ pub struct Message {
     pub follow_ups: Value,
     pub follow_ups_status: String,
     pub activity: Value,
+    /// The owner's own rating of a reply; never shown to someone the chat is shared with.
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<crate::feedback::Feedback>,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow)]
@@ -161,6 +168,8 @@ pub struct Conversation {
     pub generation_cancel_requested: bool,
     /// Who else may read it: none, group or signed_in.
     pub share_scope: String,
+    /// Kept out of history and deleted when its owner leaves it.
+    pub temporary: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -193,7 +202,7 @@ impl Store {
         recover_expired_in(&mut tx, owner).await?;
         let rows = sqlx::query_as::<_, ConversationSummary>(
             "SELECT id, title, model, reasoning_effort, updated_at, settings, archived, pinned, parent_id FROM conversations
-             WHERE owner_id = $1 ORDER BY updated_at DESC, id",
+             WHERE owner_id = $1 AND NOT temporary ORDER BY updated_at DESC, id",
         )
         .bind(owner)
         .fetch_all(&mut *tx)
@@ -219,18 +228,32 @@ impl Store {
         model: &str,
         reasoning_effort: ReasoningEffort,
     ) -> Result<Conversation, ApiError> {
+        self.create_chat(owner, title, model, reasoning_effort, false)
+            .await
+    }
+
+    /// A new chat; a temporary one stays out of history and goes when its owner leaves it.
+    pub async fn create_chat(
+        &self,
+        owner: Uuid,
+        title: &str,
+        model: &str,
+        reasoning_effort: ReasoningEffort,
+        temporary: bool,
+    ) -> Result<Conversation, ApiError> {
         validate_title(title)?;
         validate_model(model)?;
         let mut tx = self.owner_transaction(owner).await?;
         require_conversation_capacity(&mut tx, owner).await?;
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO conversations (id, owner_id, title, model, reasoning_effort, settings) VALUES ($1,$2,$3,$4,$5,$6)")
+        sqlx::query("INSERT INTO conversations (id, owner_id, title, model, reasoning_effort, settings, temporary) VALUES ($1,$2,$3,$4,$5,$6,$7)")
             .bind(id)
             .bind(owner)
             .bind(title.trim())
             .bind(model)
             .bind(reasoning_effort.as_str())
             .bind(json!({"reasoningEffort":reasoning_effort}))
+            .bind(temporary)
             .execute(&mut *tx)
             .await?;
         let conversation = read_conversation(&mut tx, owner, id).await?;
@@ -314,32 +337,74 @@ impl Store {
     pub async fn delete(&self, owner: Uuid, id: Uuid) -> Result<(), ApiError> {
         let mut tx = self.owner_transaction(owner).await?;
         recover_expired_in(&mut tx, owner).await?;
-        let active: Option<Option<Uuid>> = sqlx::query_scalar(
-            "SELECT active_generation FROM conversations WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+        delete_in(&mut tx, owner, id).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Its owner left a temporary chat: it is deleted as Delete does. While a reply
+    /// still runs, the reply is stopped and the sweep deletes the chat once it ends.
+    pub async fn leave_temporary(&self, owner: Uuid, id: Uuid) -> Result<(), ApiError> {
+        let mut tx = self.owner_transaction(owner).await?;
+        recover_expired_in(&mut tx, owner).await?;
+        let row: Option<(bool, Option<Uuid>)> = sqlx::query_as(
+            "SELECT temporary, active_generation FROM conversations WHERE id = $1 AND owner_id = $2 FOR UPDATE",
         )
         .bind(id)
         .bind(owner)
         .fetch_optional(&mut *tx)
         .await?;
-        match active {
+        match row {
             None => return Err(ApiError::not_found()),
-            Some(Some(_)) => {
-                return Err(conflict(
-                    "Stop the response before deleting this conversation",
+            Some((false, _)) => {
+                return Err(ApiError::bad(
+                    "Only a temporary chat is deleted when you leave it",
                 ))
             }
-            Some(None) => {}
-        }
-        let changed = sqlx::query("DELETE FROM conversations WHERE id = $1 AND owner_id = $2")
-            .bind(id)
-            .bind(owner)
-            .execute(&mut *tx)
-            .await?;
-        if changed.rows_affected() == 0 {
-            return Err(ApiError::not_found());
+            Some((true, Some(_))) => {
+                sqlx::query("UPDATE conversations SET left_at = COALESCE(left_at, clock_timestamp()), generation_cancel_requested = TRUE WHERE id = $1 AND owner_id = $2")
+                    .bind(id)
+                    .bind(owner)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            Some((true, None)) => delete_in(&mut tx, owner, id).await?,
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Deletes, as Delete does, temporary chats their owners left or that saw no activity
+    /// for TEMPORARY_CHAT_HOURS, at most 100 a run. One whose reply still runs waits for
+    /// it to end. Disabled owners' chats go too.
+    pub async fn sweep_temporary(&self) -> Result<u64, ApiError> {
+        const DUE: &str = "temporary AND (left_at IS NOT NULL OR updated_at < NOW() - make_interval(hours => $1))";
+        let due: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
+            "SELECT owner_id, id FROM conversations WHERE {DUE}
+             AND (active_generation IS NULL OR generation_expires <= NOW()) ORDER BY updated_at, id LIMIT 100"
+        ))
+        .bind(TEMPORARY_CHAT_HOURS)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut deleted = 0;
+        for (owner, id) in due {
+            let mut tx = self.lock_owner(owner, true).await?;
+            recover_expired_in(&mut tx, owner).await?;
+            let still: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE {DUE} AND id = $2 AND owner_id = $3)"
+            ))
+            .bind(TEMPORARY_CHAT_HOURS)
+            .bind(id)
+            .bind(owner)
+            .fetch_one(&mut *tx)
+            .await?;
+            // A reply that started since is left to finish; the next run tries again.
+            if still && delete_in(&mut tx, owner, id).await.is_ok() {
+                tx.commit().await?;
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 
     /// A chat as someone it is shared with reads it: unlocked, and without recovering
@@ -479,6 +544,7 @@ impl Store {
         let mut tx = self.owner_transaction(owner).await?;
         recover_expired_in(&mut tx, owner).await?;
         let original = read_conversation(&mut tx, owner, id).await?;
+        refuse_temporary(&original, "branched")?;
         require_conversation_capacity(&mut tx, owner).await?;
         let through = original
             .messages
@@ -875,6 +941,7 @@ impl Store {
             follow_ups: json!([]),
             follow_ups_status: "idle".into(),
             activity: json!([]),
+            feedback: None,
         });
         attached.insert(user_id, files);
         Ok(Turn {
@@ -1108,6 +1175,58 @@ async fn recover_expired_in(
     Ok(result.rows_affected())
 }
 
+/// Deletes one of the owner's chats, under the owner's lock, unless a reply is running.
+/// Its messages, attachment links, workspace and other per-chat records go with it.
+async fn delete_in(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
+    let active: Option<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT active_generation FROM conversations WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match active {
+        None => return Err(ApiError::not_found()),
+        Some(Some(_)) => {
+            return Err(conflict(
+                "Stop the response before deleting this conversation",
+            ))
+        }
+        Some(None) => {}
+    }
+    let changed = sqlx::query("DELETE FROM conversations WHERE id = $1 AND owner_id = $2")
+        .bind(id)
+        .bind(owner)
+        .execute(&mut **tx)
+        .await?;
+    if changed.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
+    Ok(())
+}
+
+/// Whether one of the owner's chats is temporary; not found when it isn't theirs.
+pub async fn is_temporary(pool: &PgPool, owner: Uuid, id: Uuid) -> Result<bool, ApiError> {
+    sqlx::query_scalar("SELECT temporary FROM conversations WHERE id = $1 AND owner_id = $2")
+        .bind(id)
+        .bind(owner)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(ApiError::not_found)
+}
+
+/// Refuses to make a kept copy of, or hand out, a temporary chat.
+fn refuse_temporary(chat: &Conversation, what: &str) -> Result<(), ApiError> {
+    if chat.temporary {
+        return Err(ApiError::bad(format!("A temporary chat can't be {what}")));
+    }
+    Ok(())
+}
+
 async fn require_conversation_capacity(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
@@ -1135,8 +1254,14 @@ async fn read_conversation(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(ApiError::not_found)?;
-    let messages = read_messages(tx, owner, id).await?;
-    let (active_generation_id,generation_cancel_requested,share_scope):(Option<Uuid>,bool,String)=sqlx::query_as("SELECT active_generation,generation_cancel_requested,share_scope FROM conversations WHERE id=$1 AND owner_id=$2").bind(id).bind(owner).fetch_one(&mut **tx).await?;
+    let mut messages = read_messages(tx, owner, id).await?;
+    let ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
+    for rating in crate::feedback::for_messages(tx, owner, &ids).await? {
+        if let Some(m) = messages.iter_mut().find(|m| m.id == rating.message_id) {
+            m.feedback = Some(rating);
+        }
+    }
+    let (active_generation_id,generation_cancel_requested,share_scope,temporary):(Option<Uuid>,bool,String,bool)=sqlx::query_as("SELECT active_generation,generation_cancel_requested,share_scope,temporary FROM conversations WHERE id=$1 AND owner_id=$2").bind(id).bind(owner).fetch_one(&mut **tx).await?;
     Ok(Conversation {
         id: row.id,
         title: row.title,
@@ -1151,6 +1276,7 @@ async fn read_conversation(
         active_generation_id,
         generation_cancel_requested,
         share_scope,
+        temporary,
     })
 }
 
@@ -1397,6 +1523,7 @@ mod replay_tests {
             follow_ups: json!([]),
             follow_ups_status: "idle".into(),
             activity,
+            feedback: None,
         }
     }
 

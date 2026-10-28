@@ -105,6 +105,9 @@ async fn set_sharing(
     let user = s.auth.require(&headers, true).await?;
     let pool = &s.store.pool;
     let current = owned(pool, &user, id).await?;
+    if body.scope != "none" && crate::store::is_temporary(pool, user.id, id).await? {
+        return Err(ApiError::bad("A temporary chat can't be shared"));
+    }
     let group = match body.scope.as_str() {
         "none" | "signed_in" => None,
         "group" => {
@@ -149,6 +152,10 @@ async fn read(
     }
     let images = format!("/api/shared/{id}/images/");
     for m in value["messages"].as_array_mut().into_iter().flatten() {
+        // How the owner rated a reply is theirs alone.
+        if let Some(m) = m.as_object_mut() {
+            m.remove("feedback");
+        }
         if let Some(text) = m["content"].as_str() {
             m["content"] = json!(text.replace("/api/images/", &images));
         }

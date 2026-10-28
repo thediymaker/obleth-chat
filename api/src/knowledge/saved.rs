@@ -137,16 +137,24 @@ impl Knowledge {
             .chars()
             .take(40)
             .collect();
-        // A source must be one of the person's own conversations.
+        // A source must be one of the person's own conversations, and not a temporary one.
         let source: Option<(Uuid, Option<Uuid>)> = match input.source_conversation_id {
-            Some(conversation) => sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM conversations WHERE id=$1 AND owner_id=$2",
+            Some(conversation) => match sqlx::query_scalar::<_, bool>(
+                "SELECT temporary FROM conversations WHERE id=$1 AND owner_id=$2",
             )
             .bind(conversation)
             .bind(user.id)
             .fetch_optional(&self.pool)
             .await?
-            .map(|c| (c, input.source_message_id)),
+            {
+                Some(true) => {
+                    return Err(bad(
+                        "Nothing in a temporary chat can be saved to the Library",
+                    ))
+                }
+                Some(false) => Some((conversation, input.source_message_id)),
+                None => None,
+            },
             None => None,
         };
         let message = match source {

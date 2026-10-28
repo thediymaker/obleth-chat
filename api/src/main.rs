@@ -155,6 +155,10 @@ async fn main() -> Result<()> {
         state.clone(),
         state.shutdown.clone(),
     ));
+    tokio::spawn(obleth_chat::retention::temporary_worker(
+        state.store.clone(),
+        state.shutdown.clone(),
+    ));
     let mut maintenance = tokio::spawn(obleth_chat::retention::worker(
         pool.clone(),
         state.shutdown.clone(),

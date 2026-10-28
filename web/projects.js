@@ -218,5 +218,5 @@ export function createProjects({ api, state, capabilities, render, modal, close,
     render();
     return r.project;
   }
-  return { load, list, researchHome, page, sidebar, editor, submit, actions, clear, loadChat, crumb, pill, menuItems, composerChip, contextSection, applyDraft, chatProject, choices: () => local.list || [], resetDraft: () => { chat.draft = null; }, refresh: () => list(true).then(render).catch(() => {}) };
+  return { load, list, researchHome, page, sidebar, editor, submit, actions, clear, loadChat, crumb, pill, menuItems, composerChip, contextSection, applyDraft, chatProject, choices: () => local.list || [], resetDraft: () => { chat.draft = null; }, hasDraft: () => !chat.id && !!chat.draft, refresh: () => list(true).then(render).catch(() => {}) };
 }

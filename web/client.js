@@ -73,6 +73,13 @@ export class ApiClient {
     sessionSignal.throwIfAborted();
     return result;
   }
+  // A POST that still goes out while the page closes, such as leaving a temporary chat.
+  // Best effort: nothing waits for its answer.
+  send(path) {
+    if (!path.startsWith('/api/')) throw new Error('API requests must use this origin.');
+    const headers = this.csrfToken ? { 'X-CSRF-Token': this.csrfToken } : {};
+    return this.fetcher(path, { method: 'POST', headers, credentials: 'same-origin', cache: 'no-store', keepalive: true }).then(() => {}, () => {});
+  }
 }
 
 // Read SSE by lines, preserving UTF-8 and CRLF boundaries between chunks.

@@ -117,7 +117,7 @@ impl Store {
         // only messages with a lexeme hit can match unless an empty vector
         // satisfies the query (pure negation). Lexeme-free queries match substrings.
         let matching = "WITH owned AS (
-              SELECT id FROM conversations WHERE owner_id=$1 AND ($3::boolean IS NULL OR archived=$3)
+              SELECT id FROM conversations WHERE owner_id=$1 AND NOT temporary AND ($3::boolean IS NULL OR archived=$3)
             ), hits AS (
               SELECT m.conversation_id FROM messages m JOIN owned o ON o.id=m.conversation_id
                 WHERE $2<>'' AND numnode(websearch_to_tsquery('simple',$2))=0
@@ -250,6 +250,7 @@ impl Store {
         let mut tx = self.owner_transaction(owner).await?;
         recover_expired_in(&mut tx, owner).await?;
         let original = read_conversation(&mut tx, owner, id).await?;
+        refuse_temporary(&original, "branched")?;
         if original.messages.iter().any(|m| m.status == "pending") {
             return Err(conflict("Stop the response before editing or retrying it"));
         }
@@ -356,6 +357,7 @@ impl Store {
         let mut bytes = 0usize;
         for id in ids {
             let chat = read_conversation(&mut tx, owner, *id).await?;
+            refuse_temporary(&chat, "exported")?;
             if chat.messages.iter().any(|m| m.status == "pending") {
                 return Err(conflict("Stop responses before exporting"));
             }

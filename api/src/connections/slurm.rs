@@ -32,8 +32,10 @@ fn tool(
     }
 }
 
-pub fn tools() -> Vec<Tool> {
-    vec![
+/// The cluster's tools. `output` adds Job output, for clusters that bring job output
+/// back to Chat.
+pub fn tools(output: bool) -> Vec<Tool> {
+    let mut tools = vec![
         tool("cluster", "Cluster", "Partitions and nodes of the Slurm cluster: state, CPUs and memory in use, and time limits.", true, json!({}), &[]),
         tool("jobs", "Jobs", "Your running and pending Slurm jobs. For one job, including a finished one, use Job details.", true, json!({"state":{"type":"string","enum":["RUNNING","PENDING"],"description":"Only jobs in this state"}}), &[]),
         tool("job", "Job details", "Details of one job: state, reason, resources, working directory and output files.", true, json!({"job_id":{"type":"integer"}}), &["job_id"]),
@@ -50,7 +52,11 @@ pub fn tools() -> Vec<Tool> {
             "output":{"type":"string","description":"Output file path, may use %j for the job id"}
         }), &["script"]),
         tool("cancel", "Cancel job", "Cancel one of your jobs.", false, json!({"job_id":{"type":"integer"}}), &["job_id"]),
-    ]
+    ];
+    if output {
+        tools.push(tool("output", "Job output", "The end of what a job you submitted from this chat printed (its output file, up to the last 1 MiB), once the job has ended. Use it instead of guessing from the state or exit code.", true, json!({"job_id":{"type":"integer"}}), &["job_id"]));
+    }
+    tools
 }
 
 pub struct Client {
@@ -285,7 +291,7 @@ impl Client {
             "cluster" => self.cluster().await.map(|t| (true, t)),
             "jobs" => self.jobs(args).await.map(|t| (true, t)),
             "job" => self.job(args).await.map(|t| (true, t)),
-            "submit" => self.submit(args).await.map(|t| (true, t)),
+            "submit" => self.submit(args, None).await.map(|(t, _)| (true, t)),
             "cancel" => {
                 let id = job_id(args)?;
                 self.call_api(reqwest::Method::DELETE, &format!("job/{id}"), None)
@@ -395,9 +401,19 @@ impl Client {
 
     async fn job(&mut self, args: &Value) -> Result<String, String> {
         let id = job_id(args)?;
-        let data = self
+        // The scheduler forgets a job minutes after it ends; accounting keeps it.
+        let data = match self
             .call_api(reqwest::Method::GET, &format!("job/{id}"), None)
-            .await?;
+            .await
+        {
+            Ok(data) => data,
+            Err(error) => {
+                return match self.accounted(id).await {
+                    Some(j) => Ok(finished_job(id, &j)),
+                    None => Err(error),
+                }
+            }
+        };
         let Some(j) = data["jobs"].as_array().and_then(|a| a.first()) else {
             return Err(format!("Slurm has no job {id}"));
         };
@@ -440,7 +456,34 @@ impl Client {
         .join("\n"))
     }
 
-    async fn submit(&mut self, args: &Value) -> Result<String, String> {
+    /// One job from accounting, which keeps jobs after the scheduler forgets them.
+    async fn accounted(&mut self, id: i64) -> Option<Value> {
+        let data = self.call_db(&format!("job/{id}")).await.ok()?;
+        data["jobs"].as_array()?.first().cloned()
+    }
+
+    /// The job's state, such as RUNNING or COMPLETED, from the scheduler or accounting.
+    pub async fn state_of(&mut self, id: i64) -> Option<String> {
+        if let Ok(data) = self
+            .call_api(reqwest::Method::GET, &format!("job/{id}"), None)
+            .await
+        {
+            if let Some(j) = data["jobs"].as_array().and_then(|a| a.first()) {
+                return Some(text(&j["job_state"]));
+            }
+        }
+        self.accounted(id)
+            .await
+            .map(|j| text(&j["state"]["current"]))
+    }
+
+    /// Submits the job. With `upload`, the job also sends the end of its output there
+    /// as it ends. Returns what to tell the model and the job id.
+    pub async fn submit(
+        &mut self,
+        args: &Value,
+        upload: Option<&Url>,
+    ) -> Result<(String, i64), String> {
         let script = args["script"].as_str().unwrap_or("").trim_start();
         if script.is_empty() || script.len() > 256 * 1024 {
             return Err("The script must be between 1 byte and 256 KB".into());
@@ -480,6 +523,16 @@ impl Client {
         if let Some(o) = args["output"].as_str() {
             job["standard_output"] = json!(o);
         }
+        // Where Slurm writes the output, as the job's shell names it, when Chat can
+        // follow the pattern: then the job sends the end of that file back.
+        let output = args["output"].as_str().unwrap_or(DEFAULT_OUTPUT);
+        let script = match (upload, output_path(output)) {
+            (Some(upload), Some(path)) => {
+                job["standard_output"] = json!(output);
+                returning_output(&script, upload, &path)
+            }
+            _ => script,
+        };
         let result = self
             .call_api(
                 reqwest::Method::POST,
@@ -495,7 +548,7 @@ impl Client {
             .map(|w| text(&w["description"]))
             .filter(|w| !w.is_empty())
             .collect();
-        Ok(format!(
+        let text = format!(
             "Submitted job {id} as {} in {}.{}",
             self.user,
             job["current_working_directory"].as_str().unwrap_or(""),
@@ -504,7 +557,8 @@ impl Client {
             } else {
                 format!(" Warnings: {}", warnings.join("; "))
             }
-        ))
+        );
+        Ok((text, id))
     }
 }
 
@@ -573,6 +627,123 @@ impl Client {
     }
 }
 
+/// Slurm's own default output file, in the working directory.
+const DEFAULT_OUTPUT: &str = "slurm-%j.out";
+/// The most of a job's output that comes back: its last 1 MiB.
+pub const RETURNED_OUTPUT: usize = 1024 * 1024;
+
+/// An output file pattern (`--output`) as a path the job's shell expands, or None for
+/// patterns Chat can't follow (such as `%4j`) or characters the shell would read.
+fn output_path(pattern: &str) -> Option<String> {
+    if pattern.is_empty()
+        || pattern
+            .chars()
+            .any(|c| matches!(c, '"' | '$' | '`' | '\\') || c.is_control())
+    {
+        return None;
+    }
+    let mut path = String::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            path.push(c);
+            continue;
+        }
+        path.push_str(match chars.next()? {
+            'j' => "${SLURM_JOB_ID}",
+            'x' => "${SLURM_JOB_NAME}",
+            'u' => "${USER}",
+            'A' => "${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}",
+            'a' => "${SLURM_ARRAY_TASK_ID}",
+            'N' => "$(hostname -s)",
+            '%' => "%",
+            _ => return None,
+        });
+    }
+    Some(path)
+}
+
+/// The job script Chat submits to bring output back: it runs the person's script
+/// unchanged, then uploads the end of the output file to `upload`, a link that can
+/// write that one object. It also sends it when the job is cancelled or runs out of
+/// time, since Slurm sends SIGTERM before it kills the job.
+fn returning_output(script: &str, upload: &Url, path: &str) -> String {
+    let end = format!("OBLETH_CHAT_SCRIPT_{}", uuid::Uuid::new_v4().simple());
+    // A presigned URL is percent-encoded, so it holds no quote to escape.
+    let url = upload.as_str().replace('\'', "%27");
+    format!(
+        r#"#!/bin/bash
+# Chat runs the script below unchanged, then sends the end of this job's output back
+# to Chat, so the chat that submitted it can read it.
+chat_script=$(mktemp "${{TMPDIR:-/tmp}}/chat-job.XXXXXX") || exit 1
+cat > "$chat_script" <<'{end}'
+{script}
+{end}
+chmod +x "$chat_script"
+chat_sent=
+chat_send() {{
+  [ -n "$chat_sent" ] && return
+  chat_sent=1
+  chat_tail=$(mktemp "${{TMPDIR:-/tmp}}/chat-out.XXXXXX") || return
+  tail -c {RETURNED_OUTPUT} "{path}" > "$chat_tail" 2>/dev/null
+  curl -s --connect-timeout 10 -m 60 -T "$chat_tail" '{url}' > /dev/null 2>&1
+  rm -f "$chat_tail" "$chat_script"
+}}
+trap 'chat_send; exit 143' TERM INT
+"$chat_script"
+chat_status=$?
+chat_send
+exit $chat_status
+"#
+    )
+}
+
+/// One job as accounting describes it, for Job details once the scheduler forgot it.
+fn finished_job(id: i64, j: &Value) -> String {
+    let exit = num(&j["exit_code"]["return_code"])
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "-".into());
+    let file = |expanded: &str, plain: &str| {
+        Some(text(&j[expanded]))
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(|| text(&j[plain]))
+    };
+    [
+        format!(
+            "Job {id}: {} [{}], from accounting (the scheduler no longer lists it)",
+            text(&j["name"]),
+            text(&j["state"]["current"])
+        ),
+        format!(
+            "User {}, account {}, partition {}",
+            text(&j["user"]),
+            text(&j["account"]),
+            text(&j["partition"])
+        ),
+        format!("Reason: {}", text(&j["state"]["reason"])),
+        format!(
+            "Nodes {}, ran {} of {}",
+            text(&j["nodes"]),
+            duration(num(&j["time"]["elapsed"]).unwrap_or(0)),
+            minutes(&j["time"]["limit"])
+        ),
+        format!(
+            "Submitted {}, started {}, ended {}",
+            time(&j["time"]["submission"]),
+            time(&j["time"]["start"]),
+            time(&j["time"]["end"])
+        ),
+        format!("Exit code {exit}"),
+        format!("Working directory {}", text(&j["working_directory"])),
+        format!(
+            "Output {}, errors {}",
+            file("stdout_expanded", "stdout"),
+            file("stderr_expanded", "stderr")
+        ),
+    ]
+    .join("\n")
+}
+
 /// The states the person's job list shows, asked for one at a time.
 const ACTIVE: [&str; 2] = ["RUNNING", "PENDING"];
 
@@ -600,7 +771,7 @@ fn not_offered() -> String {
     )
 }
 
-fn job_id(args: &Value) -> Result<i64, String> {
+pub(super) fn job_id(args: &Value) -> Result<i64, String> {
     args["job_id"]
         .as_i64()
         .or_else(|| args["job_id"].as_str().and_then(|s| s.trim().parse().ok()))
@@ -638,7 +809,120 @@ mod tests {
         );
         assert_eq!(job_id(&json!({"job_id":"42"})), Ok(42));
         assert!(job_id(&json!({"job_id":-1})).is_err());
-        assert_eq!(tools().iter().filter(|t| !t.read_only).count(), 2);
+        assert_eq!(tools(false).iter().filter(|t| !t.read_only).count(), 2);
+        // Job output only reads.
+        assert_eq!(tools(true).len(), tools(false).len() + 1);
+        assert_eq!(tools(true).iter().filter(|t| !t.read_only).count(), 2);
+    }
+
+    /// Runs the job script Chat submits the way Slurm would: its output going to the
+    /// output file, with a `curl` that keeps what it was asked to upload.
+    fn run_returning(
+        script: &str,
+        signal_after: Option<std::time::Duration>,
+    ) -> (Option<i32>, String) {
+        let dir =
+            std::env::temp_dir().join(format!("job-output-{}", uuid::Uuid::new_v4().simple()));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("curl"),
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -T ] && cp \"$2\" \"$UPLOADED\"; shift; done\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(bin.join("curl"))
+            .status()
+            .unwrap();
+        let upload =
+            Url::parse("https://store.example/bucket/job-output/x?X-Amz-Signature=abc").unwrap();
+        let wrapped = returning_output(script, &upload, &output_path("out-%j.txt").unwrap());
+        std::fs::write(dir.join("job.sh"), wrapped).unwrap();
+        let out = std::fs::File::create(dir.join("out-8.txt")).unwrap();
+        let mut child = std::process::Command::new("setsid")
+            .arg("bash")
+            .arg("job.sh")
+            .current_dir(&dir)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("SLURM_JOB_ID", "8")
+            .env("TMPDIR", &dir)
+            .env("UPLOADED", dir.join("uploaded"))
+            .stdout(out.try_clone().unwrap())
+            .stderr(out)
+            .spawn()
+            .unwrap();
+        if let Some(after) = signal_after {
+            std::thread::sleep(after);
+            // Like scancel or a time limit: SIGTERM to every process of the job.
+            std::process::Command::new("kill")
+                .args(["-TERM", "--", &format!("-{}", child.id())])
+                .status()
+                .unwrap();
+        }
+        let status = child.wait().unwrap();
+        let uploaded = std::fs::read_to_string(dir.join("uploaded")).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).ok();
+        (status.code(), uploaded)
+    }
+
+    #[test]
+    fn a_job_sends_the_end_of_its_output_and_keeps_its_exit_code() {
+        if std::process::Command::new("setsid")
+            .arg("true")
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        let (code, uploaded) = run_returning(
+            "#!/bin/bash\necho \"hello from $SLURM_JOB_ID\"\nexit 3",
+            None,
+        );
+        assert_eq!(code, Some(3));
+        assert_eq!(uploaded, "hello from 8\n");
+        // Another interpreter's script runs as itself.
+        let (code, uploaded) = run_returning("#!/bin/sh\nprintf 'sh too\\n'", None);
+        assert_eq!((code, uploaded.as_str()), (Some(0), "sh too\n"));
+    }
+
+    #[test]
+    fn a_cancelled_job_still_sends_its_output() {
+        if std::process::Command::new("setsid")
+            .arg("true")
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        let (code, uploaded) = run_returning(
+            "#!/bin/bash\necho started\nsleep 30\necho never",
+            Some(std::time::Duration::from_millis(700)),
+        );
+        assert_eq!(code, Some(143));
+        // What it printed before it was stopped, and the shell's note that it was.
+        assert!(uploaded.starts_with("started\n"), "{uploaded}");
+        assert!(!uploaded.contains("never"), "{uploaded}");
+    }
+
+    #[test]
+    fn output_patterns_become_paths_the_job_expands() {
+        assert_eq!(
+            output_path("slurm-%j.out").as_deref(),
+            Some("slurm-${SLURM_JOB_ID}.out")
+        );
+        assert_eq!(output_path("logs/%x-%A_%a.txt").as_deref(), Some("logs/${SLURM_JOB_NAME}-${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}.txt"));
+        assert_eq!(output_path("100%%.log").as_deref(), Some("100%.log"));
+        for refused in ["%4j.out", "a$(id).out", "a\"b", "x%"] {
+            assert_eq!(output_path(refused), None, "{refused}");
+        }
     }
 
     #[test]

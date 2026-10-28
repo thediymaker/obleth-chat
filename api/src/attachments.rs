@@ -179,12 +179,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
             "/api/attachments",
-            get(list)
-                .post(upload)
-                // A document's base64 and the JSON around it.
-                .layer(DefaultBodyLimit::max(
-                    MAX_DOCUMENT_BYTES / 3 * 4 + 1024 * 1024,
-                )),
+            // The upload reads its own body, after sign-in.
+            get(list).post(upload).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/attachments/{id}", get(download).delete(delete))
         .with_state(state)
@@ -200,12 +196,36 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     ))
 }
 
+/// A document's base64 and the JSON around it.
+const MAX_UPLOAD_BODY: usize = MAX_DOCUMENT_BYTES / 3 * 4 + 1024 * 1024;
+/// Uploads read at once on each server. A document's upload holds its base64, its
+/// bytes and its text while it is read, so these bound the memory uploads take.
+static UPLOADING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+
 async fn upload(
     State(s): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Upload>,
+    body: Body,
 ) -> Result<(StatusCode, Json<AttachmentMeta>), ApiError> {
     let user = s.auth.require(&headers, true).await?;
+    // Signed in first, then a turn, before the body is read.
+    let _turn = UPLOADING
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let body = axum::body::to_bytes(body, MAX_UPLOAD_BODY)
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Choose a file of {} or less",
+                    size_label(MAX_DOCUMENT_BYTES)
+                ),
+            )
+        })?;
+    let body: Upload =
+        serde_json::from_slice(&body).map_err(|_| ApiError::bad("Invalid upload"))?;
     // A long document can be searched when Knowledge is set up and has a gateway to
     // embed it through.
     let searchable = s.knowledge.is_some() && s.gateway.is_some();

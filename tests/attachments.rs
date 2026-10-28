@@ -1034,3 +1034,33 @@ async fn documents_too_long_to_read_whole_are_refused_without_knowledge(pool: Pg
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn upload_bodies_are_read_only_after_sign_in_and_within_the_limit(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let user = session(&pool).await;
+    let big = "x".repeat(30 * 1024 * 1024);
+    let post = |cookie: Option<&str>| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/attachments")
+            .header("origin", ORIGIN)
+            .header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            request = request
+                .header("cookie", cookie)
+                .header("x-csrf-token", &user.csrf);
+        }
+        request
+            .body(Body::from(format!(r#"{{"name":"a.pdf","data":"{big}"}}"#)))
+            .unwrap()
+    };
+    // Signed out: refused before the body is read.
+    let response = app.clone().oneshot(post(None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // Signed in: the body stops at the limit, with a message that names it.
+    let response = app.clone().oneshot(post(Some(&user.cookie))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("20.0 MB or less"), "{body:?}");
+}

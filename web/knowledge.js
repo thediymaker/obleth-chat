@@ -84,7 +84,7 @@ export function createKnowledge({ api, state, capabilities, render, modal, close
     if (local.searching) return '<p class="inline-note" role="status">Searching…</p>';
     if (!local.results) return '';
     if (!local.results.length) return '<p class="inline-note">No passages matched. A chat would answer without this collection.</p>';
-    return `<ol class="knowledge-results">${local.results.map(r => `<li><div class="spread"><a href="${fileUrl(r.documentId, r.page)}" target="_blank" rel="noopener noreferrer">${esc(r.name)}${r.page ? ` · page ${r.page}` : ''}</a>${badge(r.matched)}</div><p>${esc(r.excerpt)}</p></li>`).join('')}</ol>`;
+    return `<ol class="knowledge-results">${local.results.map(r => `<li><div class="spread"><a href="${fileUrl(r.documentId, r.page)}" target="_blank" rel="noopener noreferrer">${esc(r.name)}${r.page ? ` · page ${r.page}` : ''}</a>${badge(r.matched)}</div><p>${r.section ? `<span class="faint">${esc(r.section)}</span><br>` : ''}${esc(r.excerpt)}</p></li>`).join('')}</ol>`;
   }
   function detail() {
     if (!local.detail) return local.error ? `<div class="page">${errorBox(local.error, 'knowledge-reload')}<a class="btn small" href="#knowledge">All collections</a></div>` : '<div class="empty" role="status">Opening the collection…</div>';
@@ -208,13 +208,13 @@ export function createKnowledge({ api, state, capabilities, render, modal, close
       return part.replace(/\[(\d{1,2}(?:\s*,\s*\d{1,2})*)\]/g, (whole, list) => {
         const ns = list.split(',').map(n => Number(n.trim()));
         if (!ns.every(n => items.has(n))) return whole;
-        return ns.map(n => { const s = items.get(n); return `<a class="cite" ${sourceLink(s)} title="${s.saved ? 'Saved: ' : ''}${esc(s.name)}${s.page ? `, page ${s.page}` : ''}">${n}</a>`; }).join('');
+        return ns.map(n => { const s = items.get(n); return `<a class="cite" ${sourceLink(s)} title="${s.saved ? 'Saved: ' : ''}${esc(s.name)}${s.page ? `, page ${s.page}` : ''}${s.section ? `, ${esc(s.section)}` : ''}">${n}</a>`; }).join('');
       });
     }).join('');
   }
   const searching = m => (Array.isArray(m.activity) ? m.activity : []).find(e => e.tool === 'search_knowledge' && e.status === 'running');
   const quote = (q, max = 80) => `“${esc(q.length > max ? `${q.slice(0, max - 1)}…` : q)}”`;
-  const passage = s => `<li class="${s.cited ? 'cited' : ''}"><span class="cite-number">${s.n}</span><div class="grow"><div class="spread"><strong>${s.saved ? `${icon('bookmark')} ` : ''}${esc(s.name)}${s.page ? ` <span class="faint">page ${s.page}</span>` : ''}</strong><a class="btn ghost small" ${sourceLink(s)}>${s.saved ? 'Open in Library' : s.page ? 'Open at page' : 'Open'}${s.saved ? '' : icon('external')}</a></div><p>${esc(s.excerpt)}</p></div></li>`;
+  const passage = s => `<li class="${s.cited ? 'cited' : ''}"><span class="cite-number">${s.n}</span><div class="grow"><div class="spread"><strong>${s.saved ? `${icon('bookmark')} ` : ''}${esc(s.name)}${s.page ? ` <span class="faint">page ${s.page}</span>` : ''}${s.section ? ` <span class="faint">· ${esc(s.section)}</span>` : ''}</strong><a class="btn ghost small" ${sourceLink(s)}>${s.saved ? 'Open in Library' : s.page ? 'Open at page' : 'Open'}${s.saved ? '' : icon('external')}</a></div><p>${esc(s.excerpt)}</p></div></li>`;
   /**
    * One card for everything the reply looked up: a single line while closed (what it
    * is searching now, or how much it found), then the searches and the passages the

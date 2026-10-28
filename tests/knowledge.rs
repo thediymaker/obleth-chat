@@ -390,8 +390,18 @@ async fn settled(app: &Router, collection: &str, session: &Session) -> Vec<Value
 
 /// A minimal PDF with one text page per entry; an empty entry draws a line instead.
 fn pdf(pages: &[&str]) -> Vec<u8> {
+    pdf_with_bookmarks(pages, &[])
+}
+
+/// A minimal PDF with top-level bookmarks, each a title and the index of its page.
+fn pdf_with_bookmarks(pages: &[&str], bookmarks: &[(&str, usize)]) -> Vec<u8> {
+    let outlines = 4 + 2 * pages.len();
     let mut objects = vec![
-        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        if bookmarks.is_empty() {
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string()
+        } else {
+            format!("<< /Type /Catalog /Pages 2 0 R /Outlines {outlines} 0 R >>")
+        },
         format!(
             "<< /Type /Pages /Kids [{}] /Count {} >>",
             (0..pages.len())
@@ -427,6 +437,28 @@ fn pdf(pages: &[&str]) -> Vec<u8> {
             "<< /Length {} >>\nstream\n{content}\nendstream",
             content.len()
         ));
+    }
+    if !bookmarks.is_empty() {
+        let item = |j: usize| outlines + 1 + j;
+        objects.push(format!(
+            "<< /Type /Outlines /First {} 0 R /Last {} 0 R /Count {} >>",
+            item(0),
+            item(bookmarks.len() - 1),
+            bookmarks.len()
+        ));
+        for (j, (title, page)) in bookmarks.iter().enumerate() {
+            let mut entry = format!(
+                "<< /Title ({title}) /Parent {outlines} 0 R /Dest [{} 0 R /XYZ 0 792 0]",
+                4 + 2 * page
+            );
+            if j > 0 {
+                entry.push_str(&format!(" /Prev {} 0 R", item(j - 1)));
+            }
+            if j + 1 < bookmarks.len() {
+                entry.push_str(&format!(" /Next {} 0 R", item(j + 1)));
+            }
+            objects.push(entry + " >>");
+        }
     }
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets = vec![];
@@ -2435,4 +2467,135 @@ async fn an_ampersand_before_wide_characters_is_indexed_and_indexing_goes_on(poo
         assert_eq!(document["status"], "ready", "{document}");
     }
     assert_eq!(documents.len(), 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn passages_keep_the_section_they_sit_under(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, created) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/collections",
+        json!({"name":"Guides"}),
+        &admin,
+    )
+    .await;
+    let collection = created["collection"]["id"].as_str().unwrap().to_owned();
+    let guide = "# Cluster guide\n\nWelcome to the cluster and how to get going on it.\n\n## Install\n\nLoad the compiler module and build the solver from source.\n\n### From a container\n\nPull the image and run the solver inside it.\n\n## Running jobs\n\nSubmit the solver with sbatch and the provided script.\n";
+    assert_eq!(
+        upload(
+            &f.app,
+            &collection,
+            "guide.md",
+            guide.as_bytes().to_vec(),
+            &admin
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let documents = settled(&f.app, &collection, &admin).await;
+    assert_eq!(documents[0]["status"], "ready", "{}", documents[0]);
+    let stored: Vec<(Option<String>, String)> =
+        sqlx::query_as("SELECT section, content FROM knowledge_passages ORDER BY ordinal")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let sections: Vec<Option<&str>> = stored.iter().map(|(s, _)| s.as_deref()).collect();
+    assert_eq!(
+        sections,
+        [
+            None,
+            Some("Install"),
+            Some("Install › From a container"),
+            Some("Running jobs")
+        ]
+    );
+    assert_eq!(
+        stored[0].1,
+        "Welcome to the cluster and how to get going on it."
+    );
+    // Only the text is embedded: the section is for keyword search and citations.
+    let inputs: Vec<String> = f
+        .embedded
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["input"].as_array().cloned().unwrap_or_default())
+        .filter_map(|t| t.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        inputs.contains(&"d: Pull the image and run the solver inside it.".to_owned()),
+        "{inputs:?}"
+    );
+    // A word only the heading has finds the passage, and the hit says where it is.
+    let (_, found) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/search",
+        json!({"query":"container","collectionIds":[collection]}),
+        &admin,
+    )
+    .await;
+    let top = &found["results"][0];
+    assert_eq!(top["section"], "Install › From a container", "{found}");
+    assert_eq!(
+        top["excerpt"],
+        "Pull the image and run the solver inside it."
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn pdf_bookmarks_become_sections(pool: PgPool) {
+    // Needs poppler (CI installs it); without it there is nothing to read the PDF with.
+    if !pdf_available() {
+        return;
+    }
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, created) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/collections",
+        json!({"name":"Handbook"}),
+        &admin,
+    )
+    .await;
+    let collection = created["collection"]["id"].as_str().unwrap().to_owned();
+    let handbook = pdf_with_bookmarks(
+        &[
+            "Overview. Our cluster has four hundred nodes and a shared parallel file system for everyone. Storage. Scratch space is purged after ninety days so keep results in project space",
+            "Graphics cards. Each accelerator node has eight cards and jobs request them with the gres option of sbatch",
+        ],
+        &[("Overview", 0), ("Storage", 0), ("Graphics cards", 1)],
+    );
+    assert_eq!(
+        upload(&f.app, &collection, "handbook.pdf", handbook, &admin)
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    let documents = settled(&f.app, &collection, &admin).await;
+    assert_eq!(documents[0]["status"], "ready", "{}", documents[0]);
+    let stored: Vec<(Option<i32>, Option<String>, String)> =
+        sqlx::query_as("SELECT page, section, content FROM knowledge_passages ORDER BY ordinal")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let places: Vec<(Option<i32>, Option<&str>)> =
+        stored.iter().map(|(p, s, _)| (*p, s.as_deref())).collect();
+    assert_eq!(
+        places,
+        [
+            (Some(1), Some("Overview")),
+            (Some(1), Some("Storage")),
+            (Some(2), Some("Graphics cards"))
+        ],
+        "{stored:?}"
+    );
+    // The bookmark cuts its page where its title appears.
+    assert!(stored[0].2.contains("four hundred nodes"), "{stored:?}");
+    assert!(!stored[0].2.contains("ninety days"), "{stored:?}");
+    assert!(stored[1].2.contains("ninety days"), "{stored:?}");
 }

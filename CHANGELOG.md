@@ -8,6 +8,11 @@ Each release's section is also its GitHub Release notes.
 
 - **How busy each model is.** With a gateway that reports load (obleth's `GET /v1/load`), the model list marks a model that is busy (amber), full (red) or has no servers running (hollow); a free model carries no mark. The model button shows the chosen model's mark. A reply that hasn't started after 3 seconds says what holds it: the model is full, with how many requests are running and waiting, or the person has reached their own in-flight limit. It offers to switch to a favorite or default model that isn't full, or to Auto; switching stops the waiting reply and sends it again. When the gateway gives up waiting for a slot, the reply says the model stayed full and offers the same switch. Gateways that don't report load show none of this.
 - **Research reads papers by section.** `read_paper` takes a link to a paper, or any web page with headings, and what the chat is looking for in it. arXiv abstract and PDF links read arXiv's HTML version. The page is fetched in the workspace, once, and kept there. Chat splits it at its headings, keeping math as TeX. One pick-one decision over the outline ranks the sections, and the likeliest three come back in full, with the outline and each pick's probability. A document with more than 255 sections is narrowed by its top-level sections first. Asked for `sections` by id, number or heading, it returns those. The research rules ask the chat to take a paper's settings from the section that gives them and cite it. Administrators turn the picking off with **Pick sections of papers**; the chat then gets the outline and names the sections itself.
+- **Knowledge keeps the section each passage sits under.** PDFs are split at their bookmarks, Word files at their heading styles, Markdown at its `#` headings and HTML at `h1`–`h6`, and a passage never spans two sections. Citations, the sources under a reply and Knowledge search show the section ("2 Method › 2.1 Schedule") with the file and page, and the chat sees it with each passage. Keyword search reads a section's headings as part of its passages, so a word only the heading has finds them. Passages are embedded as before. Files without headings are read as before, and files indexed before this have no sections until they are uploaded again.
+
+**Changed**
+
+- **Long pastes become attachments.** Pasting more than 4,000 characters into the message box, or enough to pass its 12,000-character limit, attaches the text as a file named "Pasted text" instead of cutting it off where the box ends. Click the attachment's name to read it, or remove it. Text over what a conversation can hold (100 KiB) is refused with a message. The box shows how many characters it holds once it is near the limit.
 
 **Fixed**
 
@@ -16,6 +21,7 @@ Each release's section is also its GitHub Release notes.
 **Upgrading**
 
 - Migration 048 adds `decisions.pick_sections` (on).
+- Migration 049 adds `knowledge_passages.section` and rebuilds the keyword index of `knowledge_passages` to include it. The table is rewritten once.
 
 ## v0.8.0
 

@@ -12,6 +12,12 @@ use url::Url;
 
 const UNSIGNED: &str = "UNSIGNED-PAYLOAD";
 
+/// How long moving `bytes` may take: two minutes, and a second for every MiB more,
+/// so large files are not cut off.
+fn transfer_time(bytes: usize) -> Duration {
+    Duration::from_secs(120 + (bytes / (1024 * 1024)) as u64)
+}
+
 #[derive(Clone)]
 pub struct ObjectStore {
     client: reqwest::Client,
@@ -87,6 +93,7 @@ impl ObjectStore {
             .client
             .put(url)
             .headers(headers)
+            .timeout(transfer_time(bytes.len()))
             .header("content-type", content_type)
             .body(bytes)
             .send()
@@ -102,6 +109,7 @@ impl ObjectStore {
             .client
             .get(url)
             .headers(headers)
+            .timeout(transfer_time(limit))
             .send()
             .await
             .context("object storage is unreachable")?;
@@ -111,6 +119,30 @@ impl ObjectStore {
             bail!("the stored file is larger than expected");
         }
         Ok(bytes.to_vec())
+    }
+
+    /// The object's bytes as they arrive, for a download that should not be held in
+    /// memory. Fails up front when the object is larger than `limit`.
+    pub async fn get_stream(
+        &self,
+        key: &str,
+        limit: usize,
+    ) -> Result<impl futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>>> {
+        let url = self.object_url(key);
+        let headers = self.sign("GET", &url, UNSIGNED, Utc::now());
+        let response = self
+            .client
+            .get(url)
+            .headers(headers)
+            .timeout(transfer_time(limit))
+            .send()
+            .await
+            .context("object storage is unreachable")?;
+        let response = check(response).await?;
+        if response.content_length().unwrap_or(0) > limit as u64 {
+            bail!("the stored file is larger than expected");
+        }
+        Ok(response.bytes_stream())
     }
 
     /// Like `get`, but None when there is no such object.

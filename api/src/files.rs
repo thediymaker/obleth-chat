@@ -100,6 +100,23 @@ impl Files {
         }
     }
 
+    /// A row's bytes as a response body. From the bucket they are streamed, so a large
+    /// download is never held in memory.
+    pub async fn body(
+        &self,
+        data: Option<Vec<u8>>,
+        key: Option<String>,
+        limit: usize,
+    ) -> Result<axum::body::Body, ApiError> {
+        match (data, key, &self.store) {
+            (None, Some(key), Some(store)) => {
+                let stream = store.get_stream(&key, limit).await.map_err(unavailable)?;
+                Ok(axum::body::Body::from_stream(stream))
+            }
+            (data, key, _) => Ok(self.read(data, key, limit).await?.into()),
+        }
+    }
+
     /// Stores a copy of a row's bytes under `key`, for a new row. If that row is never
     /// written, the copy is deleted after the grace period.
     pub async fn copy(

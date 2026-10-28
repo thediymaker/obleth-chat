@@ -18,7 +18,7 @@ use crate::error::ApiError;
 use crate::store::{ChatArchive, MAX_CONVERSATION_BYTES, MAX_HISTORY, MAX_RESPONSE_BYTES};
 
 mod formats;
-mod zip;
+pub(crate) mod zip;
 
 /// The largest file accepted, zipped or not.
 pub const MAX_IMPORT_BYTES: usize = 200 * 1024 * 1024;

@@ -70,8 +70,10 @@ impl Shell for Pod<'_> {
         let script = tools::in_project(self.sandboxes, self.sandbox, script);
         let mut argv = vec!["sh", "-c", script.as_str(), "sh"];
         argv.extend_from_slice(args);
+        // Large input, such as an attached file, gets a second more for every MiB.
+        let more = Duration::from_secs((stdin.map_or(0, <[u8]>::len) / (1024 * 1024)) as u64);
         let output = tokio::time::timeout(
-            TIMEOUT,
+            TIMEOUT + more,
             self.sandboxes.exec_with(self.sandbox, &argv, stdin, limit),
         )
         .await
@@ -110,11 +112,13 @@ async fn run(
 }
 
 /// Makes the chat's folder a git repository if it is not one yet. repos/ holds other
-/// people's repositories checked out to read, which stay out of the project.
+/// people's repositories checked out to read, and uploads/ the chat's attached files,
+/// which stay out of the project.
 const ENSURE: &str = r#"if [ ! -d .git ]; then g init -q || exit 10; fi
 mkdir -p .git/info && touch .git/info/exclude
 grep -qx 'node_modules/' .git/info/exclude 2>/dev/null || printf '%s' "$OB_EXCLUDE" >> .git/info/exclude
 grep -qx '/repos/' .git/info/exclude 2>/dev/null || echo '/repos/' >> .git/info/exclude
+grep -qx '/uploads/' .git/info/exclude 2>/dev/null || echo '/uploads/' >> .git/info/exclude
 "#;
 
 fn ensure() -> String {

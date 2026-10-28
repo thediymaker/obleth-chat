@@ -2677,6 +2677,65 @@ fn user_text(request: &Value) -> String {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn any_file_can_be_attached_and_the_model_is_told_what_it_holds(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    // A zip of a small site, sent as its own bytes.
+    let site = office::zip(&[
+        ("site/index.html", "<img src=\"logo.png\">".into()),
+        ("site/logo.png", "x".repeat(3000)),
+    ]);
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/attachments?name=site.zip&type=application%2Fzip",
+            Body::from(site),
+            "application/octet-stream",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let zip: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        (zip["kind"].as_str(), zip["parts"].as_i64()),
+        (Some("file"), Some(2))
+    );
+    // A CSV too long to read whole is kept as a file, its start shown to the model.
+    let csv = format!("station,temp\n{}", "north,21.5\n".repeat(40_000));
+    let (status, data) = call(
+        &f.app,
+        "POST",
+        "/api/attachments",
+        attachment("readings.csv", csv.as_bytes()),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{data}");
+    assert_eq!(data["kind"], "file");
+    let ids = [zip["id"].as_str().unwrap(), data["id"].as_str().unwrap()];
+    let (_, request) = send_with(&f, &admin, "What is in these?", &ids).await;
+    let text = user_text(&request);
+    assert!(text.starts_with("What is in these?"), "{text}");
+    assert!(text.contains("Attached file \"site.zip\""), "{text}");
+    assert!(text.contains("A zip archive with 2 entries. Entries (path and size):\nsite/index.html (1 KB)\nsite/logo.png (3 KB)"), "{text}");
+    assert!(text.contains("Attached file \"readings.csv\""), "{text}");
+    assert!(
+        text.contains("A CSV file. Its first 4 KB:\nstation,temp\nnorth,21.5\n"),
+        "{text}"
+    );
+    assert!(text.contains("[The file continues.]"));
+    assert!(
+        text.contains("This conversation has no workspace"),
+        "{text}"
+    );
+    assert!(text.len() < 16 * 1024, "{} bytes", text.len());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn documents_in_a_chat_are_read_whole_with_their_markers(pool: PgPool) {
     let f = fixture(pool).await;
     let admin = login(&f.app, "test-admin").await;

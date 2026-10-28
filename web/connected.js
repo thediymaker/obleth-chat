@@ -1214,6 +1214,8 @@ export async function startConnected(capabilities) {
     if (zone) { event.preventDefault(); zone.classList.remove('dropping'); knowledgeView.add(event.dataTransfer?.files || []); return; }
     const form = event.target.closest?.('#chat-form'); if (!form) return;
     event.preventDefault(); form.classList.remove('dropping');
+    // A folder can't be uploaded as it is; a zip of it can, and keeps its layout.
+    if ([...(event.dataTransfer?.items || [])].some(item => item.webkitGetAsEntry?.()?.isDirectory)) { toast('To attach a folder, zip it first and attach the zip.'); return; }
     const files = composerFiles(event.dataTransfer?.files); if (files.length) attachments.add(files);
   });
   document.addEventListener('change', event => {

@@ -43,6 +43,9 @@ pub struct ChatArchive {
     pub format: String,
     pub version: u32,
     pub conversations: Vec<ArchivedChat>,
+    /// Names of attached files too large to export, each named in its message instead.
+    #[serde(default, rename = "leftOut", skip_serializing_if = "Vec::is_empty")]
+    pub left_out: Vec<String>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -354,6 +357,7 @@ impl Store {
         validate_ids(ids)?;
         let mut tx = self.owner_transaction(owner).await?;
         let mut conversations = Vec::new();
+        let mut omitted = Vec::new();
         let mut bytes = 0usize;
         for id in ids {
             let chat = read_conversation(&mut tx, owner, *id).await?;
@@ -362,7 +366,10 @@ impl Store {
                 return Err(conflict("Stop responses before exporting"));
             }
             let ids = chat.messages.iter().map(|m| m.id).collect::<Vec<_>>();
-            let mut files = attachments::load_for_archive(
+            let attachments::ForArchive {
+                mut files,
+                mut left_out,
+            } = attachments::load_for_archive(
                 &mut tx,
                 &self.files,
                 owner,
@@ -380,7 +387,17 @@ impl Store {
                 messages: chat
                     .messages
                     .into_iter()
-                    .map(|m| ArchivedMessage {
+                    .map(|m| {
+                        let mut content = m.content;
+                        // A file too large for the export is named where it was.
+                        for file in left_out.remove(&m.id).unwrap_or_default() {
+                            content.push_str(&format!(
+                                "\n\n[Attached file \"{}\" was left out of this export: it is too large to include.]",
+                                file.name
+                            ));
+                            omitted.push(file.name);
+                        }
+                        ArchivedMessage {
                         attachments: files
                             .remove(&m.id)
                             .unwrap_or_default()
@@ -388,13 +405,14 @@ impl Store {
                             .map(Attachment::archive)
                             .collect(),
                         role: m.role,
-                        content: m.content,
+                        content,
                         reasoning_content: m.reasoning_content,
                         status: m.status,
                         settings: m.settings,
                         usage: m.usage,
                         finish_reason: m.finish_reason,
                         error_message: m.error_message,
+                    }
                     })
                     .collect(),
             };
@@ -413,6 +431,7 @@ impl Store {
             format: "obleth-chat".into(),
             version: 1,
             conversations,
+            left_out: omitted,
         })
     }
 
@@ -529,8 +548,14 @@ impl Store {
                 .bind(id).bind(owner).bind(chat.title.trim()).bind(&chat.model).bind(chat.reasoning_effort.as_str()).bind(json!(chat.settings)).execute(&mut *tx).await?;
             for (ordinal, m) in chat.messages.into_iter().enumerate() {
                 let message_id = Uuid::new_v4();
-                let file_ids =
-                    attachments::import_in(&mut tx, &self.files, owner, &m.attachments).await?;
+                let file_ids = attachments::import_in(
+                    &mut tx,
+                    &self.files,
+                    &self.limits,
+                    owner,
+                    &m.attachments,
+                )
+                .await?;
                 sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,usage,finish_reason,error_message) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
                     .bind(message_id).bind(id).bind(ordinal as i32).bind(&m.role).bind(m.content).bind(m.reasoning_content).bind(m.status)
                     .bind(if m.role=="assistant"{Some(Uuid::new_v4())}else{None}).bind(m.settings).bind(m.usage).bind(m.finish_reason).bind(m.error_message).execute(&mut *tx).await?;

@@ -2,7 +2,9 @@
 
 Each release's section is also its GitHub Release notes.
 
-## Unreleased
+## v0.9.1
+
+Model load tints the model's own icon instead of adding a dot.
 
 **Changed**
 

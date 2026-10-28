@@ -98,6 +98,8 @@ pub struct Store {
     pub pool: PgPool,
     /// Where attachment and generated image bytes go; Postgres unless a bucket is set.
     pub files: crate::files::Files,
+    /// How large attached files may be and how much each person may keep.
+    pub limits: attachments::Limits,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow)]
@@ -191,8 +193,14 @@ impl Store {
     pub fn new(pool: PgPool) -> Self {
         Self {
             files: crate::files::Files::new(pool.clone(), None),
+            limits: attachments::Limits::default(),
             pool,
         }
+    }
+
+    pub fn with_limits(mut self, limits: attachments::Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Keeps new files' bytes in object storage instead of Postgres.

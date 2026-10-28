@@ -195,9 +195,9 @@ async fn attachment(
     let user = s.auth.require(&headers, false).await?;
     let owner = readable(&s.store.pool, user.id, id).await?;
     let row: Option<crate::attachments::DownloadRow> = sqlx::query_as(
-        "SELECT a.name, a.mime_type, a.data, a.object_key FROM attachments a
+        &format!("SELECT a.name, {}, a.data, a.object_key FROM attachments a
          WHERE a.id = $1 AND a.owner_id = $2
-           AND EXISTS (SELECT 1 FROM message_attachments ma JOIN messages m ON m.id = ma.message_id WHERE ma.attachment_id = a.id AND m.conversation_id = $3)",
+           AND EXISTS (SELECT 1 FROM message_attachments ma JOIN messages m ON m.id = ma.message_id WHERE ma.attachment_id = a.id AND m.conversation_id = $3)", crate::attachments::SERVED_TYPE),
     )
     .bind(file)
     .bind(owner)
@@ -205,12 +205,12 @@ async fn attachment(
     .fetch_optional(&s.store.pool)
     .await?;
     let (name, mime, data, key) = row.ok_or_else(ApiError::not_found)?;
-    let data = s
+    let body = s
         .store
         .files
-        .read(data, key, crate::attachments::MAX_FILE_BYTES)
+        .body(data, key, crate::attachments::MAX_FILE_BYTES)
         .await?;
-    crate::attachments::file_response(&name, &mime, data)
+    crate::attachments::file_response(&name, &mime, body)
 }
 
 async fn image(

@@ -1284,6 +1284,20 @@ pub(crate) async fn launch_workspace(
     Ok((running, sandboxes))
 }
 
+/// Copies the chat's attached files into its running workspace. A file that could not
+/// be copied is tried again next turn.
+async fn copy_uploads(
+    s: &AppState,
+    uploads: &attachments::workspace::Uploads,
+    sandboxes: &sandbox::Sandboxes,
+    sandbox: &sandbox::Sandbox,
+) {
+    let pod = code::workspace::Pod { sandboxes, sandbox };
+    if let Err(error) = uploads.copy(&pod, &s.store.pool, &s.store.files).await {
+        tracing::warn!("could not copy a chat's files into its workspace: {error}");
+    }
+}
+
 /// Longest a turn waits for its long documents to finish indexing before it searches
 /// what is ready. Indexing starts on upload, so this is rarely needed.
 const ATTACHED_WAIT: Duration = Duration::from_secs(120);
@@ -1424,6 +1438,16 @@ async fn run_generation(
     let mut first = true;
     let generation_id = turn.generation_id;
     let mut tx = Some(tx);
+    // Where the chat's attached files are in its workspace, for the model.
+    let uploads = match &workspace {
+        Some(_) => attachments::workspace::Uploads::of(&s.store.pool, user.id, id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("could not list a chat's attached files: {error}");
+                Default::default()
+            }),
+        None => Default::default(),
+    };
     let mut messages = vec![];
     let parameters = &resolved.parameters;
     if !parameters.system_prompt.is_empty() {
@@ -1438,14 +1462,18 @@ async fn run_generation(
             if files.iter().all(|f| f.meta.kind != "image") {
                 let mut text = m.content.clone();
                 for file in files {
-                    if let Some(context) = file.text_context() {
+                    if let Some(context) = file.text_context_in(uploads.path(file.meta.id)) {
                         text.push_str(&context);
                     }
                 }
                 json!(text)
             } else {
                 let mut parts = vec![json!({"type":"text","text":m.content})];
-                parts.extend(files.iter().map(attachments::Attachment::content_part));
+                parts.extend(
+                    files
+                        .iter()
+                        .map(|file| file.content_part_in(uploads.path(file.meta.id))),
+                );
                 json!(parts)
             }
         } else {
@@ -1454,6 +1482,15 @@ async fn run_generation(
         json!({"role":m.role,"content":content})
     }));
     let workspace = workspace.zip(s.sandboxes.clone());
+    // The chat's files go into a running workspace now, so the model sees them listed;
+    // one that sleeps gets them when its first tool wakes it.
+    let mut uploads_copied = false;
+    if let Some((sandbox, sandboxes)) = &workspace {
+        if sandbox.status == "running" && sandbox.pod_ip.is_some() {
+            copy_uploads(&s, &uploads, sandboxes, sandbox).await;
+            uploads_copied = true;
+        }
+    }
     let mut preamble = vec![];
     if let Some(project) = &project {
         preamble.push(project.prompt());
@@ -2044,6 +2081,10 @@ async fn run_generation(
             if let Some((sandbox, sandboxes)) = workspace.as_ref().filter(|_| workspace_call) {
                 // The first workspace tool of a turn may need to start or wake the pod.
                 let sandbox = sandboxes.ensure_running(sandbox).await?;
+                if !uploads_copied {
+                    copy_uploads(&s, &uploads, sandboxes, &sandbox).await;
+                    uploads_copied = true;
+                }
                 // A woken pod has no server yet; bring the preview back before the tools run.
                 if sandbox.preview_port.is_none() {
                     if let Ok(Some(server)) =

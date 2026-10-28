@@ -89,6 +89,7 @@ pub fn system_prompt(sandbox: &Sandbox, instructions: Option<&str>, context: &st
 - Public git repositories can be cloned over HTTPS. To read, explain or review one the person points at, clone it into repos/ (`git clone --depth 50 <url> repos/<name>`), which stays out of this project's own history; for a big codebase, hand the reading to workers with delegate if you have it. To build on a repository as a project's code with its history, its owner can start an empty project from it on the project's Code tab (Start from a repository); otherwise copy its files into the project folder without its .git.
 - Package downloads may be slow or unavailable; prefer what is installed. `uv pip install --python .venv/bin/python …` installs into a project environment much faster than pip. Cargo and Go download crates and modules on first build, which can take a minute; build output stays in the project.
 - Only tell the person an app is running or visible after the dev server or start_server reported success; if something failed, say what failed.
+- Files the person attaches to this conversation, of any kind, are copied into uploads/ in the project folder before each message. Archives stay packed: unpack one with unzip or tar into a folder of its own when you need what is inside, and build from copies outside uploads/, which stays out of the project's history.
 - An AGENTS.md file in the project folder holds the person's notes for this project; follow it, and keep it current when you change something it describes.",
         dir = sandbox.dir(),
         port = sandbox.port
@@ -1321,9 +1322,11 @@ async fn compile_check(
 }
 
 /// Checkpoints live in a git directory outside the project folder, so a project's own
-/// repository is never touched and downloads do not include them.
+/// repository is never touched and downloads do not include them. Attached files in
+/// uploads/ are not saved in them: Chat copies those back in.
 const CHECKPOINTS: &str = "export GIT_DIR=/workspace/.obleth-checkpoints/$OBLETH_SLUG.git GIT_WORK_TREE=.; \
     if [ ! -d \"$GIT_DIR\" ]; then git init -q \"$GIT_DIR\" && printf 'node_modules/\\n.next/\\ndist/\\nbuild/\\n.git/\\n.venv/\\n__pycache__/\\n' > \"$GIT_DIR/info/exclude\" || exit 1; fi; \
+    grep -qx '/uploads/' \"$GIT_DIR/info/exclude\" || echo '/uploads/' >> \"$GIT_DIR/info/exclude\"; \
     git() { command git -c user.name=obleth -c user.email=checkpoints@obleth.invalid -c core.quotepath=off \"$@\"; }";
 
 /// Saves the project as it is now. None when nothing changed since the last one.

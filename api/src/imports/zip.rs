@@ -61,6 +61,34 @@ struct Entry {
 
 /// The shortest-named conversations.json, outside any macOS resource folder.
 fn find(zip: &[u8]) -> Option<Option<Entry>> {
+    let mut best: Option<(usize, Entry)> = None;
+    walk(zip, |name, entry| {
+        let name = String::from_utf8_lossy(name);
+        let wanted = (name == "conversations.json" || name.ends_with("/conversations.json"))
+            && !name.starts_with("__MACOSX/");
+        if wanted && best.as_ref().is_none_or(|(len, _)| name.len() < *len) {
+            best = Some((name.len(), entry));
+        }
+        true
+    })?;
+    Some(best.map(|(_, e)| e))
+}
+
+/// The first `max` entries' paths and sizes, and how many entries there are, read
+/// from the central directory without inflating anything. None when the file has no
+/// directory Chat can read.
+pub(crate) fn listing(zip: &[u8], max: usize) -> Option<(u64, Vec<(String, u64)>)> {
+    let mut entries = vec![];
+    let count = walk(zip, |name, entry| {
+        entries.push((String::from_utf8_lossy(name).into_owned(), entry.size));
+        entries.len() < max
+    })?;
+    Some((count, entries))
+}
+
+/// Calls `each` with every entry of the central directory, in order, until it
+/// returns false. Returns the directory's entry count.
+fn walk(zip: &[u8], mut each: impl FnMut(&[u8], Entry) -> bool) -> Option<u64> {
     let tail = zip.len().saturating_sub(22 + 65_535);
     let end = (tail..zip.len().saturating_sub(21))
         .rev()
@@ -76,7 +104,6 @@ fn find(zip: &[u8]) -> Option<Option<Entry>> {
         count = u64_at(zip, record + 32).ok()?;
         at = u64_at(zip, record + 48).ok()?;
     }
-    let mut best: Option<(usize, Entry)> = None;
     for _ in 0..count {
         if u32_at(zip, at).ok()? != 0x0201_4b50 {
             return None;
@@ -109,24 +136,19 @@ fn find(zip: &[u8]) -> Option<Option<Entry>> {
             }
             extra = &extra[4 + len..];
         }
-        let name = String::from_utf8_lossy(name);
-        let wanted = (name == "conversations.json" || name.ends_with("/conversations.json"))
-            && !name.starts_with("__MACOSX/");
-        if wanted && best.as_ref().is_none_or(|(len, _)| name.len() < *len) {
-            best = Some((
-                name.len(),
-                Entry {
-                    method,
-                    crc,
-                    compressed,
-                    size,
-                    offset,
-                },
-            ));
+        let entry = Entry {
+            method,
+            crc,
+            compressed,
+            size,
+            offset,
+        };
+        if !each(name, entry) {
+            break;
         }
         at += 46 + name_len + extra_len + comment_len;
     }
-    Some(best.map(|(_, e)| e))
+    Some(count)
 }
 
 fn slice(zip: &[u8], at: u64, len: u64) -> Option<&[u8]> {

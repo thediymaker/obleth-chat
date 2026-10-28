@@ -1,10 +1,11 @@
 # Workspace image for Chat's Kubernetes sandboxes: Node.js 22, Python 3 with a data
 # science stack, uv, Jupyter and web frameworks, Rust, Go, C/C++ build tools and git,
 # plus Vite and Next.js starters with dependencies installed so a site can start offline.
+# unzip, tar, xz and bzip2 unpack the archives people attach to a chat.
 FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends build-essential ca-certificates curl git procps python3 python3-pip python3-venv \
+    && apt-get install --yes --no-install-recommends build-essential bzip2 ca-certificates curl git procps python3 python3-pip python3-venv unzip xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /opt/templates /workspace \
     && chown node:node /opt/templates /workspace \

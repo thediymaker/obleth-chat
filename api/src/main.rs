@@ -59,6 +59,13 @@ async fn main() -> Result<()> {
         tokio::spawn(files.worker(state.shutdown.clone()));
         tracing::info!("files kept in object storage");
     }
+    let limits = obleth_chat::attachments::Limits::new(
+        config.max_file_mb,
+        config.file_quota_mb,
+        config.max_files,
+        objects.is_some(),
+    );
+    state.store = state.store.clone().with_limits(limits);
     match obleth_chat::sandbox::SandboxConfig::from_env()? {
         Ok(sandbox_config) => {
             let sandboxes =

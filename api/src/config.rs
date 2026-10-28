@@ -25,6 +25,13 @@ pub struct Config {
     pub connections: ConnectionsMode,
     /// Whether a chat may switch to Auto mode, where tools run without asking.
     pub auto_mode: bool,
+    /// OBLETH_CHAT_MAX_FILE_MB: the largest file or document one upload may be.
+    pub max_file_mb: u32,
+    /// OBLETH_CHAT_FILE_QUOTA_MB: one person's attached files in all. Unset, it
+    /// follows where files are kept (see `attachments::Limits`).
+    pub file_quota_mb: Option<u32>,
+    /// OBLETH_CHAT_MAX_FILES: how many files one person may keep.
+    pub max_files: u32,
 }
 /// OBLETH_CHAT_GATEWAY_AUTH: `sign` (the default) sends a token Chat signs with
 /// its gateway signing key; `forward` sends the access token the identity provider
@@ -167,6 +174,13 @@ impl Config {
                 Some("off") => false,
                 Some(_) => bail!("OBLETH_CHAT_AUTO_MODE must be allowed or off"),
             },
+            max_file_mb: number("OBLETH_CHAT_MAX_FILE_MB", 50, 1, 2000)?,
+            file_quota_mb: env::var("OBLETH_CHAT_FILE_QUOTA_MB")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(|_| number("OBLETH_CHAT_FILE_QUOTA_MB", 0, 1, 10_000_000))
+                .transpose()?,
+            max_files: number("OBLETH_CHAT_MAX_FILES", 500, 1, 1_000_000)?,
         })
     }
 }

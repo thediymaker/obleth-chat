@@ -28,6 +28,13 @@ export { markdown } from './markdown.js';
 
 const efforts = ['none', 'low', 'medium', 'high'];
 const effortLabel = value => value[0].toUpperCase() + value.slice(1);
+// The message box holds this many characters (store::MAX_USER_MESSAGE_CHARS); a paste longer than
+// PASTE_AS_FILE, or one that would pass the limit, is attached as a text file instead.
+const PROMPT_LIMIT = 12000, PASTE_AS_FILE = 4000;
+/** Whether pasting `text` into `box` attaches it instead, replacing any selection. */
+export const pastesAsFile = (text, box) => text.length > PASTE_AS_FILE || box.value.length - (box.selectionEnd - box.selectionStart) + text.length > PROMPT_LIMIT;
+/** How close the message is to the box's limit, once it is near. */
+export const promptCount = n => n >= PROMPT_LIMIT * 0.9 ? `${n.toLocaleString()} / ${PROMPT_LIMIT.toLocaleString()}` : '';
 const compactNumber = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -229,7 +236,7 @@ export async function startConnected(capabilities) {
     // What the model can use sits in one dock; on ones show their names while there is room.
     const dock = `${workspace.toggleButton()}${browserView.toggleButton()}${connectionsView.composerButton()}`;
     const knowledge = route().id ? '' : knowledgeView.pill(false);
-    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${codeView.composerChip()}${knowledge ? `<div class="composer-chips">${knowledge}</div>` : ''}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="12000" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar(knowledgeView.enabled())}${dock ? `<div class="dock" role="group" aria-label="What the model can use">${dock}</div>` : ''}</div>${engineButton(available)}${sendButton(op, available)}</div></form><div class="composer-hint">${esc(hint)}</div>`;
+    return `<form class="composer" id="chat-form">${projectsView.composerChip()}${codeView.composerChip()}${knowledge ? `<div class="composer-chips">${knowledge}</div>` : ''}${attachments.chips()}<textarea id="prompt" aria-label="Message" rows="${home ? 3 : 2}" placeholder="${available ? 'Ask a question, write some code, follow an idea…' : 'Connect your gateway to start a conversation…'}" maxlength="${PROMPT_LIMIT}" ${!available ? 'disabled' : ''}>${esc(state.draft)}</textarea><div class="composer-bottom"><div class="composer-options">${attachments.toolbar(knowledgeView.enabled())}${dock ? `<div class="dock" role="group" aria-label="What the model can use">${dock}</div>` : ''}</div><span class="prompt-count" id="prompt-count" title="Longer text is attached as a file when you paste it">${promptCount(state.draft.length)}</span>${engineButton(available)}${sendButton(op, available)}</div></form><div class="composer-hint">${esc(hint)}</div>`;
   }
   /** One pill for the model and its thinking effort; it opens the model list with effort and the other parameters. */
   function engineButton(available) {
@@ -1072,7 +1079,7 @@ export async function startConnected(capabilities) {
     if (questionsView.input(event)) return;
     if (codeView.input(event)) return;
     if (event.target.id === 'steer-text') turnView.setDraft(event.target.value);
-    if (event.target.id === 'prompt') { state.draft = event.target.value; event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight, 220)}px`; }
+    if (event.target.id === 'prompt') { state.draft = event.target.value; event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight, 220)}px`; const count = $('#prompt-count'); if (count) count.textContent = promptCount(state.draft.length); }
     if (event.target.id === 'reasoning-effort') {
       state.reasoningEffort = efforts[Number(event.target.value)] || 'none';
       event.target.setAttribute('aria-valuetext', effortLabel(state.reasoningEffort));
@@ -1095,9 +1102,15 @@ export async function startConnected(capabilities) {
   const composerFiles = list => [...(list || [])].filter(file => file.size > 0);
   document.addEventListener('paste', event => {
     if (event.target.id !== 'prompt') return;
-    const files = composerFiles(event.clipboardData?.files);
     // Text copied from documents can carry a picture of itself; keep it as text.
-    if (!files.length || event.clipboardData.getData('text/plain')) return;
+    const text = event.clipboardData?.getData('text/plain') || '';
+    if (text) {
+      // Long text is attached as a file, so the box never cuts it off and the question stays in view.
+      if (pastesAsFile(text, event.target)) { event.preventDefault(); attachments.addText(text); }
+      return;
+    }
+    const files = composerFiles(event.clipboardData?.files);
+    if (!files.length) return;
     event.preventDefault(); attachments.add(files);
   });
   document.addEventListener('dragover', event => { if (event.target.closest?.('#chat-form') && event.dataTransfer?.types?.includes('Files')) { event.preventDefault(); event.target.closest('#chat-form').classList.add('dropping'); } });

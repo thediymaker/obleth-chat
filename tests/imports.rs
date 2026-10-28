@@ -639,3 +639,14 @@ async fn limits_on_files_chats_and_long_transcripts(pool: PgPool) {
         .unwrap();
     assert_eq!(titles, ["newest", "newer"]);
 }
+
+#[test]
+fn a_single_object_is_read_whole_only_up_to_the_size_of_chats_own_exports() {
+    let mut big = br#"{"title":"x","chat":{}}"#.to_vec();
+    big.resize(obleth_chat::store::ARCHIVE_BYTES + 1, b' ');
+    let Err(error) = obleth_chat::imports::read(&big) else {
+        panic!("a large object was read")
+    };
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert!(error.1.contains("up to 10 MiB"), "{}", error.1);
+}

@@ -434,6 +434,11 @@ async fn import(
     body: axum::body::Body,
 ) -> Result<(StatusCode, Json<store::ImportSummary>), ApiError> {
     let u = s.auth.require(&headers, true).await?;
+    // Waits its turn before reading the body, so waiting uploads hold no memory.
+    let _turn = imports::RUNNING
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
     let body = axum::body::to_bytes(body, imports::MAX_IMPORT_BYTES)
         .await
         .map_err(|_| {

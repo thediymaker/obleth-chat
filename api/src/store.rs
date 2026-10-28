@@ -25,7 +25,9 @@ mod variants;
 mod workflows;
 pub use imports::ImportSummary;
 pub use variants::VariantContext;
-pub use workflows::{ChatArchive, ConversationPatch, ForkResult, HistoryPage, HistoryQuery};
+pub use workflows::{
+    ChatArchive, ConversationPatch, ForkResult, HistoryPage, HistoryQuery, ARCHIVE_BYTES,
+};
 
 pub const MAX_HISTORY: usize = 200;
 pub const MAX_USER_MESSAGE_CHARS: usize = 12_000;

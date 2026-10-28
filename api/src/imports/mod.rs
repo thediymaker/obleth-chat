@@ -22,6 +22,12 @@ mod zip;
 
 /// The largest file accepted, zipped or not.
 pub const MAX_IMPORT_BYTES: usize = 200 * 1024 * 1024;
+/// A file that is one JSON object (Chat's own export, or one chat saved on its own) is
+/// read whole, so it keeps the size of Chat's own exports.
+const MAX_OBJECT_BYTES: usize = crate::store::ARCHIVE_BYTES;
+/// Imports run one at a time on each server, from reading the upload to saving it, so
+/// a large export, or many at once, can't take more memory than one import needs.
+pub static RUNNING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 /// Conversations one file may hold.
 pub const MAX_IMPORT_CONVERSATIONS: usize = 5_000;
 /// Messages and versions kept per conversation, as Chat stores at most.
@@ -132,6 +138,11 @@ pub fn read(body: &[u8]) -> Result<Upload, ApiError> {
             found.finish(result.map_err(|_| ApiError::bad(UNREADABLE)))
         }
         Some(b'{') => {
+            if body.len() > MAX_OBJECT_BYTES {
+                return Err(ApiError::bad(
+                    "A Chat export, or a single chat saved on its own, can be up to 10 MiB.",
+                ));
+            }
             let value: serde_json::Value =
                 serde_json::from_slice(body).map_err(|_| ApiError::bad(UNREADABLE))?;
             if value.get("format").is_some() {

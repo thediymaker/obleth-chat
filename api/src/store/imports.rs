@@ -3,14 +3,11 @@
 //! way leaves every earlier batch in place and the summary says how far it got.
 use super::*;
 use crate::imports::{self, ImportedChat, Upload};
-use tokio::sync::Semaphore;
 
 /// Chats saved per transaction, and the text and messages one may carry.
 const BATCH_CHATS: usize = 100;
 const BATCH_BYTES: usize = 16 * 1024 * 1024;
 const BATCH_MESSAGES: usize = 20_000;
-/// Large exports parse one or two at a time, which bounds the memory they take.
-static PARSING: Semaphore = Semaphore::const_new(2);
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,13 +48,10 @@ impl Store {
                 "Choose an export of 200 MB or less".into(),
             ));
         }
-        let upload = {
-            let _permit = PARSING.acquire().await.map_err(|_| ApiError::internal())?;
-            // The body is dropped once read; only the shaped chats stay.
-            tokio::task::spawn_blocking(move || imports::read(body.as_ref()))
-                .await
-                .map_err(|_| ApiError::internal())??
-        };
+        // The body is dropped once read; only the shaped chats stay.
+        let upload = tokio::task::spawn_blocking(move || imports::read(body.as_ref()))
+            .await
+            .map_err(|_| ApiError::internal())??;
         match upload {
             Upload::Archive(archive) => {
                 let conversations = self.import(owner, archive).await?;

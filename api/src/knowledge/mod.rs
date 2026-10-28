@@ -249,14 +249,18 @@ impl Knowledge {
             let start = batch * EMBED_BATCH;
             let ordinals: Vec<i32> = (start..start + chunk.len()).map(|i| i as i32).collect();
             let pages: Vec<Option<i32>> = chunk.iter().map(|p| p.page).collect();
+            let sections: Vec<Option<String>> = chunk
+                .iter()
+                .map(|p| p.section.as_ref().map(|s| s.chars().take(1000).collect()))
+                .collect();
             let texts: Vec<String> = chunk
                 .iter()
                 .map(|p| p.text.chars().take(7900).collect())
                 .collect();
             let embeddings: Vec<String> = vectors.into_iter().map(vector_literal).collect();
             let inserted = sqlx::query(
-                "INSERT INTO knowledge_passages (document_id, collection_id, ordinal, page, content, embedding)
-                 SELECT $1, $2, o, p, t, e::halfvec FROM UNNEST($3::int[], $4::int[], $5::text[], $6::text[]) AS u(o, p, t, e)
+                "INSERT INTO knowledge_passages (document_id, collection_id, ordinal, page, section, content, embedding)
+                 SELECT $1, $2, o, p, s, t, e::halfvec FROM UNNEST($3::int[], $4::int[], $5::text[], $6::text[], $8::text[]) AS u(o, p, t, e, s)
                  WHERE EXISTS (SELECT 1 FROM knowledge_documents WHERE id=$1 AND status='processing' AND claimed_at=$7)",
             )
             .bind(job.id)
@@ -266,6 +270,7 @@ impl Knowledge {
             .bind(&texts)
             .bind(&embeddings)
             .bind(job.claimed)
+            .bind(&sections)
             .execute(&self.pool)
             .await;
             let inserted = match inserted {
@@ -385,7 +390,7 @@ impl Knowledge {
                 SELECT id, SUM(1.0 / (60 + r)) AS score, BOOL_OR(src = 'v') AS by_meaning, BOOL_OR(src = 'k') AS by_words
                 FROM (SELECT id, r, 'v' AS src FROM vec UNION ALL SELECT id, r, 'k' FROM kw) u GROUP BY id
              )
-             SELECT p.document_id, p.collection_id, p.page, p.content, d.name, f.score, f.by_meaning, f.by_words
+             SELECT p.document_id, p.collection_id, p.page, p.section, p.content, d.name, f.score, f.by_meaning, f.by_words
              FROM fused f JOIN knowledge_passages p ON p.id = f.id JOIN knowledge_documents d ON d.id = p.document_id
              ORDER BY f.score DESC LIMIT $4",
         )
@@ -405,6 +410,7 @@ impl Knowledge {
                     collection: r.get("collection_id"),
                     name: r.get("name"),
                     page: r.get("page"),
+                    section: r.get("section"),
                     content: r.get("content"),
                     matched: match (meaning, by_words) {
                         (true, true) => "meaning + words",
@@ -438,6 +444,8 @@ pub struct Hit {
     pub collection: Uuid,
     pub name: String,
     pub page: Option<i32>,
+    /// The headings the passage sits under, outermost first.
+    pub section: Option<String>,
     pub content: String,
     pub matched: &'static str,
     /// A saved item rather than a collection passage; `document` is its id.
@@ -446,7 +454,7 @@ pub struct Hit {
 
 impl Hit {
     pub fn json(&self, n: usize) -> Value {
-        json!({"n":n,"documentId":self.document,"collectionId":self.collection,"name":self.name,"page":self.page,"excerpt":excerpt(&self.content, 420),"matched":self.matched,"saved":self.saved})
+        json!({"n":n,"documentId":self.document,"collectionId":self.collection,"name":self.name,"page":self.page,"section":self.section,"excerpt":excerpt(&self.content, 420),"matched":self.matched,"saved":self.saved})
     }
 }
 

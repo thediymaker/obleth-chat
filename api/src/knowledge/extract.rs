@@ -1,6 +1,11 @@
 //! Turns an uploaded file into pages of plain text, then into passages for search.
-//! PDFs go through poppler's `pdftotext` and Word files through `unzip`, each in a
-//! short-lived process with a time limit, so a hostile file cannot hang Chat.
+//! PDFs go through poppler's `pdftotext` (and `pdftohtml` for their bookmarks) and Word
+//! files through `unzip`, each in a short-lived process with a time limit, so a hostile
+//! file cannot hang Chat.
+//!
+//! Each part of a file keeps the headings it sits under, its section: HTML headings,
+//! Markdown `#` lines, Word heading styles and PDF bookmarks. A passage never spans two
+//! sections, so a citation names one.
 
 use anyhow::{bail, Context, Result};
 use std::{path::PathBuf, process::Stdio, time::Duration};
@@ -21,6 +26,7 @@ pub enum Kind {
     Pdf,
     Docx,
     Html,
+    Markdown,
     Text,
 }
 
@@ -34,10 +40,11 @@ pub fn kind(name: &str, mime: &str) -> Option<Kind> {
         "pdf" => Some(Kind::Pdf),
         "docx" => Some(Kind::Docx),
         "html" | "htm" => Some(Kind::Html),
-        "txt" | "md" | "markdown" | "rst" | "tex" | "csv" | "tsv" | "json" | "jsonl" | "yaml"
-        | "yml" | "toml" | "xml" | "ipynb" | "py" | "rs" | "go" | "java" | "c" | "h" | "cc"
-        | "cpp" | "hpp" | "js" | "mjs" | "ts" | "tsx" | "jsx" | "sh" | "sql" | "r" | "jl" | "m"
-        | "f90" | "cu" | "log" => Some(Kind::Text),
+        "md" | "markdown" => Some(Kind::Markdown),
+        "txt" | "rst" | "tex" | "csv" | "tsv" | "json" | "jsonl" | "yaml" | "yml" | "toml"
+        | "xml" | "ipynb" | "py" | "rs" | "go" | "java" | "c" | "h" | "cc" | "cpp" | "hpp"
+        | "js" | "mjs" | "ts" | "tsx" | "jsx" | "sh" | "sql" | "r" | "jl" | "m" | "f90" | "cu"
+        | "log" => Some(Kind::Text),
         _ if mime == "application/pdf" => Some(Kind::Pdf),
         _ if mime.starts_with("text/") => Some(Kind::Text),
         _ => None,
@@ -52,14 +59,41 @@ pub fn mime_for(kind: Kind) -> String {
         Kind::Docx => {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into()
         }
-        Kind::Html | Kind::Text => "text/plain; charset=utf-8".into(),
+        Kind::Html | Kind::Markdown | Kind::Text => "text/plain; charset=utf-8".into(),
     }
 }
 
 pub struct Page {
     /// From 1 for PDFs; None for formats without pages.
     pub number: Option<i32>,
+    /// The headings this text sits under, outermost first, joined with " › ".
+    pub section: Option<String>,
     pub text: String,
+}
+
+impl Page {
+    fn whole(text: String) -> Self {
+        Self {
+            number: None,
+            section: None,
+            text,
+        }
+    }
+
+    /// One page per section; a document with no headings is one page.
+    fn sections(sections: Vec<Section>, whole: impl FnOnce() -> String) -> Vec<Self> {
+        if !sections.iter().any(|s| !s.path.is_empty()) {
+            return vec![Self::whole(whole())];
+        }
+        sections
+            .into_iter()
+            .map(|s| Self {
+                number: None,
+                section: (!s.path.is_empty()).then(|| s.path.join(" › ")),
+                text: s.text,
+            })
+            .collect()
+    }
 }
 
 pub enum Extracted {
@@ -73,6 +107,8 @@ pub enum Extracted {
 #[derive(Clone)]
 pub struct Tools {
     pub pdftotext: String,
+    /// Reads a PDF's bookmarks (`pdftohtml -xml`).
+    pub pdftohtml: String,
     pub unzip: String,
 }
 
@@ -86,6 +122,7 @@ impl Tools {
         };
         Self {
             pdftotext: var("OBLETH_CHAT_PDFTOTEXT", "pdftotext"),
+            pdftohtml: var("OBLETH_CHAT_PDFTOHTML", "pdftohtml"),
             unzip: var("OBLETH_CHAT_UNZIP", "unzip"),
         }
     }
@@ -93,22 +130,36 @@ impl Tools {
 
 pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracted> {
     match kind {
-        Kind::Text => Ok(Extracted::Pages(vec![Page {
-            number: None,
-            text: String::from_utf8_lossy(bytes).into_owned(),
-        }])),
-        Kind::Html => Ok(Extracted::Pages(vec![Page {
-            number: None,
-            text: html_text(&String::from_utf8_lossy(bytes)),
-        }])),
+        Kind::Text => Ok(Extracted::Pages(vec![Page::whole(
+            String::from_utf8_lossy(bytes).into_owned(),
+        )])),
+        Kind::Markdown => {
+            let text = String::from_utf8_lossy(bytes);
+            Ok(Extracted::Pages(Page::sections(
+                markdown_sections(&text).1,
+                || text.to_string(),
+            )))
+        }
+        Kind::Html => {
+            let html = String::from_utf8_lossy(bytes);
+            Ok(Extracted::Pages(Page::sections(
+                html_sections(&html).1,
+                || html_text(&html),
+            )))
+        }
         Kind::Docx => {
             let xml = run(&tools.unzip, &["-p", "{file}", "word/document.xml"], bytes)
                 .await
                 .context("this Word file could not be opened")?;
-            Ok(Extracted::Pages(vec![Page {
-                number: None,
-                text: docx_text(&String::from_utf8_lossy(&xml)),
-            }]))
+            let xml = String::from_utf8_lossy(&xml);
+            // Heading styles are named in styles.xml; a file without one has no headings.
+            let styles = run(&tools.unzip, &["-p", "{file}", "word/styles.xml"], bytes)
+                .await
+                .unwrap_or_default();
+            Ok(Extracted::Pages(Page::sections(
+                docx_sections(&xml, &String::from_utf8_lossy(&styles)).1,
+                || docx_text(&xml),
+            )))
         }
         Kind::Pdf => {
             let out = run(
@@ -129,16 +180,17 @@ pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracte
             if letters < 40 * count as usize {
                 return Ok(Extracted::NeedsOcr { pages: count });
             }
-            Ok(Extracted::Pages(
-                pages
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, text)| Page {
-                        number: Some(i as i32 + 1),
-                        text: text.to_owned(),
-                    })
-                    .collect(),
-            ))
+            // Bookmarks are a bonus: a PDF without them, or a pdftohtml that fails, is
+            // read without sections.
+            let outline = run(
+                &tools.pdftohtml,
+                &["-xml", "-i", "-q", "-stdout", "{file}"],
+                bytes,
+            )
+            .await
+            .map(|xml| pdf_outline(&String::from_utf8_lossy(&xml)))
+            .unwrap_or_default();
+            Ok(Extracted::Pages(pdf_pages(&pages, &outline)))
         }
     }
 }
@@ -239,16 +291,70 @@ fn html_text(html: &str) -> String {
 /// A part of a document under one heading.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Section {
-    /// The heading's level, 1 to 6.
+    /// The heading's level, 1 to 6; 0 for text before the first heading.
     pub level: u8,
-    /// The headings above it and its own, outermost first.
+    /// The headings above it and its own, outermost first; empty for text before the
+    /// first heading or directly under the title.
     pub path: Vec<String>,
     pub text: String,
 }
 
-/// An HTML document split at its h1 to h6 headings. A page's only h1 is its title and
-/// kept apart, so it doesn't head every path; headings before it are the site's, not
-/// the document's. Math keeps its TeX (`alttext`)
+/// A heading and the text under it, before headings are nested into paths.
+struct Heading {
+    /// 0 for a title, then 1 to 6.
+    level: u8,
+    title: String,
+    text: String,
+}
+
+/// Nests headings into sections. A document's title (a title style, or with
+/// `lone_title` its only level-1 heading) is kept apart, so it doesn't head every
+/// path; the text under it joins the text before the first heading. No text is dropped.
+fn nest(lead: String, heads: Vec<Heading>, lone_title: bool) -> (Option<String>, Vec<Section>) {
+    let at_title = heads.iter().position(|h| h.level == 0).or_else(|| {
+        match heads.iter().filter(|h| h.level == 1).count() {
+            1 if lone_title => heads.iter().position(|h| h.level == 1),
+            _ => None,
+        }
+    });
+    let title = at_title.map(|t| heads[t].title.clone());
+    let mut sections: Vec<Section> = Vec::new();
+    let mut push = |level: u8, path: Vec<String>, text: String| {
+        let lead = path.is_empty();
+        if lead && !text.chars().any(char::is_alphanumeric) {
+            return;
+        }
+        match sections.last_mut() {
+            // Text before the title and text under it are one lead.
+            Some(last) if lead && last.path.is_empty() => {
+                last.text = format!("{}\n\n{text}", last.text);
+            }
+            _ => sections.push(Section { level, path, text }),
+        }
+    };
+    push(0, vec![], lead);
+    let mut stack: Vec<(u8, String)> = Vec::new();
+    for (k, head) in heads.into_iter().enumerate() {
+        if Some(k) == at_title {
+            stack.clear();
+            push(0, vec![], head.text);
+            continue;
+        }
+        let level = head.level.max(1);
+        while stack.last().is_some_and(|(l, _)| *l >= level) {
+            stack.pop();
+        }
+        stack.push((level, head.title));
+        push(
+            level,
+            stack.iter().map(|(_, h)| h.clone()).collect(),
+            head.text,
+        );
+    }
+    (title, sections)
+}
+
+/// An HTML document split at its h1 to h6 headings. Math keeps its TeX (`alttext`)
 /// rather than the text of its MathML, and table cells are separated with |.
 pub fn html_sections(html: &str) -> (Option<String>, Vec<Section>) {
     let mut html = html.to_owned();
@@ -261,13 +367,13 @@ pub fn html_sections(html: &str) -> (Option<String>, Vec<Section>) {
     let html = math_tex(&html);
     let lower = html.to_ascii_lowercase();
     // Each heading: where its tag opens, where it closes, its level and its text.
-    let mut heads: Vec<(usize, usize, u8, String)> = Vec::new();
+    let mut found: Vec<(usize, usize, u8, String)> = Vec::new();
     let mut at = 0;
     while let Some(start) = lower[at..].find("<h").map(|i| at + i) {
         let bytes = lower.as_bytes();
         let level = bytes.get(start + 2).copied().filter(u8::is_ascii_digit);
         let after = bytes.get(start + 3).copied();
-        let found = level
+        let heading = level
             .filter(|l| (b'1'..=b'6').contains(l))
             .filter(|_| after.is_some_and(|c| c == b'>' || c.is_ascii_whitespace()))
             .and_then(|l| {
@@ -276,49 +382,254 @@ pub fn html_sections(html: &str) -> (Option<String>, Vec<Section>) {
                 let end = lower[open..].find(&close).map(|i| open + i)?;
                 Some((open, end, end + close.len(), l - b'0'))
             });
-        match found {
+        match heading {
             Some((open, end, after, level)) => {
                 let title = one_line(&html_text(&html[open..end]));
                 if !title.is_empty() {
-                    heads.push((start, after, level, title));
+                    found.push((start, after, level, title));
                 }
                 at = after;
             }
             None => at = start + 2,
         }
     }
-    let at_title = match heads.iter().filter(|h| h.2 == 1).count() {
-        1 => heads.iter().position(|h| h.2 == 1),
-        _ => None,
-    };
-    let title = at_title.map(|t| heads[t].3.clone());
-    let skip = at_title.map_or(0, |t| t + 1);
-    let mut sections = Vec::new();
-    // Text before the first heading, or between the title and it, is kept when it says something.
-    let first = heads.get(skip).map_or(html.len(), |h| h.0);
-    let before = at_title.map_or(0, |t| heads[t].1);
-    let lead = section_text(&html[before.min(first)..first]);
-    if lead.chars().filter(|c| c.is_alphanumeric()).count() >= 200 {
-        sections.push(Section {
-            level: 1,
-            path: vec!["Start".into()],
-            text: lead,
-        });
+    let lead = section_text(&html[..found.first().map_or(html.len(), |h| h.0)]);
+    let heads = found
+        .iter()
+        .enumerate()
+        .map(|(k, (_, after, level, title))| Heading {
+            level: *level,
+            title: title.clone(),
+            text: section_text(&html[*after..found.get(k + 1).map_or(html.len(), |h| h.0)]),
+        })
+        .collect();
+    nest(lead, heads, true)
+}
+
+/// A Markdown document split at its `#` headings, outside fenced code.
+pub fn markdown_sections(text: &str) -> (Option<String>, Vec<Section>) {
+    let mut lead = String::new();
+    let mut heads: Vec<Heading> = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        match fence {
+            Some(f) if trimmed.starts_with(f) => fence = None,
+            Some(_) => {}
+            None if trimmed.starts_with("```") => fence = Some("```"),
+            None if trimmed.starts_with("~~~") => fence = Some("~~~"),
+            None => {
+                if let Some((level, title)) = atx_heading(line) {
+                    heads.push(Heading {
+                        level,
+                        title,
+                        text: String::new(),
+                    });
+                    continue;
+                }
+            }
+        }
+        let body = heads.last_mut().map_or(&mut lead, |h| &mut h.text);
+        body.push_str(line);
+        body.push('\n');
     }
-    let mut stack: Vec<(u8, String)> = Vec::new();
-    for (k, (_, after, level, heading)) in heads.iter().enumerate().skip(skip) {
-        while stack.last().is_some_and(|(l, _)| l >= level) {
+    let tidy = |text: &str| paragraphs(text).join("\n\n");
+    let heads = heads
+        .into_iter()
+        .map(|h| Heading {
+            text: tidy(&h.text),
+            ..h
+        })
+        .collect();
+    nest(tidy(&lead), heads, true)
+}
+
+/// `## Title ##` as a level and a title.
+fn atx_heading(line: &str) -> Option<(u8, String)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[indent..];
+    let hashes = rest.len() - rest.trim_start_matches('#').len();
+    let after = &rest[hashes..];
+    if indent > 3
+        || !(1..=6).contains(&hashes)
+        || !(after.is_empty() || after.starts_with([' ', '\t']))
+    {
+        return None;
+    }
+    let title = after.trim().trim_end_matches('#').trim();
+    (!title.is_empty()).then(|| (hashes as u8, title.to_owned()))
+}
+
+/// A Word document split at its headings. Paragraph styles are matched by the names
+/// styles.xml gives them ("heading 1", "Title"), which stay English in every language,
+/// or by an outline level.
+fn docx_sections(document: &str, styles: &str) -> (Option<String>, Vec<Section>) {
+    let level_of = |name: &str, outline: Option<&str>| -> Option<u8> {
+        let name = name.to_ascii_lowercase();
+        if name == "title" {
+            return Some(0);
+        }
+        if let Some(n) = name
+            .strip_prefix("heading ")
+            .and_then(|n| n.parse::<u8>().ok())
+        {
+            return Some(n.clamp(1, 6));
+        }
+        outline
+            .and_then(|o| o.parse::<u8>().ok())
+            .filter(|o| *o < 9)
+            .map(|o| (o + 1).min(6))
+    };
+    let mut levels = std::collections::HashMap::new();
+    for style in styles.split("<w:style ").skip(1) {
+        let style = style.split("</w:style>").next().unwrap_or("");
+        let open = format!(" {}", &style[..style.find('>').unwrap_or(style.len())]);
+        let Some(id) = attribute(&open, "w:styleId") else {
+            continue;
+        };
+        let name = tag_value(style, "<w:name ").unwrap_or_default();
+        if let Some(level) = level_of(name, tag_value(style, "<w:outlineLvl ")) {
+            levels.insert(id.to_owned(), level);
+        }
+    }
+    let mut lead = String::new();
+    let mut heads: Vec<Heading> = Vec::new();
+    for paragraph in document.split("</w:p>") {
+        let text = docx_text(paragraph).trim().to_owned();
+        if text.is_empty() {
+            continue;
+        }
+        let level = tag_value(paragraph, "<w:pStyle ")
+            .and_then(|id| levels.get(id).copied())
+            .or_else(|| level_of("", tag_value(paragraph, "<w:outlineLvl ")));
+        match level {
+            Some(level) => heads.push(Heading {
+                level,
+                title: one_line(&text),
+                text: String::new(),
+            }),
+            None => {
+                let body = heads.last_mut().map_or(&mut lead, |h| &mut h.text);
+                body.push_str(&text);
+                body.push_str("\n\n");
+            }
+        }
+    }
+    nest(lead, heads, false)
+}
+
+/// The `w:val` of the first tag that starts with `open`, such as `<w:pStyle `.
+fn tag_value<'a>(xml: &'a str, open: &str) -> Option<&'a str> {
+    let start = xml.find(open)?;
+    let end = xml[start..].find('>').map_or(xml.len(), |e| start + e);
+    attribute(&xml[start..end], "w:val")
+}
+
+/// A PDF's bookmarks from `pdftohtml -xml`: each one's depth, title and page.
+fn pdf_outline(xml: &str) -> Vec<(usize, String, i32)> {
+    let Some(start) = xml.find("<outline>") else {
+        return vec![];
+    };
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut rest = &xml[start..];
+    while let Some(open) = rest.find('<') {
+        rest = &rest[open..];
+        if rest.starts_with("<outline>") {
+            depth += 1;
+            rest = &rest["<outline>".len()..];
+        } else if rest.starts_with("</outline>") {
+            depth = depth.saturating_sub(1);
+            rest = &rest["</outline>".len()..];
+            if depth == 0 {
+                break;
+            }
+        } else if rest.starts_with("<item") {
+            let Some(close) = rest.find("</item>") else {
+                break;
+            };
+            let item = &rest[..close];
+            let tag_end = item.find('>').map_or(item.len(), |e| e + 1);
+            let tag = &item[..tag_end];
+            let title = one_line(&decode(&strip_tags(&item[tag_end..])));
+            if let Some(page) = attribute(tag, "page").and_then(|p| p.parse().ok()) {
+                if !title.is_empty() && depth > 0 {
+                    items.push((depth, title, page));
+                }
+            }
+            rest = &rest[close + "</item>".len()..];
+        } else {
+            rest = &rest[1..];
+        }
+    }
+    items
+}
+
+/// PDF pages cut where each bookmark's title appears on its page; a bookmark whose
+/// title isn't found there starts at the top of its page.
+fn pdf_pages(pages: &[&str], outline: &[(usize, String, i32)]) -> Vec<Page> {
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut starts: Vec<(i32, String, String)> = Vec::new();
+    for (depth, title, page) in outline {
+        while stack.last().is_some_and(|(d, _)| d >= depth) {
             stack.pop();
         }
-        stack.push((*level, heading.clone()));
-        let end = heads.get(k + 1).map_or(html.len(), |h| h.0);
-        sections.push(Section {
-            level: *level,
-            path: stack.iter().map(|(_, h)| h.clone()).collect(),
-            text: section_text(&html[*after..end]),
+        stack.push((*depth, title.clone()));
+        let path = stack
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" › ");
+        starts.push((*page, title.clone(), path));
+    }
+    let mut current: Option<String> = None;
+    let mut out = Vec::new();
+    for (i, text) in pages.iter().enumerate() {
+        let number = i as i32 + 1;
+        let mut cut = 0;
+        for (_, title, path) in starts.iter().filter(|(p, _, _)| *p == number) {
+            let at = find_loose(&text[cut..], title).map_or(cut, |at| cut + at);
+            if at > cut || (at == 0 && cut == 0) {
+                out.push(Page {
+                    number: Some(number),
+                    section: current.clone(),
+                    text: text[cut..at].to_owned(),
+                });
+            }
+            cut = at;
+            current = Some(path.clone());
+        }
+        out.push(Page {
+            number: Some(number),
+            section: current.clone(),
+            text: text[cut..].to_owned(),
         });
     }
-    (title, sections)
+    out.retain(|p| p.text.chars().any(char::is_alphanumeric));
+    out
+}
+
+/// Where `title`'s words appear in `text` in order, with any spacing between them.
+fn find_loose(text: &str, title: &str) -> Option<usize> {
+    let words: Vec<String> = title
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let first = words.first()?;
+    let lower = text.to_ascii_lowercase();
+    lower
+        .match_indices(first.as_str())
+        .map(|(i, _)| i)
+        .find(|&i| {
+            let mut at = i + first.len();
+            words[1..].iter().all(|word| {
+                let rest = &lower[at..];
+                let skipped = rest.len() - rest.trim_start().len();
+                let found = rest[skipped..].starts_with(word.as_str());
+                at += skipped + word.len();
+                found && skipped > 0
+            })
+        })
 }
 
 fn section_text(html: &str) -> String {
@@ -347,6 +658,8 @@ fn tag_end(html: &str, start: usize) -> Option<usize> {
 /// An attribute's raw value in an opening tag.
 fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let lower = tag.to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
+    let name = name.as_str();
     let mut at = 0;
     while let Some(i) = lower[at..].find(name).map(|i| at + i) {
         let before = lower[..i].chars().last();
@@ -472,21 +785,24 @@ fn decode(text: &str) -> String {
 
 pub struct Passage {
     pub page: Option<i32>,
+    pub section: Option<String>,
     pub text: String,
 }
 
 /// Splits pages into passages of about PASSAGE characters along paragraph and sentence
-/// boundaries. A passage never spans pages, so a citation names one page.
+/// boundaries. A passage never spans pages or sections, so a citation names one of each.
 pub fn split(pages: &[Page]) -> Vec<Passage> {
     let mut passages = Vec::new();
     for page in pages {
         let paragraphs = paragraphs(&page.text);
+        let before = passages.len();
         let mut current = String::new();
         let push = |current: &mut String, passages: &mut Vec<Passage>| {
             let text = current.trim().to_owned();
             if text.chars().filter(|c| c.is_alphanumeric()).count() >= 20 {
                 passages.push(Passage {
                     page: page.number,
+                    section: page.section.clone(),
                     text,
                 });
             }
@@ -505,7 +821,7 @@ pub fn split(pages: &[Page]) -> Vec<Passage> {
                 current.push_str(&piece);
             }
         }
-        if current.len() > OVERLAP || passages.last().map(|p| p.page) != Some(page.number) {
+        if current.len() > OVERLAP || passages.len() == before {
             push(&mut current, &mut passages);
         }
         if passages.len() >= MAX_PASSAGES {
@@ -578,7 +894,7 @@ mod tests {
             kind("Lecture 7.PDF", "application/octet-stream"),
             Some(Kind::Pdf)
         );
-        assert_eq!(kind("notes.md", ""), Some(Kind::Text));
+        assert_eq!(kind("notes.md", ""), Some(Kind::Markdown));
         assert_eq!(kind("report.docx", ""), Some(Kind::Docx));
         assert_eq!(kind("photo.jpg", "image/jpeg"), None);
     }
@@ -600,6 +916,7 @@ mod tests {
         assert_eq!(
             paths,
             [
+                "",
                 "Abstract",
                 "1 Introduction",
                 "2 Method",
@@ -608,25 +925,168 @@ mod tests {
                 "References"
             ]
         );
-        assert_eq!(sections[0].level, 6);
-        assert_eq!(sections[0].text, "We study warmup.");
-        assert_eq!(sections[2].text, "");
+        // The text under the title, before the first heading, is the lead.
         assert_eq!(
-            sections[3].text,
+            (sections[0].level, sections[0].text.as_str()),
+            (0, "A. Author")
+        );
+        assert_eq!(sections[1].level, 6);
+        assert_eq!(sections[1].text, "We study warmup.");
+        assert_eq!(sections[3].text, "");
+        assert_eq!(
+            sections[4].text,
             "We use $\\eta_t = t/T$ for 500 steps.\n\nlr | loss |\n\n3e-4 | 2.41 |"
         );
-        assert_eq!(sections[4].text, "Deduplicated & filtered.");
-        assert!(!sections
-            .iter()
-            .any(|s| s.text.contains("footer") || s.text.contains("1 Introduction")));
-        // With no title and text before the first heading, that text is kept.
-        let lead = format!("<p>{}</p><h2>Next</h2><p>More.</p>", "word ".repeat(60));
-        let (title, sections) = html_sections(&lead);
+        assert_eq!(sections[5].text, "Deduplicated & filtered.");
+        assert!(!sections.iter().any(|s| s.text.contains("footer")
+            || s.text.contains("1 Introduction")
+            || s.text.contains("Report")));
+        // Without a title, text before the first heading is the lead; with several h1s,
+        // each heads its own path.
+        let (title, sections) = html_sections(
+            "<p>Intro.</p><h1>One</h1><p>A.</p><h2>Sub</h2><p>B.</p><h1>Two</h1><p>C.</p>",
+        );
         assert_eq!(title, None);
-        assert_eq!(sections[0].path, ["Start"]);
-        assert_eq!(sections[1].path, ["Next"]);
-        // A page without headings has no sections beyond its text.
-        assert_eq!(html_sections("<p>short</p>").1, []);
+        let paths: Vec<String> = sections.iter().map(|s| s.path.join(" › ")).collect();
+        assert_eq!(paths, ["", "One", "One › Sub", "Two"]);
+        assert_eq!(sections[0].text, "Intro.");
+        // A page without headings is all lead.
+        assert_eq!(
+            html_sections("<p>short</p>").1[0].path,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn markdown_splits_at_its_headings_outside_code() {
+        let text = "Intro line.\n\n# Guide\n\nWhat this is.\n\n## Install ##\n\nRun:\n\n```sh\n# not a heading\npip install x\n```\n\n### On a cluster\n\nLoad the module first.\n\n## Use\n\n    # indented code, not a heading\n#hashtag is text\n";
+        let (title, sections) = markdown_sections(text);
+        assert_eq!(title.as_deref(), Some("Guide"));
+        let paths: Vec<String> = sections.iter().map(|s| s.path.join(" › ")).collect();
+        assert_eq!(paths, ["", "Install", "Install › On a cluster", "Use"]);
+        assert_eq!(sections[0].text, "Intro line.\n\nWhat this is.");
+        assert!(sections[1].text.contains("# not a heading pip install x"));
+        assert!(sections[3].text.contains("#hashtag is text"));
+        assert_eq!(atx_heading("####### seven"), None);
+        assert_eq!(atx_heading("#"), None);
+    }
+
+    #[test]
+    fn word_headings_come_from_style_names() {
+        // A German document: the style ids are translated, the names are not.
+        let styles = r#"<w:styles><w:style w:type="paragraph" w:styleId="Titel"><w:name w:val="Title"/></w:style><w:style w:type="paragraph" w:styleId="berschrift1"><w:name w:val="heading 1"/></w:style><w:style w:type="paragraph" w:styleId="berschrift2"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Standard"><w:name w:val="Normal"/></w:style></w:styles>"#;
+        let p = |style: &str, text: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let document = [
+            p("Titel", "Handbuch"),
+            p("Standard", "Einleitung."),
+            p("berschrift1", "Installation"),
+            p("Standard", "Erst &amp; dann."),
+            p("berschrift2", "Auf dem Cluster"),
+            p("Standard", "Modul laden."),
+            r#"<w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>Anhang</w:t></w:r></w:p>"#
+                .into(),
+            p("Standard", "Mehr."),
+        ]
+        .concat();
+        let (title, sections) = docx_sections(&document, styles);
+        assert_eq!(title.as_deref(), Some("Handbuch"));
+        let found: Vec<(String, String)> = sections
+            .iter()
+            .map(|s| (s.path.join(" › "), s.text.trim().to_owned()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("".into(), "Einleitung.".into()),
+                ("Installation".into(), "Erst & dann.".into()),
+                (
+                    "Installation › Auf dem Cluster".into(),
+                    "Modul laden.".into()
+                ),
+                ("Anhang".into(), "Mehr.".into()),
+            ]
+        );
+        // Without styles.xml, only outline levels make headings.
+        assert_eq!(docx_sections(&document, "").1.len(), 2);
+    }
+
+    #[test]
+    fn pdf_bookmarks_cut_pages_into_sections() {
+        let xml = r#"<?xml version="1.0"?><pdf2xml><page number="1"><text>&lt;outline&gt;</text></page>
+<outline>
+<item page="1">1 Introduction</item>
+<item page="2">2 Method</item>
+<outline>
+<item page="2">2.1 Schedule &amp; warmup</item>
+<item>No page</item>
+</outline>
+<item page="3">3 Results</item>
+</outline>
+</pdf2xml>"#;
+        let outline = pdf_outline(xml);
+        assert_eq!(
+            outline,
+            [
+                (1, "1 Introduction".into(), 1),
+                (1, "2 Method".into(), 2),
+                (2, "2.1 Schedule & warmup".into(), 2),
+                (1, "3 Results".into(), 3),
+            ]
+        );
+        let pages = [
+            "Title page\n1 Introduction\nWhy warmup.",
+            "More intro.\n2 Method\nWe train.\n2.1 Schedule &\nwarmup\nLinear for 500 steps.",
+            "Results first.\n3.  Results\nLoss 2.31.",
+        ];
+        let parts: Vec<(Option<i32>, Option<String>, String)> = pdf_pages(&pages, &outline)
+            .into_iter()
+            .map(|p| (p.number, p.section, p.text.trim().to_owned()))
+            .collect();
+        let s = |t: &str| Some(t.to_owned());
+        assert_eq!(
+            parts,
+            [
+                (Some(1), None, "Title page".into()),
+                (
+                    Some(1),
+                    s("1 Introduction"),
+                    "1 Introduction\nWhy warmup.".into()
+                ),
+                (Some(2), s("1 Introduction"), "More intro.".into()),
+                (Some(2), s("2 Method"), "2 Method\nWe train.".into()),
+                (
+                    Some(2),
+                    s("2 Method › 2.1 Schedule & warmup"),
+                    "2.1 Schedule &\nwarmup\nLinear for 500 steps.".into()
+                ),
+                // "3.  Results" isn't "3 Results": the section starts at the top of its page.
+                (
+                    Some(3),
+                    s("3 Results"),
+                    "Results first.\n3.  Results\nLoss 2.31.".into()
+                ),
+            ]
+        );
+        assert_eq!(pdf_outline("<pdf2xml></pdf2xml>"), []);
+    }
+
+    #[test]
+    fn short_sections_keep_their_own_passages() {
+        let part = |section: &str, text: &str| Page {
+            number: None,
+            section: Some(section.into()),
+            text: text.into(),
+        };
+        let passages = split(&[
+            part("Install", "Load the module, then install the package."),
+            part("Use", "Run the solver with the config file you made."),
+        ]);
+        let sections: Vec<_> = passages.iter().map(|p| p.section.as_deref()).collect();
+        assert_eq!(sections, [Some("Install"), Some("Use")]);
     }
 
     #[test]
@@ -792,10 +1252,12 @@ mod tests {
         let pages = vec![
             Page {
                 number: Some(1),
+                section: None,
                 text: format!("Intro paragraph about heat engines and work.\n\n{long}"),
             },
             Page {
                 number: Some(2),
+                section: None,
                 text: "A short second page about the second law of thermodynamics.".into(),
             },
         ];

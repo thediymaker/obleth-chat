@@ -2,6 +2,36 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.11.0
+
+Any file can be attached to a chat: a zip of a web page and its images, a dataset, a tarball of code, a long log. The model is told what each file holds, and the chat's workspace gets a copy.
+
+**New**
+
+- **Attach any file.** The paperclip, drag and paste take files of any kind. Text up to 256 KiB, PNG, JPEG and WebP images up to 5 MiB, and PDF and Office documents work as before. Everything else is kept as a file: archives, binaries, data such as CSV, Parquet, HDF5 and NumPy, SVG, images too large to view, and text too long to read whole.
+  - The model sees each file's name, size and kind. For a zip or a plain tar it also sees the list of entries, read without unpacking, up to 200 entries with a count of the rest. For a text file it sees the first 4 KB, marked as a preview.
+  - A file's chip shows an archive or file icon, its name, its size and, for an archive, how many files it holds. Dropping a folder says to zip it first.
+- **Files land in the workspace.** Before each message in a chat with a workspace, every file sent in the conversation, of any kind, is copied to `uploads/<name>` in the project folder. A workspace that is asleep gets them when its first tool wakes it. Archives stay packed, and the model unpacks what it needs. Two different files with the same name become `data.csv` and `data-2.csv`. `uploads/` stays out of the project's git repository and of its checkpoints. The workspace image adds `unzip`, `xz-utils` and `bzip2`.
+- **Limits are set by the server.**
+  - `OBLETH_CHAT_MAX_FILE_MB` sets the largest file or document, 50 MB by default (was 20 MiB for documents).
+  - `OBLETH_CHAT_FILE_QUOTA_MB` sets one person's files in all: 1024 MB by default with object storage, 200 MB without (was 50 MiB).
+  - `OBLETH_CHAT_MAX_FILES` sets how many files one person may keep, 500 by default (was 100).
+  - `GET /api/attachments` returns the limits in effect, and the web client checks files against them.
+
+**Changed**
+
+- **A file is always downloaded, never shown.** A file kept as `file` is served as `application/octet-stream` with `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`, whatever its name or stated type, from your chats and from shared chats alike. An uploaded HTML page or SVG can't run on Chat's site. Images and PDFs are served as before.
+- **Uploads are bounded by size, not count.** Each server holds at most 256 MiB of upload bodies and workspace copies at once, weighed by size, in place of eight uploads at a time. An upload must declare its size: one without `Content-Length` gets 411, and one over the limit gets 413 before any of it is read.
+- **Uploads can be sent as raw bytes.** `POST /api/attachments?name=<name>&type=<type>` with `Content-Type: application/octet-stream` avoids base64, and the web client uses it. The JSON form still works.
+- **Downloads from object storage are streamed** instead of held in memory, and requests to object storage get a timeout that grows with the size of the file.
+- **Exports leave out files too large to fit.** The message gets a line naming the file, the archive lists it in `leftOut`, and the History page says so. Text, images and documents still have to fit, as before.
+
+**Upgrading**
+
+- Migration 055 adds the `file` attachment kind and drops the fixed upper limit on `attachments.size`.
+- Behind a reverse proxy, allow request bodies a little over `OBLETH_CHAT_MAX_FILE_MB` for `POST /api/attachments` (about 51 MB at the default), or 4/3 of it plus 1 MB for clients that still send JSON.
+- `OBLETH_CHAT_MAX_FILE_MB` can be 1 to 2000, and at most 1000 without object storage, where files are kept in Postgres.
+
 ## v0.10.0
 
 Replies draw math, code, diagrams, charts, molecules and tables. A message can carry PDF, Word, PowerPoint and Excel files. Replies can be rated, chats can be temporary, and chat history comes over from Open WebUI, ChatGPT and Claude.

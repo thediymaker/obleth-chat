@@ -162,7 +162,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: chat
-          image: ghcr.io/thediymaker/obleth-chat/chat:v0.10.0
+          image: ghcr.io/thediymaker/obleth-chat/chat:v0.11.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -217,7 +217,8 @@ spec:
             secretName: obleth-chat-gateway-signing-key
             defaultMode: 0440
         # Documents and Knowledge files are written here while they are read, up to
-        # eight uploads of 20 MiB at once, so it is on disk rather than in memory.
+        # the 256 MiB of uploads each server holds at once, so it is on disk rather
+        # than in memory.
         - name: tmp
           emptyDir:
             sizeLimit: 1Gi

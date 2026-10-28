@@ -145,6 +145,8 @@ struct Access<'a> {
     url: &'a Url,
     shared: bool,
     ca: Option<&'a str>,
+    /// The Slurm REST API version set on the cluster.
+    api_version: Option<&'a str>,
     token: String,
     user: String,
     namespace: String,
@@ -349,6 +351,7 @@ impl Connections {
                 access.url.clone(),
                 access.user,
                 access.token,
+                access.api_version.map(str::to_owned),
             )),
             Kind::Kubernetes => {
                 let http = mcp::client(access.shared || self.private_allowed, access.ca)
@@ -372,6 +375,7 @@ impl Connections {
             url,
             shared: row.shared(),
             ca: row.options["ca"].as_str(),
+            api_version: row.options["apiVersion"].as_str(),
             token,
             user: settings["user"].as_str().unwrap_or("").into(),
             namespace: settings["namespace"].as_str().unwrap_or("default").into(),
@@ -408,6 +412,7 @@ impl Connections {
             url,
             shared,
             ca: options["ca"].as_str(),
+            api_version: options["apiVersion"].as_str(),
             token: token.clone().unwrap_or_default(),
             user: options["user"].as_str().unwrap_or("").into(),
             namespace: options["namespace"].as_str().unwrap_or("default").into(),
@@ -891,7 +896,7 @@ fn view(row: &Row, user: &Identity) -> Value {
         "needsCredential": !row.usable(), "credential": credential,
         "personalTokens": row.personal_tokens(),
         "confirmActions": row.confirm_actions, "hasToken": row.token.is_some(),
-        "hasCa": row.options["ca"].is_string(),
+        "hasCa": row.options["ca"].is_string(), "apiVersion": row.options["apiVersion"],
         "user": settings["user"], "namespace": settings["namespace"], "identity": settings["identity"],
         "serverName": row.server_name, "checkedAt": row.checked_at, "tools": tools,
     })
@@ -1020,8 +1025,8 @@ fn clean_label(value: &str, what: &str) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
-/// Validated options for a connection kind: a CA for Kubernetes, and the Slurm
-/// user or namespace a person's own cluster connection uses.
+/// Validated options for a connection kind: a CA for Kubernetes, the REST API version
+/// for Slurm, and the Slurm user or namespace a person's own cluster connection uses.
 fn clean_options(kind: Kind, options: &Value, personal: bool) -> Result<Value, ApiError> {
     let mut clean = json!({});
     match kind {
@@ -1055,6 +1060,18 @@ fn clean_options(kind: Kind, options: &Value, personal: bool) -> Result<Value, A
             }
         }
         Kind::Slurm => {
+            if let Some(version) = options["apiVersion"]
+                .as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                if !slurm::valid_version(version) {
+                    return Err(ApiError::bad(
+                        "The Slurm REST API version looks like v0.0.45",
+                    ));
+                }
+                clean["apiVersion"] = json!(version);
+            }
             if personal {
                 clean["user"] = json!(clean_label(
                     options["user"].as_str().unwrap_or(""),
@@ -1173,7 +1190,7 @@ struct Update {
     confirm_actions: Option<bool>,
     /// For a shared connection: switch it off for your own chats.
     opted_out: Option<bool>,
-    /// Replaces the CA, Slurm user or namespace.
+    /// Replaces the CA, Slurm REST API version, Slurm user or namespace.
     options: Option<Value>,
 }
 
@@ -1240,10 +1257,13 @@ async fn update(
         }
         let mut options = match &body.options {
             Some(options) => {
-                // Keep the saved CA unless the edit names a new one ("" removes it).
+                // Keep the saved CA and API version unless the edit names new ones
+                // ("" removes them).
                 let mut options = options.clone();
-                if options.get("ca").is_none() {
-                    options["ca"] = row.options["ca"].clone();
+                for key in ["ca", "apiVersion"] {
+                    if options.get(key).is_none() {
+                        options[key] = row.options[key].clone();
+                    }
                 }
                 clean_options(kind, &options, !row.shared())?
             }
@@ -1428,6 +1448,7 @@ async fn save_credential(
     let url = Url::parse(&row.url).map_err(|_| ApiError::internal())?;
     let mut check_options = options.clone();
     check_options["ca"] = row.options["ca"].clone();
+    check_options["apiVersion"] = row.options["apiVersion"].clone();
     let checked = connections
         .check(kind, &url, Some(token.clone()), &check_options, true)
         .await

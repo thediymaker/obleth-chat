@@ -1,11 +1,14 @@
 //! Slurm through slurmrestd with a person's own JWT, so jobs run as their account.
-//! Chat finds the newest data parser the server offers (v0.0.42 to v0.0.40).
+//! Chat uses the API version set on the cluster, or finds the newest one the server
+//! offers (v0.0.45 to v0.0.40).
 use super::mcp::Tool;
 use serde_json::{json, Value};
 use std::time::Duration;
 use url::Url;
 
-const VERSIONS: [&str; 3] = ["v0.0.42", "v0.0.41", "v0.0.40"];
+const VERSIONS: [&str; 6] = [
+    "v0.0.45", "v0.0.44", "v0.0.43", "v0.0.42", "v0.0.41", "v0.0.40",
+];
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 fn tool(
@@ -51,7 +54,16 @@ pub struct Client {
     base: Url,
     user: String,
     token: String,
-    version: Option<&'static str>,
+    version: Option<String>,
+    /// Set on the cluster, so Chat uses it rather than looking for one.
+    pinned: bool,
+}
+
+/// An API version as slurmrestd names it, such as v0.0.45.
+pub fn valid_version(version: &str) -> bool {
+    version
+        .strip_prefix("v0.0.")
+        .is_some_and(|n| (2..=3).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A Slurm number: plain, or `{"set":true,"number":n}`; None when unset or infinite.
@@ -96,7 +108,13 @@ fn duration(seconds: i64) -> String {
 }
 
 impl Client {
-    pub fn new(http: reqwest::Client, base: Url, user: String, token: String) -> Self {
+    pub fn new(
+        http: reqwest::Client,
+        base: Url,
+        user: String,
+        token: String,
+        version: Option<String>,
+    ) -> Self {
         let mut base = base;
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
@@ -106,7 +124,8 @@ impl Client {
             base,
             user,
             token,
-            version: None,
+            pinned: version.is_some(),
+            version,
         }
     }
 
@@ -147,20 +166,20 @@ impl Client {
         ))
     }
 
-    async fn version(&mut self) -> Result<&'static str, String> {
-        if let Some(v) = self.version {
-            return Ok(v);
+    async fn version(&mut self) -> Result<String, String> {
+        if let Some(v) = &self.version {
+            return Ok(v.clone());
         }
         for v in VERSIONS {
             if let Ok((200, _)) = self
                 .send(reqwest::Method::GET, &format!("slurm/{v}/ping"), None)
                 .await
             {
-                self.version = Some(v);
-                return Ok(v);
+                self.version = Some(v.into());
+                return Ok(v.into());
             }
         }
-        Err("This server does not offer the Slurm REST API v0.0.40 or newer".into())
+        Err(not_offered())
     }
 
     async fn call_api(
@@ -192,13 +211,18 @@ impl Client {
             401 | 403 | 511 => Err(format!("Slurm refused the token for {} (HTTP {status}). Create a new one with `scontrol token`.", self.user)),
             200..=299 if errors.is_empty() => Ok(value),
             _ if !errors.is_empty() => Err(format!("Slurm: {}", errors.join("; "))),
+            404 if self.pinned => Err(format!("This server does not offer the Slurm REST API {v}. Change the version on the cluster, or leave it empty to find the newest one.")),
             _ => Err(format!("slurmrestd answered HTTP {status}")),
         }
     }
 
     /// Whether slurmrestd answers at all, for a cluster shared before anyone has a token.
     pub async fn reachable(&self) -> Result<(), String> {
-        for v in VERSIONS {
+        let versions = match (&self.version, self.pinned) {
+            (Some(v), true) => vec![v.as_str()],
+            _ => VERSIONS.to_vec(),
+        };
+        for v in &versions {
             match self
                 .send(reqwest::Method::GET, &format!("slurm/{v}/ping"), None)
                 .await?
@@ -213,7 +237,14 @@ impl Client {
                 }
             }
         }
-        Err("No Slurm REST API v0.0.40 or newer at this URL".into())
+        Err(if self.pinned {
+            format!(
+                "This server does not offer the Slurm REST API {}",
+                versions[0]
+            )
+        } else {
+            not_offered()
+        })
     }
 
     /// Checks the token by listing partitions, which slurmrestd authenticates.
@@ -538,6 +569,14 @@ fn ran(job: &Value, now: i64) -> i64 {
     }
 }
 
+fn not_offered() -> String {
+    format!(
+        "This server does not offer the Slurm REST API {} to {}. If it runs a newer one, set that version on the cluster.",
+        VERSIONS[VERSIONS.len() - 1],
+        VERSIONS[0]
+    )
+}
+
 fn job_id(args: &Value) -> Result<i64, String> {
     args["job_id"]
         .as_i64()
@@ -589,5 +628,20 @@ mod tests {
         assert_eq!(job_id(&json!({"job_id":"42"})), Ok(42));
         assert!(job_id(&json!({"job_id":-1})).is_err());
         assert_eq!(tools().iter().filter(|t| !t.read_only).count(), 2);
+    }
+
+    #[test]
+    fn api_versions_look_like_slurmrestds() {
+        assert!(valid_version("v0.0.45") && valid_version("v0.0.100"));
+        for bad in [
+            "0.0.45",
+            "v0.0.4",
+            "v0.0.4x",
+            "v0.1.45",
+            "v0.0.45/",
+            "v0.0.1000",
+        ] {
+            assert!(!valid_version(bad), "{bad}");
+        }
     }
 }

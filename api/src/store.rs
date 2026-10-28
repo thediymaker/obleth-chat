@@ -20,8 +20,10 @@ use crate::attachments::{self, Attachment, AttachmentMeta};
 use crate::error::ApiError;
 use std::collections::HashMap;
 
+mod imports;
 mod variants;
 mod workflows;
+pub use imports::ImportSummary;
 pub use variants::VariantContext;
 pub use workflows::{ChatArchive, ConversationPatch, ForkResult, HistoryPage, HistoryQuery};
 

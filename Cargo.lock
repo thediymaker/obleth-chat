@@ -1667,6 +1667,8 @@ dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
  "chrono",
+ "crc32fast",
+ "flate2",
  "futures-util",
  "hmac",
  "http-body-util",

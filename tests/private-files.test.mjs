@@ -15,15 +15,16 @@ test('an attachment read that finishes after session reset cannot upload into th
   assert.deepEqual(attachments.current(), []);
 });
 
-test('an import file read that finishes after session reset cannot import into the next account', async () => {
-  let release, calls = 0;
-  const file = { size: 20, text: () => new Promise(resolve => { release = resolve; }) };
-  const history = createHistory({ api: { request: () => { calls++; } }, state: {}, render() {}, toast() {} });
+test('an import sends the file unread, and a reply that arrives after session reset shows nothing', async () => {
+  let release; const requests = [], modals = [];
+  const file = { name: 'conversations.json', type: 'application/json', size: 20 };
+  const history = createHistory({ api: { request: (path, options) => { requests.push(options); return new Promise(resolve => { release = resolve; }); } }, state: {}, render() {}, toast() {}, close() {}, refreshSidebar() {}, modal: (title, body) => modals.push([title, body]) });
   const pending = history.submit({ id: 'history-import-form', elements: { 'history-file': { files: [file] } } });
+  assert.equal(requests[0].raw, file);
   history.clear();
-  release('{"conversations":[]}');
+  release({ source: 'chatgpt', imported: 3 });
   await pending;
-  assert.equal(calls, 0);
+  assert.deepEqual(modals, []);
 });
 
 test('long pasted text is attached as a file whose chip shows it', async () => {

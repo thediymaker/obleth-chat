@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { workOf, stats, gist, latest, duration, changeOf, createTurn } from '../web/turn.js';
+import { workOf, stats, gist, latest, duration, changeOf, createTurn, steerExample, steerPlaceholder } from '../web/turn.js';
 
 const t = s => new Date(Date.UTC(2026, 9, 19, 12, 0, s)).toISOString();
 const reasoning = 'Plan seven files. Then write them.Nothing vendored, so load three.js from a CDN.The script was deferred, so ours ran first.';
@@ -99,3 +99,17 @@ test('the result card downloads through the workspace, so an asleep one is woken
   assert.match(html, /data-action="turn-download"/);
   assert.doesNotMatch(html, /workspace\/download/);
 });
+
+test('the Steer example fits the work, most specific first', () => {
+  const reply = (...activity) => ({ role: 'assistant', status: 'streaming', activity });
+  const step = (tool, more = {}) => ({ id: tool, tool, status: 'completed', ...more });
+  assert.equal(steerExample(reply()), 'keep it short');
+  assert.equal(steerExample(null), 'keep it short');
+  assert.equal(steerExample(reply(step('write_file'))), 'add tests before you finish');
+  assert.equal(steerExample(reply(step('browser_open'))), 'check the pricing page too');
+  assert.equal(steerExample(reply(step('run_command'), step('kubernetes__list', { connection: 'k', service: 'kubernetes' }))), 'use 2 replicas instead');
+  assert.equal(steerExample(reply(step('run_command'), step('sol__jobs', { connection: 's', service: 'slurm' }))), 'ask for 4 hours, not 1');
+  assert.equal(steerExample(reply(step('sol__jobs', { connection: 's', service: 'slurm' }), step('experiment_run'))), 'try a larger batch size next');
+  assert.equal(steerPlaceholder(reply()), 'Add a note without stopping, like “keep it short”');
+});
+

@@ -2,6 +2,23 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.12.0
+
+Clusters show what each Slurm partition can run now instead of every node, and a cluster's nodes are listed at most once every 30 seconds for everyone.
+
+**Changed**
+
+- **Partitions, not every node.** The Clusters page shows each partition's idle nodes, idle CPUs and, on a cluster with GPUs, idle GPUs, each out of the partition's total, with its state and time limit. The tiles show CPUs, GPUs and memory in use, how many nodes are idle or unavailable, and the queue. The node table is gone.
+  - Counts follow `sinfo`: idle CPUs and GPUs are those free on nodes that can start jobs, and an idle node has nothing running.
+  - Nodes that are down, drained, failing, not responding or in maintenance are unavailable and never count as idle.
+  - GPUs come from each node's `gres` and `gres_used`.
+- **The Cluster tool gives the model a summary.** One line per partition, plus one for the cluster and the queue, in place of one line per node. A new optional `partition` argument also lists that partition's nodes, for a partition the person's account sees.
+- **A cluster's nodes are listed once for everyone.** Each server lists a cluster's nodes and reads the scheduler's statistics at most once every 30 seconds, and everyone who looks in that time shares the result. Partitions and the person's own jobs are still asked with the person's own token every time. Each person sees only the partitions Slurm shows their account, totals count only the nodes in those partitions, and the token is checked even when the nodes come from someone else's look. A page view now makes two slurmrestd calls instead of four.
+
+**Upgrading**
+
+- No migrations or configuration changes.
+
 ## v0.11.0
 
 Any file can be attached to a chat: a zip of a web page and its images, a dataset, a tarball of code, a long log. The model is told what each file holds, and the chat's workspace gets a copy.

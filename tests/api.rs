@@ -950,10 +950,16 @@ async fn background_completion_and_same_chat_regeneration_restore_selected_conte
         .unwrap();
     let _ = send.into_body().collect().await.unwrap();
     let body = fake.seen.lock().unwrap().last().unwrap()["body"].clone();
-    assert_eq!(body["messages"].as_array().unwrap().len(), 3);
-    assert_eq!(body["messages"][0]["content"], "background");
-    assert_eq!(body["messages"][1]["content"], "Hello α");
-    assert_eq!(body["messages"][2]["content"], "follow-up");
+    // The system message tells the model what Chat draws; then the selected history.
+    assert_eq!(body["messages"].as_array().unwrap().len(), 4);
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert!(body["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("```mermaid"));
+    assert_eq!(body["messages"][1]["content"], "background");
+    assert_eq!(body["messages"][2]["content"], "Hello α");
+    assert_eq!(body["messages"][3]["content"], "follow-up");
     let final_chat = state.store.get(owner, chat).await.unwrap();
     assert_eq!(final_chat.messages.len(), 4);
     assert_eq!(final_chat.messages[1].id, original);

@@ -203,7 +203,7 @@ export function createKnowledge({ api, state, capabilities, render, modal, close
     const items = new Map(entry.items.map(s => [s.n, s]));
     let code = 0;
     return html.split(/(<[^>]+>)/).map(part => {
-      if (part.startsWith('<')) { if (/^<(pre|code)\b/i.test(part)) code++; else if (/^<\/(pre|code)>/i.test(part)) code = Math.max(0, code - 1); return part; }
+      if (part.startsWith('<')) { if (/^<(pre|code|svg)\b/i.test(part)) code++; else if (/^<\/(pre|code|svg)>/i.test(part)) code = Math.max(0, code - 1); return part; }
       if (code) return part;
       return part.replace(/\[(\d{1,2}(?:\s*,\s*\d{1,2})*)\]/g, (whole, list) => {
         const ns = list.split(',').map(n => Number(n.trim()));

@@ -1,0 +1,20 @@
+SmilesDrawer 2.4.1
+https://github.com/reymond-group/smilesDrawer
+https://reymond-group.github.io/smilesDrawer/
+
+smiles-drawer-2.4.1.min.mjs is dist/smiles-drawer.min.mjs from the published
+npm package smiles-drawer@2.4.1, renamed and with its sourceMappingURL
+comment removed.
+No CDN requests or npm install are required by Obleth Chat at build/runtime.
+
+Upstream tarball:
+https://registry.npmjs.org/smiles-drawer/-/smiles-drawer-2.4.1.tgz
+SHA-512 integrity:
+sha512-kJeD91Bp8EwLTQouq4az7hn5zUYdIaLQoyFt8XlsqriugPiZOdBFADJMUnfqDYpyu3XK9SFpBgTuDtczpbSUbA==
+
+SmilesDrawer is MIT licensed; see LICENSE. It bundles chroma-js, whose notice
+is in DEPENDENCY-LICENSES.txt.
+
+Update by downloading a reviewed tagged npm release with npm pack
+--ignore-scripts, verifying the registry integrity, and replacing the bundle
+and the license notices. Run tests/markdown.test.mjs after updates.

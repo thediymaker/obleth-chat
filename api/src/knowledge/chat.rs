@@ -35,15 +35,17 @@ pub struct Turn {
 }
 
 impl Knowledge {
-    /// Searches the conversation's collections for the person's message. A model that
-    /// calls tools also gets save_item, and search_knowledge over saved items, in any
-    /// chat. None when there is nothing to offer.
+    /// Searches the conversation's collections, and `attached` (those of long documents
+    /// sent in it), for the person's message. A model that calls tools also gets
+    /// save_item, and search_knowledge over saved items, in any chat. None when there
+    /// is nothing to offer.
     #[allow(clippy::too_many_arguments)]
     pub async fn prepare(
         &self,
         gateway: &Gateway,
         user: &Identity,
         conversation: Uuid,
+        attached: &[Uuid],
         messages: &[(String, String)],
         tools: bool,
         library: bool,
@@ -55,6 +57,8 @@ impl Knowledge {
         for id in project
             .map(|p| p.collections.as_slice())
             .unwrap_or_default()
+            .iter()
+            .chain(attached)
         {
             if !collections.contains(id) {
                 collections.push(*id);

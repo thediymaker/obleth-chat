@@ -1,5 +1,7 @@
 //! Owner-scoped, bounded file uploads and durable references for model context.
 //! Files are never fetched from remote URLs and are never served as active content.
+//! Documents (PDF, Word, PowerPoint, Excel) have their text read once, on upload, by
+//! Knowledge's extractor; the model reads that text, never the file itself.
 use std::collections::{HashMap, HashSet};
 
 use axum::{
@@ -20,6 +22,7 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     files::{attachment_key, Files, Placed},
+    knowledge::extract::{self, Extracted, Tools},
     AppState,
 };
 
@@ -33,6 +36,9 @@ type AttachmentRow = (
     String,
     Option<Vec<u8>>,
     Option<String>,
+    Option<String>,
+    Option<i32>,
+    bool,
 );
 type MessageAttachmentRow = (
     Uuid,
@@ -43,13 +49,28 @@ type MessageAttachmentRow = (
     String,
     Option<Vec<u8>>,
     Option<String>,
+    Option<String>,
+    Option<i32>,
+    bool,
 );
+type MessageMetaRow = (Uuid, Uuid, String, String, i32, String, Option<i32>, bool);
+/// Columns of a file for model context. A document's original is left unread (empty)
+/// unless `$3` asks for it: the model reads its text.
+const CONTEXT_COLUMNS: &str = "a.id,a.name,a.mime_type,a.size,a.kind,CASE WHEN a.kind='document' AND NOT $3 THEN ''::BYTEA ELSE a.data END,CASE WHEN a.kind='document' AND NOT $3 THEN NULL ELSE a.object_key END,a.extracted_text,a.parts,a.searched";
 
 pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 pub const MAX_USER_BYTES: i64 = 50 * 1024 * 1024;
 pub const MAX_USER_FILES: i64 = 100;
 pub const MAX_PER_MESSAGE: usize = 4;
+/// PDF, Word, PowerPoint and Excel files.
+pub const MAX_DOCUMENT_BYTES: usize = 20 * 1024 * 1024;
+/// Most text of one document a model reads whole: three quarters of what a whole
+/// conversation holds (store::MAX_CONTEXT_BYTES), so the conversation still fits. A
+/// longer document is searched instead when Knowledge is set up, and refused when not.
+pub const MAX_DOCUMENT_TEXT_BYTES: usize = crate::store::MAX_CONTEXT_BYTES * 3 / 4;
+/// Largest file any upload may be, for reading stored files back.
+pub const MAX_FILE_BYTES: usize = MAX_DOCUMENT_BYTES;
 /// Encoded images, including replayed images, must fit in this inference budget.
 pub const MAX_IMAGE_CONTEXT_BYTES: usize = 20 * 1024 * 1024;
 
@@ -61,12 +82,20 @@ pub struct AttachmentMeta {
     pub mime_type: String,
     pub size: i32,
     pub kind: String,
+    /// A document's pages, slides or sheets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<i32>,
+    /// A document too long to read whole, which the chat searches instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub searched: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Attachment {
     pub meta: AttachmentMeta,
     data: Vec<u8>,
+    /// A document's text with its page, slide or sheet markers.
+    text: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -85,13 +114,40 @@ impl Attachment {
     }
     /// Filenames are represented as JSON strings to keep their boundaries clear.
     pub fn text_context(&self) -> Option<String> {
-        (self.meta.kind == "text").then(|| {
-            format!(
-                "\n\nAttached file {}:\n{}\nEnd of attached file.\n",
-                json!(self.meta.name),
+        let name = json!(self.meta.name);
+        let parts = self
+            .parts_label()
+            .map_or(String::new(), |p| format!(" ({p})"));
+        match self.meta.kind.as_str() {
+            "text" => Some(format!(
+                "\n\nAttached file {name}:\n{}\nEnd of attached file.\n",
                 String::from_utf8_lossy(&self.data)
-            )
-        })
+            )),
+            "document" => Some(match &self.text {
+                Some(text) => {
+                    format!("\n\nAttached file {name}{parts}:\n{text}\nEnd of attached file.\n")
+                }
+                None => format!("\n\nAttached file {name}{parts} is too long to read whole. Chat searches it for passages that answer the message, given with your instructions; search it again with search_knowledge if you have that tool.\n"),
+            }),
+            _ => None,
+        }
+    }
+
+    /// A document's searched copy: it is read from its collection, not sent whole.
+    pub fn searched(&self) -> bool {
+        self.meta.kind == "document" && self.meta.searched
+    }
+
+    /// "12 pages", "1 slide", "3 sheets".
+    fn parts_label(&self) -> Option<String> {
+        let n = self.meta.parts?;
+        let unit = match extract::kind(&self.meta.name, &self.meta.mime_type)? {
+            extract::Kind::Pdf => "page",
+            extract::Kind::Pptx => "slide",
+            extract::Kind::Xlsx => "sheet",
+            _ => return None,
+        };
+        Some(format!("{n} {unit}{}", if n == 1 { "" } else { "s" }))
     }
 
     pub fn content_part(&self) -> Value {
@@ -123,9 +179,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
             "/api/attachments",
-            get(list)
-                .post(upload)
-                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+            // The upload reads its own body, after sign-in.
+            get(list).post(upload).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/attachments/{id}", get(download).delete(delete))
         .with_state(state)
@@ -134,26 +189,60 @@ pub fn router(state: AppState) -> Router {
 async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
     let attachments = sqlx::query_as::<_, AttachmentMeta>(
-        "SELECT id,name,mime_type,size,kind FROM attachments WHERE owner_id=$1 ORDER BY created_at DESC,id LIMIT 100",
+        "SELECT id,name,mime_type,size,kind,parts,searched FROM attachments WHERE owner_id=$1 ORDER BY created_at DESC,id LIMIT 100",
     ).bind(user.id).fetch_all(&s.store.pool).await?;
     Ok(Json(
-        json!({"attachments":attachments,"limits":{"maxFiles":MAX_USER_FILES,"maxBytes":MAX_USER_BYTES,"maxTextBytes":MAX_TEXT_BYTES,"maxImageBytes":MAX_IMAGE_BYTES,"maxPerMessage":MAX_PER_MESSAGE}}),
+        json!({"attachments":attachments,"limits":{"maxFiles":MAX_USER_FILES,"maxBytes":MAX_USER_BYTES,"maxTextBytes":MAX_TEXT_BYTES,"maxImageBytes":MAX_IMAGE_BYTES,"maxDocumentBytes":MAX_DOCUMENT_BYTES,"maxDocumentTextBytes":MAX_DOCUMENT_TEXT_BYTES,"maxPerMessage":MAX_PER_MESSAGE}}),
     ))
 }
+
+/// A document's base64 and the JSON around it.
+const MAX_UPLOAD_BODY: usize = MAX_DOCUMENT_BYTES / 3 * 4 + 1024 * 1024;
+/// Uploads read at once on each server. A document's upload holds its base64, its
+/// bytes and its text while it is read, so these bound the memory uploads take.
+static UPLOADING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 async fn upload(
     State(s): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Upload>,
+    body: Body,
 ) -> Result<(StatusCode, Json<AttachmentMeta>), ApiError> {
     let user = s.auth.require(&headers, true).await?;
-    let file = validate_upload(body)?;
+    // Signed in first, then a turn, before the body is read.
+    let _turn = UPLOADING
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let body = axum::body::to_bytes(body, MAX_UPLOAD_BODY)
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Choose a file of {} or less",
+                    size_label(MAX_DOCUMENT_BYTES)
+                ),
+            )
+        })?;
+    let body: Upload =
+        serde_json::from_slice(&body).map_err(|_| ApiError::bad("Invalid upload"))?;
+    // A long document can be searched when Knowledge is set up and has a gateway to
+    // embed it through.
+    let searchable = s.knowledge.is_some() && s.gateway.is_some();
+    let tools = s
+        .knowledge
+        .as_ref()
+        .map_or_else(Tools::from_env, |k| k.tools().clone());
+    let file = validate_upload(body, &tools, searchable).await?;
     let files = &s.store.files;
     let placed = place(files, user.id, &file).await?;
     let saved = async {
         let mut tx = s.store.pool.begin().await?;
         lock_owner(&mut tx, user.id).await?;
         insert_in(&mut tx, user.id, &file, &placed).await?;
+        if file.searched() {
+            crate::knowledge::attached::stage_in(&mut tx, user.id, &file.meta).await?;
+        }
         tx.commit().await?;
         Ok::<_, ApiError>(())
     }
@@ -191,10 +280,11 @@ async fn insert_in(
     if count >= MAX_USER_FILES || bytes + i64::from(file.meta.size) > MAX_USER_BYTES {
         return Err(ApiError(StatusCode::CONFLICT,"Your file storage is full (100 files or 50 MiB). Delete unused files before uploading more.".into()));
     }
-    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,object_key,sha256)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,object_key,sha256,extracted_text,parts,searched)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
         .bind(file.meta.id).bind(owner).bind(&file.meta.name).bind(&file.meta.mime_type)
         .bind(&file.meta.kind).bind(file.meta.size).bind(&placed.data).bind(&placed.key)
-        .bind(Sha256::digest(&file.data).to_vec()).execute(&mut **tx).await?;
+        .bind(Sha256::digest(&file.data).to_vec()).bind(&file.text).bind(file.meta.parts)
+        .bind(file.meta.searched).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -215,12 +305,20 @@ pub async fn import_in(
     }
     lock_owner(tx, owner).await?;
     let mut ids = vec![];
+    let tools = Tools::from_env();
     for item in files {
-        let file = validate_upload(Upload {
-            name: item.name.clone(),
-            mime_type: item.mime_type.clone(),
-            data_base64: item.data_base64.clone(),
-        })?;
+        // A long document is kept to be searched; a chat on a server without Knowledge
+        // tells the model it can't be read whole.
+        let file = validate_upload(
+            Upload {
+                name: item.name.clone(),
+                mime_type: item.mime_type.clone(),
+                data_base64: item.data_base64.clone(),
+            },
+            &tools,
+            true,
+        )
+        .await?;
         let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM attachments WHERE owner_id=$1 AND name=$2 AND mime_type=$3 AND size=$4 AND sha256=$5 AND NOT(id=ANY($6)) ORDER BY created_at,id LIMIT 1")
             .bind(owner).bind(&file.meta.name).bind(&file.meta.mime_type).bind(file.meta.size).bind(Sha256::digest(&file.data).to_vec()).bind(&ids).fetch_optional(&mut **tx).await?;
         if let Some(id) = existing {
@@ -251,7 +349,7 @@ async fn download(
     .fetch_optional(&s.store.pool)
     .await?;
     let (name, mime, data, key) = row.ok_or_else(ApiError::not_found)?;
-    let data = s.store.files.read(data, key, MAX_IMAGE_BYTES).await?;
+    let data = s.store.files.read(data, key, MAX_FILE_BYTES).await?;
     file_response(&name, &mime, data)
 }
 
@@ -360,11 +458,12 @@ pub async fn load_owner(
     if ids.is_empty() {
         return Ok(vec![]);
     }
-    let rows: Vec<AttachmentRow> = sqlx::query_as(
-        "SELECT id,name,mime_type,size,kind,data,object_key FROM attachments WHERE owner_id=$1 AND id=ANY($2)",
-    )
+    let rows: Vec<AttachmentRow> = sqlx::query_as(&format!(
+        "SELECT {CONTEXT_COLUMNS} FROM attachments a WHERE a.owner_id=$1 AND a.id=ANY($2)"
+    ))
     .bind(owner)
     .bind(ids)
+    .bind(false)
     .fetch_all(&mut **tx)
     .await?;
     if rows.len() != ids.len() {
@@ -372,29 +471,39 @@ pub async fn load_owner(
     }
     let (rows, stored): (Vec<_>, Vec<_>) = rows
         .into_iter()
-        .map(|(id, name, mime_type, size, kind, data, key)| {
-            ((id, name, mime_type, size, kind), (data, key))
-        })
+        .map(
+            |(id, name, mime_type, size, kind, data, key, text, parts, searched)| {
+                (
+                    (id, name, mime_type, size, kind, text, parts, searched),
+                    (data, key),
+                )
+            },
+        )
         .unzip();
-    let data = files.read_all(stored, MAX_IMAGE_BYTES).await?;
+    let data = files.read_all(stored, MAX_FILE_BYTES).await?;
     let mut by_id: HashMap<_, _> = rows
         .into_iter()
         .zip(data)
-        .map(|((id, name, mime_type, size, kind), data)| {
-            (
-                id,
-                Attachment {
-                    meta: AttachmentMeta {
-                        id,
-                        name,
-                        mime_type,
-                        size,
-                        kind,
+        .map(
+            |((id, name, mime_type, size, kind, text, parts, searched), data)| {
+                (
+                    id,
+                    Attachment {
+                        meta: AttachmentMeta {
+                            id,
+                            name,
+                            mime_type,
+                            size,
+                            kind,
+                            parts,
+                            searched,
+                        },
+                        data,
+                        text,
                     },
-                    data,
-                },
-            )
-        })
+                )
+            },
+        )
         .collect();
     let files: Vec<_> = ids
         .iter()
@@ -462,7 +571,7 @@ pub async fn load_messages(
     // Count repeated references before loading bytea: one 5 MiB upload replayed
     // hundreds of times must not create a multi-gigabyte database result.
     let (text_bytes,image_bytes): (i64,i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(CASE WHEN a.kind='text' THEN a.size ELSE 0 END),0)::BIGINT,COALESCE(SUM(CASE WHEN a.kind='image' THEN ((a.size::BIGINT+2)/3)*4+128 ELSE 0 END),0)::BIGINT FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2)",
+        "SELECT COALESCE(SUM(CASE WHEN a.kind='text' THEN a.size WHEN a.kind='document' THEN COALESCE(OCTET_LENGTH(a.extracted_text),0) ELSE 0 END),0)::BIGINT,COALESCE(SUM(CASE WHEN a.kind='image' THEN ((a.size::BIGINT+2)/3)*4+128 ELSE 0 END),0)::BIGINT FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2)",
     ).bind(owner).bind(messages).fetch_one(&mut **tx).await?;
     if image_bytes > 0 && !vision {
         return Err(ApiError::bad("This conversation contains images. Choose a model with confirmed image support to continue."));
@@ -472,7 +581,7 @@ pub async fn load_messages(
     {
         return Err(ApiError::bad("Attached files exceed the conversation context limit. Start a new conversation or branch an earlier message."));
     }
-    load_message_data(tx, files, owner, messages).await
+    load_message_data(tx, files, owner, messages, false).await
 }
 
 /// Export is bounded by encoded size rather than inference capabilities.
@@ -492,27 +601,38 @@ pub async fn load_for_archive(
     if bytes > max_bytes.min(20 * 1024 * 1024) as i64 {
         return Err(ApiError::bad("These attachments exceed the archive size limit. Export a smaller conversation branch."));
     }
-    load_message_data(tx, files, owner, messages).await
+    load_message_data(tx, files, owner, messages, true).await
 }
 
+/// `originals`: read documents' own bytes too, which only an archive needs.
 async fn load_message_data(
     tx: &mut Transaction<'_, Postgres>,
     files: &Files,
     owner: Uuid,
     messages: &[Uuid],
+    originals: bool,
 ) -> Result<HashMap<Uuid, Vec<Attachment>>, ApiError> {
-    let rows: Vec<MessageAttachmentRow> = sqlx::query_as(
-        "SELECT ma.message_id,a.id,a.name,a.mime_type,a.size,a.kind,a.data,a.object_key FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2) ORDER BY ma.message_id,ma.position",
-    ).bind(owner).bind(messages).fetch_all(&mut **tx).await?;
+    let rows: Vec<MessageAttachmentRow> = sqlx::query_as(&format!(
+        "SELECT ma.message_id,{CONTEXT_COLUMNS} FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2) ORDER BY ma.message_id,ma.position",
+    )).bind(owner).bind(messages).bind(originals).fetch_all(&mut **tx).await?;
     let (rows, stored): (Vec<_>, Vec<_>) = rows
         .into_iter()
-        .map(|(message, id, name, mime_type, size, kind, data, key)| {
-            ((message, id, name, mime_type, size, kind), (data, key))
-        })
+        .map(
+            |(message, id, name, mime_type, size, kind, data, key, text, parts, searched)| {
+                (
+                    (
+                        message, id, name, mime_type, size, kind, text, parts, searched,
+                    ),
+                    (data, key),
+                )
+            },
+        )
         .unzip();
-    let data = files.read_all(stored, MAX_IMAGE_BYTES).await?;
+    let data = files.read_all(stored, MAX_FILE_BYTES).await?;
     let mut result: HashMap<Uuid, Vec<Attachment>> = HashMap::new();
-    for ((message, id, name, mime_type, size, kind), data) in rows.into_iter().zip(data) {
+    for ((message, id, name, mime_type, size, kind, text, parts, searched), data) in
+        rows.into_iter().zip(data)
+    {
         result.entry(message).or_default().push(Attachment {
             meta: AttachmentMeta {
                 id,
@@ -520,8 +640,11 @@ async fn load_message_data(
                 mime_type,
                 size,
                 kind,
+                parts,
+                searched,
             },
             data,
+            text,
         });
     }
     Ok(result)
@@ -536,17 +659,19 @@ pub async fn metadata_for_messages(
     if messages.len() > crate::store::MAX_HISTORY {
         return Err(ApiError::bad("Too many messages"));
     }
-    let rows: Vec<(Uuid,Uuid,String,String,i32,String)> = sqlx::query_as(
-        "SELECT ma.message_id,a.id,a.name,a.mime_type,a.size,a.kind FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2) ORDER BY ma.message_id,ma.position",
+    let rows: Vec<MessageMetaRow> = sqlx::query_as(
+        "SELECT ma.message_id,a.id,a.name,a.mime_type,a.size,a.kind,a.parts,a.searched FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2) ORDER BY ma.message_id,ma.position",
     ).bind(owner).bind(messages).fetch_all(&mut **tx).await?;
     let mut result: HashMap<Uuid, Vec<AttachmentMeta>> = HashMap::new();
-    for (message, id, name, mime_type, size, kind) in rows {
+    for (message, id, name, mime_type, size, kind, parts, searched) in rows {
         result.entry(message).or_default().push(AttachmentMeta {
             id,
             name,
             mime_type,
             size,
             kind,
+            parts,
+            searched,
         });
     }
     Ok(result)
@@ -564,7 +689,13 @@ pub async fn has_images(
         .bind(owner).bind(pending).bind(conversation).fetch_one(pool).await?)
 }
 
-fn validate_upload(body: Upload) -> Result<Attachment, ApiError> {
+/// Checks an upload and, for a document, reads its text. `searchable`: a document too
+/// long to read whole may be kept to be searched instead of being refused.
+async fn validate_upload(
+    body: Upload,
+    tools: &Tools,
+    searchable: bool,
+) -> Result<Attachment, ApiError> {
     let name = body.name.trim();
     if name.is_empty()
         || name.chars().count() > 200
@@ -582,14 +713,16 @@ fn validate_upload(body: Upload) -> Result<Attachment, ApiError> {
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
         .unwrap_or_default();
-    if [
-        "svg", "svgz", "pdf", "zip", "gz", "bz2", "xz", "7z", "rar", "tar",
-    ]
-    .contains(&extension.as_str())
-    {
+    if ["pdf", "docx", "pptx", "xlsx"].contains(&extension.as_str()) {
+        return document(name, &body.data_base64, tools, searchable).await;
+    }
+    if ["doc", "ppt", "xls"].contains(&extension.as_str()) {
         return Err(ApiError::bad(
-            "Upload a text/code file, PNG, JPEG, or WebP image",
+            "Chat reads the newer Office formats: save this file as .docx, .pptx or .xlsx and upload that",
         ));
+    }
+    if ["svg", "svgz", "zip", "gz", "bz2", "xz", "7z", "rar", "tar"].contains(&extension.as_str()) {
+        return Err(ApiError::bad(UNSUPPORTED));
     }
     let requested = body
         .mime_type
@@ -628,9 +761,7 @@ fn validate_upload(body: Upload) -> Result<Attachment, ApiError> {
         ]
         .contains(&mime);
     if !image && !text {
-        return Err(ApiError::bad(
-            "Upload a text/code file, PNG, JPEG, or WebP image",
-        ));
+        return Err(ApiError::bad(UNSUPPORTED));
     }
     let max = if image {
         MAX_IMAGE_BYTES
@@ -681,9 +812,95 @@ fn validate_upload(body: Upload) -> Result<Attachment, ApiError> {
             mime_type: stored_mime.into(),
             size: data.len() as i32,
             kind: if image { "image" } else { "text" }.into(),
+            parts: None,
+            searched: false,
         },
         data,
+        text: None,
     })
+}
+
+const UNSUPPORTED: &str =
+    "Upload a text or code file, a PDF, Word, PowerPoint or Excel file, or a PNG, JPEG or WebP image";
+
+/// A PDF, Word, PowerPoint or Excel file, with its text read now so every turn that
+/// sends it reuses the same text.
+async fn document(
+    name: &str,
+    data_base64: &str,
+    tools: &Tools,
+    searchable: bool,
+) -> Result<Attachment, ApiError> {
+    if data_base64.len() > MAX_DOCUMENT_BYTES.div_ceil(3) * 4 {
+        return Err(ApiError::bad("Documents must be at most 20 MiB"));
+    }
+    let data = STANDARD
+        .decode(data_base64)
+        .map_err(|_| ApiError::bad("File data must use standard base64 encoding"))?;
+    if data.is_empty() || data.len() > MAX_DOCUMENT_BYTES {
+        return Err(ApiError::bad("The file is empty or exceeds its size limit"));
+    }
+    let kind = extract::kind(name, "").ok_or_else(|| ApiError::bad(UNSUPPORTED))?;
+    let (signature, what) = match kind {
+        extract::Kind::Pdf => (&b"%PDF-"[..], "PDF"),
+        extract::Kind::Docx => (&b"PK\x03\x04"[..], "Word file"),
+        extract::Kind::Pptx => (&b"PK\x03\x04"[..], "PowerPoint file"),
+        _ => (&b"PK\x03\x04"[..], "Excel file"),
+    };
+    let unreadable = || {
+        ApiError::bad(format!(
+            "This {what} could not be read. Check that it opens, then upload it again."
+        ))
+    };
+    if !data.starts_with(signature) {
+        return Err(unreadable());
+    }
+    let pages = match extract::extract(tools, kind, &data).await {
+        Ok(Extracted::Pages(pages)) => pages,
+        Ok(Extracted::NeedsOcr { .. }) => {
+            return Err(ApiError::bad(
+                "This PDF has no text to read; it may be a scan.",
+            ))
+        }
+        Err(error) => {
+            tracing::warn!("could not read an attached document: {error:#}");
+            return Err(unreadable());
+        }
+    };
+    let text = extract::marked_text(&pages);
+    if !text.chars().any(char::is_alphanumeric) {
+        return Err(ApiError::bad(format!("This {what} has no text to read.")));
+    }
+    let searched = text.len() > MAX_DOCUMENT_TEXT_BYTES;
+    if searched && !searchable {
+        return Err(ApiError::bad(format!(
+            "This {what} has {} of text, and Chat can read up to {} of a document in a conversation. Attach a shorter part of it.",
+            size_label(text.len()),
+            size_label(MAX_DOCUMENT_TEXT_BYTES)
+        )));
+    }
+    Ok(Attachment {
+        meta: AttachmentMeta {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            // The type follows the kind of file, never what the uploader said.
+            mime_type: extract::mime_for(kind),
+            size: data.len() as i32,
+            kind: "document".into(),
+            parts: extract::parts(kind, &pages),
+            searched,
+        },
+        data,
+        text: (!searched).then_some(text),
+    })
+}
+
+/// 76800 bytes as "75 KB".
+fn size_label(bytes: usize) -> String {
+    match bytes {
+        b if b < 1024 * 1024 => format!("{} KB", b.div_ceil(1024)),
+        b => format!("{:.1} MB", b as f64 / 1024.0 / 1024.0),
+    }
 }
 
 fn valid_image_header(mime: &str, data: &[u8]) -> bool {

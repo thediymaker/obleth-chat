@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAttachments } from '../web/attachments.js';
+import { createAttachments, describe } from '../web/attachments.js';
 import { createHistory } from '../web/history.js';
 
 test('an attachment read that finishes after session reset cannot upload into the next account', async () => {
@@ -56,4 +56,23 @@ test('pasted text a conversation could not hold, or pasted mid-reply, is refused
   await attachments.addText('short but sent while a reply streams');
   assert.equal(calls, 0);
   assert.deepEqual(toasts, ['That text is 120.0 KB, and a conversation can hold 100.0 KB. Paste a shorter part.', 'Paste it again once the reply has finished.']);
+});
+
+test('a document chip names its type and parts, and says when Chat searches it', async () => {
+  const toasts = [];
+  const attachments = createAttachments({
+    api: { request: (path, options) => ({ id: 'd1', name: options.body.name, size: 3 * 1024 * 1024, kind: 'document', parts: 120, searched: true }) },
+    state: {}, render() {}, toast: m => toasts.push(m),
+  });
+  const file = { name: 'Thesis.pdf', type: 'application/pdf', size: 3 * 1024 * 1024, arrayBuffer: async () => new Uint8Array(8).buffer };
+  await attachments.upload({ files: [file], value: '' });
+  assert.deepEqual(toasts, []);
+  assert.match(attachments.chips(), /PDF · 120 pages · 3\.0 MB/);
+  assert.match(attachments.chips(), /Large document: Chat searches it instead of reading it all\./);
+  assert.equal(describe({ name: 'deck.pptx', kind: 'document', size: 2048, parts: 1 }).detail, 'PowerPoint · 1 slide · 2.0 KB');
+  assert.equal(describe({ name: 'Budget.XLSX', kind: 'document', size: 2048, parts: 3 }).glyph, 'grid');
+  assert.equal(describe({ name: 'memo.docx', kind: 'document', size: 512 }).detail, 'Word · 512 B');
+  // Documents over the limit are refused before they are read.
+  await attachments.upload({ files: [{ ...file, size: 21 * 1024 * 1024 }], value: '' });
+  assert.deepEqual(toasts, ['Documents must be 20 MB or smaller.']);
 });

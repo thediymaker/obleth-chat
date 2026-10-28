@@ -6,6 +6,7 @@
 //! the person may open the collection: their own, a group they belong to, or one an
 //! administrator shared with everyone.
 
+pub mod attached;
 pub mod chat;
 pub mod embedding;
 pub mod extract;
@@ -107,6 +108,11 @@ impl Knowledge {
         }
     }
 
+    /// The tools documents are read with.
+    pub fn tools(&self) -> &extract::Tools {
+        &self.tools
+    }
+
     /// Prefixes for the default model, as the environment variables give them.
     pub fn with_prompts(mut self, prompts: Prompts) -> Self {
         self.env_prompts = (Some(prompts.query), Some(prompts.document));
@@ -168,13 +174,14 @@ impl Knowledge {
         crate::files::empty_trash(&self.pool, &self.store).await;
     }
 
-    /// Takes the oldest queued document, or one whose worker stopped mid-way.
+    /// Takes the oldest queued document, or one whose worker stopped mid-way. Documents
+    /// attached in a chat go first: someone is waiting on them.
     async fn claim(&self) -> anyhow::Result<Option<Job>> {
         let row = sqlx::query(
             "UPDATE knowledge_documents SET status='processing', stage='reading', error=NULL, claimed_at=NOW(), attempts=attempts+1, updated_at=NOW()
              WHERE id = (SELECT id FROM knowledge_documents
                          WHERE status='queued' OR (status='processing' AND claimed_at < NOW() - INTERVAL '10 minutes')
-                         ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+                         ORDER BY object_key IS NOT NULL, created_at FOR UPDATE SKIP LOCKED LIMIT 1)
              RETURNING id, owner_id, collection_id, name, mime_type, object_key, size, attempts, claimed_at",
         )
         .fetch_optional(&self.pool)
@@ -200,7 +207,10 @@ impl Knowledge {
         let embedding = self.embedding().await?;
         let kind = extract::kind(&job.name, &job.mime)
             .ok_or_else(|| anyhow::anyhow!("This file type is not supported"))?;
-        let bytes = self.store.get(&job.key, job.size as usize + 1024).await?;
+        let bytes = match &job.key {
+            Some(key) => self.store.get(key, job.size as usize + 1024).await?,
+            None => self.attachment_bytes(job.collection).await?,
+        };
         let pages = match extract::extract(&self.tools, kind, &bytes).await? {
             extract::Extracted::NeedsOcr { pages } => {
                 sqlx::query("UPDATE knowledge_documents SET status='needs_ocr', stage='', pages=$2, updated_at=NOW() WHERE id=$1")
@@ -321,6 +331,21 @@ impl Knowledge {
         Ok(())
     }
 
+    /// The bytes of the attached file a chat's own collection holds.
+    async fn attachment_bytes(&self, collection: Uuid) -> anyhow::Result<Vec<u8>> {
+        let (data, key): (Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+            "SELECT a.data, a.object_key FROM knowledge_collections c JOIN attachments a ON a.id = c.attachment_id WHERE c.id = $1",
+        )
+        .bind(collection)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("The attached file is gone"))?;
+        crate::files::Files::new(self.pool.clone(), Some(self.store.clone()))
+            .read(data, key, crate::attachments::MAX_FILE_BYTES)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.1))
+    }
+
     /// The collections among `ids` that the person may search.
     pub async fn visible(&self, user: Uuid, ids: &[Uuid]) -> Result<Vec<Uuid>, ApiError> {
         Ok(sqlx::query_scalar(&format!(
@@ -430,7 +455,8 @@ struct Job {
     collection: Uuid,
     name: String,
     mime: String,
-    key: String,
+    /// None for a document attached in a chat, which reads the attachment's bytes.
+    key: Option<String>,
     size: i64,
     attempts: i32,
     /// Identifies this claim: a document queued again or taken over by another worker
@@ -563,7 +589,7 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
          FROM knowledge_collections c JOIN users u ON u.id = c.owner_id
          LEFT JOIN user_groups g ON g.id = c.group_id
          LEFT JOIN knowledge_documents d ON d.collection_id = c.id
-         WHERE {VISIBLE} GROUP BY c.id, g.name, u.display_name ORDER BY c.owner_id = $1 DESC, c.updated_at DESC"
+         WHERE {VISIBLE} AND c.attachment_id IS NULL GROUP BY c.id, g.name, u.display_name ORDER BY c.owner_id = $1 DESC, c.updated_at DESC"
     ))
     .bind(user.id)
     .fetch_all(&k.pool)
@@ -578,8 +604,9 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
                 "passages":r.get::<i64,_>("passages"),"bytes":r.get::<i64,_>("bytes")})
         })
         .collect();
+    // Documents attached in chats count against the person's files, not here.
     let used: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(size),0)::bigint FROM knowledge_documents WHERE owner_id=$1",
+        "SELECT COALESCE(SUM(size),0)::bigint FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL",
     )
     .bind(user.id)
     .fetch_one(&k.pool)
@@ -648,11 +675,12 @@ async fn create(
         .collect::<String>();
     let scope = body.scope.unwrap_or_else(|| "personal".into());
     check_scope(&k.pool, &user, &scope, body.group_id, None).await?;
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_collections WHERE owner_id=$1")
-            .bind(user.id)
-            .fetch_one(&k.pool)
-            .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM knowledge_collections WHERE owner_id=$1 AND attachment_id IS NULL",
+    )
+    .bind(user.id)
+    .fetch_one(&k.pool)
+    .await?;
     if count >= 100 {
         return Err(bad("You have 100 collections; delete one to make another"));
     }
@@ -828,7 +856,7 @@ async fn upload(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let kind = extract::kind(&name, given).ok_or_else(|| {
-        bad("Chat can read PDF, Word (.docx), HTML, Markdown, text and code files")
+        bad("Chat can read PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code files")
     })?;
     let mime = extract::mime_for(kind);
     let doc = Uuid::new_v4();
@@ -853,7 +881,7 @@ async fn upload(
     let usage = |pool: &PgPool| {
         let pool = pool.clone();
         async move {
-            sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1")
+            sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
                 .bind(user.id)
                 .fetch_one(&pool)
                 .await
@@ -876,7 +904,7 @@ async fn upload(
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
-    let row = sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1")
+    let row = sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
         .bind(user.id)
         .fetch_one(&mut *tx)
         .await?;
@@ -988,8 +1016,22 @@ async fn file(
     let user = s.auth.require(&headers, false).await?;
     let k = knowledge(&s)?;
     let (row, _) = visible_document(&k.pool, user.id, id).await?;
-    let (key, name, mime): (String, String, String) =
+    let (key, name, mime): (Option<String>, String, String) =
         (row.get("object_key"), row.get("name"), row.get("mime_type"));
+    // A document attached in a chat is the attachment itself.
+    let Some(key) = key else {
+        let bytes = k
+            .attachment_bytes(row.get("collection_id"))
+            .await
+            .map_err(|error| {
+                tracing::warn!("could not read an attached document: {error:#}");
+                ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "The file could not be read. Try again.".into(),
+                )
+            })?;
+        return crate::attachments::file_response(&name, &mime, bytes);
+    };
     let stored_safely = extract::kind(&name, &mime).map(extract::mime_for) == Some(mime.clone());
     if !stored_safely {
         let bytes = k.store.get(&key, MAX_FILE_BYTES).await.map_err(|error| {

@@ -82,11 +82,15 @@ pub(crate) fn launch_script() -> String {
          echo started"
     )
 }
+/// A run writes its exit file before its process ends, so once the process is gone
+/// the exit file is read again: a run that ended between the two checks finished,
+/// and only one with no exit file at all is lost.
 pub(crate) fn poll_script() -> String {
     format!(
         "{RUN_DIR}\n[ -d \"$R\" ] || {{ echo lost; exit 0; }}\n\
          if [ -f \"$R/exit\" ]; then echo \"exit $(cat \"$R/exit\")\"; \
          elif [ -f \"$R/pid\" ] && kill -0 \"$(cat \"$R/pid\")\" 2>/dev/null; then echo running; \
+         elif [ -f \"$R/exit\" ]; then echo \"exit $(cat \"$R/exit\")\"; \
          elif [ -f \"$R/pid\" ]; then echo lost; else echo running; fi\n\
          tail -c {LOG_TAIL} \"$R/log\" 2>/dev/null"
     )

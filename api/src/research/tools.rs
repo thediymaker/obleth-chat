@@ -1335,6 +1335,27 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_ends_between_the_poll_checks_is_not_lost() {
+        let root = std::env::temp_dir().join(format!("research-{}", Uuid::new_v4().simple()));
+        let (dir, runs) = (root.join("demo"), root.join("runs"));
+        let run = runs.join("demo/runs/1");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("pid"), "999999999").unwrap();
+        // The run writes its exit file and ends just after the first look for it.
+        let ends_now = format!(
+            "kill() {{ echo 0 > \"$R/exit\"; return 1; }}\n{}",
+            super::super::poll_script()
+        );
+        let (out, _) = local(&dir, &runs, &ends_now, &["1"], None);
+        assert_eq!(out.lines().next(), Some("exit 0"));
+        // With no exit file the process is really gone.
+        std::fs::remove_file(run.join("exit")).unwrap();
+        let (out, _) = local(&dir, &runs, &super::super::poll_script(), &["1"], None);
+        assert_eq!(out.lines().next(), Some("lost"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn the_workspace_scripts_branch_run_and_cancel() {
         if std::process::Command::new("setsid")
             .arg("true")

@@ -16,6 +16,8 @@ pub fn home_namespace(identity: &str) -> Option<String> {
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ROWS: usize = 200;
+/// The most Chat reads of one Kubernetes API answer.
+const MAX_BODY: usize = 32 * 1024 * 1024;
 /// Group versions searched first when a kind is given without an apiVersion.
 const COMMON: [&str; 8] = [
     "v1",
@@ -132,11 +134,15 @@ impl Client {
             }
         })?;
         let status = response.status().as_u16();
-        let bytes = response
-            .bytes()
+        let bytes = super::read_capped(response, MAX_BODY)
             .await
-            .map_err(|_| "The Kubernetes API closed the connection".to_string())?
-            .to_vec();
+            .map_err(|e| match e {
+                super::Read::Closed => "The Kubernetes API closed the connection".to_string(),
+                super::Read::TooLarge => format!(
+                    "The Kubernetes API's answer was larger than {} MiB, so Chat did not read it. Narrow it with a namespace or label selector.",
+                    MAX_BODY / 1024 / 1024
+                ),
+            })?;
         if (200..300).contains(&status) {
             return Ok((status, bytes));
         }

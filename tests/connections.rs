@@ -34,6 +34,8 @@ const TOKEN: &str = "fixture-mcp-token";
 /// A person's own token for a shared MCP server set to personal tokens.
 const PERSONAL_TOKEN: &str = "fixture-personal-mcp-token";
 const SLURM_TOKEN: &str = "fixture-slurm-jwt";
+/// A token whose every answer is larger than Chat reads.
+const HUGE_SLURM_TOKEN: &str = "fixture-huge-answers";
 const KUBE_TOKEN: &str = "fixture-kube-token";
 /// A service account token of namespace "team".
 const SA_TOKEN: &str = "fixture-service-account-token";
@@ -90,7 +92,8 @@ async fn mcp(
 }
 
 /// slurmrestd (v0.0.45, and the older v0.0.42) and a Kubernetes API server for
-/// account "alice", recording every request.
+/// account "alice", recording every request. Like a large cluster's, slurmrestd's list
+/// of every job is too big to read: Chat must ask accounting for the person's jobs.
 async fn cluster(
     axum::extract::State(seen): axum::extract::State<Seen>,
     request: Request<Body>,
@@ -119,7 +122,11 @@ async fn cluster(
         )
             .into_response()
     };
-    if let Some(rest) = path.strip_prefix("/slurm/") {
+    let slurm = path
+        .strip_prefix("/slurm/")
+        .map(|rest| ("slurm", rest))
+        .or_else(|| path.strip_prefix("/slurmdb/").map(|rest| ("slurmdb", rest)));
+    if let Some((api, rest)) = slurm {
         let Some(rest) = rest
             .strip_prefix("v0.0.45/")
             .or_else(|| rest.strip_prefix("v0.0.42/"))
@@ -130,6 +137,10 @@ async fn cluster(
         if rest == "ping" {
             return Json(json!({"pings":[{"hostname":"slurm"}]})).into_response();
         }
+        if header("x-slurm-user-token") == HUGE_SLURM_TOKEN {
+            let pad = "x".repeat(33 * 1024 * 1024);
+            return Json(json!({"partitions":[],"pad":pad})).into_response();
+        }
         if header("x-slurm-user-token") != SLURM_TOKEN {
             return (
                 StatusCode::from_u16(511).unwrap(),
@@ -137,15 +148,40 @@ async fn cluster(
             )
                 .into_response();
         }
-        return match (method, rest) {
-            ("GET", "partitions") => Json(json!({"partitions":[{"name":"debug","partition":{"state":["UP"]},"cpus":{"total":2}}]})).into_response(),
-            ("GET", "jobs") => Json(json!({"jobs":[
-                {"job_id":6,"name":"mine","job_state":["COMPLETED"],"user_name":"alice","partition":"debug"},
-                {"job_id":{"set":true,"infinite":false,"number":7},"name":"theirs","job_state":["RUNNING"],"user_name":"bob","partition":"debug"}
-            ]}))
-            .into_response(),
-            ("GET", "nodes") => Json(json!({"nodes":[{"name":"n1","state":["MIXED"],"cpus":4,"alloc_cpus":1,"real_memory":8000,"alloc_memory":2000,"partitions":["debug"]}]})).into_response(),
-            ("POST", "job/submit") => Json(json!({"job_id":8,"errors":[]})).into_response(),
+        let query: Vec<(String, String)> =
+            url::form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes())
+                .into_owned()
+                .collect();
+        let param = |name: &str| {
+            query
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+        return match (method, api, rest) {
+            ("GET", "slurm", "jobs") => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"errors":[{"description":"the whole cluster's job list is too large to read"}]})),
+            )
+                .into_response(),
+            ("GET", "slurm", "diag") => Json(json!({"statistics":{"jobs_running":{"set":true,"infinite":false,"number":2},"jobs_pending":3}})).into_response(),
+            ("GET", "slurmdb", "jobs") => {
+                let jobs = [
+                    json!({"job_id":6,"name":"mine","user":"alice","partition":"debug","nodes":"n1","state":{"current":["RUNNING"],"reason":"None"},"time":{"elapsed":75,"submission":100,"limit":{"set":true,"infinite":false,"number":30}}}),
+                    json!({"job_id":9,"name":"queued","user":"alice","partition":"debug","nodes":"None assigned","state":{"current":["PENDING"],"reason":"Priority"},"time":{"elapsed":0,"submission":200,"limit":{"set":true,"infinite":false,"number":60}}}),
+                    json!({"job_id":7,"name":"theirs","user":"bob","partition":"debug","nodes":"n1","state":{"current":["RUNNING"],"reason":"None"},"time":{"elapsed":5,"submission":150,"limit":{"set":true,"infinite":false,"number":30}}}),
+                ];
+                let (users, state) = (param("users"), param("state"));
+                let jobs: Vec<Value> = jobs
+                    .into_iter()
+                    .filter(|j| users.as_deref().is_none_or(|u| j["user"] == u))
+                    .filter(|j| state.as_deref().is_none_or(|s| j["state"]["current"][0] == s))
+                    .collect();
+                Json(json!({"jobs":jobs})).into_response()
+            }
+            ("GET", "slurm", "partitions") => Json(json!({"partitions":[{"name":"debug","partition":{"state":["UP"]},"cpus":{"total":2}}]})).into_response(),
+            ("GET", "slurm", "nodes") => Json(json!({"nodes":[{"name":"n1","state":["MIXED"],"cpus":4,"alloc_cpus":1,"real_memory":8000,"alloc_memory":2000,"partitions":["debug"]}]})).into_response(),
+            ("POST", "slurm", "job/submit") => Json(json!({"job_id":8,"errors":[]})).into_response(),
             _ => missing(),
         };
     }
@@ -1424,7 +1460,9 @@ async fn a_shared_slurm_cluster_runs_jobs_with_each_persons_own_token(pool: PgPo
         .unwrap()
         .unwrap();
     // Only the person's own jobs, then the submitted one.
-    assert!(text.contains("6 mine [COMPLETED]"), "{text}");
+    assert!(text.contains("6 mine [RUNNING]"), "{text}");
+    assert!(text.contains("9 queued [PENDING]"), "{text}");
+    assert!(text.contains("reason Priority"), "{text}");
     assert!(!text.contains("theirs"), "{text}");
     assert!(text.contains("Submitted job 8 as alice"), "{text}");
     let submitted = cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit");
@@ -1585,6 +1623,40 @@ async fn a_kubernetes_connection_lists_and_applies_with_the_persons_token(pool: 
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_cluster_answer_too_large_to_read_is_refused_not_held(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Slurm","url":f.cluster_url,"shared":true}),
+        &admin,
+    )
+    .await;
+    let id = shared["id"].as_str().unwrap().to_owned();
+    let (status, refused) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":HUGE_SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("larger than 32 MiB"),
+        "{refused}"
+    );
+    // Chat carries on with the next request.
+    let (status, _) = call(&f.app, "GET", "/api/connections", Value::Null, &admin).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_slurm_cluster_uses_the_api_version_set_on_it(pool: PgPool) {
     let f = fixture(pool).await;
     let admin = login(&f.app, "test-admin").await;
@@ -1719,13 +1791,36 @@ async fn cluster_status_shows_what_the_persons_account_sees(pool: PgPool) {
     let s = &status["status"];
     assert_eq!(s["totals"]["cpus"], 4);
     assert_eq!(s["totals"]["allocCpus"], 1);
+    // The queue's size comes from the scheduler's statistics.
     assert_eq!(
-        (s["queue"]["running"].clone(), s["queue"]["total"].clone()),
-        (json!(1), json!(2))
+        (s["queue"]["running"].clone(), s["queue"]["pending"].clone()),
+        (json!(2), json!(3))
     );
-    // Only the person's own jobs are listed.
-    assert_eq!(s["jobs"].as_array().unwrap().len(), 1);
-    assert_eq!(s["jobs"][0]["id"], 6);
+    // Only the person's own jobs, newest first, asked of accounting by user name.
+    let ids: Vec<&Value> = s["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| &j["id"])
+        .collect();
+    assert_eq!(ids, [&json!(9), &json!(6)]);
+    assert_eq!(
+        (
+            s["jobs"][1]["elapsed"].clone(),
+            s["jobs"][1]["timeLimit"].clone()
+        ),
+        (json!("1m15s"), json!("30m"))
+    );
+    assert_eq!(s["jobs"][0]["nodes"], "");
+    let asked: Vec<String> = cluster_requests(&f, "GET", "/slurmdb/v0.0.45/jobs")
+        .iter()
+        .map(|r| r["query"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        asked,
+        ["users=alice&state=RUNNING", "users=alice&state=PENDING"]
+    );
+    assert!(cluster_requests(&f, "GET", "/slurm/v0.0.45/jobs").is_empty());
 
     let (_, kube) = call(&f.app, "POST", "/api/connections", json!({"kind":"kubernetes","name":"Kube","url":f.cluster_url,"token":KUBE_TOKEN,"options":{"namespace":"team"}}), &admin).await;
     let kube = kube["id"].as_str().unwrap().to_owned();

@@ -486,6 +486,25 @@ fn pdf_with_bookmarks(pages: &[&str], bookmarks: &[(&str, usize)]) -> Vec<u8> {
 const NOTES: &str = "# Heat engines\n\nA Carnot engine is the most efficient engine possible between two reservoirs. Its efficiency limit is one minus the cold temperature over the hot temperature.\n\n# Entropy\n\nIn a free expansion the entropy of the gas rises even though no heat flows, because entropy is a state function.";
 
 #[sqlx::test(migrations = "./migrations")]
+async fn nothing_in_a_temporary_chat_is_saved_to_the_library(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, chat) = call(
+        &f.app,
+        "POST",
+        "/api/conversations",
+        json!({"title":"Passing thought","model":"auto","temporary":true}),
+        &admin,
+    )
+    .await;
+    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
+    let (status, body) = call(&f.app, "POST", "/api/saved", json!({"kind":"excerpt","title":"Kept","body":"From a temporary chat","sourceConversationId":id}), &admin).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (_, listed) = call(&f.app, "GET", "/api/saved", Value::Null, &admin).await;
+    assert_eq!(listed["items"], json!([]));
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool) {
     let f = fixture(pool).await;
     let admin = login(&f.app, "test-admin").await;
@@ -2598,23 +2617,4 @@ async fn pdf_bookmarks_become_sections(pool: PgPool) {
     assert!(stored[0].2.contains("four hundred nodes"), "{stored:?}");
     assert!(!stored[0].2.contains("ninety days"), "{stored:?}");
     assert!(stored[1].2.contains("ninety days"), "{stored:?}");
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn nothing_in_a_temporary_chat_is_saved_to_the_library(pool: PgPool) {
-    let f = fixture(pool).await;
-    let admin = login(&f.app, "test-admin").await;
-    let (_, chat) = call(
-        &f.app,
-        "POST",
-        "/api/conversations",
-        json!({"title":"Passing thought","model":"auto","temporary":true}),
-        &admin,
-    )
-    .await;
-    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
-    let (status, body) = call(&f.app, "POST", "/api/saved", json!({"kind":"excerpt","title":"Kept","body":"From a temporary chat","sourceConversationId":id}), &admin).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    let (_, listed) = call(&f.app, "GET", "/api/saved", Value::Null, &admin).await;
-    assert_eq!(listed["items"], json!([]));
 }

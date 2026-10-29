@@ -5,7 +5,7 @@ import { esc, icon, displayName, when, badge, btn, empty, errorBox, field, textI
 const tabs = [['users','users','People'],['groups','grid','Groups'],['models','cube','Models'],['usage','chart','Usage & limits'],['feedback','thumbsUp','Feedback'],['audit','clock','Activity'],['system','server','System']];
 const generation = [['systemPrompt','System instructions'],['reasoningEffort','Thinking effort'],['temperature','Temperature'],['topP','Top P'],['maxTokens','Output token limit']];
 export function createAdmin({ api, state, capabilities, render, modal, close, toast, onIdentityChanged, onCatalogChanged }) {
-  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, feedback: null, feedbackDays: 30, sequence: 0, pending: null };
+  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, feedback: null, feedbackDays: 30, auditKind: '', auditQuery: '', sequence: 0, pending: null };
   const isAdmin = () => state.user?.role === 'admin';
   const tabFromHash = () => tabs.some(t => t[0] === adminLocation(location.hash).section) ? adminLocation(location.hash).section : 'users';
   const userById = id => local.users.find(u => u.id === id);
@@ -35,7 +35,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
         const [r, e, h, d] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null, api.request('/api/admin/health').catch(() => null), api.request('/api/admin/decisions').catch(err => ({ error: err.message }))]); if (sequence !== local.sequence) return;
         local.retention = r; local.embedding = e; local.health = h; local.decisions = d;
       }
-      if (local.tab === 'audit') { const r = await api.request(`/api/admin/audit?limit=50${append && local.nextCursor ? '&before=' + encodeURIComponent(local.nextCursor) : ''}`); if (sequence !== local.sequence) return; local.events = append ? [...local.events, ...(r.events || [])] : r.events || []; local.nextCursor = r.nextCursor; }
+      if (local.tab === 'audit') { const r = await api.request(`/api/admin/audit?limit=50${local.auditKind ? '&kind=' + encodeURIComponent(local.auditKind) : ''}${local.auditQuery ? '&q=' + encodeURIComponent(local.auditQuery) : ''}${append && local.nextCursor ? '&before=' + encodeURIComponent(local.nextCursor) : ''}`); if (sequence !== local.sequence) return; local.events = append ? [...local.events, ...(r.events || [])] : r.events || []; local.nextCursor = r.nextCursor; }
     } catch (e) { if (sequence === local.sequence && e.name !== 'AbortError') local.error = e.message; }
     finally { if (sequence === local.sequence) { local.loading = false; render(); } }
   }
@@ -66,8 +66,70 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     const user = local.usage.find(u => u.id === userId);
     modal(userId ? `Limits for ${displayName(user)}` : 'Workspace limits', `<form id="admin-limits-form" data-id="${esc(userId || '')}"><p class="inline-note">${userId ? 'Leave a field blank to inherit the workspace default.' : 'Leave daily limits blank for unlimited usage.'} Concurrent responses must be between 1 and 32.</p>${field('limit-requests', 'Requests per day', textInput('limit-requests', limits.dailyRequests ?? '', 'type="number" min="1" max="1000000" placeholder="' + (userId ? 'Inherit workspace default' : 'Unlimited') + '"'))}${userId ? checkbox('limit-requests-unlimited','Unlimited daily requests', Object.hasOwn(limits,'dailyRequests') && limits.dailyRequests === null) : ''}${field('limit-tokens', 'Tokens per day', textInput('limit-tokens', limits.dailyTokens ?? '', 'type="number" min="1" max="1000000000" placeholder="' + (userId ? 'Inherit workspace default' : 'Unlimited') + '"'))}${userId ? checkbox('limit-tokens-unlimited','Unlimited daily tokens', Object.hasOwn(limits,'dailyTokens') && limits.dailyTokens === null) : ''}${field('limit-concurrent', 'Concurrent responses', textInput('limit-concurrent', limits.concurrentRequests ?? '', `type="number" min="1" max="32" placeholder="Inherit workspace default" ${userId ? '' : 'required'}`))}<p class="inline-note">Token allowances include reported usage and reserved output tokens for active responses.</p>${formEnd('Save limits')}</form>${userId ? `<div class="admin-account-actions">${btn('Remove all overrides', 'admin-remove-limits', { tone: 'small', attrs: `data-id="${esc(userId)}"` })}</div>` : ''}`);
   }
+  const auditKinds = [['accounts','users','Accounts'],['sign_in','signin','Sign-in and tokens'],['groups','grid','Groups'],['settings','settings','Settings'],['connections','link','Connections'],['mcp','bolt','MCP'],['cleanup','trash','Automatic cleanup']];
+  /** One plain sentence for an event, with names in bold. */
+  function auditSentence(e) {
+    const m = e.metadata || {}, bold = (value, fallback) => value ? `<strong>${esc(value)}</strong>` : fallback;
+    const actor = bold(e.actorName, 'Chat'), target = fallback => bold(e.targetName, fallback), member = bold(e.memberName, 'someone');
+    const removed = [['conversations','inactive conversation'],['unusedFiles','unused file'],['auditEvents','old activity entry','old activity entries'],['expiredSessions','expired sign-in'],['expiredAccessTokens','expired sign-in link']].filter(([key]) => Number(m[key]) > 0).map(([key, one, many]) => `${Number(m[key]).toLocaleString()} ${Number(m[key]) === 1 ? one : many || one + 's'}`);
+    return {
+      user_created: () => `${actor} created the account ${target('a person')}`,
+      user_invited: () => `${actor} invited ${target('a person')}`,
+      user_updated: () => m.enabled === false ? `${actor} turned off the account ${target('a person')}` : `${actor} updated the account ${target('a person')}`,
+      profile_updated: () => `${actor} updated their profile`,
+      password_changed: () => `${actor} changed their password`,
+      password_reset: () => `${actor} reset the password for ${target('a person')}`,
+      oidc_linked: () => `${target('An account')} was linked to single sign-on`,
+      access_link_created: () => `${actor} made a sign-in link for ${target('a person')}`,
+      access_link_redeemed: () => `${target('Someone')} used a sign-in link`,
+      session_revoked: () => m.current ? `${actor} signed out` : `${actor} signed out one of their sessions`,
+      other_sessions_revoked: () => `${actor} signed out their other sessions`,
+      user_sessions_revoked: () => `${actor} signed ${target('a person')} out everywhere`,
+      sign_in_ended: () => `${member}’s single sign-on session ended`,
+      api_token_created: () => `${actor} created the access token ${target('')}`.trim(),
+      api_token_revoked: () => `${actor} revoked an access token`,
+      group_created: () => `${actor} created the group ${target('')}`.trim(),
+      group_updated: () => `${actor} updated the group ${target('')}`.trim(),
+      group_deleted: () => `${actor} deleted a group`,
+      group_member_added: () => `${actor} added ${member} to ${target('a group')}`,
+      group_member_removed: () => `${actor} removed ${member} from ${target('a group')}`,
+      oidc_groups_reconciled: () => `Single sign-on updated the groups of ${target('a person')}`,
+      'model.update': () => `${actor} changed the model ${target('')}`.trim(),
+      'limits.update': () => e.targetType === 'user' ? `${actor} changed the limits for ${target('a person')}` : `${actor} changed the workspace limits`,
+      'decisions.update': () => `${actor} changed the decisions settings`,
+      'knowledge.embedding.update': () => `${actor} changed the knowledge search model`,
+      'retention.update': () => `${actor} changed data retention`,
+      'retention.cleanup': () => removed.length ? `Automatic cleanup removed ${removed.join(', ')}` : 'Automatic cleanup ran',
+      'connection.create': () => `${actor} added the shared connection ${target('')}`.trim(),
+      'connection.update': () => `${actor} changed the shared connection ${target('')}`.trim(),
+      'connection.delete': () => `${actor} removed the shared connection ${target('')}`.trim(),
+      mcp_chat_started: () => `${actor} started a chat over MCP`,
+      mcp_message_sent: () => `${actor} sent a message over MCP`,
+      mcp_chat_stopped: () => `${actor} stopped a reply over MCP`,
+    }[e.action]?.() || `${actor} · ${esc(titleCase(e.action))}`;
+  }
+  /** The event's stored details as label and value rows. */
+  function auditDetails(e) {
+    const label = key => titleCase(key.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase());
+    const value = v => v === true ? 'Yes' : v === false ? 'No' : v == null ? '—' : Array.isArray(v) ? v.map(x => typeof x === 'object' ? JSON.stringify(x) : String(x)).join(', ') || 'None' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    const rows = Object.entries(e.metadata || {}).filter(([key]) => !(e.action === 'retention.cleanup' && key === 'at')).map(([key, v]) => [label(key), value(v)]);
+    if (e.targetId) rows.push([`${titleCase(e.targetType)} ID`, e.targetId]);
+    return rows.length ? `<details class="activity-details"><summary>Details</summary><dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl></details>` : '';
+  }
   function audit() {
-    return `<div class="management-toolbar"><p class="inline-note">Administrative changes and account security events. Conversation content stays private.</p>${btn('Refresh', 'admin-refresh', { icon: 'refresh', tone: 'small' })}</div>${local.events.length ? `<div class="audit-list">${local.events.map(e => `<article class="audit-event"><span class="audit-dot"></span><div class="grow"><div class="spread"><h3>${esc(titleCase(e.action))}</h3><time>${esc(when(e.createdAt))}</time></div><p>${esc(e.actorName || 'System')} <span>· ${esc(e.targetType || 'account')}${e.targetId ? ' · ' + esc(e.targetId) : ''}</span></p>${e.metadata && Object.keys(e.metadata).length ? `<details><summary>Details</summary><pre>${esc(JSON.stringify(e.metadata, null, 2))}</pre></details>` : ''}</div></article>`).join('')}</div>${local.nextCursor ? `<div class="load-more">${btn(local.loading ? 'Loading…' : 'Load older activity', 'admin-more-audit', { tone: 'small', attrs: local.loading ? 'disabled' : '' })}</div>` : ''}` : empty('No activity yet', 'Account and administration events will appear here.')}`;
+    const kind = new Map(auditKinds.map(([id, glyph, name]) => [id, { glyph, name }]));
+    const day = value => { const d = new Date(value), today = new Date(); today.setHours(0, 0, 0, 0); const days = Math.round((today - new Date(d).setHours(0, 0, 0, 0)) / 864e5); return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', ...(d.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }) }); };
+    const time = value => new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const filtered = local.auditKind || local.auditQuery;
+    const toolbar = `<div class="management-toolbar activity-toolbar"><form id="admin-audit-search-form" class="management-search"><label class="sr-only" for="admin-audit-query">Search activity</label><input id="admin-audit-query" name="query" class="form-control" placeholder="Search people, groups, models…" maxlength="128" value="${esc(local.auditQuery)}"><button class="btn small" type="submit">Search</button></form><div class="row"><label class="sr-only" for="admin-audit-kind">Kind of activity</label><select id="admin-audit-kind" class="form-control activity-kind"><option value="">All activity</option>${auditKinds.map(([id, , name]) => `<option value="${id}" ${local.auditKind === id ? 'selected' : ''}>${name}</option>`).join('')}</select>${btn('Refresh', 'admin-refresh', { icon: 'refresh', tone: 'small' })}</div></div><p class="inline-note management-note">Administrative changes and account security events. Conversation content stays private.</p>`;
+    if (!local.events.length) return toolbar + (filtered ? empty('No matching activity', 'Try another kind or search.', btn('Clear filters', 'admin-audit-clear', { tone: 'small' })) : empty('No activity yet', 'Account and administration events will appear here.'));
+    let last = '';
+    const rows = local.events.map(e => {
+      const k = kind.get(e.kind) || { glyph: 'clock', name: 'Other' }, heading = day(e.createdAt), head = heading === last ? '' : `<h3 class="activity-day">${esc(heading)}</h3>`;
+      last = heading;
+      return `${head}<article class="activity-row"><span class="activity-icon" title="${esc(k.name)}">${icon(k.glyph)}</span><div class="grow"><div class="activity-line"><p>${auditSentence(e)}</p><time datetime="${esc(e.createdAt)}" title="${esc(when(e.createdAt))}">${esc(time(e.createdAt))}</time></div><small class="faint">${esc(k.name)}</small>${auditDetails(e)}</div></article>`;
+    }).join('');
+    return `${toolbar}<div class="activity-list">${rows}</div>${local.nextCursor ? `<div class="load-more">${btn(local.loading ? 'Loading…' : 'Load older activity', 'admin-more-audit', { tone: 'small', attrs: local.loading ? 'disabled' : '' })}</div>` : ''}`;
   }
   // What people thought of replies, per model. No conversation or person is shown: the
   // server sends only ratings, reasons, comments, models and dates.
@@ -169,6 +231,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     'admin-feedback-days': el => { local.feedbackDays = Number(el.dataset.days) || 30; return load(); },
     'admin-refresh': () => load(), 'admin-edit-limits': () => limitsDialog(), 'admin-user-limits': el => limitsDialog(el.dataset.id),
     'admin-remove-limits': async el => { await api.request(`/api/admin/limits/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' }); close(); await load(); toast('Account uses workspace limits'); }, 'admin-more-audit': () => load({ append: true }),
+    'admin-audit-clear': () => { local.auditKind = ''; local.auditQuery = ''; return load(); },
     'admin-create-user': () => accountDialog(), 'admin-invite-user': () => accountDialog(true),
     'admin-manage-user': el => manageUser(userById(el.dataset.id)),
     'admin-embedding-defaults': async () => { const d = local.embedding?.defaults; if (d) await saveEmbedding({ model: null, queryPrefix: null, documentPrefix: null }, d); },
@@ -195,6 +258,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
   };
   async function submit(form) {
     if (form.id === 'admin-users-search-form' || form.id === 'admin-member-search-form' || form.id === 'admin-usage-search-form') { await load({ query: getValue(form, 'query').trim() }); return; }
+    if (form.id === 'admin-audit-search-form') { local.auditQuery = getValue(form, 'query').trim(); await load(); return; }
     if (form.id === 'admin-models-search-form') { local.query = getValue(form, 'query').trim(); render(); return; }
     if (form.id === 'admin-embedding-form') {
       const e = local.embedding, d = e.defaults;
@@ -251,6 +315,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     select.dataset.previous = select.value;
   }
   function input(event) {
+    if (event.type === 'change' && event.target.id === 'admin-audit-kind') { local.auditKind = event.target.value; load(); return; }
     if (event.target.id === 'model-visibility') document.querySelector('.model-visibility-groups').hidden = event.target.value !== 'groups';
     if (event.target.id === 'embedding-model') modelPrefixes(event.target);
     if (event.target.id === 'decisions-endpoint') {

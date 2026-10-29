@@ -2,6 +2,38 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.13.0
+
+A reply's details show how fast it was written and, when the gateway measures it, the energy and CO₂ it used. Activity reads as one sentence per event and can be filtered. Every chat knows today's date. Workspace cleanup can no longer hang workspace and browser starts, and an asleep workspace wakes from its preview.
+
+**New**
+
+- **Speed and energy in a reply's details.**
+  - **Speed** is output tokens over the time spent writing them. Chat times each step from its first generated token (text, thinking or a tool call) to its last, and counts a step only once its usage arrives, so a dropped attempt doesn't slow the figure. It is stored in the reply's usage as `generation_ms`.
+  - **First token** is how long the first step took to write its first token, stored as `first_token_ms`.
+  - **Energy** and **CO₂** come from the gateway's `usage.energy_wh` and `usage.co2_g`, summed over a reply's steps like tokens. A gateway that doesn't send them shows neither.
+  - Older replies, and replies too short to time (under 200 ms or one token), show no speed.
+- **Activity filters.** A kind menu (accounts, sign-in, groups, settings, connections, MCP, cleanup) and a search box sit above the list, and an empty filtered list offers **Clear filters**. The search matches the names of the actor, the target and a group's member, the action, the target id and a connection's name, ignoring case.
+  - `GET /api/admin/audit` takes `kind` and `q`. An unknown kind, or a search over 128 characters, is a 400.
+  - Each event gains `kind`, `targetName` (the person, group, model, connection or token by name) and `memberName` (the person in a group-membership or ended-sign-in event).
+- **Wake from the preview.** On a workspace's Preview tab, reload wakes an asleep workspace or restarts a stopped app, and the preview opens once the app serves. The asleep note has a **Wake it up** button. Neither needs a message to the assistant.
+
+**Changed**
+
+- **Activity reads as sentences.** One sentence per event with an icon for its kind, under day headings, with the time on the right and the full date on hover. Details are label and value rows instead of JSON.
+- **Cleanup shows only when it did something.** Automatic cleanup records an Activity event only when it removed something. Every run still updates the retention policy's last run and result, which the System tab shows.
+- **Every chat knows today's date.** Every turn's system prompt starts with today's date, not only a workspace turn, so web and browser searches about anything recent name the right year. The browser's instructions ask for the year or date in such searches.
+- **Compute.** The Workspaces and Clusters tabs share the heading "Compute". A workspace is described as a project folder in your own Linux container, on the page, in the workspace offer and in the model's `turn_on_workspace` tool.
+
+**Fixed**
+
+- **Workspace and browser starts no longer hang.** Workspace cleanup marked an idle workspace stopped inside the transaction that holds its lock, then waited on another connection updating the same row, so the transaction never ended. Every later workspace or browser start for that person waited behind it, with no pod and no log line. Cleanup's writes now commit at once, and every database connection sets `idle_in_transaction_session_timeout` to 10 minutes, so a transaction left open is ended and its locks released.
+- **Feedback** cards have inner padding, and every management table right-aligns its last column's header as it does the cells.
+
+**Upgrading**
+
+- No migrations or configuration changes.
+
 ## v0.12.0
 
 Clusters show what each Slurm partition can run now instead of every node, and a cluster's nodes are listed at most once every 30 seconds for everyone.

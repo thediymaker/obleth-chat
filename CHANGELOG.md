@@ -2,6 +2,19 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.13.1
+
+A turn with tools has no step or time limit in any chat. Auto mode now only decides whether tools run without asking.
+
+**Changed**
+
+- **No step or time limit.** A turn with tools no longer pauses after 100 steps or 3 hours, with or without Auto mode. It runs until the model finishes or you choose **Stop**, and still pauses when the model sends nothing for 10 minutes. The model sees the latest 150 steps in full, as before, so a long turn's requests stay bounded.
+- **Auto mode is about asking.** In Auto mode every tool runs without asking, the turn keeps going after the sign-in that started it ends, and a request the model stalls on is retried twice before the turn pauses.
+
+**Upgrading**
+
+- No migrations or configuration changes.
+
 ## v0.13.0
 
 A reply's details show how fast it was written and, when the gateway measures it, the energy and CO₂ it used. Activity reads as one sentence per event and can be filtered. Every chat knows today's date. Workspace cleanup can no longer hang workspace and browser starts, and an asleep workspace wakes from its preview.

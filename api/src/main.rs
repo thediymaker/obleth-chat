@@ -18,9 +18,19 @@ async fn main() -> Result<()> {
         .init();
     let config = Config::from_env()?;
     let auth_config = AuthConfig::from_env()?;
+    // A transaction left open while its task waits on something else holds its locks
+    // until Postgres ends it, so it ends one left idle this long.
     let pool = PgPoolOptions::new()
         .max_connections(config.db_connections)
         .acquire_timeout(Duration::from_secs(5))
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET idle_in_transaction_session_timeout = '10min'")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&config.database_url)
         .await?;
     MIGRATOR.run(&pool).await?;

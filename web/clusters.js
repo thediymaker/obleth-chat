@@ -92,7 +92,7 @@ export function createClusters({ api, route, render, connections }) {
 
   function page() {
     const list = clusters();
-    const head = `<div class="page-head spread"><div><h1>Clusters</h1><p>Slurm and Kubernetes clusters the model can work on in your chats, with your own account and permissions. Reading runs without asking; submitting, cancelling, applying and deleting ask you first.</p></div>${btn('Add cluster', 'cluster-add', { icon: 'plus', tone: 'primary small' })}</div>`;
+    const head = `<div class="page-head spread"><div><h1>Compute</h1><p>Slurm and Kubernetes clusters the model can work on in your chats, with your own account and permissions. Reading runs without asking; submitting, cancelling, applying and deleting ask you first.</p></div>${btn('Add cluster', 'cluster-add', { icon: 'plus', tone: 'primary small' })}</div>`;
     if (!connections.loaded()) return `<div class="page clusters-page">${head}${errorBox(connections.error(), 'clusters-reload')}${connections.error() ? '' : '<p class="inline-note" role="status">Loading clusters…</p>'}</div>`;
     if (!list.length) return `<div class="page clusters-page">${head}${empty('No clusters yet', 'Add a Slurm cluster through slurmrestd or a Kubernetes cluster through its API server, with a token from your account.', btn('Add cluster', 'cluster-add', { icon: 'plus', tone: 'primary small' }))}</div>`;
     return `<div class="page clusters-page">${head}${list.map(card).join('')}</div>`;

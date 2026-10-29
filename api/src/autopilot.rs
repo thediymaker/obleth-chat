@@ -235,7 +235,7 @@ mod tests {
             nudge_for(
                 "completed",
                 None,
-                "Done.\n\n_Paused after 100 workspace steps. Say \"continue\" to pick up where it left off._",
+                "Done.\n\n_Paused because the model sent nothing for 10 minutes. Say \"continue\" to pick up where it left off._",
                 false
             ),
             Some(Nudge::Paused)

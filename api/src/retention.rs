@@ -160,7 +160,17 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
         .bind(&result)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO audit_events(id,action,target_type,metadata)VALUES($1,'retention.cleanup','site',$2)").bind(Uuid::new_v4()).bind(result).execute(&mut *tx).await?;
+    // Activity shows a cleanup only when it removed something; every run is still in
+    // last_run and last_result.
+    if report.conversations
+        + report.unused_files
+        + report.audit_events
+        + report.expired_sessions
+        + report.expired_access_tokens
+        > 0
+    {
+        sqlx::query("INSERT INTO audit_events(id,action,target_type,metadata)VALUES($1,'retention.cleanup','site',$2)").bind(Uuid::new_v4()).bind(result).execute(&mut *tx).await?;
+    }
     tx.commit().await?;
     Ok(Some(report))
 }

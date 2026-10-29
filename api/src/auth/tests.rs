@@ -1802,6 +1802,56 @@ async fn groups_membership_and_audit_are_admin_only_and_paginated() {
         .0,
         StatusCode::BAD_REQUEST
     );
+    // Activity filters by kind and finds people by name, including the member of a
+    // group event, whose id is all the event stores.
+    let groups = call(
+        &app,
+        "GET",
+        "/api/admin/audit?kind=groups",
+        None,
+        Some(&ac),
+        None,
+        Value::Null,
+    )
+    .await
+    .2;
+    let events = groups["events"].as_array().unwrap();
+    assert!(events.iter().any(|e| e["action"] == "group_created"));
+    assert!(events.iter().all(|e| e["kind"] == "groups"));
+    let added = events
+        .iter()
+        .find(|e| e["action"] == "group_member_added")
+        .unwrap();
+    assert_eq!(added["memberName"], "group-user");
+    let found = call(
+        &app,
+        "GET",
+        "/api/admin/audit?q=GROUP-USER",
+        None,
+        Some(&ac),
+        None,
+        Value::Null,
+    )
+    .await
+    .2;
+    let found = found["events"].as_array().unwrap();
+    assert!(found.iter().any(|e| e["action"] == "group_member_added"));
+    assert!(found.iter().any(|e| e["targetName"] == "group-user"));
+    assert!(found.iter().all(|e| e["action"] != "group_created"));
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/admin/audit?kind=nope",
+            None,
+            Some(&ac),
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
     db.close().await;
 }
 

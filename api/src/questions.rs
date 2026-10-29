@@ -111,7 +111,7 @@ pub const WORKSPACE_PROMPT: &str = "This chat has no workspace yet, so you canno
 
 pub fn workspace_definition() -> Value {
     json!({"type":"function","function":{"name":WORKSPACE_TOOL,
-        "description":"Ask the person to turn on a workspace for this chat: a private Linux machine where you can write files, run commands and code, and show a live preview. Call it when the request needs that, such as building or running an app, running code or experiments, keeping files, or research, and you cannot do it well without one. Do not call it for questions you can answer in text. Your reply ends with a button that turns the workspace on; once they press it, you continue in their next message with the workspace tools.",
+        "description":"Ask the person to turn on a workspace for this chat: a project folder in their own Linux container where you can write files, run commands and code, and show a live preview. Call it when the request needs that, such as building or running an app, running code or experiments, keeping files, or research, and you cannot do it well without one. Do not call it for questions you can answer in text. Your reply ends with a button that turns the workspace on; once they press it, you continue in their next message with the workspace tools.",
         "parameters":{"type":"object","properties":{
             "reason":{"type":"string","description":"Why this needs a workspace, in one short sentence the person reads, such as \"To build the app and show you a live preview.\""}},
         "required":["reason"],"additionalProperties":false}}})

@@ -957,6 +957,10 @@ async fn background_completion_and_same_chat_regeneration_restore_selected_conte
         .as_str()
         .unwrap()
         .contains("```mermaid"));
+    assert!(body["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .starts_with("# Right now\nToday is "));
     assert_eq!(body["messages"][1]["content"], "background");
     assert_eq!(body["messages"][2]["content"], "Hello α");
     assert_eq!(body["messages"][3]["content"], "follow-up");

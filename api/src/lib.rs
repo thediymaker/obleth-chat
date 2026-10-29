@@ -1491,7 +1491,11 @@ async fn run_generation(
             uploads_copied = true;
         }
     }
-    let mut preamble = vec![];
+    // Every turn knows the date, so searches about anything recent name the right year.
+    let mut preamble = vec![format!(
+        "# Right now\nToday is {}.",
+        chrono::Utc::now().format("%A %-d %B %Y")
+    )];
     if let Some(project) = &project {
         preamble.push(project.prompt());
     }
@@ -1697,6 +1701,11 @@ async fn run_generation(
             }
             let mut calls: Vec<ToolCall> = vec![];
             let mut stalls = 0;
+            // When this request was sent, and when it wrote its first and latest token:
+            // the reply's first-token wait and how fast it wrote.
+            let asked = Instant::now();
+            let (mut wrote_first, mut wrote_last): (Option<Instant>, Option<Instant>) =
+                (None, None);
             let response = loop {
                 match tokio::time::timeout(
                     Duration::from_secs(STALL_SECS),
@@ -1814,6 +1823,40 @@ async fn run_generation(
                                 clean.insert(key.into(), json!(previous + n));
                             }
                         }
+                        // Measured energy and carbon, when the gateway reports them: the sum too.
+                        for key in ["energy_wh", "co2_g"] {
+                            if let Some(n) = u
+                                .get(key)
+                                .and_then(Value::as_f64)
+                                .filter(|n| n.is_finite() && (0.0..1e9).contains(n))
+                            {
+                                let previous = if steps > 1 {
+                                    clean.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+                                } else {
+                                    0.0
+                                };
+                                clean.insert(key.into(), json!(previous + n));
+                            }
+                        }
+                        // Time spent writing, from each step's first token to its last.
+                        if let (Some(from), Some(to)) = (wrote_first, wrote_last) {
+                            let ms = to.duration_since(from).as_millis() as u64;
+                            let previous = if steps > 1 {
+                                clean
+                                    .get("generation_ms")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            clean.insert("generation_ms".into(), json!(previous + ms));
+                            if steps <= 1 {
+                                clean.insert(
+                                    "first_token_ms".into(),
+                                    json!(from.duration_since(asked).as_millis() as u64),
+                                );
+                            }
+                        }
                         // The last step alone is what the model holds: the context meter's size.
                         for (key, last) in [
                             ("prompt_tokens", "last_prompt_tokens"),
@@ -1851,6 +1894,9 @@ async fn run_generation(
                                 );
                             }
                             accumulate_tool_calls(&mut calls, deltas)?;
+                            let now = Instant::now();
+                            wrote_first.get_or_insert(now);
+                            wrote_last = Some(now);
                             // Show the file the model is typing, a few times a second.
                             if drafted.elapsed() >= Duration::from_millis(300) {
                                 if let Some(draft) = calls.last().and_then(draft_of) {
@@ -1881,6 +1927,9 @@ async fn run_generation(
                                     .observe(started.elapsed().as_secs_f64());
                                 first = false;
                             }
+                            let now = Instant::now();
+                            wrote_first.get_or_insert(now);
+                            wrote_last = Some(now);
                             if channel == "reasoning" {
                                 reasoning_content.push_str(delta);
                                 if tool_turn

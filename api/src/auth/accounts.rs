@@ -491,6 +491,77 @@ async fn change_member(
 struct AuditQuery {
     limit: Option<i64>,
     before: Option<Uuid>,
+    kind: Option<String>,
+    q: Option<String>,
+}
+/// The kinds Activity filters by, and the actions each holds. An action not listed
+/// here is kind "other".
+const AUDIT_KINDS: [(&str, &[&str]); 7] = [
+    (
+        "accounts",
+        &[
+            "user_created",
+            "user_invited",
+            "user_updated",
+            "profile_updated",
+            "password_changed",
+            "password_reset",
+            "oidc_linked",
+            "access_link_created",
+            "access_link_redeemed",
+        ],
+    ),
+    (
+        "sign_in",
+        &[
+            "session_revoked",
+            "other_sessions_revoked",
+            "user_sessions_revoked",
+            "sign_in_ended",
+            "api_token_created",
+            "api_token_revoked",
+        ],
+    ),
+    (
+        "groups",
+        &[
+            "group_created",
+            "group_updated",
+            "group_deleted",
+            "group_member_added",
+            "group_member_removed",
+            "oidc_groups_reconciled",
+        ],
+    ),
+    (
+        "settings",
+        &[
+            "model.update",
+            "limits.update",
+            "decisions.update",
+            "knowledge.embedding.update",
+            "retention.update",
+        ],
+    ),
+    (
+        "connections",
+        &[
+            "connection.create",
+            "connection.update",
+            "connection.delete",
+        ],
+    ),
+    (
+        "mcp",
+        &["mcp_chat_started", "mcp_message_sent", "mcp_chat_stopped"],
+    ),
+    ("cleanup", &["retention.cleanup"]),
+];
+fn audit_kind(action: &str) -> &'static str {
+    AUDIT_KINDS
+        .iter()
+        .find(|(_, actions)| actions.contains(&action))
+        .map_or("other", |(kind, _)| kind)
 }
 #[derive(Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -501,8 +572,14 @@ struct AuditView {
     action: String,
     target_type: String,
     target_id: Option<String>,
+    /// The person, group, model or connection the event is about, by name.
+    target_name: Option<String>,
+    /// For group membership and ended sign-ins: the person, by name.
+    member_name: Option<String>,
     metadata: Value,
     created_at: DateTime<Utc>,
+    #[sqlx(skip)]
+    kind: &'static str,
 }
 async fn audit(
     State(auth): State<Auth>,
@@ -527,10 +604,34 @@ async fn audit(
     } else {
         None
     };
-    let mut events=sqlx::query_as::<_,AuditView>("SELECT e.id,e.actor_id,u.username AS actor_name,e.action,e.target_type,e.target_id,e.metadata,e.created_at FROM audit_events e LEFT JOIN users u ON u.id=e.actor_id WHERE ($1::timestamptz IS NULL OR (e.created_at,e.id)<($1,$2)) ORDER BY e.created_at DESC,e.id DESC LIMIT $3")
-        .bind(cursor.map(|c|c.0)).bind(cursor.map(|c|c.1)).bind(limit+1).fetch_all(&auth.pool).await?;
+    let actions = match query.kind.as_deref() {
+        None | Some("") => None,
+        Some(kind) => Some(
+            AUDIT_KINDS
+                .iter()
+                .find(|(name, _)| *name == kind)
+                .ok_or_else(|| ApiError::bad("Unknown activity kind"))?
+                .1
+                .to_vec(),
+        ),
+    };
+    let search = query.q.as_deref().unwrap_or("").trim();
+    if search.chars().count() > 128 {
+        return Err(ApiError::bad("Search must be 128 characters or fewer"));
+    }
+    // Ids are text in audit_events; only a well-formed one is cast, so a lookup uses
+    // the primary key and a malformed id matches nothing instead of failing.
+    let mut events=sqlx::query_as::<_,AuditView>("WITH e AS (SELECT e.*, CASE WHEN e.target_id ~* '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$' THEN e.target_id::uuid END AS target_uuid, CASE WHEN e.metadata->>'userId' ~* '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$' THEN (e.metadata->>'userId')::uuid END AS member_uuid FROM audit_events e WHERE ($1::timestamptz IS NULL OR (e.created_at,e.id)<($1,$2)) AND ($4::text[] IS NULL OR e.action=ANY($4))) \
+        SELECT e.id,e.actor_id,u.username AS actor_name,e.action,e.target_type,e.target_id,CASE e.target_type WHEN 'user' THEN t.username WHEN 'group' THEN g.name WHEN 'model' THEN e.target_id WHEN 'connection' THEN e.metadata->>'name' WHEN 'api_token' THEN e.metadata->>'name' END AS target_name,m.username AS member_name,e.metadata,e.created_at \
+        FROM e LEFT JOIN users u ON u.id=e.actor_id LEFT JOIN users t ON e.target_type='user' AND t.id=e.target_uuid LEFT JOIN user_groups g ON e.target_type='group' AND g.id=e.target_uuid LEFT JOIN users m ON m.id=e.member_uuid \
+        WHERE $5='' OR strpos(lower(concat_ws(' ',u.username,u.display_name,t.username,t.display_name,g.name,m.username,m.display_name,e.action,e.target_id,e.metadata->>'name')),lower($5))>0 \
+        ORDER BY e.created_at DESC,e.id DESC LIMIT $3")
+        .bind(cursor.map(|c|c.0)).bind(cursor.map(|c|c.1)).bind(limit+1).bind(actions).bind(search).fetch_all(&auth.pool).await?;
     let more = events.len() > limit as usize;
     events.truncate(limit as usize);
+    for event in &mut events {
+        event.kind = audit_kind(&event.action);
+    }
     let next = if more {
         events.last().map(|e| e.id)
     } else {

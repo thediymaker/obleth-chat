@@ -134,6 +134,18 @@ async fn serve_kube(kube: Arc<FakeKube>) -> (String, PathBuf) {
                         None => (StatusCode::NOT_FOUND, Json(json!({"message": "not found"}))),
                     }
                 },
+            )
+            .delete(
+                |State(kube): State<Arc<FakeKube>>, Path(name): Path<String>| async move {
+                    let mut pods = kube.pods.lock().unwrap();
+                    let before = pods.len();
+                    pods.retain(|p| p["metadata"]["name"] != name.as_str());
+                    if pods.len() < before {
+                        (StatusCode::OK, Json(json!({})))
+                    } else {
+                        (StatusCode::NOT_FOUND, Json(json!({"message": "not found"})))
+                    }
+                },
             ),
         )
         .route(
@@ -579,6 +591,42 @@ async fn reconciling_stops_records_whose_pod_is_gone(pool: PgPool) {
     stop.cancel();
     worker.await.unwrap();
     assert_eq!(record, ("stopped".into(), None, None), "{:?}", kube.seen());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn stopping_an_idle_pod_does_not_wait_on_its_own_pass(pool: PgPool) {
+    let kube = Arc::new(FakeKube::default());
+    kube.set_pod(Some("127.0.0.1"));
+    let (app, sandboxes) = app_with(pool.clone(), Some(DOMAIN), Some(kube.clone())).await;
+    login(&app).await;
+    workspace(&pool, 3000, "running").await;
+    // Idle past the hour allowed: the pass deletes the pod, then finds it gone.
+    for table in ["sandbox_pods", "sandboxes"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET last_used_at=NOW()-interval '2 hours'"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let stop = CancellationToken::new();
+    let worker = tokio::spawn(sandboxes.worker(stop.clone()));
+    let mut record = pod_record(&pool).await;
+    for _ in 0..50 {
+        if record.0 == "stopped" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        record = pod_record(&pool).await;
+    }
+    stop.cancel();
+    let finished = tokio::time::timeout(Duration::from_secs(10), worker).await;
+    assert_eq!(record, ("stopped".into(), None, None), "{:?}", kube.seen());
+    assert!(
+        finished.is_ok(),
+        "the pass never finished: {:?}",
+        kube.seen()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]

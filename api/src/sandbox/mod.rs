@@ -800,7 +800,9 @@ impl Sandboxes {
     /// One replica at a time: stop idle dev servers and idle pods (keeping their
     /// volumes), remove volumes past retention, measure disks, mark records stopped
     /// whose pod is gone or moved, and delete cluster objects whose pod record no
-    /// longer exists.
+    /// longer exists. The transaction only holds the lock: writes go through the pool
+    /// and commit at once, because `stop_stale` and the pod check update the same rows
+    /// on other connections and would otherwise wait on this transaction for good.
     async fn reconcile(&self) -> Result<()> {
         let pool = &self.inner.pool;
         let mut tx = pool.begin().await?;
@@ -830,11 +832,11 @@ impl Sandboxes {
             kube.delete("pods", &pod_name(&slug)).await?;
             sqlx::query("UPDATE sandbox_pods SET status='stopped',pod_ip=NULL WHERE id=$1")
                 .bind(id)
-                .execute(&mut *tx)
+                .execute(pool)
                 .await?;
             sqlx::query("UPDATE sandboxes SET preview_port=NULL WHERE pod_id=$1")
                 .bind(id)
-                .execute(&mut *tx)
+                .execute(pool)
                 .await?;
         }
         let idle_servers = sqlx::query_as::<_, Sandbox>(&format!("{SELECT} WHERE p.status='running' AND s.preview_port IS NOT NULL AND s.last_used_at<NOW()-make_interval(secs=>$1)"))
@@ -843,7 +845,7 @@ impl Sandboxes {
             tools::stop_server(self, &sandbox).await;
             sqlx::query("UPDATE sandboxes SET preview_port=NULL WHERE id=$1")
                 .bind(sandbox.id)
-                .execute(&mut *tx)
+                .execute(pool)
                 .await?;
         }
         // One project per running pod stands in for the pod when measuring the volume.

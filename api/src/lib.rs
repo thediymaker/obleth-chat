@@ -688,15 +688,13 @@ pub(crate) async fn launch_turn(
     });
     Ok(rx)
 }
-const MAX_AGENT_STEPS: usize = 100;
-/// A tool turn runs while the model keeps answering; this only bounds runaways.
-const TOOL_TURN_SECS: u64 = 3 * 60 * 60;
-/// How long the model may send nothing before a tool turn pauses.
+/// How long the model may send nothing before a tool turn pauses. A tool turn has
+/// no step or time limit: it runs while the model keeps answering, until it is
+/// done or stopped.
 const STALL_SECS: u64 = 10 * 60;
-/// A chat in Auto mode runs unattended: it has no step or time limit, and a step
-/// the model stalled on is retried this many times before the turn pauses.
+/// A chat in Auto mode runs unattended: a step the model stalled on is retried
+/// this many times before the turn pauses.
 const UNATTENDED_STALL_RETRIES: usize = 2;
-const AGENT_STEP_LIMIT: &str = "The workspace agent stopped after";
 const STALLED: &str = "The model sent nothing for";
 /// What Chat tells a model that ends a reply right after changing files.
 const CHECK_NOTE: &str = "[Chat: you changed files and have not run anything since, and your draft reply was not shown. Check the work the way the person would before answering: run its tests or build, or make sure its server is running and request the page or endpoint (for example with curl), and fix what fails. Then write your full final reply. If it cannot be checked here, say why in one line.]";
@@ -1418,7 +1416,8 @@ async fn run_generation(
         || knowledge_turn
             .as_ref()
             .is_some_and(|t| t.searchable() || t.library);
-    // Auto mode is for work nobody watches, such as research: it runs until done.
+    // Auto mode is for work nobody watches, such as research: its tools run without
+    // asking, and its turn outlives the browser session that started it.
     let auto_mode = |s: AppState| async move {
         match &s.connections {
             Some(c) => c.auto(id).await,
@@ -2104,10 +2103,6 @@ async fn run_generation(
                 }
                 break;
             }
-            // Turning Auto mode off during a long turn brings the limit back.
-            if steps >= MAX_AGENT_STEPS && !(unattended && auto_mode(s.clone()).await) {
-                return Err(format!("{AGENT_STEP_LIMIT} {MAX_AGENT_STEPS} steps"));
-            }
             let text = content[step_start..].to_owned();
             payload["messages"].as_array_mut().unwrap().push(json!({
                 "role":"assistant",
@@ -2739,7 +2734,9 @@ async fn run_generation(
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     };
-    let limit = (!unattended).then_some(if tool_turn { TOOL_TURN_SECS } else { 540 });
+    // A reply that only writes text is bounded; a tool turn runs until it is done,
+    // stopped or stalled.
+    let limit = (!tool_turn).then_some(540);
     let bounded = async {
         match limit {
             Some(limit) => tokio::time::timeout(Duration::from_secs(limit), work)
@@ -2769,28 +2766,16 @@ async fn run_generation(
         toolset.close();
         connections::finish(&s.store.pool, generation_id).await;
     }
-    // A tool turn that stalls or reaches a runaway limit pauses: what it did is kept
-    // and replayed, and "continue" resumes it.
+    // A tool turn the model stalls on pauses: what it did is kept and replayed, and
+    // "continue" resumes it.
     if tool_turn {
         if let Err(reason) = &result {
-            let why = if reason.starts_with(AGENT_STEP_LIMIT) {
-                Some(format!(
-                    "Paused after {MAX_AGENT_STEPS} {}steps",
-                    if workspace_turn { "workspace " } else { "" }
-                ))
-            } else if reason.starts_with("Generation reached the") {
-                Some(format!(
-                    "Paused after {} hours of work",
-                    TOOL_TURN_SECS / 3600
-                ))
-            } else if reason.starts_with(STALLED) {
-                Some(format!(
+            let why = reason.starts_with(STALLED).then(|| {
+                format!(
                     "Paused because the model sent nothing for {} minutes",
                     STALL_SECS / 60
-                ))
-            } else {
-                None
-            };
+                )
+            });
             if let Some(why) = why {
                 let note = format!(
                     "{}_{why}. Say \"continue\" to pick up where it left off._",

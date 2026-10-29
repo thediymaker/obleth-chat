@@ -1491,7 +1491,11 @@ async fn run_generation(
             uploads_copied = true;
         }
     }
-    let mut preamble = vec![];
+    // Every turn knows the date, so searches about anything recent name the right year.
+    let mut preamble = vec![format!(
+        "# Right now\nToday is {}.",
+        chrono::Utc::now().format("%A %-d %B %Y")
+    )];
     if let Some(project) = &project {
         preamble.push(project.prompt());
     }

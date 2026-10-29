@@ -106,13 +106,10 @@ pub fn system_prompt(sandbox: &Sandbox, instructions: Option<&str>, context: &st
     prompt
 }
 
-/// Today's date, the project's files and its AGENTS.md, for the start of a turn.
-/// Empty when the workspace is asleep; the model can list files once it wakes.
+/// The project's files and its AGENTS.md, for the start of a turn. Empty when the
+/// workspace is asleep; the model can list files once it wakes.
 pub async fn project_context(sb: &Sandboxes, sandbox: &Sandbox) -> String {
-    let mut context = format!(
-        "# Right now\nToday is {}.",
-        chrono::Utc::now().format("%A %-d %B %Y")
-    );
+    let mut context = String::new();
     if sandbox.status != "running" || sandbox.pod_ip.is_none() {
         return context;
     }
@@ -124,11 +121,9 @@ pub async fn project_context(sb: &Sandboxes, sandbox: &Sandbox) -> String {
     let (files, agents) = out.split_once("@@obleth-agents@@").unwrap_or((&out, ""));
     let files: Vec<&str> = files.lines().filter(|l| !l.trim().is_empty()).collect();
     if files.is_empty() {
-        context.push_str(" The project folder is empty.");
+        context.push_str("The project folder is empty.");
     } else {
-        context.push_str(
-            "\n\nFiles in the project folder (dependencies and build output left out):\n",
-        );
+        context.push_str("Files in the project folder (dependencies and build output left out):\n");
         for file in files.iter().take(200) {
             context.push_str(file);
             context.push('\n');

@@ -4,6 +4,15 @@ import { icon, esc, badge, iconButton } from './manage-ui.js';
 // preview pane. The pane lives outside the re-rendered app so the running preview
 // is never reloaded by chat updates. It also holds the chat's browser tab, so a chat
 // with the browser on and no workspace gets a pane with only that tab.
+
+// The preview's reload button reloads a running app; with none running it wakes the
+// workspace, and Chat restarts the app once the workspace is up.
+export function previewReload(w, waking = false) {
+  if (w.previewPort) return { label: 'Reload preview', wake: false, disabled: false };
+  const label = { stopped: 'Wake the workspace', error: 'Start the workspace again' }[w.status] || 'Start the preview';
+  return { label, wake: true, disabled: waking || w.status === 'starting' };
+}
+
 export function createWorkspace({ api, state, route, toast, chatPath, capabilities, render, modal, close, browser = null, details = null, code = null }) {
   const spaces = new Map();
   const pane = document.createElement('aside');
@@ -119,6 +128,20 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     }
     const link = document.createElement('a'); link.href = `${chatPath(id)}/workspace/download`; link.download = ''; document.body.append(link); link.click(); link.remove();
   }
+  // Wakes the workspace from the preview, without a message to the assistant.
+  async function wake(id) {
+    const space = entry(id);
+    if (space.waking) return;
+    space.waking = true; space.url = null; space.origin = null;
+    update();
+    try {
+      await create(id);
+      // Chat starts the pod after answering, so the record may still say asleep.
+      if (space.workspace?.status === 'stopped') space.workspace.status = 'starting';
+      space.wakePolls = 0; watch(id);
+    } catch (error) { toast(error.message); }
+    finally { space.waking = false; update(); }
+  }
   async function showPreview(id, force = false) {
     const space = entry(id);
     if (!previews() || (!space.workspace?.previewPort && !force) || space.linking) return;
@@ -157,10 +180,11 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     const w = space.workspace;
     const tabs = available(id, space).map(([key, label]) => `<button class="tab ${space.tab === key ? 'active' : ''}" data-action="workspace-tab" data-tab="${key}" ${space.tab === key ? 'aria-current="true"' : ''}>${label}</button>`).join('');
     if (space.tab === 'browser' || space.tab === 'details' || space.tab === 'code') return `<div class="workspace-tabs">${tabs}</div><span class="grow"></span><div class="workspace-actions">${space.tab === 'browser' ? iconButton('power', 'browser-off', 'Turn off the browser in this chat') : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide pane')}</div>`;
+    const reload = previewReload(w, space.waking);
     const address = space.origin ? `<span class="workspace-address" title="${esc(space.origin)}">${esc(space.origin.replace(/^https?:\/\//, ''))}</span>` : `<span class="workspace-address muted">${previews() ? 'No preview yet' : ''}</span>`;
     const used = w.diskBytes, diskFull = used != null && diskLimit && used > diskLimit;
     const usage = used != null && diskLimit ? `<span class="workspace-usage ${diskFull ? 'full' : ''}" title="${diskFull ? 'Your workspaces are full: delete files to keep working' : 'Disk used by all of your workspaces'}">${(used / 2 ** 30).toFixed(1)} / ${Math.round(diskLimit / 2 ** 30)} GB</span>` : '';
-    return `<div class="workspace-tabs">${tabs}</div>${address}<div class="workspace-actions">${usage}${badge(statusLabel(w), w.status === 'running' ? 'accent' : w.status === 'error' ? 'amber' : '')}${iconButton('refresh', 'workspace-reload', { files: 'Refresh files', terminal: 'Restart terminal' }[space.tab] || 'Reload preview', w.previewPort || space.tab !== 'preview' ? '' : 'disabled')}${w.status === 'running' ? `<a class="icon-btn" href="${esc(`${chatPath(id)}/workspace/download`)}" download aria-label="Download project" title="Download project (.zip, without dependencies)">${icon('download')}</a>` : ''}${space.origin ? `<a class="icon-btn" href="${esc(space.url || space.origin)}" target="_blank" rel="noopener" aria-label="Open preview in a new tab" title="Open in a new tab">${icon('external')}</a>` : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide workspace')}</div>`;
+    return `<div class="workspace-tabs">${tabs}</div>${address}<div class="workspace-actions">${usage}${badge(statusLabel(w), w.status === 'running' ? 'accent' : w.status === 'error' ? 'amber' : '')}${iconButton('refresh', 'workspace-reload', { files: 'Refresh files', terminal: 'Restart terminal' }[space.tab] || reload.label, space.tab === 'preview' && reload.disabled ? 'disabled' : '')}${w.status === 'running' ? `<a class="icon-btn" href="${esc(`${chatPath(id)}/workspace/download`)}" download aria-label="Download project" title="Download project (.zip, without dependencies)">${icon('download')}</a>` : ''}${space.origin ? `<a class="icon-btn" href="${esc(space.url || space.origin)}" target="_blank" rel="noopener" aria-label="Open preview in a new tab" title="Open in a new tab">${icon('external')}</a>` : ''}${full() ? '' : iconButton('x', 'workspace-close', 'Hide workspace')}</div>`;
   }
   function available(id, space) {
     return [...(space.workspace ? [...(previews() ? [['preview', 'Preview']] : []), ['files', 'Files'], ['terminal', 'Terminal'], ...(code?.enabled() ? [['code', code.label(id)]] : [])] : []), ...(browser?.on(id) ? [['browser', 'Browser']] : []), ...(details && route().page === 'chat' ? [['details', 'Details']] : [])];
@@ -169,7 +193,7 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
     const w = space.workspace;
     if (w.status === 'starting') return `<div class="workspace-note" role="status">${icon('orbit')}<strong>Starting your workspace…</strong><p>A private Linux environment is being prepared for this conversation.</p></div>`;
     if (w.status === 'error') return `<div class="workspace-note">${icon('info')}<strong>The workspace could not start.</strong><p>${esc(w.errorMessage || 'Try again in a moment.')}</p></div>`;
-    if (w.status === 'stopped') return `<div class="workspace-note">${icon('clock')}<strong>The workspace is asleep.</strong><p>Your files are kept. Send a message and the assistant will wake it up.</p></div>`;
+    if (w.status === 'stopped') return `<div class="workspace-note">${icon('clock')}<strong>The workspace is asleep.</strong><p>Your files are kept. Wake it here, or send a message and the assistant will.</p><button class="btn small" data-action="workspace-wake" ${space.waking ? 'disabled' : ''}>${icon('refresh')}Wake it up</button></div>`;
     return `<div class="workspace-note">${icon('terminal')}<strong>Nothing to preview yet.</strong><p>Ask for something to build, like “Build a site for my lab's reading group.” The running app appears here.</p></div>`;
   }
   function filesView(id, space) {
@@ -443,7 +467,8 @@ export function createWorkspace({ api, state, route, toast, chatPath, capabiliti
       await create(id); toast('Workspace created. Ask for something to build.'); return 'render';
     },
     'workspace-tab': el => { const c = current(); if (!c) return; c.space.tab = el.dataset.tab; if (c.space.tab === 'details') c.space.details = true; if (c.space.tab === 'browser') browser?.reveal(c.id); c.space.file = null; if (c.space.tab === 'files') c.space.files = null; update(); },
-    'workspace-reload': () => { const c = current(); if (!c) return; if (c.space.tab === 'terminal') { closeTerminal(); update(); return; } if (c.space.tab === 'files') { c.space.files = null; c.space.file = null; update(); } else showPreview(c.id); },
+    'workspace-reload': () => { const c = current(); if (!c) return; if (c.space.tab === 'terminal') { closeTerminal(); update(); return; } if (c.space.tab === 'files') { c.space.files = null; c.space.file = null; update(); } else if (c.space.workspace && previewReload(c.space.workspace).wake) wake(c.id); else showPreview(c.id); },
+    'workspace-wake': () => { const c = current(); if (c?.space.workspace) wake(c.id); },
     'workspace-close': () => {
       const c = current(); if (!c) return;
       const onlyDetails = !c.space.workspace && !browsing(c.id);

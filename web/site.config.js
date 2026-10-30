@@ -51,4 +51,9 @@ window.OblethChatConfig = {
 
   // 'system', 'light', or 'dark'. A person's saved preference takes priority.
   appearance: { defaultTheme: 'system' },
+
+  // A one-line notice in the top bar of every page and above the sign-in page,
+  // e.g. 'In development: features may change.' '' hides it. link adds one link
+  // after it, e.g. { label: 'Send feedback', url: 'https://example.edu/feedback' }.
+  banner: { text: '', link: null },
 };

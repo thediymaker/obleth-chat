@@ -151,6 +151,12 @@ code{font-size:.9em}
 .breadcrumb .slash{color:var(--control-border);font-weight:400}
 .breadcrumb .workspace-label{color:var(--muted);font-weight:400}
 .top-actions{display:flex;align-items:center;gap:8px}
+/* The configured banner: a tag beside the page title, a strip above the sign-in page. */
+.site-banner{display:flex;align-items:center;gap:8px;min-width:0;padding:4px 12px;border:1px solid rgb(var(--amber-rgb) / 22%);border-radius:999px;background:rgb(var(--amber-rgb) / 6%);color:var(--amber);font-size:var(--fs-sm);line-height:1.4}
+.site-banner .icon{width:14px;height:14px;flex-shrink:0}
+.site-banner-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.site-banner a{flex-shrink:0;color:inherit;font-weight:500;text-decoration:underline;text-underline-offset:2px}
+.topbar .site-banner{margin-right:auto}
 .theme-control{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--card)}
 .theme-control button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:26px;height:26px;padding:0 6px;border-radius:var(--radius-sm);color:var(--muted);font-size:var(--fs-sm);transition:background .15s,color .15s}
 .theme-control button:hover{color:var(--text)}
@@ -644,6 +650,8 @@ dialog::backdrop{background:var(--backdrop);backdrop-filter:blur(3px)}
 .boot-screen p{color:var(--muted);font-size:var(--fs-base)}
 .boot-screen h1{font-size:24px}
 .auth-layout{min-height:100dvh;display:flex;flex-direction:column}
+.auth-layout>.site-banner{justify-content:center;padding:9px 16px;border-width:0 0 1px;border-radius:0;text-align:center}
+.auth-layout>.site-banner .site-banner-text{white-space:normal}
 .auth-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 32px}
 .auth-header .brand{height:auto;padding:0;margin:0;border:0}
 .auth-panel{flex:1;display:flex;align-items:center;justify-content:center;padding:32px 24px 56px;min-width:0}
@@ -1041,6 +1049,8 @@ td .icon{width:16px;height:16px;color:var(--faint)}
   .topbar{padding:0 12px;gap:8px}
   .breadcrumb{gap:6px}
   .breadcrumb .workspace-label,.breadcrumb .slash{display:none}
+  .topbar .site-banner{padding:4px 10px}
+  .topbar .site-banner a{display:none}
   .top-actions{gap:6px}
   .top-actions .context-toggle,.context-toggle{display:none}
   .preview-badge{padding:4px 8px}

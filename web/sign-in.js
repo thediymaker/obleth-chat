@@ -1,4 +1,4 @@
-import { branding, brand, siteFooter, copy } from './branding.js';
+import { branding, brand, siteBanner, siteFooter, copy } from './branding.js';
 import { btn, esc, icon } from './manage-ui.js';
 import { themeControl } from './theme-control.js';
 
@@ -38,5 +38,5 @@ const phases = {
 
 export function authScreen(state, config = branding) {
   const body = (phases[state.phase] || (s => signIn(s, config)))(state);
-  return `<main id="main" class="auth-layout"><header class="auth-header">${brand(config)}${themeControl('auth-theme')}</header><section class="auth-panel"><div class="auth-card">${body}</div></section>${siteFooter(config)}</main>`;
+  return `<main id="main" class="auth-layout">${siteBanner(config)}<header class="auth-header">${brand(config)}${themeControl('auth-theme')}</header><section class="auth-panel"><div class="auth-card">${body}</div></section>${siteFooter(config)}</main>`;
 }

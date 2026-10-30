@@ -59,3 +59,9 @@ test('every signed-out phase keeps the form ids and actions the app listens for'
   const failed = authScreen({ phase: 'error', error: 'The request failed (502).' }, config);
   assert.match(failed, /Can’t connect.*class="auth-detail">The request failed \(502\)\.<\/p>.*data-action="retry-session"/);
 });
+
+test('a configured banner sits above the sign-in page', () => {
+  assert.doesNotMatch(authScreen({ phase: 'login', oidc: false }, config), /site-banner/);
+  const html = authScreen({ phase: 'login', oidc: false }, normalizeBranding({ banner: { text: 'In development' } }));
+  assert.match(html, /^<main id="main" class="auth-layout"><div class="site-banner">.*In development<\/span><\/div><header class="auth-header">/);
+});

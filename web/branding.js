@@ -26,6 +26,7 @@ const defaults = {
     footer: '',
   },
   appearance: { defaultTheme: 'system' },
+  banner: { text: '', link: null },
 };
 const supportedIcons = new Set(iconNames);
 const plainObject = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -77,6 +78,14 @@ function loginCopy(value) {
   return { ...login, ssoLabel: login.ssoLabel.trim() || defaults.login.ssoLabel, helpLink: label && url ? { label, url } : null };
 }
 
+// The banner is one line of text that may end in one link. Blank text hides it.
+function bannerCopy(value) {
+  const input = plainObject(value);
+  const link = plainObject(input.link);
+  const label = text(link.label, '').trim(), url = linkUrl(link.url);
+  return { text: text(input.text, '').replace(/\s+/g, ' ').trim(), link: label && url ? { label, url } : null };
+}
+
 export function normalizeBranding(value) {
   const input = plainObject(value);
   const configuredIcons = plainObject(input.icons);
@@ -101,6 +110,7 @@ export function normalizeBranding(value) {
     links: links(input.links),
     home: copyFields(input.home, defaults.home),
     appearance: { defaultTheme: ['system', 'light', 'dark'].includes(defaultTheme) ? defaultTheme : defaults.appearance.defaultTheme },
+    banner: bannerCopy(input.banner),
   };
 }
 
@@ -121,6 +131,14 @@ export function brand(config = branding) {
 export function siteFooter(config = branding, year = new Date().getFullYear()) {
   const items = config.links.map(link => `<a href="${esc(link.url)}"${/^(https?:|mailto:)/i.test(link.url) ? ' target="_blank" rel="noopener noreferrer"' : ''}>${esc(link.label)}</a>`);
   return `<footer class="site-footer"><span>© ${year} ${esc(config.siteName)}</span>${items.length ? `<nav aria-label="Site links">${items.join('')}</nav>` : ''}</footer>`;
+}
+
+/** The configured banner, or nothing when it has no text: a tag in the top bar, a strip above the sign-in page. */
+export function siteBanner(config = branding) {
+  const { text: message, link } = config.banner;
+  if (!message) return '';
+  const linkHtml = link ? `<a href="${esc(link.url)}"${/^(https?:|mailto:)/i.test(link.url) ? ' target="_blank" rel="noopener noreferrer"' : ''}>${esc(link.label)}</a>` : '';
+  return `<div class="site-banner">${icon('info')}<span class="site-banner-text" title="${esc(message)}">${esc(message)}</span>${linkHtml}</div>`;
 }
 
 export function brandIcon(role, config = branding) {

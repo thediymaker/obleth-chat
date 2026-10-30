@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
-import { normalizeBranding, brand, brandLogo, brandIcon, siteFooter, copy, pageTitle } from '../web/branding.js';
+import { normalizeBranding, brand, brandLogo, brandIcon, siteBanner, siteFooter, copy, pageTitle } from '../web/branding.js';
 
 test('partial or malformed branding keeps usable defaults and optional copy can be removed', () => {
   for (const input of [undefined, null, 42, [], 'invalid']) {
@@ -155,5 +155,22 @@ test('sign-in copy keeps a usable button label and only a safe help link', () =>
   assert.deepEqual(config.login.helpLink, { label: 'Request an account', url: 'https://accounts.example.edu/new' });
   for (const helpLink of [{ label: 'Bad', url: 'javascript:alert(1)' }, { label: '', url: 'https://example.edu' }, { url: 'https://example.edu' }, 'https://example.edu', null]) {
     assert.equal(normalizeBranding({ login: { helpLink } }).login.helpLink, null);
+  }
+});
+
+test('the banner is hidden until it has text, reads as one line and keeps only a safe link', () => {
+  assert.deepEqual(normalizeBranding().banner, { text: '', link: null });
+  assert.equal(siteBanner(normalizeBranding()), '');
+  assert.equal(siteBanner(normalizeBranding({ banner: { text: '  \n ' } })), '');
+  const config = normalizeBranding({ banner: { text: ' In development:\n  features <may> change. ', link: { label: ' Send feedback ', url: 'https://example.edu/feedback' } } });
+  assert.deepEqual(config.banner, { text: 'In development: features <may> change.', link: { label: 'Send feedback', url: 'https://example.edu/feedback' } });
+  const html = siteBanner(config);
+  assert.match(html, /^<div class="site-banner"><svg/);
+  assert.match(html, /<span class="site-banner-text" title="In development: features &lt;may&gt; change\.">In development: features &lt;may&gt; change\.<\/span>/);
+  assert.match(html, /<a href="https:\/\/example\.edu\/feedback" target="_blank" rel="noopener noreferrer">Send feedback<\/a><\/div>$/);
+  for (const link of [{ label: 'Bad', url: 'javascript:alert(1)' }, { label: '', url: 'https://example.edu' }, 'https://example.edu']) {
+    const banner = normalizeBranding({ banner: { text: 'In development', link } }).banner;
+    assert.equal(banner.link, null);
+    assert.doesNotMatch(siteBanner({ banner }), /<a /);
   }
 });

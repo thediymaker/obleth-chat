@@ -177,7 +177,7 @@ OBLETH_CHAT_SESSION_HOURS=2160
 
 ## Branding and appearance
 
-Edit [web/site.config.js](web/site.config.js) and reload the page. This public, commented configuration controls the site name and subtitle, assistant name, browser title and description, logo and favicon, greeting and assistant icons, the sign-in and home page text, the sign-in footer links, and an optional banner, such as a note that the service is in development, shown in the top bar of every page and above the sign-in page. You can also view the deployed file at `/site.config.js`. No build is needed when editing the served file; never put secrets in it.
+Edit [web/site.config.js](web/site.config.js) and reload the page. This public, commented configuration controls the site name and subtitle, assistant name, browser title and description, logo and favicon, greeting and assistant icons, the sign-in and home page text, and the sign-in footer links. You can also view the deployed file at `/site.config.js`. No build is needed when editing the served file; never put secrets in it.
 
 - The logo and favicon default to the Obleth mark. To swap them, set `logo.light` and `logo.dark` (and `favicon`) to local image paths such as `./assets/custom/logo-light.svg`. One image works in both themes; leave both logo paths blank for a text-only brand.
 - `links` lists the sign-in footer links as `{ label, url }`; use `[]` for none.

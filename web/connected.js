@@ -1,5 +1,6 @@
 import { icon, esc, badge, btn, iconButton, displayName } from './manage-ui.js';
-import { branding, brand, brandLogo, brandIcon, copy as brandCopy, pageTitle, siteBanner } from './branding.js';
+import { branding, brand, brandLogo, brandIcon, copy as brandCopy, pageTitle } from './branding.js';
+import { siteBanner, closeBanner } from './banner.js';
 import { themeControl } from './theme-control.js';
 import { authScreen } from './sign-in.js';
 import { ApiClient, readEvents } from './client.js';
@@ -138,7 +139,7 @@ export async function startConnected(capabilities) {
   });
   const turnView = createTurn({ state, markdown, chatPath, route, previews: () => capabilities.features?.previews !== false });
   const turnActions = Object.fromEntries(Object.entries(turnView.actions).map(([k, f]) => [k, el => { if (f(el) === 'render') render(); }]));
-  const administration = createAdmin({ api, state, capabilities, render, modal, close, toast: message => toast(message), onIdentityChanged: session, onCatalogChanged: () => applyPreferences(state.preferences) });
+  const administration = createAdmin({ api, state, capabilities, render, modal, close, toast: message => toast(message), onIdentityChanged: session, onCatalogChanged: () => applyPreferences(state.preferences), onBannerChanged: banner => { state.banner = banner.text ? banner : null; } });
   const historyView = createHistory({ api, state, render, modal, close, toast: message => toast(message), refreshSidebar });
   function modal(title, body) {
     closeMenu(false); closeModels(false);
@@ -229,7 +230,7 @@ export async function startConnected(capabilities) {
   function shell(content) {
     const { page, id } = route();
     const section = sections[page] || page, title = pageTitles[page] || nav.find(n => n[0] === page)?.[2] || 'Settings';
-    return `<aside class="sidebar" aria-label="Main navigation">${brand()}<button class="btn primary new-chat" data-action="new-chat">${icon('plus')}New chat <kbd>⇧⌘O</kbd></button><nav class="nav">${nav.filter(([path]) => (path !== 'compute' || computeTabs().length) && (path !== 'library' || libraryView.enabled())).map(([path, i, label]) => `<a href="#${path}" class="nav-item ${section === path ? 'active' : ''}" ${section === path ? 'aria-current="page"' : ''}>${icon(i)}<span>${label}</span></a>`).join('')}</nav>${projectsView.sidebar(page === 'projects' ? id : '')}<div class="recent"><div class="recent-header spread"><span class="eyebrow">Recent</span>${iconButton('search', 'search', 'Search conversations')}</div>${state.chats.length ? state.chats.slice(0, 15).map(c => `<div class="recent-row ${id === c.id ? 'active' : ''}"><a class="recent-link" href="#chat/${encodeURIComponent(c.id)}" title="${esc(c.title)}">${esc(c.title)}</a>${iconButton('more', 'chat-menu', `Options for ${c.title}`, `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div>`).join('') : '<p class="sidebar-empty">Your next idea starts here.</p>'}${state.chats.length ? `<a class="recent-all ${page === 'history' ? 'active' : ''}" href="#history">All chats${icon('right')}</a>` : ''}</div><div class="sidebar-bottom"><a class="nav-item ${['settings','admin','connections'].includes(page) ? 'active' : ''}" href="#settings" ${['settings','admin','connections'].includes(page) ? 'aria-current="page"' : ''}>${icon('settings')}Settings</a><button class="profile" data-action="profile" aria-haspopup="menu" aria-expanded="false"><span class="avatar">${esc(initials())}</span><span class="grow"><span class="profile-name">${esc(name())}</span><span class="profile-caption">${esc(state.user.role)} · Personal</span></span>${icon('down')}</button></div></aside><div class="app-main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation">${icon('panel')}</button><span class="workspace-label">Personal workspace</span><span class="slash">/</span><span>${title}</span></div>${siteBanner()}<div class="top-actions">${themeControl('header-theme')}${iconButton('search', 'search', 'Search conversations')}<button class="btn ghost small context-toggle" data-action="${page === 'chat' && id && !state.shared ? 'context' : 'focus'}">${icon('panel')}<span>${page === 'chat' && id && !state.shared ? 'Details' : 'Focus mode'}</span></button></div></header><main id="main" class="content" tabindex="-1">${alert(state.error, 'refresh')}${content}</main><footer class="bottom-bar"><div class="row">${statusMetrics()}</div><div class="row"><span>${esc(branding.siteName)}</span><button data-action="shortcuts" aria-label="Keyboard shortcuts">⌘ K</button></div></footer></div>`;
+    return `<aside class="sidebar" aria-label="Main navigation">${brand()}<button class="btn primary new-chat" data-action="new-chat">${icon('plus')}New chat <kbd>⇧⌘O</kbd></button><nav class="nav">${nav.filter(([path]) => (path !== 'compute' || computeTabs().length) && (path !== 'library' || libraryView.enabled())).map(([path, i, label]) => `<a href="#${path}" class="nav-item ${section === path ? 'active' : ''}" ${section === path ? 'aria-current="page"' : ''}>${icon(i)}<span>${label}</span></a>`).join('')}</nav>${projectsView.sidebar(page === 'projects' ? id : '')}<div class="recent"><div class="recent-header spread"><span class="eyebrow">Recent</span>${iconButton('search', 'search', 'Search conversations')}</div>${state.chats.length ? state.chats.slice(0, 15).map(c => `<div class="recent-row ${id === c.id ? 'active' : ''}"><a class="recent-link" href="#chat/${encodeURIComponent(c.id)}" title="${esc(c.title)}">${esc(c.title)}</a>${iconButton('more', 'chat-menu', `Options for ${c.title}`, `data-id="${esc(c.id)}" aria-haspopup="menu" aria-expanded="false"`)}</div>`).join('') : '<p class="sidebar-empty">Your next idea starts here.</p>'}${state.chats.length ? `<a class="recent-all ${page === 'history' ? 'active' : ''}" href="#history">All chats${icon('right')}</a>` : ''}</div><div class="sidebar-bottom"><a class="nav-item ${['settings','admin','connections'].includes(page) ? 'active' : ''}" href="#settings" ${['settings','admin','connections'].includes(page) ? 'aria-current="page"' : ''}>${icon('settings')}Settings</a><button class="profile" data-action="profile" aria-haspopup="menu" aria-expanded="false"><span class="avatar">${esc(initials())}</span><span class="grow"><span class="profile-name">${esc(name())}</span><span class="profile-caption">${esc(state.user.role)} · Personal</span></span>${icon('down')}</button></div></aside><div class="app-main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation">${icon('panel')}</button><span class="workspace-label">Personal workspace</span><span class="slash">/</span><span>${title}</span></div>${siteBanner(state.banner)}<div class="top-actions">${themeControl('header-theme')}${iconButton('search', 'search', 'Search conversations')}<button class="btn ghost small context-toggle" data-action="${page === 'chat' && id && !state.shared ? 'context' : 'focus'}">${icon('panel')}<span>${page === 'chat' && id && !state.shared ? 'Details' : 'Focus mode'}</span></button></div></header><main id="main" class="content" tabindex="-1">${alert(state.error, 'refresh')}${content}</main><footer class="bottom-bar"><div class="row">${statusMetrics()}</div><div class="row"><span>${esc(branding.siteName)}</span><button data-action="shortcuts" aria-label="Keyboard shortcuts">⌘ K</button></div></footer></div>`;
   }
   function statusMetrics() {
     const today = state.usage?.today, limits = state.usage?.limits || {}, count = value => compactNumber.format(Number(value) || 0);
@@ -517,6 +518,7 @@ export async function startConnected(capabilities) {
       if (epoch !== identityEpoch) return;
       state.oidc = result.oidcEnabled ?? state.oidc;
       state.passwords = result.passwordSignIn ?? state.passwords;
+      state.banner = result.banner || null;
       if (!result.authenticated) { state.phase = 'login'; render(); return; }
       state.user = result.user; api.csrfToken = result.csrfToken;
       if (result.passwordChangeRequired) { state.phase = 'password-required'; render(); return; }
@@ -961,6 +963,7 @@ export async function startConnected(capabilities) {
   async function perform(action) { try { await action(); } catch (error) { if (state.user && error.name !== 'AbortError') toast(error.message); } }
   const actions = {
     close, 'retry-session': session, refresh, 'reload-chat': navigate,
+    'close-banner': () => { closeBanner(state.banner); render(); },
     go: el => go(el.dataset.path),
     menu: () => { document.body.classList.remove('collapsed'); document.body.classList.toggle('sidebar-open'); },
     focus: () => savePreference({ focus: !document.body.classList.contains('collapsed') }),
@@ -1112,7 +1115,7 @@ export async function startConnected(capabilities) {
     if (!el || el.disabled) return;
     if (menu.contains(el)) closeMenu(false);
     event.preventDefault();
-    if (state.phase !== 'ready' && !['retry-session', 'close', 'logout'].includes(el.dataset.action)) return;
+    if (state.phase !== 'ready' && !['retry-session', 'close', 'logout', 'close-banner'].includes(el.dataset.action)) return;
     const workspaceAction = workspace.actions[el.dataset.action] || browserView.actions[el.dataset.action];
     if (workspaceAction) { perform(async () => { if (await workspaceAction(el) === 'render') render(); }); return; }
     perform(() => (actions[el.dataset.action] || personal.actions[el.dataset.action] || connectionsView.actions[el.dataset.action] || clustersView.actions[el.dataset.action] || knowledgeView.actions[el.dataset.action] || libraryView.actions[el.dataset.action] || sharing.actions[el.dataset.action] || projectsView.actions[el.dataset.action] || questionsView.actions[el.dataset.action] || researchView.actions[el.dataset.action] || groupsView.actions[el.dataset.action] || codeView.actions[el.dataset.action] || turnActions[el.dataset.action] || administration.actions[el.dataset.action] || historyView.actions[el.dataset.action] || attachments.actions[el.dataset.action])?.(el));

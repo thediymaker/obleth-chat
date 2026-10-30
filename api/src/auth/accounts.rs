@@ -539,6 +539,7 @@ const AUDIT_KINDS: [(&str, &[&str]); 7] = [
             "model.update",
             "limits.update",
             "decisions.update",
+            "banner.update",
             "knowledge.embedding.update",
             "retention.update",
         ],

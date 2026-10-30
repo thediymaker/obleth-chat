@@ -1341,10 +1341,11 @@ async fn session(State(auth): State<Auth>, headers: HeaderMap) -> Result<Respons
                     .bind(user.id)
                     .fetch_one(&auth.pool)
                     .await?;
-            json!({"authenticated": true, "user": user, "csrfToken": csrf_token(&auth.session_token(&headers).ok_or_else(ApiError::unauthorized)?), "oidcEnabled": auth.oidc_enabled(), "passwordSignIn": auth.password_sign_in(), "passwordChangeRequired": password_change_required})
+            let banner = crate::banner::shown(&auth.pool, true).await?;
+            json!({"authenticated": true, "user": user, "csrfToken": csrf_token(&auth.session_token(&headers).ok_or_else(ApiError::unauthorized)?), "oidcEnabled": auth.oidc_enabled(), "passwordSignIn": auth.password_sign_in(), "passwordChangeRequired": password_change_required, "banner": banner})
         }
         Err(error) if error.0 == StatusCode::UNAUTHORIZED => {
-            json!({"authenticated": false, "oidcEnabled": auth.oidc_enabled(), "passwordSignIn": auth.password_sign_in()})
+            json!({"authenticated": false, "oidcEnabled": auth.oidc_enabled(), "passwordSignIn": auth.password_sign_in(), "banner": crate::banner::shown(&auth.pool, false).await?})
         }
         Err(error) => return Err(error),
     };

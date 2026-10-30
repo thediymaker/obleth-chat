@@ -2,6 +2,22 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.14.0
+
+Administrators can show a one-line banner, such as "In development" or an announcement, in the top bar of every page and, if they choose, above the sign-in page.
+
+**New**
+
+- **Banner.** Settings › Administration › System has a Banner card: one line of text (up to 200 characters), an optional link, a Notice or Warning style, whether it also shows on the sign-in page and whether people may close it. Empty text turns it off.
+  - A closed banner stays closed in that browser until its text or link changes.
+  - Links go only to `http`, `https` or `mailto` addresses. On a phone the link is hidden to keep the top bar on one line.
+  - `GET` and `PATCH /api/admin/banner` read and change it, and each change is recorded in Activity under settings.
+  - `GET /api/session` gains `banner`: `null` when there is none, otherwise its text, link, style and whether it can be closed. Signed out, it is `null` unless the banner is set to show on the sign-in page.
+
+**Upgrading**
+
+- Migration 056 adds `banner`, with no text, so nothing shows until an administrator sets one. It runs when Chat starts.
+
 ## v0.13.1
 
 A turn with tools has no step or time limit in any chat. Auto mode now only decides whether tools run without asking.

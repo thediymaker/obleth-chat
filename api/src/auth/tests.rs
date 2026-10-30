@@ -243,7 +243,7 @@ async fn local_auth_origin_csrf_and_account_isolation() {
     let (_, _, body) = call(&app, "GET", "/api/session", None, None, None, Value::Null).await;
     assert_eq!(
         body,
-        json!({"authenticated": false, "oidcEnabled": false, "passwordSignIn": true})
+        json!({"authenticated": false, "oidcEnabled": false, "passwordSignIn": true, "banner": null})
     );
     for origin in [None, Some("https://attacker.example"), Some("null")] {
         let (status, _, _) = call(

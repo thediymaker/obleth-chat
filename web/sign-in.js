@@ -1,6 +1,7 @@
 import { branding, brand, siteFooter, copy } from './branding.js';
 import { btn, esc, icon } from './manage-ui.js';
 import { themeControl } from './theme-control.js';
+import { siteBanner } from './banner.js';
 
 // The signed-out screens: sign in, an invitation, a required password change,
 // the session check and its failure. One quiet column, the same in every phase.
@@ -38,5 +39,5 @@ const phases = {
 
 export function authScreen(state, config = branding) {
   const body = (phases[state.phase] || (s => signIn(s, config)))(state);
-  return `<main id="main" class="auth-layout"><header class="auth-header">${brand(config)}${themeControl('auth-theme')}</header><section class="auth-panel"><div class="auth-card">${body}</div></section>${siteFooter(config)}</main>`;
+  return `<main id="main" class="auth-layout">${siteBanner(state.banner)}<header class="auth-header">${brand(config)}${themeControl('auth-theme')}</header><section class="auth-panel"><div class="auth-card">${body}</div></section>${siteFooter(config)}</main>`;
 }

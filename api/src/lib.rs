@@ -2,6 +2,7 @@ pub mod agents;
 pub mod attachments;
 pub mod auth;
 pub mod autopilot;
+pub mod banner;
 pub mod browser;
 pub mod code;
 pub mod config;
@@ -108,6 +109,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let catalog = models::router(state.clone());
     let operations = operations::router(state.clone());
     let retention = retention::router(state.clone());
+    let banner = banner::router(state.clone());
     let attachments = attachments::router(state.clone());
     let images = images::router(state.clone());
     let projects = projects::router(state.clone());
@@ -163,6 +165,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(catalog)
         .merge(operations)
         .merge(retention)
+        .merge(banner)
         .merge(attachments)
         .merge(images)
         .merge(projects)

@@ -4,15 +4,15 @@ import { esc, icon, displayName, when, badge, btn, empty, errorBox, field, textI
 
 const tabs = [['users','users','People'],['groups','grid','Groups'],['models','cube','Models'],['usage','chart','Usage & limits'],['feedback','thumbsUp','Feedback'],['audit','clock','Activity'],['system','server','System']];
 const generation = [['systemPrompt','System instructions'],['reasoningEffort','Thinking effort'],['temperature','Temperature'],['topP','Top P'],['maxTokens','Output token limit']];
-export function createAdmin({ api, state, capabilities, render, modal, close, toast, onIdentityChanged, onCatalogChanged }) {
-  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, feedback: null, feedbackDays: 30, auditKind: '', auditQuery: '', sequence: 0, pending: null };
+export function createAdmin({ api, state, capabilities, render, modal, close, toast, onIdentityChanged, onCatalogChanged, onBannerChanged }) {
+  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, banner: null, feedback: null, feedbackDays: 30, auditKind: '', auditQuery: '', sequence: 0, pending: null };
   const isAdmin = () => state.user?.role === 'admin';
   const tabFromHash = () => tabs.some(t => t[0] === adminLocation(location.hash).section) ? adminLocation(location.hash).section : 'users';
   const userById = id => local.users.find(u => u.id === id);
   const modelById = id => local.models.find(m => m.id === id);
   const groupId = () => adminLocation(location.hash).groupId;
   const gatewayUrl = () => capabilities.adminGatewayUrl || capabilities.gatewayAdminUrl || '';
-  function clear() { local.sequence++; Object.assign(local, { users: [], groups: [], models: [], events: [], members: [], usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, feedback: null, memberCursor: null, group: null, query: '', error: '', loading: false, pending: null }); }
+  function clear() { local.sequence++; Object.assign(local, { users: [], groups: [], models: [], events: [], members: [], usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, banner: null, feedback: null, memberCursor: null, group: null, query: '', error: '', loading: false, pending: null }); }
   async function load({ append = false, query = local.query } = {}) {
     if (!isAdmin()) { clear(); return; }
     const sequence = ++local.sequence; local.tab = tabFromHash(); local.loading = true; local.error = ''; local.query = query; render();
@@ -31,9 +31,9 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       if (local.tab === 'usage') { const [u, l] = await Promise.all([api.request(`/api/admin/usage${query ? '?q=' + encodeURIComponent(query) : ''}`), api.request('/api/admin/limits')]); if (sequence !== local.sequence) return; local.usage = u.users || []; local.hasMore = !!u.hasMore; local.limits = l; }
       if (local.tab === 'feedback') { const r = await api.request(`/api/admin/feedback?days=${local.feedbackDays}`); if (sequence !== local.sequence) return; local.feedback = r; }
       if (local.tab === 'system') {
-        local.retention = null; local.embedding = null; local.health = null; local.decisions = null;
-        const [r, e, h, d] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null, api.request('/api/admin/health').catch(() => null), api.request('/api/admin/decisions').catch(err => ({ error: err.message }))]); if (sequence !== local.sequence) return;
-        local.retention = r; local.embedding = e; local.health = h; local.decisions = d;
+        local.retention = null; local.embedding = null; local.health = null; local.decisions = null; local.banner = null;
+        const [r, e, h, d, b] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null, api.request('/api/admin/health').catch(() => null), api.request('/api/admin/decisions').catch(err => ({ error: err.message })), api.request('/api/admin/banner').catch(err => ({ error: err.message }))]); if (sequence !== local.sequence) return;
+        local.retention = r; local.embedding = e; local.health = h; local.decisions = d; local.banner = b;
       }
       if (local.tab === 'audit') { const r = await api.request(`/api/admin/audit?limit=50${local.auditKind ? '&kind=' + encodeURIComponent(local.auditKind) : ''}${local.auditQuery ? '&q=' + encodeURIComponent(local.auditQuery) : ''}${append && local.nextCursor ? '&before=' + encodeURIComponent(local.nextCursor) : ''}`); if (sequence !== local.sequence) return; local.events = append ? [...local.events, ...(r.events || [])] : r.events || []; local.nextCursor = r.nextCursor; }
     } catch (e) { if (sequence === local.sequence && e.name !== 'AbortError') local.error = e.message; }
@@ -97,6 +97,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       'model.update': () => `${actor} changed the model ${target('')}`.trim(),
       'limits.update': () => e.targetType === 'user' ? `${actor} changed the limits for ${target('a person')}` : `${actor} changed the workspace limits`,
       'decisions.update': () => `${actor} changed the decisions settings`,
+      'banner.update': () => `${actor} changed the banner`,
       'knowledge.embedding.update': () => `${actor} changed the knowledge search model`,
       'retention.update': () => `${actor} changed data retention`,
       'retention.cleanup': () => removed.length ? `Automatic cleanup removed ${removed.join(', ')}` : 'Automatic cleanup ran',
@@ -143,6 +144,13 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     const reasons = `<section class="card feedback-card"><h2>Why replies got a thumbs down</h2>${f.reasons.length ? `<ul class="feedback-counts">${f.reasons.map(r => `<li><span>${esc(reasonLabel(r.reason))}</span><strong>${Number(r.count).toLocaleString()}</strong></li>`).join('')}</ul>` : '<p class="inline-note">No reasons given.</p>'}</section>`;
     const comments = `<section class="card feedback-card"><h2>Recent comments</h2>${f.comments.length ? `<div class="audit-list">${f.comments.map(c => `<article class="audit-event"><span class="audit-dot"></span><div class="grow"><p>${esc(c.comment)}</p><small class="faint">${esc([c.model, c.rating > 0 ? 'Thumbs up' : 'Thumbs down', ...(c.reasons || []).map(reasonLabel), when(c.at)].join(' · '))}</small></div></article>`).join('')}</div>` : '<p class="inline-note">No comments.</p>'}</section>`;
     return `${toolbar}${table}<div class="feedback-grid">${reasons}${comments}</div>`;
+  }
+  function bannerCard() {
+    const b = local.banner;
+    if (!b) return '';
+    if (b.error) return `<section class="setting-card card"><h2>Banner</h2>${errorBox(b.error)}</section>`;
+    const tone = ([id, label]) => `<option value="${id}" ${id === b.tone ? 'selected' : ''}>${label}</option>`;
+    return `<section class="setting-card card banner-card"><div class="spread"><h2>Banner</h2>${badge(b.text ? 'On' : 'Off')}</div><p>One line at the top of every page, for an announcement or a note such as that Chat is in development. People see a change the next time they load Chat.</p><form id="admin-banner-form">${field('banner-text', 'Text', textInput('banner-text', b.text, 'maxlength="200" placeholder="No banner"'), 'Leave blank to show no banner. Keep it short: the top bar shows one line, and the rest when someone points at it.')}<div class="form-columns">${field('banner-link-label', 'Link text', textInput('banner-link-label', b.link?.label || '', 'maxlength="40" placeholder="Optional"'))}${field('banner-link-url', 'Link address', textInput('banner-link-url', b.link?.url || '', 'type="url" maxlength="2048" placeholder="https://" spellcheck="false" autocomplete="off"'))}</div>${field('banner-tone', 'Style', `<select class="form-control" id="banner-tone" name="banner-tone">${[['info', 'Notice'], ['warning', 'Warning']].map(tone).join('')}</select>`, 'A notice is quiet; a warning is amber.')}${checkbox('banner-signed-out', 'Show it on the sign-in page', b.signedOut, 'Anyone who opens Chat sees it there, signed in or not.')}${checkbox('banner-dismissible', 'Let people close it', b.dismissible, 'A closed banner stays closed in that browser until you change its text or link.')}${formEnd('Save banner')}</form></section>`;
   }
   function retentionCard() {
     const r = local.retention;
@@ -196,7 +204,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
   function system() {
     const docs = 'https://www.obleth.com/docs/run-chat', link = ([glyph, label, path, note]) => `<a class="setting-line docs-link" href="${docs}${path}" target="_blank" rel="noopener">${icon(glyph)}<div class="grow"><h3>${label}</h3><p>${note}</p></div>${icon('external')}</a>`;
     const pages = [['cube', 'Connect the gateway', '/connect-gateway', 'Model access and inference through Obleth'], ['lock', 'Accounts and sign-in', '/accounts', 'Local accounts and single sign-on'], ['book', 'Knowledge', '/enable-knowledge', 'Collections and saved items in S3'], ['terminal', 'Workspaces and the browser', '/enable-workspaces', workspaceStatus()], ['link', 'Connections and clusters', '/enable-connections', 'MCP servers, Slurm and Kubernetes'], ['shield', 'Reverse proxies', '/reverse-proxies', 'Client addresses and sign-in limits'], ['chart', 'Operate Chat', '/operations', 'Health checks, metrics and backups'], ['settings', 'Environment variables', '/environment-variables', 'Every setting in one list']];
-    return `<div class="admin-system-grid">${retentionCard()}${embeddingCard()}${decisionsCard()}<section class="setting-card card"><h2>Set where Chat runs</h2><p>The rest is configured with environment variables when Chat is deployed. These guides show how.</p>${pages.map(link).join('')}</section></div>`;
+    return `<div class="admin-system-grid">${bannerCard()}${retentionCard()}${embeddingCard()}${decisionsCard()}<section class="setting-card card"><h2>Set where Chat runs</h2><p>The rest is configured with environment variables when Chat is deployed. These guides show how.</p>${pages.map(link).join('')}</section></div>`;
   }
 
   function view() {
@@ -269,6 +277,13 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       const own = e.prefixes?.[next.model] || { queryPrefix: '', documentPrefix: '' };
       await saveEmbedding({ model: pick(next.model, d.model), queryPrefix: pick(next.queryPrefix, own.queryPrefix), documentPrefix: pick(next.documentPrefix, own.documentPrefix) }, next);
       return;
+    }
+    if (form.id === 'admin-banner-form') {
+      const label = getValue(form, 'banner-link-label').trim(), url = getValue(form, 'banner-link-url').trim();
+      if (!label !== !url) throw new Error('A link needs both its text and its address.');
+      const body = { text: getValue(form, 'banner-text'), link: url ? { label, url } : null, tone: getValue(form, 'banner-tone'), signedOut: isChecked(form, 'banner-signed-out'), dismissible: isChecked(form, 'banner-dismissible') };
+      local.banner = await api.request('/api/admin/banner', { method: 'PATCH', body });
+      onBannerChanged?.(local.banner); render(); toast(local.banner.text ? 'Banner saved' : 'Banner turned off'); return;
     }
     if (form.id === 'admin-decisions-form') { local.decisions = await api.request('/api/admin/decisions', { method: 'PATCH', body: decisionsBody(form) }); render(); toast('Decisions saved'); return; }
     if (form.id === 'admin-retention-form') {

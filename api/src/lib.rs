@@ -1542,6 +1542,13 @@ async fn run_generation(
     if offers_workspace {
         preamble.push(questions::WORKSPACE_PROMPT.into());
     }
+    // Research can be suggested in a chat that isn't part of a project's research.
+    let offers_research = asks
+        && research_standing.is_none()
+        && s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(&user));
+    if offers_research {
+        preamble.push(questions::RESEARCH_PROMPT.into());
+    }
     if let Some(prompt) = knowledge_turn
         .as_ref()
         .map(|k| k.prompt())
@@ -1623,11 +1630,7 @@ async fn run_generation(
     if offers_workspace {
         tools.push(questions::workspace_definition());
     }
-    // Research can be suggested in a chat that isn't part of a project's research.
-    let offers_research = asks
-        && research_standing.is_none()
-        && s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(&user));
-    // Its button keeps the chat's project when that project can take the research.
+    // The research card's button keeps the chat's project when that project can take the research.
     let research_here = match (&project, offers_research) {
         (Some(project), true) => matches!(
             research::tools::standing(&s.store.pool, user.id, id, project.id).await,
@@ -1636,7 +1639,6 @@ async fn run_generation(
         _ => false,
     };
     if offers_research {
-        preamble.push(questions::RESEARCH_PROMPT.into());
         tools.push(questions::research_definition());
     }
     if research_tools {

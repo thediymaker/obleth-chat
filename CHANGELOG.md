@@ -2,6 +2,18 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.14.1
+
+Models are told when to suggest research.
+
+**Fixed**
+
+- **Research suggestions.** In a chat that may suggest research, the system prompt again includes the guidance on when to call `suggest_research`: tuning or optimizing over many measured tries, a parameter sweep, or a run left going overnight. Since v0.12.0 it was added after the system prompt had been put together, so models saw only the tool's description and could plan the suggestion without making it.
+
+**Upgrading**
+
+- No migrations or configuration changes.
+
 ## v0.14.0
 
 Administrators can show a one-line banner, such as "In development" or an announcement, in the top bar of every page and, if they choose, above the sign-in page.

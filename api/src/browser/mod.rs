@@ -335,7 +335,9 @@ impl Browsers {
                 PodState::Pending => {}
             }
         }
-        sqlx::query("UPDATE browsers SET status='starting',error_message=NULL WHERE id=$1 AND status<>'starting'")
+        // The idle sweep stops 'starting' browsers not used for a while; a browser
+        // last used hours ago would otherwise be stopped while its pod starts.
+        sqlx::query("UPDATE browsers SET status='starting',error_message=NULL,last_used_at=NOW() WHERE id=$1")
             .bind(browser.id)
             .execute(&self.inner.pool)
             .await?;

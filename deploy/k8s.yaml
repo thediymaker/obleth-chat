@@ -162,7 +162,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: chat
-          image: ghcr.io/thediymaker/obleth-chat/chat:v0.14.1
+          image: ghcr.io/thediymaker/obleth-chat/chat:v0.14.2
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

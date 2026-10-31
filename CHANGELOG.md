@@ -2,6 +2,18 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.14.2
+
+A browser that hadn't been used for a while no longer fails to start.
+
+**Fixed**
+
+- **Browser start.** Starting a browser now counts as using it. Before, the idle check could stop a browser last used more than an hour earlier while its pod was still starting, and the start failed with "the browser pod disappeared while starting". Trying again usually worked.
+
+**Upgrading**
+
+- No migrations or configuration changes.
+
 ## v0.14.1
 
 Models are told when to suggest research.

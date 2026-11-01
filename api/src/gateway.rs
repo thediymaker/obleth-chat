@@ -359,6 +359,31 @@ impl Gateway {
         }
         response.json().await.map_err(|_| unavailable())
     }
+    /// A whole completion in one answer, for work Chat does on its own, such as naming
+    /// the task a chat was about.
+    pub async fn complete(
+        &self,
+        user: &Identity,
+        body: &Value,
+        timeout: Duration,
+    ) -> Result<Value, ApiError> {
+        let response = self
+            .client
+            .post(self.base.join("v1/chat/completions").unwrap())
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(user).await?,
+            )
+            .timeout(timeout)
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| unavailable())?;
+        if !response.status().is_success() {
+            return Err(upstream_error(response).await);
+        }
+        response.json().await.map_err(|_| unavailable())
+    }
     pub async fn chat(
         &self,
         user: &Identity,

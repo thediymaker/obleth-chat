@@ -15,6 +15,7 @@ pub mod gateway;
 pub mod groups;
 pub mod images;
 pub mod imports;
+pub mod insights;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod mcp;
@@ -125,6 +126,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let embedding = knowledge::embedding::router(state.clone());
     let decisions = decisions::router(state.clone());
     let feedback = feedback::router(state.clone());
+    let insights = insights::router(state.clone());
     let mcp = mcp::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
@@ -181,6 +183,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(embedding)
         .merge(decisions)
         .merge(feedback)
+        .merge(insights)
         .merge(mcp)
         .fallback_service(static_files(static_dir))
         .layer(DefaultBodyLimit::max(128 * 1024))

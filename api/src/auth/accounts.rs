@@ -542,6 +542,8 @@ const AUDIT_KINDS: [(&str, &[&str]); 7] = [
             "banner.update",
             "knowledge.embedding.update",
             "retention.update",
+            "insights.update",
+            "insights.report",
         ],
     ),
     (

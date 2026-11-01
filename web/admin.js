@@ -1,18 +1,19 @@
 import { adminLocation } from './settings-navigation.js';
 import { reasonLabel } from './feedback.js';
+import { insightsView, settingsForm as insightsSettings } from './insights.js';
 import { esc, icon, displayName, when, badge, btn, empty, errorBox, field, textInput, checkbox, formEnd, getValue, isChecked, titleCase } from './manage-ui.js';
 
-const tabs = [['users','users','People'],['groups','grid','Groups'],['models','cube','Models'],['usage','chart','Usage & limits'],['feedback','thumbsUp','Feedback'],['audit','clock','Activity'],['system','server','System']];
+const tabs = [['users','users','People'],['groups','grid','Groups'],['models','cube','Models'],['usage','chart','Usage & limits'],['insights','gauge','Insights'],['feedback','thumbsUp','Feedback'],['audit','clock','Activity'],['system','server','System']];
 const generation = [['systemPrompt','System instructions'],['reasoningEffort','Thinking effort'],['temperature','Temperature'],['topP','Top P'],['maxTokens','Output token limit']];
 export function createAdmin({ api, state, capabilities, render, modal, close, toast, onIdentityChanged, onCatalogChanged, onBannerChanged }) {
-  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, banner: null, feedback: null, feedbackDays: 30, auditKind: '', auditQuery: '', sequence: 0, pending: null };
+  const local = { tab: 'users', loading: false, error: '', users: [], groups: [], models: [], events: [], nextCursor: null, hasMore: false, query: '', group: null, members: [], memberCursor: null, usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, banner: null, feedback: null, feedbackDays: 30, insights: null, insightsDays: 28, insightsGroup: '', insightsOpen: new Set(), insightsAll: new Set(), insightsSort: 'tokens', auditKind: '', auditQuery: '', sequence: 0, pending: null };
   const isAdmin = () => state.user?.role === 'admin';
   const tabFromHash = () => tabs.some(t => t[0] === adminLocation(location.hash).section) ? adminLocation(location.hash).section : 'users';
   const userById = id => local.users.find(u => u.id === id);
   const modelById = id => local.models.find(m => m.id === id);
   const groupId = () => adminLocation(location.hash).groupId;
   const gatewayUrl = () => capabilities.adminGatewayUrl || capabilities.gatewayAdminUrl || '';
-  function clear() { local.sequence++; Object.assign(local, { users: [], groups: [], models: [], events: [], members: [], usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, banner: null, feedback: null, memberCursor: null, group: null, query: '', error: '', loading: false, pending: null }); }
+  function clear() { local.sequence++; Object.assign(local, { users: [], groups: [], models: [], events: [], members: [], usage: [], limits: null, health: null, retention: null, embedding: null, decisions: null, banner: null, feedback: null, insights: null, memberCursor: null, group: null, query: '', error: '', loading: false, pending: null }); }
   async function load({ append = false, query = local.query } = {}) {
     if (!isAdmin()) { clear(); return; }
     const sequence = ++local.sequence; local.tab = tabFromHash(); local.loading = true; local.error = ''; local.query = query; render();
@@ -30,6 +31,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       }
       if (local.tab === 'usage') { const [u, l] = await Promise.all([api.request(`/api/admin/usage${query ? '?q=' + encodeURIComponent(query) : ''}`), api.request('/api/admin/limits')]); if (sequence !== local.sequence) return; local.usage = u.users || []; local.hasMore = !!u.hasMore; local.limits = l; }
       if (local.tab === 'feedback') { const r = await api.request(`/api/admin/feedback?days=${local.feedbackDays}`); if (sequence !== local.sequence) return; local.feedback = r; }
+      if (local.tab === 'insights') { const r = await api.request(`/api/admin/insights?days=${local.insightsDays}${local.insightsGroup ? '&group=' + encodeURIComponent(local.insightsGroup) : ''}`); if (sequence !== local.sequence) return; local.insights = r; watchReport(); }
       if (local.tab === 'system') {
         local.retention = null; local.embedding = null; local.health = null; local.decisions = null; local.banner = null;
         const [r, e, h, d, b] = await Promise.all([api.request('/api/admin/retention'), capabilities.features?.knowledge ? api.request('/api/admin/knowledge/embedding').catch(err => ({ error: err.message })) : null, api.request('/api/admin/health').catch(() => null), api.request('/api/admin/decisions').catch(err => ({ error: err.message })), api.request('/api/admin/banner').catch(err => ({ error: err.message }))]); if (sequence !== local.sequence) return;
@@ -97,6 +99,8 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       'model.update': () => `${actor} changed the model ${target('')}`.trim(),
       'limits.update': () => e.targetType === 'user' ? `${actor} changed the limits for ${target('a person')}` : `${actor} changed the workspace limits`,
       'decisions.update': () => `${actor} changed the decisions settings`,
+      'insights.update': () => `${actor} changed the usage insights settings`,
+      'insights.report': () => `${actor} asked for workstreams`,
       'banner.update': () => `${actor} changed the banner`,
       'knowledge.embedding.update': () => `${actor} changed the knowledge search model`,
       'retention.update': () => `${actor} changed data retention`,
@@ -207,10 +211,23 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
     return `<div class="admin-system-grid">${bannerCard()}${retentionCard()}${embeddingCard()}${decisionsCard()}<section class="setting-card card"><h2>Set where Chat runs</h2><p>The rest is configured with environment variables when Chat is deployed. These guides show how.</p>${pages.map(link).join('')}</section></div>`;
   }
 
+  function insights() { return insightsView(local.insights, { days: local.insightsDays, group: local.insightsGroup, open: local.insightsOpen, all: local.insightsAll, sort: local.insightsSort }); }
+  // While a workstreams report builds, check on it every few seconds for as long as the tab shows it.
+  let reportTimer = null;
+  function watchReport() {
+    clearTimeout(reportTimer);
+    const report = local.insights?.report;
+    if (report?.status !== 'building') return;
+    reportTimer = setTimeout(async () => {
+      if (local.tab !== 'insights' || local.insights?.report?.id !== report.id) return;
+      try { const r = await api.request(`/api/admin/insights/reports/${encodeURIComponent(report.id)}`); if (local.insights?.report?.id === report.id) { local.insights.report = r.report; render(); } } catch { /* the next look tries again */ }
+      watchReport();
+    }, 3000);
+  }
   function view() {
     if (!isAdmin()) return `<div class="settings-access-denied">${empty('Administrator access required', 'Your personal account settings are available below.', '<a class="btn" href="#settings">Open Settings</a>')}</div>`;
     local.tab = tabFromHash();
-    return shell(local.loading && !({ users: local.users.length, groups: local.groups.length || local.group, models: local.models.length, audit: local.events.length, usage: local.limits, feedback: local.feedback, system: true }[local.tab]) ? '' : ({ users: people, groups, models, audit, usage, feedback, system }[local.tab])());
+    return shell(local.loading && !({ users: local.users.length, groups: local.groups.length || local.group, models: local.models.length, audit: local.events.length, usage: local.limits, feedback: local.feedback, insights: local.insights, system: true }[local.tab]) ? '' : ({ users: people, groups, models, audit, usage, feedback, insights, system }[local.tab])());
   }
   // Any change to what makes the vectors re-indexes everything, so it is confirmed first.
   async function saveEmbedding(body, next) {
@@ -237,6 +254,12 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
   }
   const actions = {
     'admin-feedback-days': el => { local.feedbackDays = Number(el.dataset.days) || 30; return load(); },
+    'admin-insights-days': el => { local.insightsDays = Number(el.dataset.days) || 28; local.insightsOpen = new Set(); return load(); },
+    'admin-insights-all': el => { local.insightsAll.add(el.dataset.name); render(); },
+    'admin-insights-sort': el => { local.insightsSort = el.dataset.sort === 'sessions' ? 'sessions' : 'tokens'; render(); },
+    'admin-insights-stream': el => { const name = el.dataset.name; if (local.insightsOpen.has(name)) local.insightsOpen.delete(name); else local.insightsOpen.add(name); render(); },
+    'admin-insights-settings': () => modal('Usage insights', insightsSettings(local.insights?.settings, (state.models || []).map(m => m.id).filter(id => id && id !== 'auto'))),
+    'admin-insights-report': async () => { const r = await api.request('/api/admin/insights/reports', { method: 'POST', body: { days: local.insightsDays, group: local.insightsGroup || null } }); if (local.insights) { local.insights.report = r.report; local.insightsOpen = new Set(); } render(); watchReport(); },
     'admin-refresh': () => load(), 'admin-edit-limits': () => limitsDialog(), 'admin-user-limits': el => limitsDialog(el.dataset.id),
     'admin-remove-limits': async el => { await api.request(`/api/admin/limits/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' }); close(); await load(); toast('Account uses workspace limits'); }, 'admin-more-audit': () => load({ append: true }),
     'admin-audit-clear': () => { local.auditKind = ''; local.auditQuery = ''; return load(); },
@@ -285,6 +308,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       local.banner = await api.request('/api/admin/banner', { method: 'PATCH', body });
       onBannerChanged?.(local.banner); render(); toast(local.banner.text ? 'Banner saved' : 'Banner turned off'); return;
     }
+    if (form.id === 'admin-insights-form') { await api.request('/api/admin/insights/settings', { method: 'PUT', body: { enabled: isChecked(form, 'insights-enabled'), titles: isChecked(form, 'insights-titles'), model: getValue(form, 'insights-model').trim() || null, reportModel: getValue(form, 'insights-report-model').trim() || null } }); close(); await load(); toast('Insights saved'); return; }
     if (form.id === 'admin-decisions-form') { local.decisions = await api.request('/api/admin/decisions', { method: 'PATCH', body: decisionsBody(form) }); render(); toast('Decisions saved'); return; }
     if (form.id === 'admin-retention-form') {
       const body = Object.fromEntries([['conversationDays','retention-conversations'],['unusedFileDays','retention-files'],['auditDays','retention-audit']].map(([key,id]) => [key,getValue(form,id).trim() ? Number(getValue(form,id)) : null]));
@@ -331,6 +355,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
   }
   function input(event) {
     if (event.type === 'change' && event.target.id === 'admin-audit-kind') { local.auditKind = event.target.value; load(); return; }
+    if (event.type === 'change' && event.target.id === 'admin-insights-group') { local.insightsGroup = event.target.value; local.insightsOpen = new Set(); load(); return; }
     if (event.target.id === 'model-visibility') document.querySelector('.model-visibility-groups').hidden = event.target.value !== 'groups';
     if (event.target.id === 'embedding-model') modelPrefixes(event.target);
     if (event.target.id === 'decisions-endpoint') {

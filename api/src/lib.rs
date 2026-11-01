@@ -15,6 +15,7 @@ pub mod gateway;
 pub mod groups;
 pub mod images;
 pub mod imports;
+pub mod insights;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod mcp;
@@ -125,6 +126,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
     let embedding = knowledge::embedding::router(state.clone());
     let decisions = decisions::router(state.clone());
     let feedback = feedback::router(state.clone());
+    let insights = insights::router(state.clone());
     let mcp = mcp::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
@@ -181,6 +183,7 @@ pub fn router(state: AppState, static_dir: PathBuf) -> Router {
         .merge(embedding)
         .merge(decisions)
         .merge(feedback)
+        .merge(insights)
         .merge(mcp)
         .fallback_service(static_files(static_dir))
         .layer(DefaultBodyLimit::max(128 * 1024))
@@ -2895,6 +2898,9 @@ async fn run_generation(
     } else {
         false
     };
+    // Labels and a better title for a chat whose reply just finished, when they are on.
+    let title_pending =
+        status == "completed" && !content.is_empty() && insights::after_reply(&s, &user, id).await;
     if persisted.is_err() {
         emit(
             &mut tx,
@@ -2911,6 +2917,9 @@ async fn run_generation(
         }
         if let Some(text) = rewritten {
             done["content"] = json!(text);
+        }
+        if title_pending {
+            done["titlePending"] = json!(true);
         }
         done
     });

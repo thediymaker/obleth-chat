@@ -172,6 +172,11 @@ async fn main() -> Result<()> {
         state.clone(),
         state.shutdown.clone(),
     ));
+    // Usage insights label quiet chats while an administrator has them on.
+    tokio::spawn(obleth_chat::insights::worker(
+        state.clone(),
+        state.shutdown.clone(),
+    ));
     tokio::spawn(obleth_chat::retention::temporary_worker(
         state.store.clone(),
         state.shutdown.clone(),

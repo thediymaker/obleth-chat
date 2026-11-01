@@ -898,7 +898,7 @@ export async function startConnected(capabilities) {
         if (event.event === 'reasoning') { assistant.reasoningContent += event.data.content || ''; assistant.status = 'streaming'; assistant._draft = null; }
         browserView.observe(event, c.id);
         if (workspace.onEvent(event, assistant, c.id)) assistant.status = 'streaming';
-        if (event.event === 'done') { Object.assign(assistant, event.data); assistant.status = event.data.status || 'completed'; op.terminal = true; }
+        if (event.event === 'done') { Object.assign(assistant, event.data); assistant.status = event.data.status || 'completed'; op.terminal = true; if (event.data.titlePending) for (const wait of [3000, 9000]) setTimeout(() => reconcileConversation(c.id), wait); }
         if (event.event === 'error') { assistant.status = 'error'; assistant.errorMessage = event.data.message || 'The model could not complete this response.'; op.terminal = true; }
         if (op.terminal) {
           const unread = turnView.unread(assistant);

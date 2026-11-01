@@ -2898,6 +2898,9 @@ async fn run_generation(
     } else {
         false
     };
+    // Labels and a better title for a chat whose reply just finished, when they are on.
+    let title_pending =
+        status == "completed" && !content.is_empty() && insights::after_reply(&s, &user, id).await;
     if persisted.is_err() {
         emit(
             &mut tx,
@@ -2914,6 +2917,9 @@ async fn run_generation(
         }
         if let Some(text) = rewritten {
             done["content"] = json!(text);
+        }
+        if title_pending {
+            done["titlePending"] = json!(true);
         }
         done
     });

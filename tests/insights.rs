@@ -11,7 +11,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use http_body_util::BodyExt;
 use obleth_chat::{
-    auth::{Auth, AuthConfig},
+    auth::{Auth, AuthConfig, Identity, Role},
     gateway::Gateway,
     insights, AppState,
 };
@@ -56,7 +56,7 @@ async fn session(pool: &PgPool, role: &str) -> Session {
 }
 
 /// A gateway that labels a chat mentioning a diary as personal and anything else as
-/// research, names every task the same, and finds one workstream.
+/// research, names every chat and task the same, and finds one workstream.
 async fn gateway(asked: Arc<AtomicUsize>) -> Gateway {
     async fn verdicts(
         State(asked): State<Arc<AtomicUsize>>,
@@ -80,11 +80,10 @@ async fn gateway(asked: Arc<AtomicUsize>) -> Gateway {
         }}))
     }
     async fn completions(Json(body): Json<Value>) -> Json<Value> {
-        let content = if body["messages"][0]["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("workstream list")
-        {
+        let system = body["messages"][0]["content"].as_str().unwrap_or("");
+        let content = if system.starts_with("You name") {
+            "{\"title\": \"Folding assay curve fit\", \"topic\": \"Analyzing protein folding data\"}"
+        } else if system.contains("workstream list") {
             "<think>grouping</think>[{\"name\": \"Analyzing protein folding experiments\", \"description\": \"Lab data analysis\"}]"
         } else {
             "\"Analyzing protein folding data.\""
@@ -197,13 +196,157 @@ async fn message(pool: &PgPool, chat: Uuid, ordinal: i32, text: &str, minutes: i
     .unwrap();
 }
 
+/// A chat with its first exchange, titled the way Chat titles a new chat.
+async fn exchanged(pool: &PgPool, owner: Uuid, text: &str, title: &str, temporary: bool) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO conversations(id,owner_id,title,model,temporary)VALUES($1,$2,$3,'judge',$4)",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(title)
+    .bind(temporary)
+    .execute(pool)
+    .await
+    .unwrap();
+    message(pool, id, 0, text, 1).await;
+    sqlx::query(
+        "INSERT INTO messages(id,conversation_id,ordinal,role,content,status,generation_id,usage)
+         VALUES($1,$2,1,'assistant','Here is a fit.','completed',$3,'{\"total_tokens\":120}')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(id)
+    .bind(Uuid::new_v4())
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+/// Waits for the work a reply started.
+async fn settled<T: PartialEq>(mut read: impl AsyncFnMut() -> T, done: impl Fn(&T) -> bool) -> T {
+    for _ in 0..100 {
+        let value = read().await;
+        if done(&value) {
+            return value;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    read().await
+}
+
+async fn label(pool: &PgPool, chat: Uuid) -> Option<(Option<String>, Option<String>, i64)> {
+    sqlx::query_as("SELECT kind, topic, tokens FROM conversation_labels WHERE conversation_id=$1 AND labeled_at IS NOT NULL")
+        .bind(chat)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+async fn title(pool: &PgPool, chat: Uuid) -> String {
+    sqlx::query_scalar("SELECT title FROM conversations WHERE id=$1")
+        .bind(chat)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_first_reply_labels_and_names_a_chat_and_a_deleted_chat_still_counts(pool: PgPool) {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let (state, app) = fixture(&pool, asked).await;
+    let admin = session(&pool, "admin").await;
+    let person = session(&pool, "user").await;
+    let me = Identity {
+        id: person.id,
+        username: "person".into(),
+        display_name: "Person".into(),
+        role: Role::User,
+        session: None,
+    };
+    let text = "Fit a model to my folding assay results, the curve looks off";
+    let chat = exchanged(&pool, person.id, text, &text[..40], false).await;
+    assert!(
+        !insights::after_reply(&state, &me, chat).await,
+        "off until turned on"
+    );
+    turn_on(&app, &admin).await;
+    assert!(
+        insights::after_reply(&state, &me, chat).await,
+        "a title is on its way"
+    );
+    let labelled = settled(async || label(&pool, chat).await, |l| l.is_some()).await;
+    assert_eq!(
+        labelled,
+        Some((
+            Some("research".into()),
+            Some("Analyzing protein folding data".into()),
+            120
+        ))
+    );
+    let named = settled(async || title(&pool, chat).await, |t| t != &text[..40]).await;
+    assert_eq!(named, "Folding assay curve fit");
+    // Already labelled and named: the quiet pass and a later reply leave it alone.
+    assert_eq!(insights::tick(&state).await.unwrap(), 0);
+    assert!(!insights::after_reply(&state, &me, chat).await);
+
+    // A title the person typed stays; the chat is still labelled.
+    let typed = exchanged(
+        &pool,
+        person.id,
+        "Plot the folding curves",
+        "My curves",
+        false,
+    )
+    .await;
+    assert!(!insights::after_reply(&state, &me, typed).await);
+    assert!(settled(async || label(&pool, typed).await, |l| l.is_some())
+        .await
+        .is_some());
+    assert_eq!(title(&pool, typed).await, "My curves");
+    // A temporary chat is never read or named.
+    let temporary = exchanged(&pool, person.id, "Quick question", "Quick question", true).await;
+    assert!(!insights::after_reply(&state, &me, temporary).await);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_labels")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 2);
+
+    // Deleting a chat keeps its count and drops its topic line.
+    sqlx::query("DELETE FROM conversations WHERE id=$1")
+        .bind(chat)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let kept: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT kind, topic FROM conversation_labels WHERE owner_id=$1 AND conversation_id IS NULL",
+    )
+    .bind(person.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, (Some("research".into()), None));
+    let (status, summary) = call(
+        &app,
+        &admin,
+        "GET",
+        "/api/admin/insights?days=28",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["sessions"], 2);
+    assert_eq!(summary["tokens"], 240);
+}
+
 async fn turn_on(app: &Router, admin: &Session) {
     let (status, body) = call(
         app,
         admin,
         "PUT",
         "/api/admin/insights/settings",
-        json!({"enabled": true, "model": "judge", "reportModel": null}),
+        json!({"enabled": true, "titles": true, "model": "judge", "reportModel": null}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");

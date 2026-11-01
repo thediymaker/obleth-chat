@@ -308,7 +308,7 @@ export function createAdmin({ api, state, capabilities, render, modal, close, to
       local.banner = await api.request('/api/admin/banner', { method: 'PATCH', body });
       onBannerChanged?.(local.banner); render(); toast(local.banner.text ? 'Banner saved' : 'Banner turned off'); return;
     }
-    if (form.id === 'admin-insights-form') { await api.request('/api/admin/insights/settings', { method: 'PUT', body: { enabled: isChecked(form, 'insights-enabled'), model: getValue(form, 'insights-model').trim() || null, reportModel: getValue(form, 'insights-report-model').trim() || null } }); close(); await load(); toast('Insights saved'); return; }
+    if (form.id === 'admin-insights-form') { await api.request('/api/admin/insights/settings', { method: 'PUT', body: { enabled: isChecked(form, 'insights-enabled'), titles: isChecked(form, 'insights-titles'), model: getValue(form, 'insights-model').trim() || null, reportModel: getValue(form, 'insights-report-model').trim() || null } }); close(); await load(); toast('Insights saved'); return; }
     if (form.id === 'admin-decisions-form') { local.decisions = await api.request('/api/admin/decisions', { method: 'PATCH', body: decisionsBody(form) }); render(); toast('Decisions saved'); return; }
     if (form.id === 'admin-retention-form') {
       const body = Object.fromEntries([['conversationDays','retention-conversations'],['unusedFileDays','retention-files'],['auditDays','retention-audit']].map(([key,id]) => [key,getValue(form,id).trim() ? Number(getValue(form,id)) : null]));

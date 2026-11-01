@@ -1,9 +1,11 @@
 //! Usage insights: what kind of work people do in Chat, without keeping what they said.
-//! Once a chat has been quiet for a while, Chat asks a model about it as its owner, the
-//! way auto mode works: the kind of use, the activity, the field, what the person wanted
-//! out and a few flags, in the verdicts format, and one generic line naming the task.
-//! Only those labels are kept, never the messages. Personal chats, and chats flagged
-//! explicit or self-harm, keep no topic line. Temporary chats are never read.
+//! When a chat's first reply finishes, and again once a longer chat has been quiet for a
+//! while, Chat asks a model about it as its owner: the kind of use, the activity, the
+//! field, what the person wanted out and a few flags, in the verdicts format, and one
+//! generic line naming the task. Only those labels are kept, never the messages, and a
+//! chat keeps its labels when it is deleted, so short-lived chats still count. Personal
+//! chats, chats flagged explicit or self-harm, and deleted chats keep no topic line.
+//! Temporary chats are never read. The same pass can give a new chat a better title.
 //!
 //! Administrators see counts for a period and a group, and can have a model group the
 //! topic lines into workstreams. A group with fewer than five people shows totals only.
@@ -31,7 +33,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-/// How long a chat stays quiet before it is labelled.
+/// How long a chat that kept going stays quiet before it is labelled again.
 const QUIET_SECS: f64 = 30.0 * 60.0;
 /// Chats last active longer ago than this are left alone.
 const LOOKBACK_DAYS: i32 = 30;
@@ -39,10 +41,12 @@ const LOOKBACK_DAYS: i32 = 30;
 const BATCH: i64 = 12;
 const AT_ONCE: usize = 4;
 const CLAIM_SECS: f64 = 600.0;
-/// What the model reads: the person's messages, each one and all together capped.
+/// What the model reads: the person's first and latest messages, each one and all
+/// together capped.
 const MESSAGE_CHARS: usize = 1_500;
 const CHAT_CHARS: usize = 8_000;
 const TOPIC_CHARS: usize = 120;
+const TITLE_CHARS: usize = 80;
 /// A flag counts from this probability.
 const FLAG_AT: f64 = 0.7;
 /// A group with fewer people shows totals only, so nothing singles anyone out.
@@ -211,6 +215,8 @@ const QUESTIONS: &str = r#"{
 
 const TOPIC_PROMPT: &str = "You label AI-assistant conversations for an anonymous usage report. Reply with one line of at most 10 words that names the task as a workstream, like 'Debugging a Django data model migration' or 'Writing fan fiction crossover stories'. Be specific about the subject area and the kind of work, but never include names of people, organizations, places or products, any personal details, or quotes from the text. Reply with the line only.";
 
+const NAMES_PROMPT: &str = "You name AI-assistant conversations. Reply with JSON only: {\"title\": \"...\", \"topic\": \"...\"}. title: a short, specific title for the person's own list of chats, 3 to 8 words, in the language the person wrote in, naming what they are working on; it may name the specific thing, such as a library, a dataset or a book. topic: at most 10 words naming the task as a workstream for an anonymous usage report, like 'Debugging a Django data model migration' or 'Writing fan fiction crossover stories'; specific about the subject area and the kind of work, but with no names of people, organizations, places or products, no personal details and no quotes from the text.";
+
 const WORKSTREAMS_PROMPT: &str = "You design the workstream list for a usage report of an AI assistant. Given one-line descriptions of conversations, propose up to {max} workstreams that together cover nearly all of them. Each workstream gets a specific, plain name of 5 to 9 words in the style 'Migrating a tracking service off a legacy scheduler' or 'Writing fan fiction and crossover stories', and a one-sentence description of what belongs in it. Prefer groupings by the actual subject and kind of work over generic buckets. Reply with JSON only: [{\"name\": \"...\", \"description\": \"...\"}]";
 
 pub fn questions() -> Value {
@@ -221,12 +227,14 @@ pub fn questions() -> Value {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub enabled: bool,
+    /// Whether new chats get a title from the model.
+    pub titles: bool,
     pub model: Option<String>,
     pub report_model: Option<String>,
 }
 
 pub async fn settings(pool: &PgPool) -> Result<Settings, sqlx::Error> {
-    sqlx::query_as("SELECT enabled, model, report_model FROM insights WHERE id")
+    sqlx::query_as("SELECT enabled, titles, model, report_model FROM insights WHERE id")
         .fetch_one(pool)
         .await
 }
@@ -240,8 +248,8 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Labels quiet chats every minute while insights are on. Replicas share the work by
-/// claiming each chat before asking about it.
+/// Labels chats that went quiet after more messages, every minute while insights are on.
+/// Replicas share the work by claiming each chat before asking about it.
 pub async fn worker(s: AppState, shutdown: CancellationToken) {
     loop {
         tokio::select! {
@@ -286,19 +294,7 @@ pub async fn tick(s: &AppState) -> Result<usize, sqlx::Error> {
     .await?;
     let mut claimed = Vec::new();
     for (id, owner, last) in due {
-        let mine: Option<Uuid> = sqlx::query_scalar(
-            "INSERT INTO conversation_labels (conversation_id, owner_id, claimed_until)
-             VALUES ($1, $2, NOW() + make_interval(secs => $3))
-             ON CONFLICT (conversation_id) DO UPDATE SET claimed_until = EXCLUDED.claimed_until
-             WHERE conversation_labels.claimed_until IS NULL OR conversation_labels.claimed_until < NOW()
-             RETURNING conversation_id",
-        )
-        .bind(id)
-        .bind(owner)
-        .bind(CLAIM_SECS)
-        .fetch_optional(pool)
-        .await?;
-        if mine.is_some() {
+        if claim(pool, id, owner).await? {
             claimed.push((id, owner, last));
         }
     }
@@ -307,21 +303,18 @@ pub async fn tick(s: &AppState) -> Result<usize, sqlx::Error> {
             let gateway = gateway.clone();
             let model = model.clone();
             async move {
-                match label(pool, &gateway, &model, id, owner, last).await {
-                    Ok(()) => Ok(()),
-                    Err(Failure::Database(error)) => Err(error),
-                    Err(Failure::Answer(why)) => {
-                        tracing::info!(conversation = %id, "insights could not label a chat: {why}");
-                        sqlx::query(
-                            "UPDATE conversation_labels SET claimed_until = NULL, failed_at = NOW(), attempts = attempts + 1
-                             WHERE conversation_id = $1",
-                        )
+                let Some(user) = identity(pool, owner).await? else {
+                    // An account that is gone: the chat is passed over until it has a new
+                    // message.
+                    sqlx::query("UPDATE conversation_labels SET claimed_until = NULL, labeled_through = $2 WHERE conversation_id = $1")
                         .bind(id)
+                        .bind(last)
                         .execute(pool)
-                        .await
-                        .map(|_| ())
-                    }
-                }
+                        .await?;
+                    return Ok(());
+                };
+                let work = Work { label: true, rename: None };
+                settle(pool, id, describe(pool, &gateway, &model, id, &user, work).await).await
             }
         })
         .buffer_unordered(AT_ONCE)
@@ -333,6 +326,127 @@ pub async fn tick(s: &AppState) -> Result<usize, sqlx::Error> {
         labelled += 1;
     }
     Ok(labelled)
+}
+
+/// Claims a chat's labels for this replica; false when another one holds them.
+async fn claim(pool: &PgPool, id: Uuid, owner: Uuid) -> Result<bool, sqlx::Error> {
+    let mine: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO conversation_labels (conversation_id, owner_id, claimed_until)
+         VALUES ($1, $2, NOW() + make_interval(secs => $3))
+         ON CONFLICT (conversation_id) DO UPDATE SET claimed_until = EXCLUDED.claimed_until
+         WHERE conversation_labels.claimed_until IS NULL OR conversation_labels.claimed_until < NOW()
+         RETURNING conversation_id",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(CLAIM_SECS)
+    .fetch_optional(pool)
+    .await?;
+    Ok(mine.is_some())
+}
+
+/// Records a failed answer, so the chat is tried again later.
+async fn settle(pool: &PgPool, id: Uuid, done: Result<(), Failure>) -> Result<(), sqlx::Error> {
+    match done {
+        Ok(()) => Ok(()),
+        Err(Failure::Database(error)) => Err(error),
+        Err(Failure::Answer(why)) => {
+            tracing::info!(conversation = %id, "insights could not label a chat: {why}");
+            sqlx::query(
+                "UPDATE conversation_labels SET claimed_until = NULL, failed_at = NOW(), attempts = attempts + 1
+                 WHERE conversation_id = $1",
+            )
+            .bind(id)
+            .execute(pool)
+            .await
+            .map(|_| ())
+        }
+    }
+}
+
+/// When a reply finishes: labels a chat that has none yet, and names a chat whose first
+/// reply this is and whose title is still the start of its first message. Starts the work
+/// and returns at once; true when a new title is on its way.
+pub async fn after_reply(s: &AppState, user: &Identity, conversation: Uuid) -> bool {
+    match tokio::time::timeout(Duration::from_secs(2), start(s, user, conversation)).await {
+        Ok(Ok(pending)) => pending,
+        Ok(Err(error)) => {
+            tracing::warn!(conversation = %conversation, "insights after a reply: {error}");
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+async fn start(s: &AppState, user: &Identity, conversation: Uuid) -> Result<bool, sqlx::Error> {
+    let Some(gateway) = s.gateway.clone() else {
+        return Ok(false);
+    };
+    let pool = &s.store.pool;
+    let settings = settings(pool).await?;
+    let (Some(model), true) = (settings.model.clone(), settings.enabled || settings.titles) else {
+        return Ok(false);
+    };
+    let row: Option<(bool, String, Option<String>, bool, i64)> = sqlx::query_as(
+        "SELECT c.temporary, c.title,
+           (SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.ordinal LIMIT 1),
+           EXISTS (SELECT 1 FROM conversation_labels l WHERE l.conversation_id = c.id),
+           (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.role = 'assistant' AND m.status = 'completed')
+         FROM conversations c WHERE c.id = $1 AND c.owner_id = $2",
+    )
+    .bind(conversation)
+    .bind(user.id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((temporary, title, first, labelled, replies)) = row else {
+        return Ok(false);
+    };
+    if temporary {
+        return Ok(false);
+    }
+    let rename = (settings.titles
+        && replies == 1
+        && first
+            .as_deref()
+            .is_some_and(|first| auto_title(&title, first)))
+    .then_some(title);
+    let label = settings.enabled && !labelled && claim(pool, conversation, user.id).await?;
+    if !label && rename.is_none() {
+        return Ok(false);
+    }
+    let pending = rename.is_some();
+    let pool = pool.clone();
+    let user = user.clone();
+    tokio::spawn(async move {
+        let work = Work { label, rename };
+        let done = describe(&pool, &gateway, &model, conversation, &user, work).await;
+        let settled = if label {
+            settle(&pool, conversation, done).await
+        } else {
+            done.or_else(|f| match f {
+                Failure::Database(error) => Err(error),
+                Failure::Answer(_) => Ok(()),
+            })
+        };
+        if let Err(error) = settled {
+            tracing::warn!(conversation = %conversation, "insights after a reply: {error}");
+        }
+    });
+    Ok(pending)
+}
+
+/// Whether a title is still the one Chat gave the chat: the start of its first message.
+pub fn auto_title(title: &str, first: &str) -> bool {
+    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (title, first) = (words(title), words(first));
+    !title.is_empty() && first.starts_with(&title)
+}
+
+/// What one pass does for a chat: label it, and name it in place of `rename`, the title
+/// it had when the pass started.
+struct Work {
+    label: bool,
+    rename: Option<String>,
 }
 
 enum Failure {
@@ -390,13 +504,13 @@ impl Labels {
     }
 }
 
-async fn label(
+async fn describe(
     pool: &PgPool,
     gateway: &Gateway,
     model: &str,
     id: Uuid,
-    owner: Uuid,
-    last: DateTime<Utc>,
+    user: &Identity,
+    work: Work,
 ) -> Result<(), Failure> {
     let texts: Vec<String> = sqlx::query_scalar(
         "SELECT content FROM messages WHERE conversation_id = $1 AND role = 'user' ORDER BY ordinal",
@@ -404,62 +518,88 @@ async fn label(
     .bind(id)
     .fetch_all(pool)
     .await?;
-    let user = identity(pool, owner).await?;
-    let read = capped(&texts);
-    let (Some(user), false) = (user, read.is_empty()) else {
-        // Nothing to read, or an account that is gone: the chat is passed over until it
-        // has a new message.
-        sqlx::query("UPDATE conversation_labels SET claimed_until = NULL, labeled_through = $2 WHERE conversation_id = $1")
-            .bind(id)
-            .bind(last)
-            .execute(pool)
-            .await?;
-        return Ok(());
-    };
-    let body = json!({
-        "state": {"user_messages": read},
-        "questions": questions(),
-        "model": model,
-        "on_no_answer": "low_confidence",
-    });
-    let answer = gateway
-        .verdicts(&user, &body, Duration::from_secs(120))
-        .await
-        .map_err(|e| Failure::Answer(e.1))?;
-    let mut labels =
-        Labels::read(&answer).ok_or_else(|| Failure::Answer("the model gave no answer".into()))?;
-    if texts.iter().any(|t| has_secret(t)) {
-        labels.flags.push("secrets".into());
-    }
-    let topic = if labels.private() {
-        None
-    } else {
-        let body = json!({
-            "model": model,
-            "temperature": 0,
-            "max_tokens": 40,
-            "stream": false,
-            "messages": [
-                {"role": "system", "content": TOPIC_PROMPT},
-                {"role": "user", "content": read.join("\n\n---\n\n")},
-            ],
-        });
-        match gateway
-            .complete(&user, &body, Duration::from_secs(120))
-            .await
-        {
-            Ok(answer) => topic_line(&answer),
-            Err(e) => return Err(Failure::Answer(e.1)),
-        }
-    };
-    let tokens: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CASE WHEN jsonb_typeof(usage->'total_tokens') = 'number'
+    let (last, tokens): (Option<DateTime<Utc>>, i64) = sqlx::query_as(
+        "SELECT MAX(created_at), COALESCE(SUM(CASE WHEN jsonb_typeof(usage->'total_tokens') = 'number'
            THEN (usage->>'total_tokens')::numeric ELSE 0 END), 0)::bigint
          FROM messages WHERE conversation_id = $1",
     )
     .bind(id)
     .fetch_one(pool)
     .await?;
+    let read = capped(&texts);
+    if read.is_empty() {
+        // Nothing to read: the chat is passed over until it has a new message.
+        if work.label {
+            sqlx::query("UPDATE conversation_labels SET claimed_until = NULL, labeled_through = $2 WHERE conversation_id = $1")
+                .bind(id)
+                .bind(last)
+                .execute(pool)
+                .await?;
+        }
+        return Ok(());
+    }
+    let labels = if work.label {
+        let body = json!({
+            "state": {"user_messages": read},
+            "questions": questions(),
+            "model": model,
+            "on_no_answer": "low_confidence",
+        });
+        let answer = gateway
+            .verdicts(user, &body, Duration::from_secs(120))
+            .await
+            .map_err(|e| Failure::Answer(e.1))?;
+        let mut labels = Labels::read(&answer)
+            .ok_or_else(|| Failure::Answer("the model gave no answer".into()))?;
+        if texts.iter().any(|t| has_secret(t)) {
+            labels.flags.push("secrets".into());
+        }
+        Some(labels)
+    } else {
+        None
+    };
+    let want_topic = labels.as_ref().is_some_and(|l| !l.private());
+    let (title, topic) = if work.rename.is_some() || want_topic {
+        let prompt = if work.rename.is_some() {
+            NAMES_PROMPT
+        } else {
+            TOPIC_PROMPT
+        };
+        let body = json!({
+            "model": model,
+            "temperature": 0,
+            "max_tokens": 120,
+            "stream": false,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": read.join("\n\n---\n\n")},
+            ],
+        });
+        let answer = gateway
+            .complete(user, &body, Duration::from_secs(120))
+            .await
+            .map_err(|e| Failure::Answer(e.1))?;
+        if work.rename.is_some() {
+            names(&answer)
+        } else {
+            (None, topic_line(&answer))
+        }
+    } else {
+        (None, None)
+    };
+    if let (Some(old), Some(title)) = (&work.rename, &title) {
+        // Only while the title is still the one the pass started from: a rename wins.
+        sqlx::query("UPDATE conversations SET title = $2 WHERE id = $1 AND title = $3")
+            .bind(id)
+            .bind(title)
+            .bind(old)
+            .execute(pool)
+            .await?;
+    }
+    let Some(labels) = labels else {
+        return Ok(());
+    };
+    let topic = if want_topic { topic } else { None };
     sqlx::query(
         "UPDATE conversation_labels SET owner_id = $2, kind = $3, activity = $4, field = $5, output = $6,
            topic = $7, flags = $8, turns = $9, tokens = $10, model = $11, labeled_through = $12,
@@ -467,7 +607,7 @@ async fn label(
          WHERE conversation_id = $1",
     )
     .bind(id)
-    .bind(owner)
+    .bind(user.id)
     .bind(&labels.kind)
     .bind(&labels.activity)
     .bind(&labels.field)
@@ -500,24 +640,61 @@ async fn identity(pool: &PgPool, user: Uuid) -> Result<Option<Identity>, sqlx::E
     }))
 }
 
-/// The person's messages as the model reads them: each one, and all of them together,
-/// cut to a few thousand characters.
+/// The person's messages as the model reads them: the first one and as many of the latest
+/// as fit, in order, each one and all of them together cut to a few thousand characters.
 pub fn capped(texts: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut left = CHAT_CHARS;
-    for text in texts {
-        let text = text.trim();
-        if text.is_empty() {
-            continue;
-        }
+    let texts: Vec<&str> = texts
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let Some((first, rest)) = texts.split_first() else {
+        return Vec::new();
+    };
+    let cut = |text: &str, most: usize| text.chars().take(most).collect::<String>();
+    let first = cut(first, MESSAGE_CHARS.min(CHAT_CHARS));
+    let mut left = CHAT_CHARS - first.chars().count();
+    let mut latest = Vec::new();
+    for text in rest.iter().rev() {
         if left == 0 {
             break;
         }
-        let part: String = text.chars().take(MESSAGE_CHARS.min(left)).collect();
+        let part = cut(text, MESSAGE_CHARS.min(left));
         left -= part.chars().count();
-        out.push(part);
+        latest.push(part);
     }
-    out
+    latest.reverse();
+    std::iter::once(first).chain(latest).collect()
+}
+
+/// The title and topic line from a naming answer. A title is one line of a few words.
+pub fn names(answer: &Value) -> (Option<String>, Option<String>) {
+    let text = answer["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    let text = match text.rfind("</think>") {
+        Some(end) => &text[end + "</think>".len()..],
+        None => text,
+    };
+    let (Some(open), Some(close)) = (text.find('{'), text.rfind('}')) else {
+        return (None, None);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text[open..=close.max(open)]) else {
+        return (None, None);
+    };
+    let clean = |key: &str, most: usize| {
+        let line = value[key]
+            .as_str()?
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())?;
+        let line = line.trim_matches(|c: char| {
+            c == '"' || c == '\'' || c == '*' || c == '`' || c == '.' || c.is_whitespace()
+        });
+        let line: String = line.chars().take(most).collect();
+        (line.chars().count() >= 2).then_some(line)
+    };
+    (clean("title", TITLE_CHARS), clean("topic", TOPIC_CHARS))
 }
 
 /// The first line of a completion, without thinking, quotes or a final full stop.
@@ -788,6 +965,7 @@ async fn summary(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Patch {
     enabled: bool,
+    titles: bool,
     model: Option<String>,
     report_model: Option<String>,
 }
@@ -808,28 +986,31 @@ async fn save(
     let user = s.auth.require_admin(&headers, true).await?;
     let model = model_name(patch.model)?;
     let report_model = model_name(patch.report_model)?;
-    if patch.enabled && model.is_none() {
-        return Err(ApiError::bad("Choose the model that labels chats"));
+    if (patch.enabled || patch.titles) && model.is_none() {
+        return Err(ApiError::bad(
+            "Choose the model that labels and names chats",
+        ));
     }
-    if patch.enabled && s.gateway.is_none() {
+    if (patch.enabled || patch.titles) && s.gateway.is_none() {
         return Err(ApiError::bad(
             "Insights ask models through the gateway; connect one first",
         ));
     }
     let mut tx = s.store.pool.begin().await?;
     let saved: Settings = sqlx::query_as(
-        "UPDATE insights SET enabled = $1, model = $2, report_model = $3 WHERE id
-         RETURNING enabled, model, report_model",
+        "UPDATE insights SET enabled = $1, titles = $4, model = $2, report_model = $3 WHERE id
+         RETURNING enabled, titles, model, report_model",
     )
     .bind(patch.enabled)
     .bind(&model)
     .bind(&report_model)
+    .bind(patch.titles)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'insights.update','site',$3)")
         .bind(Uuid::new_v4())
         .bind(user.id)
-        .bind(json!({"enabled": saved.enabled, "model": saved.model, "reportModel": saved.report_model}))
+        .bind(json!({"enabled": saved.enabled, "titles": saved.titles, "model": saved.model, "reportModel": saved.report_model}))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1161,7 +1342,7 @@ fn workstreams(
             } else {
                 (
                     "Personal and unlisted chats".to_string(),
-                    "Chats about the person's own life, flagged explicit or self-harm, or without a topic line. Counted, never listed.".to_string(),
+                    "Chats about the person's own life, flagged explicit or self-harm, deleted, or without a topic line. Counted, never listed.".to_string(),
                     true,
                 )
             };
@@ -1243,16 +1424,18 @@ mod tests {
     }
 
     #[test]
-    fn the_model_reads_capped_messages() {
-        let long = "x".repeat(5_000);
+    fn the_model_reads_the_first_and_latest_messages() {
+        let long = |c: &str| c.repeat(5_000);
         let texts = vec![
             "  ".into(),
-            long.clone(),
-            long.clone(),
-            long.clone(),
-            long.clone(),
-            long.clone(),
-            long,
+            long("a"),
+            long("b"),
+            long("c"),
+            long("d"),
+            long("e"),
+            long("f"),
+            long("g"),
+            long("h"),
             "late".into(),
         ];
         let read = capped(&texts);
@@ -1261,8 +1444,47 @@ mod tests {
             read.iter().map(|t| t.chars().count()).sum::<usize>(),
             CHAT_CHARS
         );
-        assert!(!read.contains(&"late".to_string()));
+        assert!(read[0].starts_with('a'));
+        assert_eq!(read.last().unwrap(), "late");
+        assert!(
+            !read
+                .iter()
+                .any(|t| t.starts_with('b') || t.starts_with('c')),
+            "the middle is left out"
+        );
         assert_eq!(capped(&["é".repeat(10)]), vec!["é".repeat(10)]);
+        assert!(capped(&[" ".into()]).is_empty());
+    }
+
+    #[test]
+    fn names_come_from_a_json_answer() {
+        let answer = |text: &str| json!({"choices": [{"message": {"content": text}}]});
+        assert_eq!(
+            names(&answer("<think>x</think>```json\n{\"title\": \"Fix the VEHICULE reverse accessor clash.\", \"topic\": \"Debugging a Django data model migration\"}\n```")),
+            (Some("Fix the VEHICULE reverse accessor clash".into()), Some("Debugging a Django data model migration".into()))
+        );
+        assert_eq!(names(&answer("{\"title\": \"x\"}")), (None, None));
+        assert_eq!(names(&answer("no json")), (None, None));
+        assert_eq!(
+            names(&answer(&format!("{{\"title\": \"{}\"}}", "w ".repeat(100))))
+                .0
+                .unwrap()
+                .chars()
+                .count(),
+            TITLE_CHARS
+        );
+    }
+
+    #[test]
+    fn only_the_title_chat_gave_is_replaced() {
+        let first = "getting this error in make migrations in django ,  how can i fix it\ndata_model.VEHICULE";
+        assert!(auto_title(
+            "getting this error in make migrations in django , how can i fix it",
+            first
+        ));
+        assert!(!auto_title("Django migration error", first));
+        assert!(!auto_title("", first));
+        assert!(!auto_title("report.pdf", "Summarize this"));
     }
 
     #[test]

@@ -2,6 +2,25 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v0.15.0
+
+Administrators can see what kind of work people do in Chat, without Chat keeping what was said. Chat can also give new chats short titles.
+
+**New**
+
+- **Insights.** Administration has an Insights tab. For a period of 7, 28 or 90 days, and optionally one group, it shows chats, people and tokens, the kind of use (research, learning, work, personal, play, trying it out), fields, activities, what people wanted out, and counts of flagged chats.
+  - A chat is labelled when its first reply finishes, and again once a longer chat has been quiet for 30 minutes. The labelling model is asked as the chat's owner, so the tokens count as theirs. It reads the first message and the latest ones.
+  - Chat keeps only the labels, a one-line generic topic, the number of messages and the tokens. Personal chats and chats flagged explicit or self-harm keep no topic. Temporary chats are never read. A deleted chat still counts but loses its topic.
+  - Flags: harmful requests, explicit content, harassment or hate, attempts to get around a model's rules, graded coursework, self-harm, and pasted keys or passwords (found by a pattern scan, not a model). Only counts are shown.
+  - **Find workstreams** asks the workstreams model to group the period's topics, then places each chat in one. Each workstream shows its share of chats and of tokens, and opens to list its topics.
+  - A group with fewer than 5 people shows totals only and gets no workstreams.
+- **Chat titles.** With **Name new chats** on, the labelling model gives a chat a 3 to 8 word title after its first reply. It replaces only the title Chat made from the first message, never one you typed.
+- Both are off by default. Settings on the Insights tab turns them on and sets the labelling model, which must return logprobs, and an optional larger workstreams model. Changes and report requests are recorded in Activity under settings.
+
+**Upgrading**
+
+- Migration 057 adds `insights`, `conversation_labels` and `usage_reports`, with Insights and chat titles off. It runs when Chat starts.
+
 ## v0.14.2
 
 A browser that hadn't been used for a while no longer fails to start.

@@ -1,6 +1,6 @@
 {
   "name": "obleth-chat",
-  "version": "0.14.2",
+  "version": "0.15.0",
   "private": true,
   "type": "module",
   "description": "Self-hosted Obleth chat with local accounts, optional OIDC, and durable gateway conversations.",

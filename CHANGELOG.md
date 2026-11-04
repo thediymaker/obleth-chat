@@ -2,6 +2,19 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.0.2
+
+**New**
+
+- **Feedback button.** People send a problem, an idea or anything else from the sidebar. Administrators read it under Administration › Feedback › Sent feedback, filter it, mark it done, and choose whether the button shows highlighted, plainly or not at all. A sender is named only when they say they may be contacted.
+- **MCP.** `start_chat` can start the chat in a project, turn on its browser and choose which connections it may use; `get_chat` lists the latest reply's steps.
+- **Certification.** `evals/certify` holds 100 cases over Chat's workflows and a runner that scores models on them through the MCP endpoint.
+
+**Fixes**
+
+- A question at the end of a reply now shows as a question card instead of being written into the text.
+- The model offers an app only for something that answers requests, such as an assistant over documents or an API. A site for sharing files, a portal or a dashboard is built in a workspace instead.
+
 ## v1.0.1
 
 **Fixes**

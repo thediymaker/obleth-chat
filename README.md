@@ -126,6 +126,10 @@ obleth-chat runs on your own servers in front of [obleth](https://github.com/the
 
 Administrators publish models and choose who sees them, set generation defaults and daily allowances, manage accounts and groups, and can add OIDC sign-in.
 
+## The gateway
+
+Chat reaches models only through [obleth-gateway](https://github.com/thediymaker/obleth-gateway), which admits each person's requests by fair share, routes `auto`, keeps budgets and records usage per person. Run one first, or point Chat at the one you have; [Connect the gateway](https://www.obleth.com/docs/run-chat/connect-gateway) covers the entry that lets it trust Chat.
+
 ## Quick start
 
 With Docker or Podman, Chat brings its own PostgreSQL:

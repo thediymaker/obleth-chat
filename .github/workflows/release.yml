@@ -2,11 +2,13 @@ name: release
 
 # Pushing a vX.Y.Z tag publishes a release: multi-arch images of Chat, its web
 # interface (chat-ui), the workspace and the browser to GHCR, then a GitHub Release
-# with the version's CHANGELOG.md section. Prerelease tags (vX.Y.Z-rc.N) publish images without
-# moving :latest and mark the release as a prerelease.
+# with the version's CHANGELOG.md section. Prerelease tags (vX.Y.Z-rc.N) publish
+# images without moving :latest and mark the release as a prerelease. To publish a
+# tag whose push started nothing: gh workflow run release.yml --ref vX.Y.Z
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
   contents: read

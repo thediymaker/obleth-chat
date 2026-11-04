@@ -154,7 +154,7 @@ pub const APP_TOOL: &str = "suggest_app";
 
 /// Said in the system prompt while the tool is offered: from the tool list alone, models
 /// say they cannot host anything and send the person off to build a server.
-pub const APP_PROMPT: &str = "Chat can turn a project into an app: a set of steps over typed inputs (models, the project's knowledge collections, JavaScript, rules, HTTP requests) that programs call over an HTTP API with a key. When the person wants something others or other programs will use, such as a chatbot or assistant over their documents, an API for their lab, or a tool for their group, call suggest_app with a first version of its steps instead of saying you cannot host or expose it, or planning a server for them to run. Apps have no chat page yet; they answer over the API.";
+pub const APP_PROMPT: &str = "Chat can turn a project into an app: a set of steps over typed inputs (models, the project's knowledge collections, JavaScript, rules, HTTP requests) that answers one request at a time, over an HTTP API with a key and on a chat page. When the person wants something that takes a question or input and gives back an answer, for others or for other programs, such as an assistant over their documents, an API for their lab, or a tool for their group, call suggest_app with a first version of its steps instead of saying you cannot host or expose it, or planning a server for them to run. An app is not a website: it cannot list, show or hand out files, serve pages or keep what people add. For a portal, a site for sharing files or data, or a dashboard, build it in a workspace instead, and deploy it on the person's cluster only when they ask.";
 
 pub fn app_definition() -> Value {
     json!({"type":"function","function":{"name":APP_TOOL,

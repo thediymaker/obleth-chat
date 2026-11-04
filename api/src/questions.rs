@@ -10,7 +10,7 @@ const MAX_OPTIONS: usize = 6;
 
 pub fn definition() -> Value {
     json!({"type":"function","function":{"name":TOOL,
-        "description":"Ask the person one to four questions, each with a few choices, when their answer changes what you do next and you cannot reasonably assume it: which of several directions to take, a preference, or a missing detail. They pick from your options or write their own. Your reply ends with the questions, and their answers arrive as their next message. Do not ask what you can find out or decide sensibly yourself, and do not list the same options again in your text.",
+        "description":"Ask the person one to four questions, each with a few choices, when their answer changes what you do next and you cannot reasonably assume it: which of several directions to take, a preference, or a missing detail. They pick from your options or write their own. Use it also for a question at the end of a reply, after what you could already give. Your reply ends with the questions, and their answers arrive as their next message. Do not ask what you can find out or decide sensibly yourself, and do not list the same options again in your text.",
         "parameters":{"type":"object","properties":{
             "questions":{"type":"array","minItems":1,"maxItems":MAX_QUESTIONS,"items":{"type":"object","properties":{
                 "header":{"type":"string","description":"A label of one to three words, such as First task"},
@@ -104,7 +104,7 @@ pub const WORKSPACE_TOOL: &str = "request_workspace";
 
 /// Said in the system prompt whenever ask_user is offered: from the tool list alone,
 /// many models write their questions into the reply, where the person cannot pick.
-pub const ASK_PROMPT: &str = "When you need the person to choose or tell you something before you can go on well, ask with ask_user instead of writing the questions in your reply: they answer by picking an option. Ask only what changes what you do. To get a workspace, call request_workspace rather than asking.";
+pub const ASK_PROMPT: &str = "When you need the person to choose or tell you something before you can go on well, ask with ask_user instead of writing the questions in your reply: they answer by picking an option. That includes a reply that gives what it can and ends by asking which of several directions to take or for a missing detail: write the rest, then put that question and its choices in ask_user, not in the text. Ask only what changes what you do. To get a workspace, call request_workspace rather than asking.";
 /// Said in the system prompt while the tool is offered: from the tool list alone,
 /// models tell the person they cannot run code, or act out the program's output.
 pub const WORKSPACE_PROMPT: &str = "This chat has no workspace yet, so you cannot run code, open a terminal or keep files. One can be turned on: when the person wants something built, run, tested or previewed, or asks for the workspace or a terminal, call request_workspace. Do not say you are unable to run code, and never give a program's output that did not come from running it: not acted out, and not worked out by hand either, since hashes, random values and long calculations written out that way are wrong.";

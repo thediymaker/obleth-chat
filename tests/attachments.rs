@@ -1,0 +1,1437 @@
+//! Real database checks for private files, durable references, and concurrent quotas.
+use axum::{
+    body::Body,
+    http::{HeaderMap, Request, StatusCode},
+    Router,
+};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
+use http_body_util::BodyExt;
+use obleth_chat::{
+    attachments::{self, ArchivedAttachment},
+    auth::{Auth, AuthConfig},
+    files::Files,
+    AppState,
+};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use sqlx::PgPool;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+mod office;
+
+const ORIGIN: &str = "http://localhost:8085";
+const PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQq8AAAAASUVORK5CYII=";
+
+struct Session {
+    id: Uuid,
+    cookie: String,
+    csrf: String,
+}
+async fn fixture(pool: &PgPool) -> Router {
+    fixture_with(pool, attachments::Limits::default()).await
+}
+/// The app with these file limits, as the server's configuration sets them.
+async fn fixture_with(pool: &PgPool, limits: attachments::Limits) -> Router {
+    let auth = Auth::new(
+        pool.clone(),
+        AuthConfig {
+            origin: ORIGIN.into(),
+            session_hours: 12,
+            bootstrap_username: None,
+            bootstrap_password: None,
+            oidc: None,
+            login_rate_per_minute: 1000,
+            ..AuthConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    // The composed router, so handler headers are checked as the site sends them.
+    let mut state = AppState::new(auth, pool.clone(), None, 4);
+    state.store = state.store.clone().with_limits(limits);
+    obleth_chat::router(state, "branding".into())
+}
+async fn session(pool: &PgPool) -> Session {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,username,display_name)VALUES($1,$2,'File test')")
+        .bind(id)
+        .bind(format!("file_{id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    let token = URL_SAFE_NO_PAD.encode(Sha256::digest(id.as_bytes()));
+    sqlx::query("INSERT INTO auth_sessions(token_hash,user_id,expires_at)VALUES($1,$2,NOW()+INTERVAL '1 hour')")
+        .bind(Sha256::digest(token.as_bytes()).to_vec()).bind(id).execute(pool).await.unwrap();
+    let csrf = URL_SAFE_NO_PAD.encode(Sha256::digest(
+        format!("obleth-chat-csrf:{token}").as_bytes(),
+    ));
+    Session {
+        id,
+        cookie: format!("obleth_chat_session={token}"),
+        csrf,
+    }
+}
+async fn raw(
+    app: &Router,
+    user: &Session,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let result = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("origin", ORIGIN)
+                .header("cookie", &user.cookie)
+                .header("x-csrf-token", &user.csrf)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = result.status();
+    let headers = result.headers().clone();
+    let bytes = result
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+async fn call(
+    app: &Router,
+    user: &Session,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let (status, _, bytes) = raw(app, user, method, path, body).await;
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+fn text_file(name: &str, content: &[u8]) -> Value {
+    json!({"name":name,"mimeType":"text/plain","dataBase64":STANDARD.encode(content)})
+}
+async fn uploaded(app: &Router, user: &Session, body: Value) -> Uuid {
+    let (status, body) = call(app, user, "POST", "/api/attachments", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(body.get("dataBase64").is_none());
+    body["id"].as_str().unwrap().parse().unwrap()
+}
+async fn message(pool: &PgPool, owner: Uuid) -> (Uuid, Uuid) {
+    let conversation = Uuid::new_v4();
+    let message = Uuid::new_v4();
+    sqlx::query("INSERT INTO conversations(id,owner_id,title,model)VALUES($1,$2,'Files','test')")
+        .bind(conversation)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,status)VALUES($1,$2,0,'user','Read the file','completed')")
+        .bind(message).bind(conversation).execute(pool).await.unwrap();
+    (conversation, message)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn uploads_are_private_downloads_and_require_csrf(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let bob = session(&pool).await;
+    let content = b"<script>alert('text only')</script>\n";
+    let id=uploaded(&app,&alice,json!({"name":"example page.html","mimeType":"text/html","dataBase64":STANDARD.encode(content)})).await;
+    let path = format!("/api/attachments/{id}");
+    let (status, headers, bytes) = raw(&app, &alice, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, content);
+    assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
+    assert!(headers["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment;"));
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert!(headers["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .starts_with("sandbox;"));
+    assert_eq!(headers["cache-control"], "private, no-store");
+    assert_eq!(
+        call(&app, &bob, "GET", &path, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&app, &bob, "DELETE", &path, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, listed) = call(&app, &bob, "GET", "/api/attachments", Value::Null).await;
+    assert!(listed["attachments"].as_array().unwrap().is_empty());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/attachments")
+                .header("origin", ORIGIN)
+                .header("cookie", &alice.cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(text_file("a.txt", b"hello").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        call(&app, &alice, "DELETE", &path, Value::Null).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn file_types_signatures_sizes_and_names_are_validated(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let refused = [
+        text_file("../escape.txt", b"ok"),
+        text_file("x\r\nHeader.txt", b"ok"),
+        text_file("file.pdf", b"%PDF-1.7"),
+        text_file("empty.txt", b""),
+        json!({"name":"remote.txt","mimeType":"text/plain","dataBase64":"https://example.com/file"}),
+    ];
+    for body in refused {
+        assert_eq!(
+            call(&app, &alice, "POST", "/api/attachments", body).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // Anything that is not text to read whole, an image to view or a document is
+    // kept as a file, never served as what it claims to be.
+    let kept = [
+        text_file("vector.svg", b"<svg/>"),
+        text_file("binary.txt", &[0, 1, 2]),
+        text_file("latin1.txt", &[0xff]),
+        json!({"name":"x.png","mimeType":"image/png","dataBase64":STANDARD.encode(b"not an image")}),
+        json!({"name":"x.jpeg","mimeType":"image/jpeg","dataBase64":PNG}),
+        json!({"name":"x.webp","mimeType":"image/webp","dataBase64":PNG}),
+        json!({"name":"x.svg","mimeType":"image/svg+xml","dataBase64":STANDARD.encode(b"<svg/>")}),
+        json!({"name":"old.doc","mimeType":"application/msword","dataBase64":STANDARD.encode(b"\xd0\xcf\x11\xe0")}),
+        text_file("large.txt", &vec![b'x'; attachments::MAX_TEXT_BYTES + 1]),
+        json!({"name":"large.png","mimeType":"image/png","dataBase64":STANDARD.encode(vec![0;attachments::MAX_IMAGE_BYTES+1])}),
+    ];
+    for body in kept {
+        let (status, file) = call(&app, &alice, "POST", "/api/attachments", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{file}");
+        assert_eq!(file["kind"], "file", "{file}");
+        assert_eq!(file["mimeType"], "application/octet-stream");
+    }
+    let id = uploaded(
+        &app,
+        &alice,
+        json!({"name":"pixel.png","mimeType":"image/png","dataBase64":PNG}),
+    )
+    .await;
+    let (_, _, data) = raw(
+        &app,
+        &alice,
+        "GET",
+        &format!("/api/attachments/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(data, STANDARD.decode(PNG).unwrap());
+    // The route's larger body limit overrides the application's normal 128 KiB limit.
+    uploaded(
+        &app,
+        &alice,
+        text_file("large source.py", &vec![b'x'; attachments::MAX_TEXT_BYTES]),
+    )
+    .await;
+    let webp = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+    uploaded(
+        &app,
+        &alice,
+        json!({"name":"pixel.webp","mimeType":"image/webp","dataBase64":webp}),
+    )
+    .await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn simultaneous_uploads_cannot_exceed_file_or_byte_quotas(pool: PgPool) {
+    // 100 files or 50 MiB, as the server is configured.
+    let limits = attachments::Limits::new(50, Some(50), 100, false);
+    let app = fixture_with(&pool, limits).await;
+    let alice = session(&pool).await;
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)SELECT gen_random_uuid(),$1,'seed.txt','text/plain','text',1,'x'::bytea FROM generate_series(1,99)")
+        .bind(alice.id).execute(&pool).await.unwrap();
+    let (a, b) = tokio::join!(
+        call(
+            &app,
+            &alice,
+            "POST",
+            "/api/attachments",
+            text_file("a.txt", b"ok")
+        ),
+        call(
+            &app,
+            &alice,
+            "POST",
+            "/api/attachments",
+            text_file("b.txt", b"ok")
+        )
+    );
+    let mut statuses = [a.0.as_u16(), b.0.as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [201, 409]);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE owner_id=$1")
+        .bind(alice.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 100);
+    let bob = session(&pool).await;
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)SELECT gen_random_uuid(),$1,'seed.png','image/png','image',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END,REPEAT('x',5242880-CASE WHEN n=10 THEN 3 ELSE 0 END)::bytea FROM generate_series(1,10) AS g(n)")
+        .bind(bob.id).execute(&pool).await.unwrap();
+    let (a, b) = tokio::join!(
+        call(
+            &app,
+            &bob,
+            "POST",
+            "/api/attachments",
+            text_file("a.txt", b"ok")
+        ),
+        call(
+            &app,
+            &bob,
+            "POST",
+            "/api/attachments",
+            text_file("b.txt", b"ok")
+        )
+    );
+    let mut statuses = [a.0.as_u16(), b.0.as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [201, 409]);
+    let bytes: i64 =
+        sqlx::query_scalar("SELECT SUM(size)::BIGINT FROM attachments WHERE owner_id=$1")
+            .bind(bob.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(bytes, limits.quota_bytes - 1);
+    let (_, listed) = call(&app, &bob, "GET", "/api/attachments", Value::Null).await;
+    assert_eq!(listed["limits"]["maxFiles"], 100);
+    assert_eq!(listed["limits"]["maxBytes"], 50 * 1024 * 1024);
+    assert_eq!(listed["limits"]["maxFileBytes"], 50 * 1024 * 1024);
+    let (status, full) = call(
+        &app,
+        &bob,
+        "POST",
+        "/api/attachments",
+        text_file("c.txt", b"ok"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(full["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("you can keep 100 files and 50.0 MB in all"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn references_enforce_ownership_capabilities_and_safe_deletion(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let bob = session(&pool).await;
+    let text = uploaded(
+        &app,
+        &alice,
+        text_file("notes.md", b"Private UTF-8 text: \xe2\x9c\x93"),
+    )
+    .await;
+    let image = uploaded(
+        &app,
+        &alice,
+        json!({"name":"pixel.png","mimeType":"image/png","dataBase64":PNG}),
+    )
+    .await;
+    let (conversation, message) = message(&pool, alice.id).await;
+    let mut tx = pool.begin().await.unwrap();
+    assert_eq!(
+        attachments::load_owner(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            bob.id,
+            &[text],
+            true
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        attachments::load_owner(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            alice.id,
+            &[text, text],
+            true
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        attachments::load_owner(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            alice.id,
+            &[image],
+            false
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        attachments::link_message(&mut tx, bob.id, message, &[text])
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    attachments::link_message(&mut tx, alice.id, message, &[image, text])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(attachments::has_images(&pool, alice.id, conversation, &[])
+        .await
+        .unwrap());
+    assert!(
+        !attachments::has_images(&pool, bob.id, conversation, &[image])
+            .await
+            .unwrap()
+    );
+    let mut tx = pool.begin().await.unwrap();
+    assert_eq!(
+        attachments::load_messages(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            alice.id,
+            &[message],
+            false
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let files = attachments::load_messages(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &[message],
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(files[&message][0].meta.id, image);
+    assert_eq!(files[&message][1].meta.id, text);
+    assert!(files[&message][0].content_part()["image_url"]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/png;base64,"));
+    assert!(files[&message][1]
+        .text_context()
+        .unwrap()
+        .contains("Private UTF-8 text"));
+    assert_eq!(
+        files[&message][0].context_bytes(),
+        files[&message][0].content_part().to_string().len()
+    );
+    let meta = attachments::metadata_for_messages(&mut tx, alice.id, &[message])
+        .await
+        .unwrap();
+    assert!(!serde_json::to_string(&meta).unwrap().contains("dataBase64"));
+    assert!(
+        attachments::metadata_for_messages(&mut tx, bob.id, &[message])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(
+        call(
+            &app,
+            &alice,
+            "DELETE",
+            &format!("/api/attachments/{image}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("DELETE FROM conversations WHERE id=$1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            &alice,
+            "DELETE",
+            &format!("/api/attachments/{image}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn portable_archives_preserve_private_bytes_and_import_atomically(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let bob = session(&pool).await;
+    let id = uploaded(
+        &app,
+        &alice,
+        text_file("source.rs", b"fn main() { println!(\"hello\"); }\n"),
+    )
+    .await;
+    let (_, message) = message(&pool, alice.id).await;
+    let mut tx = pool.begin().await.unwrap();
+    attachments::link_message(&mut tx, alice.id, message, &[id])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let files = attachments::load_for_archive(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &[message],
+        1024,
+    )
+    .await
+    .unwrap();
+    let archive = files.files[&message][0].archive();
+    assert!(attachments::load_for_archive(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &[message],
+        10
+    )
+    .await
+    .is_err());
+    tx.commit().await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let ids = attachments::import_in(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        &attachments::Limits::default(),
+        bob.id,
+        std::slice::from_ref(&archive),
+    )
+    .await
+    .unwrap();
+    assert_ne!(ids[0], id);
+    assert_eq!(
+        attachments::import_in(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            &attachments::Limits::default(),
+            bob.id,
+            std::slice::from_ref(&archive)
+        )
+        .await
+        .unwrap(),
+        ids
+    );
+    let duplicates = attachments::import_in(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        &attachments::Limits::default(),
+        bob.id,
+        &[archive.clone(), archive.clone()],
+    )
+    .await
+    .unwrap();
+    assert_ne!(duplicates[0], duplicates[1]);
+    tx.commit().await.unwrap();
+    let (_, _, alice_bytes) = raw(
+        &app,
+        &alice,
+        "GET",
+        &format!("/api/attachments/{id}"),
+        Value::Null,
+    )
+    .await;
+    let (_, _, bob_bytes) = raw(
+        &app,
+        &bob,
+        "GET",
+        &format!("/api/attachments/{}", ids[0]),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(alice_bytes, bob_bytes);
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE owner_id=$1")
+        .bind(bob.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let new = ArchivedAttachment {
+        name: "new.txt".into(),
+        mime_type: "text/plain".into(),
+        data_base64: STANDARD.encode(b"new"),
+    };
+    let bad = ArchivedAttachment {
+        name: "../bad.txt".into(),
+        mime_type: "text/plain".into(),
+        data_base64: STANDARD.encode(b"bad"),
+    };
+    assert!(attachments::import_in(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        &attachments::Limits::default(),
+        bob.id,
+        &[new, bad]
+    )
+    .await
+    .is_err());
+    tx.rollback().await.unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE owner_id=$1")
+        .bind(bob.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    // Deferred file references allow deleting the account and all of its chats together.
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(alice.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn replayed_context_is_bounded_before_loading_file_bytes(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let id = uploaded(
+        &app,
+        &alice,
+        text_file("source.txt", &vec![b'x'; 60 * 1024]),
+    )
+    .await;
+    let (_, first) = message(&pool, alice.id).await;
+    let (_, second) = message(&pool, alice.id).await;
+    let mut tx = pool.begin().await.unwrap();
+    attachments::link_message(&mut tx, alice.id, first, &[id])
+        .await
+        .unwrap();
+    attachments::link_message(&mut tx, alice.id, second, &[id])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    assert_eq!(
+        attachments::load_messages(
+            &mut tx,
+            &Files::new(pool.clone(), None),
+            alice.id,
+            &[first, second],
+            true
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(attachments::load_for_archive(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &[first, second],
+        200 * 1024
+    )
+    .await
+    .is_ok());
+    let oversized = vec![Uuid::new_v4(); 201];
+    assert!(attachments::load_messages(
+        &mut tx,
+        &Files::new(pool.clone(), None),
+        alice.id,
+        &oversized,
+        true
+    )
+    .await
+    .is_err());
+    assert!(
+        attachments::metadata_for_messages(&mut tx, alice.id, &oversized)
+            .await
+            .is_err()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn store_branches_forks_and_archives_preserve_attached_files(pool: PgPool) {
+    use obleth_chat::store::Store;
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let bob = session(&pool).await;
+    let text = uploaded(&app, &alice, text_file("source.rs", b"fn main() {}\n")).await;
+    let image = uploaded(
+        &app,
+        &alice,
+        json!({"name":"pixel.png","mimeType":"image/png","dataBase64":PNG}),
+    )
+    .await;
+    let store = Store::new(pool.clone());
+    let chat = store
+        .create(alice.id, "Private files", "vision")
+        .await
+        .unwrap();
+    let turn = store
+        .start_turn_attached(
+            alice.id,
+            chat.id,
+            "",
+            "vision",
+            "",
+            0.7,
+            256,
+            None,
+            1.0,
+            "vision",
+            &[text, image],
+            true,
+        )
+        .await
+        .unwrap();
+    let user_message = turn.messages.last().unwrap().id;
+    assert_eq!(turn.attachments[&user_message].len(), 2);
+    store
+        .finish_turn(
+            alice.id,
+            chat.id,
+            turn.generation_id,
+            "Read both files",
+            "completed",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let saved = store.get(alice.id, chat.id).await.unwrap();
+    assert_eq!(saved.messages[0].attachments[0].id, text);
+    assert_eq!(saved.messages[0].attachments[1].id, image);
+    let serialized = serde_json::to_string(&saved).unwrap();
+    assert!(!serialized.contains("dataBase64"));
+    assert!(!serialized.contains("fn main()"));
+    // A later text-only model must reject historical images even with no new upload.
+    assert_eq!(
+        store
+            .start_turn_attached(
+                alice.id,
+                chat.id,
+                "Follow up",
+                "text",
+                "",
+                0.7,
+                256,
+                None,
+                1.0,
+                "text",
+                &[],
+                false
+            )
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        store.get(alice.id, chat.id).await.unwrap().messages.len(),
+        2
+    );
+    let branch = store
+        .branch(alice.id, chat.id, turn.assistant_id)
+        .await
+        .unwrap();
+    assert_ne!(branch.messages[0].id, user_message);
+    assert_eq!(branch.messages[0].attachments[0].id, text);
+    assert_eq!(branch.messages[0].attachments[1].id, image);
+    let regeneration = store
+        .fork_turn(alice.id, chat.id, turn.assistant_id, "regenerate", None)
+        .await
+        .unwrap();
+    assert_eq!(regeneration.attachments.len(), 2);
+    assert_eq!(regeneration.attachments[1].id, image);
+    assert!(regeneration.conversation.messages.is_empty());
+    let edited = store
+        .fork_turn(
+            alice.id,
+            chat.id,
+            user_message,
+            "edit",
+            Some("Inspect these"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.attachments[0].id, text);
+    assert_eq!(edited.draft, "Inspect these");
+    let archive = store.export(alice.id, &[chat.id]).await.unwrap();
+    let encoded = serde_json::to_value(&archive).unwrap();
+    assert_eq!(
+        encoded["conversations"][0]["messages"][0]["attachments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        encoded["conversations"][0]["messages"][0]["attachments"][1]["dataBase64"],
+        PNG
+    );
+    let imported = store.import(bob.id, archive).await.unwrap();
+    assert_eq!(imported.len(), 1);
+    let imported_chat = store.get(bob.id, imported[0].id).await.unwrap();
+    assert_eq!(imported_chat.messages[0].attachments.len(), 2);
+    let imported_image = imported_chat.messages[0].attachments[1].id;
+    assert_ne!(imported_image, image);
+    let (status, _, bytes) = raw(
+        &app,
+        &bob,
+        "GET",
+        &format!("/api/attachments/{imported_image}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, STANDARD.decode(PNG).unwrap());
+    assert_eq!(
+        call(
+            &app,
+            &alice,
+            "GET",
+            &format!("/api/attachments/{imported_image}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        store
+            .start_turn_attached(
+                bob.id,
+                imported_chat.id,
+                "Follow up",
+                "text",
+                "",
+                0.7,
+                256,
+                None,
+                1.0,
+                "text",
+                &[],
+                false
+            )
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let followup = store
+        .start_turn_attached(
+            bob.id,
+            imported_chat.id,
+            "Follow up",
+            "vision",
+            "",
+            0.7,
+            256,
+            None,
+            1.0,
+            "vision",
+            &[],
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        followup.attachments.values().map(Vec::len).sum::<usize>(),
+        2
+    );
+    store
+        .finish_turn(
+            bob.id,
+            imported_chat.id,
+            followup.generation_id,
+            "Done",
+            "completed",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn store_counts_replayed_files_and_rejects_foreign_ids_atomically(pool: PgPool) {
+    use obleth_chat::store::Store;
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let bob = session(&pool).await;
+    let large = uploaded(&app, &alice, text_file("large.txt", &vec![b'x'; 70 * 1024])).await;
+    let extra = uploaded(&app, &alice, text_file("extra.txt", &vec![b'y'; 40 * 1024])).await;
+    let foreign = uploaded(&app, &bob, text_file("foreign.txt", b"Private Bob file")).await;
+    let store = Store::new(pool.clone());
+    let chat = store
+        .create(alice.id, "Bounded files", "text")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .start_turn_attached(
+                alice.id,
+                chat.id,
+                "Inspect",
+                "text",
+                "",
+                0.7,
+                256,
+                None,
+                1.0,
+                "text",
+                &[foreign],
+                false
+            )
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert!(store
+        .get(alice.id, chat.id)
+        .await
+        .unwrap()
+        .messages
+        .is_empty());
+    let turn = store
+        .start_turn_attached(
+            alice.id,
+            chat.id,
+            "Inspect",
+            "text",
+            "",
+            0.7,
+            256,
+            None,
+            1.0,
+            "text",
+            &[large],
+            false,
+        )
+        .await
+        .unwrap();
+    store
+        .finish_turn(
+            alice.id,
+            chat.id,
+            turn.generation_id,
+            "Done",
+            "completed",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .start_turn_attached(
+                alice.id,
+                chat.id,
+                "More context",
+                "text",
+                "",
+                0.7,
+                256,
+                None,
+                1.0,
+                "text",
+                &[extra],
+                false
+            )
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let saved = store.get(alice.id, chat.id).await.unwrap();
+    assert_eq!(saved.messages.len(), 2);
+    assert_eq!(saved.messages[0].attachments.len(), 1);
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id=$1 AND status='pending'",
+    )
+    .bind(chat.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn documents_too_long_to_read_whole_are_refused_without_knowledge(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let document = |name: &str, bytes: &[u8]| json!({"name":name,"mimeType":"application/octet-stream","dataBase64":STANDARD.encode(bytes)});
+    let unzip = obleth_chat::knowledge::extract::Tools::from_env().unzip;
+    if std::process::Command::new(&unzip)
+        .arg("-v")
+        .output()
+        .is_ok()
+    {
+        let long: Vec<String> = (0..1200)
+            .map(|n| format!("Line {n} of a long report about pumps, valves and the cooling loop."))
+            .collect();
+        let (status, refused) = call(
+            &app,
+            &alice,
+            "POST",
+            "/api/attachments",
+            document("report.docx", &office::docx(&long)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("This Word file has ")
+                && message.ends_with(
+                    "of text, and Chat can read up to 75 KB of a document in a conversation. Attach a shorter part of it."
+                ),
+            "{message}"
+        );
+        // A short one is read whole and kept with its text.
+        let id = uploaded(
+            &app,
+            &alice,
+            document("memo.docx", &office::docx(&["Short memo.".into()])),
+        )
+        .await;
+        let (text, searched): (Option<String>, bool) =
+            sqlx::query_as("SELECT extracted_text, searched FROM attachments WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((text.as_deref(), searched), (Some("Short memo."), false));
+    }
+    // Documents are bounded by the configured file limit.
+    let small = fixture_with(&pool, attachments::Limits::new(1, None, 500, false)).await;
+    let (status, refused) = call(
+        &small,
+        &alice,
+        "POST",
+        "/api/attachments",
+        document("big.pdf", &vec![b'%'; 1024 * 1024 + 1]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("files can be at most 1.0 MB"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn upload_bodies_are_read_only_after_sign_in_and_within_the_limit(pool: PgPool) {
+    let app = fixture_with(&pool, attachments::Limits::new(20, None, 500, false)).await;
+    let user = session(&pool).await;
+    let big = "x".repeat(30 * 1024 * 1024);
+    let post = |cookie: Option<&str>| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/attachments")
+            .header("origin", ORIGIN)
+            .header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            request = request
+                .header("cookie", cookie)
+                .header("x-csrf-token", &user.csrf);
+        }
+        request
+            .body(Body::from(format!(r#"{{"name":"a.pdf","data":"{big}"}}"#)))
+            .unwrap()
+    };
+    // Signed out: refused before the body is read.
+    let response = app.clone().oneshot(post(None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // Signed in: the body stops at the limit, with a message that names it.
+    let response = app.clone().oneshot(post(Some(&user.cookie))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("Files can be at most 20.0 MB"),
+        "{body:?}"
+    );
+}
+
+/// A raw upload: the file's own bytes, named in the query.
+fn raw_upload(user: &Session, name: &str, body: Body) -> Request<Body> {
+    let query: String = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("name", name)
+        .finish();
+    Request::builder()
+        .method("POST")
+        .uri(format!("/api/attachments?{query}"))
+        .header("origin", ORIGIN)
+        .header("cookie", &user.cookie)
+        .header("x-csrf-token", &user.csrf)
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .unwrap()
+}
+
+async fn json_of(response: axum::response::Response) -> (StatusCode, Value) {
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn files_upload_raw_and_always_download_as_opaque_bytes(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    // A page with a script, under a name and bytes a browser would render.
+    let page = b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>";
+    let (status, file) = json_of(
+        app.clone()
+            .oneshot(raw_upload(&alice, "drawing.svg", Body::from(&page[..])))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{file}");
+    assert_eq!(file["kind"], "file");
+    let id = file["id"].as_str().unwrap();
+    // Even a row that says otherwise is served as bytes to save, never to show.
+    sqlx::query("UPDATE attachments SET mime_type='image/svg+xml' WHERE id=$1::uuid")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, headers, bytes) = raw(
+        &app,
+        &alice,
+        "GET",
+        &format!("/api/attachments/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, page);
+    assert_eq!(headers["content-type"], "application/octet-stream");
+    assert!(headers["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment;"));
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    // Images keep opening in place.
+    let image = uploaded(
+        &app,
+        &alice,
+        json!({"name":"pixel.png","mimeType":"image/png","dataBase64":PNG}),
+    )
+    .await;
+    let (_, headers, _) = raw(
+        &app,
+        &alice,
+        "GET",
+        &format!("/api/attachments/{image}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(headers["content-type"], "image/png");
+    // A raw upload needs a name.
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/attachments")
+        .header("origin", ORIGIN)
+        .header("cookie", &alice.cookie)
+        .header("x-csrf-token", &alice.csrf)
+        .header("content-type", "application/octet-stream")
+        .body(Body::from("data"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_upload_without_a_size_or_over_the_limit_is_refused_before_it_is_read(pool: PgPool) {
+    let app = fixture_with(&pool, attachments::Limits::new(1, None, 500, false)).await;
+    let alice = session(&pool).await;
+    // A body that never arrives: reading it would hang the test.
+    let never = || {
+        Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >())
+    };
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.clone().oneshot(raw_upload(&alice, "data.bin", never())),
+    )
+    .await
+    .expect("answered without reading")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::LENGTH_REQUIRED);
+    let mut request = raw_upload(&alice, "data.bin", never());
+    request
+        .headers_mut()
+        .insert("content-length", "1048577".parse().unwrap());
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.clone().oneshot(request),
+    )
+    .await
+    .expect("answered without reading")
+    .unwrap();
+    let (status, body) = json_of(response).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Files can be at most 1.0 MB"));
+    // Exactly the limit is fine.
+    let (status, file) = json_of(
+        app.clone()
+            .oneshot(raw_upload(
+                &alice,
+                "data.bin",
+                Body::from(vec![0u8; 1024 * 1024]),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{file}");
+    assert_eq!(file["size"], 1024 * 1024);
+}
+
+/// A chat's folder on this machine standing in for its workspace, noting each
+/// script's arguments.
+struct Local(
+    std::path::PathBuf,
+    std::sync::Mutex<Vec<(String, Vec<String>)>>,
+);
+
+impl obleth_chat::code::workspace::Shell for Local {
+    async fn exec(
+        &self,
+        script: &str,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<obleth_chat::code::workspace::Raw, String> {
+        use tokio::io::AsyncWriteExt;
+        self.1.lock().unwrap().push((
+            script.to_owned(),
+            args.iter().map(|a| a.to_string()).collect(),
+        ));
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .arg("sh")
+            .args(args)
+            .current_dir(&self.0)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let mut input = child.stdin.take().unwrap();
+        if let Some(data) = stdin {
+            input.write_all(data).await.map_err(|e| e.to_string())?;
+        }
+        drop(input);
+        let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
+        Ok(obleth_chat::code::workspace::Raw {
+            truncated: out.stdout.len() > limit,
+            stdout: out.stdout,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            code: out.status.code(),
+        })
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_chats_files_are_copied_into_its_workspace_once(pool: PgPool) {
+    use obleth_chat::attachments::workspace::Uploads;
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let site = office::zip(&[("index.html", "<img src=logo.png>".into())]);
+    let zip = uploaded(
+        &app,
+        &alice,
+        json!({"name":"site.zip","mimeType":"application/zip","dataBase64":STANDARD.encode(&site)}),
+    )
+    .await;
+    let image = uploaded(
+        &app,
+        &alice,
+        json!({"name":"logo.png","mimeType":"image/png","dataBase64":PNG}),
+    )
+    .await;
+    let first = uploaded(&app, &alice, text_file("data.csv", b"a,b\n1,2\n")).await;
+    let second = uploaded(&app, &alice, text_file("data.csv", b"a,b\n3,4\n5,6\n")).await;
+    // A name no upload could have, as an older or imported row might.
+    let odd = Uuid::new_v4();
+    sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data)VALUES($1,$2,$3,'text/plain','text',2,'ok'::bytea)")
+        .bind(odd).bind(alice.id).bind("../x\u{1}y.txt").execute(&pool).await.unwrap();
+    let (conversation, message) = message(&pool, alice.id).await;
+    let later = Uuid::new_v4();
+    sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,status,created_at)VALUES($1,$2,1,'user','More','completed',NOW()+INTERVAL '1 second')")
+        .bind(later).bind(conversation).execute(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    attachments::link_message(&mut tx, alice.id, message, &[zip, image, first])
+        .await
+        .unwrap();
+    attachments::link_message(&mut tx, alice.id, later, &[second, odd])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let uploads = Uploads::of(&pool, alice.id, conversation).await.unwrap();
+    assert_eq!(uploads.path(zip), Some("uploads/site.zip"));
+    assert_eq!(uploads.path(second), Some("uploads/data-2.csv"));
+    assert_eq!(uploads.path(odd), Some("uploads/.._x_y.txt"));
+    let folder = tempfile::tempdir().unwrap();
+    let shell = Local(folder.path().to_owned(), Default::default());
+    let files = Files::new(pool.clone(), None);
+    assert_eq!(uploads.copy(&shell, &pool, &files).await.unwrap(), 5);
+    let dir = folder.path().join("uploads");
+    assert_eq!(std::fs::read(dir.join("site.zip")).unwrap(), site);
+    assert_eq!(
+        std::fs::read(dir.join("logo.png")).unwrap(),
+        STANDARD.decode(PNG).unwrap()
+    );
+    assert_eq!(std::fs::read(dir.join("data.csv")).unwrap(), b"a,b\n1,2\n");
+    assert_eq!(
+        std::fs::read(dir.join("data-2.csv")).unwrap(),
+        b"a,b\n3,4\n5,6\n"
+    );
+    assert_eq!(std::fs::read(dir.join(".._x_y.txt")).unwrap(), b"ok");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 5);
+    // Names only ever travel as arguments, never inside a script.
+    for (script, args) in shell.1.lock().unwrap().iter() {
+        assert!(
+            !script.contains("site.zip") && !script.contains("data"),
+            "{script}"
+        );
+        assert!(args.len() <= 1, "{args:?}");
+    }
+    // Already there at the same size: nothing is copied again.
+    shell.1.lock().unwrap().clear();
+    assert_eq!(uploads.copy(&shell, &pool, &files).await.unwrap(), 0);
+    assert_eq!(shell.1.lock().unwrap().len(), 1);
+    // A copy that is gone or changed is put back.
+    std::fs::write(dir.join("data.csv"), b"edited").unwrap();
+    assert_eq!(uploads.copy(&shell, &pool, &files).await.unwrap(), 1);
+    assert_eq!(std::fs::read(dir.join("data.csv")).unwrap(), b"a,b\n1,2\n");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_chat_with_a_file_too_large_to_export_still_exports(pool: PgPool) {
+    use obleth_chat::store::Store;
+    let app = fixture(&pool).await;
+    let alice = session(&pool).await;
+    let notes = uploaded(&app, &alice, text_file("notes.md", b"# Notes\n")).await;
+    let (status, big) = json_of(
+        app.clone()
+            .oneshot(raw_upload(
+                &alice,
+                "weights.npy",
+                Body::from(vec![7u8; 11 * 1024 * 1024]),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{big}");
+    let big: Uuid = big["id"].as_str().unwrap().parse().unwrap();
+    let store = Store::new(pool.clone());
+    let chat = store.create(alice.id, "Model files", "text").await.unwrap();
+    let turn = store
+        .start_turn_attached(
+            alice.id,
+            chat.id,
+            "Load these",
+            "text",
+            "",
+            0.7,
+            256,
+            None,
+            1.0,
+            "text",
+            &[notes, big],
+            false,
+        )
+        .await
+        .unwrap();
+    // The model is told about the large file, not sent it.
+    let message = turn.messages.last().unwrap().id;
+    let context = turn.attachments[&message][1].text_context().unwrap();
+    assert!(context.contains("A NumPy array file."), "{context}");
+    assert!(context.len() < 2048);
+    store
+        .finish_turn(
+            alice.id,
+            chat.id,
+            turn.generation_id,
+            "Loaded",
+            "completed",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let archive = store.export(alice.id, &[chat.id]).await.unwrap();
+    assert_eq!(archive.left_out, ["weights.npy"]);
+    let message = &archive.conversations[0].messages[0];
+    assert_eq!(message.attachments.len(), 1);
+    assert_eq!(message.attachments[0].name, "notes.md");
+    assert!(message
+        .content
+        .contains("[Attached file \"weights.npy\" was left out of this export"));
+    let json = serde_json::to_value(&archive).unwrap();
+    assert_eq!(json["leftOut"], json!(["weights.npy"]));
+}

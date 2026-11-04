@@ -1,0 +1,25 @@
+# Changelog
+
+Each release's section is also its GitHub Release notes.
+
+## v1.0.0
+
+The first release of obleth-chat: a self-hosted chat app in front of the [obleth gateway](https://github.com/thediymaker/obleth-gateway), where each person signs in with their own account and every request reaches the gateway as that person.
+
+**What's in it**
+
+- **Chat.** A model or Auto, thinking effort, files and images, versions you can step through when you edit or regenerate, branches, temporary chats, read-only and live sharing, and replies that keep running on the server when the tab closes. Replies draw Markdown, math, Mermaid diagrams, molecules, SVG and CSV.
+- **Knowledge.** Collections of PDFs, Word files, HTML, Markdown and code, searched with citations that open the source at the passage.
+- **Projects.** Shared instructions, documents, notes and chats, with the project's code in one git history, exported as a zip or pushed to GitHub.
+- **Workspaces and the browser.** A private Linux pod per person where the model writes, runs and fixes an app, shown in a live preview with files, a terminal and checkpoints; and a Chrome the model drives with the person watching.
+- **Connections.** MCP servers, Slurm clusters and Kubernetes clusters as tools, acting as the person's own account. Anything that changes state waits for Allow or Deny.
+- **Research and agents.** Research mode runs an experiment tree in a project; worker agents take tasks in the background.
+- **Apps.** An administrator turns a project into an app: steps over typed inputs (Agent, Search knowledge, Code, Decide, If, For each, HTTP request, Response), laid out on a canvas, tried as a draft, then published as an API called with a key and as a chat page at `/a/<code>/<name>`. A chat can suggest an app with its first steps.
+- **Administration.** Models and who sees them, generation defaults, daily allowances, accounts and groups, usage and insights, activity, feedback, and a site banner.
+- **Sign-in.** Local accounts, OIDC, or both. With OIDC, Chat can forward each person's own access token to the gateway. Signing in returns to the page it started from.
+
+**Running it**
+
+- Two servers: the Rust server (`chat` image), which is the front door and answers every API call, and the interface server (`chat-ui` image, Next.js), which the Rust server sends every page request to through `OBLETH_CHAT_UI_URL`. Workspaces and the browser have their own images (`workspace`, `browser`).
+- `./setup.sh docker` runs both with PostgreSQL through Compose (`deploy/compose.yaml`); `./setup.sh kubernetes` runs them with workspaces (`deploy/k8s.yaml`).
+- Branding is `site.config.js` and `assets/` in the branding folder (`OBLETH_CHAT_BRANDING_DIR`, `/app/branding` in the image), which installs replace with their own.

@@ -1,0 +1,28 @@
+/* React Flow in Chat's colors, for the app builder. */
+.app-flow .react-flow {
+  --xy-background-color: transparent;
+  --xy-node-border-radius: 12px;
+  --xy-edge-stroke: var(--line-strong);
+  --xy-controls-button-background-color: var(--card);
+  --xy-controls-button-background-color-hover: var(--accent);
+  --xy-controls-button-color: var(--text-2);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: 0 1px 3px var(--shadow);
+}
+.app-flow .react-flow__node {
+  font-family: var(--font-sans);
+}
+.app-flow .react-flow__node:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+.app-flow .react-flow__controls {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.app-flow .react-flow__controls-button svg {
+  fill: currentColor;
+}

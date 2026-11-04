@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.tar.gz
+*.log
+test-results/
+.DS_Store
+target/
+.local/
+*.pem
+__pycache__/
+*.py[cod]

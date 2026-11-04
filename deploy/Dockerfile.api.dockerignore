@@ -1,0 +1,11 @@
+.git
+.local
+.env
+.env.*
+target
+node_modules
+dist
+test-results
+*.tar.gz
+*.log
+**/*.pem

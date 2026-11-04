@@ -2,7 +2,7 @@
 projects:
   reef-lab: Reef Lab
 connections:
-  kubernetes: certify-k8s
-  # The same cluster with a token that no longer works, for J06.
-  kubernetes-expired: certify-k8s-expired
+  # Any cluster connection that can read the certify namespace (rc-k8s-gaudi
+  # tools/certify/fixtures.yaml). Changes stop at Allow, so nothing is applied.
+  kubernetes: ASUAIR
   slurm: certify-slurm

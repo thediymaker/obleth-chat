@@ -12,12 +12,12 @@ sees the same prompts and tools people get. `cases.yaml` explains the checks.
 2. A project named **Reef Lab** whose collection holds the files in
    `fixtures/reef-lab/`.
 3. Connections, named as in `config.yaml`:
-   - `certify-k8s`: a Kubernetes namespace with Deployment `reef-api` (2 replicas,
-     healthy) and Deployment `reef-worker` (1 replica, crash-looping because
-     `REEF_DB_URL` is not set). Leave **Ask before changes** on.
-   - `certify-k8s-expired`: the same cluster with a token that no longer works.
-   - `certify-slurm`: a Slurm account with some job history. The submit and cancel
-     cases stop at the approval, so nothing runs.
+   - a Kubernetes connection that can read a namespace `certify` holding Deployment
+     `reef-api` (2 replicas, healthy) and Deployment `reef-worker` (1 replica,
+     crash-looping because `REEF_DB_URL` is not set), with **Ask before changes**
+     on. The cases name the namespace, so an existing connection works.
+   - a Slurm connection for an account with some job history. The submit and
+     cancel cases stop at the approval, so nothing runs.
 4. A personal API token with write scope: **Settings › Personal › API tokens**.
 
 ## Run

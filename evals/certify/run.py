@@ -102,6 +102,9 @@ def card_shown(steps, approval=False):
 
 
 def matches(pattern, tool):
+    """A tool name, "*__name" for a connection's tool, or "*__*" for any connection tool."""
+    if pattern.startswith("*") and pattern.endswith("*"):
+        return pattern[1:-1] in tool
     return tool.endswith(pattern[1:]) if pattern.startswith("*") else tool == pattern
 
 
@@ -187,8 +190,6 @@ def run_case(chat, model, case, config, args):
         arguments["browser"] = True
     if "project" in setup:
         arguments["project"] = config["projects"][setup["project"]]
-    if setup.get("token") == "expired":
-        arguments["connections"] = [config["connections"]["kubernetes-expired"]]
     record = {"id": case["id"], "area": case["area"], "model": model}
     started_at = time.time()
     try:

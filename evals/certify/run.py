@@ -33,6 +33,11 @@ WRITES = ("__apply", "__delete", "__submit", "__cancel")
 # Activity kinds that are cards the reply ends with.
 CARDS = {"question", "workspace", "research", "app", "browser-request", "approval"}
 TERMINAL = {"completed", "error", "stopped", "waiting", "idle", "failed"}
+# Errors that say the service was busy, not that the model did anything wrong: the
+# case is run again after a pause instead of failing.
+BUSY = ("stayed full", "responses at once", "Try again in a few minutes")
+ATTEMPTS = 6
+PAUSE = 90
 
 
 class Chat:
@@ -162,11 +167,24 @@ Rubric: {rubric}"""
 def judge(chat, model, case, steps, text, timeout):
     prompt = JUDGE_PROMPT.format(message=case["message"], steps=json.dumps(steps),
                                  reply=text[:12000], rubric=case["expect"]["judge"])
-    started = chat.call("start_chat", {"message": prompt, "model": model,
-                                       "title": f"certify judge {case['id']}", "connections": []})
-    verdict = reply_text(chat.wait(started["id"], timeout)).strip()
-    first = verdict.splitlines()[0].upper() if verdict else ""
-    return first.startswith("PASS"), verdict[:400]
+    for attempt in range(ATTEMPTS):
+        try:
+            started = chat.call("start_chat", {"message": prompt, "model": model,
+                                               "title": f"certify judge {case['id']}", "connections": []})
+        except RuntimeError as error:
+            if busy(str(error)) and attempt < ATTEMPTS - 1:
+                time.sleep(PAUSE)
+                continue
+            raise
+        state = chat.wait(started["id"], timeout)
+        errors = [m["error"] for m in state.get("messages", []) if m.get("error")]
+        if errors and busy(errors[-1]) and attempt < ATTEMPTS - 1:
+            time.sleep(PAUSE)
+            continue
+        verdict = reply_text(state).strip()
+        first = verdict.splitlines()[0].upper() if verdict else ""
+        return first.lstrip("*# ").startswith("PASS"), verdict[:400]
+    return False, "the judge was busy"
 
 
 def answer_for(turn, state):
@@ -182,7 +200,21 @@ def answer_for(turn, state):
     return f"{question['question']} {option['label']}"
 
 
+def busy(error):
+    return any(b in (error or "") for b in BUSY)
+
+
 def run_case(chat, model, case, config, args):
+    """Runs a case, again after a pause while the model or the account is busy."""
+    for attempt in range(1, ATTEMPTS + 1):
+        record = run_once(chat, model, case, config, args)
+        if not record.get("busy") or attempt == ATTEMPTS:
+            record["attempts"] = attempt
+            return record
+        time.sleep(PAUSE)
+
+
+def run_once(chat, model, case, config, args):
     setup = case.get("setup", {})
     arguments = {"message": case["message"], "model": model,
                  "title": f"certify {case['id']} {model}",
@@ -203,18 +235,22 @@ def run_case(chat, model, case, config, args):
             chat.call("send_message", {"id": started["id"], "message": answer_for(turn, state)})
             state = chat.wait(started["id"], args.timeout)
     except Exception as error:  # A case that could not run fails with the reason.
-        record.update(passed=False, failed=[f"could not run: {error}"], seconds=round(time.time() - started_at))
+        record.update(passed=False, failed=[f"could not run: {error}"], seconds=round(time.time() - started_at), busy=busy(str(error)))
         return record
     steps, text = state.get("steps", []), reply_text(state)
-    ran = [s["tool"] for s in steps if s.get("tool", "").endswith(WRITES) and s.get("status") not in ("awaiting", "declined")]
+    ran = [s["tool"] for s in steps if (s.get("tool") or "").endswith(WRITES) and s.get("status") not in ("awaiting", "declined")]
     if ran:
         # A change ran without stopping at Allow: the connection doesn't ask first.
         sys.exit(f"{model} {case['id']}: {ran[0]} ran without an approval. Turn on Ask before changes for that connection before running again.")
     failed = machine_checks(case["expect"], steps, text, state.get("approval", False))
     if state.get("timedOut"):
         failed.append(f"still running after {args.timeout} s")
-    if state["state"] == "failed" or any(m.get("error") for m in state.get("messages", [])):
-        failed.append("the reply failed")
+    errors = [m["error"] for m in state.get("messages", []) if m.get("error")]
+    if errors and busy(errors[-1]):
+        record.update(passed=False, failed=[f"busy: {errors[-1]}"], busy=True, seconds=round(time.time() - started_at))
+        return record
+    if state["state"] == "failed" or errors:
+        failed.append("the reply failed: " + (errors[-1] if errors else state["state"]))
     if not failed and case["expect"].get("judge"):
         judge_model = args.judge_for.get(model, args.judge)
         passed, verdict = judge(chat, judge_model, case, steps, text, args.timeout)
@@ -250,7 +286,7 @@ def main():
     parser.add_argument("--cases", help="comma-separated case ids or areas to run")
     parser.add_argument("--config", default=str(Path(__file__).with_name("config.yaml")))
     parser.add_argument("--out", default="results")
-    parser.add_argument("--parallel", type=int, default=4, help="cases at once per model")
+    parser.add_argument("--parallel", type=int, default=2, help="cases at once per model; each may also start a judge chat")
     parser.add_argument("--timeout", type=int, default=600, help="seconds a turn may run")
     args = parser.parse_args()
     args.judge_for = dict(pair.split("=", 1) for pair in args.judge_for.split(",") if pair)

@@ -2,7 +2,7 @@
 projects:
   reef-lab: Reef Lab
 connections:
-  # Any cluster connection that can read the certify namespace (rc-k8s-gaudi
+  # A cluster connection whose default namespace holds the fixture (rc-k8s-gaudi
   # tools/certify/fixtures.yaml). Changes stop at Allow, so nothing is applied.
   kubernetes: ASUAIR
-  slurm: certify-slurm
+  slurm: Sol

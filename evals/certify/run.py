@@ -27,6 +27,9 @@ import yaml
 
 # Steps Chat itself adds; they are not the model's tool calls.
 HOUSEKEEPING = {"thinking_limit", "connection", "output_limit", "check"}
+# Connection tools that change things. A case must never see one run: the cluster
+# connections must ask before changes, and the runner stops a chat at the approval.
+WRITES = ("__apply", "__delete", "__submit", "__cancel")
 # Activity kinds that are cards the reply ends with.
 CARDS = {"question", "workspace", "research", "app", "browser-request", "approval"}
 TERMINAL = {"completed", "error", "stopped", "waiting", "idle", "failed"}
@@ -203,6 +206,10 @@ def run_case(chat, model, case, config, args):
         record.update(passed=False, failed=[f"could not run: {error}"], seconds=round(time.time() - started_at))
         return record
     steps, text = state.get("steps", []), reply_text(state)
+    ran = [s["tool"] for s in steps if s.get("tool", "").endswith(WRITES) and s.get("status") not in ("awaiting", "declined")]
+    if ran:
+        # A change ran without stopping at Allow: the connection doesn't ask first.
+        sys.exit(f"{model} {case['id']}: {ran[0]} ran without an approval. Turn on Ask before changes for that connection before running again.")
     failed = machine_checks(case["expect"], steps, text, state.get("approval", False))
     if state.get("timedOut"):
         failed.append(f"still running after {args.timeout} s")

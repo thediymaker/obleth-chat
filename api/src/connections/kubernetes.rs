@@ -1,7 +1,7 @@
 //! Kubernetes with a person's own token, so the cluster's RBAC decides what they may
 //! do. Resource kinds are found through API discovery, and manifests are applied with
 //! server-side apply, as JSON or YAML.
-use super::mcp::Tool;
+use super::mcp::{self, Tool};
 use serde_json::{json, Value};
 use std::{collections::HashMap, time::Duration};
 use url::Url;
@@ -125,7 +125,9 @@ impl Client {
             None => request,
         };
         let response = request.send().await.map_err(|e| {
-            if e.is_timeout() {
+            if mcp::blocked(&e) {
+                mcp::private_refusal(self.base.host_str().unwrap_or("The cluster"))
+            } else if e.is_timeout() {
                 "The Kubernetes API did not answer in time".to_string()
             } else if e.is_connect() {
                 "Could not connect to the Kubernetes API".to_string()
@@ -186,7 +188,9 @@ impl Client {
             .send()
             .await
             .map_err(|e| {
-                if e.is_connect() {
+                if mcp::blocked(&e) {
+                    mcp::private_refusal(self.base.host_str().unwrap_or("The cluster"))
+                } else if e.is_connect() {
                     format!("Could not connect to the Kubernetes API: {e}")
                 } else {
                     format!("The Kubernetes request failed: {e}")

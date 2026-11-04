@@ -123,10 +123,16 @@ struct Row {
     options: Value,
     credential: Option<Vec<u8>>,
     credential_options: Option<Value>,
+    owner_admin: bool,
 }
 impl Row {
     fn shared(&self) -> bool {
         self.owner_id.is_none()
+    }
+    /// Shared connections, and an administrator's own, may reach private addresses:
+    /// an administrator could share the same address anyway.
+    fn private_ok(&self) -> bool {
+        self.shared() || self.owner_admin
     }
     fn can_manage(&self, user: &Identity) -> bool {
         self.owner_id == Some(user.id) || (self.shared() && user.is_admin())
@@ -169,13 +175,14 @@ impl Row {
     }
 }
 
-const SELECT: &str = "SELECT c.id,c.owner_id,c.name,c.url,c.token,c.enabled,c.confirm_actions,c.tools,c.server_name,c.checked_at,c.kind,c.options,cr.token AS credential,cr.options AS credential_options,EXISTS(SELECT 1 FROM connection_opt_outs o WHERE o.user_id=$1 AND o.connection_id=c.id) AS opted_out FROM connections c LEFT JOIN connection_credentials cr ON cr.connection_id=c.id AND cr.user_id=$1 WHERE (c.owner_id=$1 OR c.owner_id IS NULL)";
+const SELECT: &str = "SELECT c.id,c.owner_id,c.name,c.url,c.token,c.enabled,c.confirm_actions,c.tools,c.server_name,c.checked_at,c.kind,c.options,cr.token AS credential,cr.options AS credential_options,EXISTS(SELECT 1 FROM connection_opt_outs o WHERE o.user_id=$1 AND o.connection_id=c.id) AS opted_out,EXISTS(SELECT 1 FROM users u WHERE u.id=c.owner_id AND u.role='admin') AS owner_admin FROM connections c LEFT JOIN connection_credentials cr ON cr.connection_id=c.id AND cr.user_id=$1 WHERE (c.owner_id=$1 OR c.owner_id IS NULL)";
 
 /// What a Slurm or Kubernetes client is built from.
 struct Access<'a> {
     kind: Kind,
     url: &'a Url,
-    shared: bool,
+    /// May reach private addresses.
+    private: bool,
     ca: Option<&'a str>,
     /// The Slurm REST API version set on the cluster.
     api_version: Option<&'a str>,
@@ -380,8 +387,8 @@ impl Connections {
         String::from_utf8(plain).ok()
     }
 
-    fn client(&self, shared: bool) -> reqwest::Client {
-        if shared {
+    fn client(&self, private: bool) -> reqwest::Client {
+        if private {
             self.clients.any.clone()
         } else {
             self.clients.public.clone()
@@ -391,14 +398,14 @@ impl Connections {
     fn native(&self, access: Access) -> Result<Native, String> {
         Ok(match access.kind {
             Kind::Slurm => Native::Slurm(slurm::Client::new(
-                self.client(access.shared),
+                self.client(access.private),
                 access.url.clone(),
                 access.user,
                 access.token,
                 access.api_version.map(str::to_owned),
             )),
             Kind::Kubernetes => {
-                let http = mcp::client(access.shared || self.private_allowed, access.ca)
+                let http = mcp::client(access.private || self.private_allowed, access.ca)
                     .map_err(|_| "The CA certificate could not be read".to_string())?;
                 Native::Kubernetes(kubernetes::Client::new(
                     http,
@@ -417,7 +424,7 @@ impl Connections {
         self.native(Access {
             kind: row.kind(),
             url,
-            shared: row.shared(),
+            private: row.private_ok(),
             ca: row.options["ca"].as_str(),
             api_version: row.options["apiVersion"].as_str(),
             token,
@@ -434,10 +441,10 @@ impl Connections {
         url: &Url,
         token: Option<String>,
         options: &Value,
-        shared: bool,
+        private: bool,
     ) -> Result<Checked, String> {
         if kind == Kind::Mcp {
-            let mut session = mcp::Session::open(self.client(shared), url.clone(), token).await?;
+            let mut session = mcp::Session::open(self.client(private), url.clone(), token).await?;
             let tools = session.list_tools().await;
             let server_name = session.server_name.clone();
             session.close().await;
@@ -454,7 +461,7 @@ impl Connections {
         let native = self.native(Access {
             kind,
             url,
-            shared,
+            private,
             ca: options["ca"].as_str(),
             api_version: options["apiVersion"].as_str(),
             token: token.clone().unwrap_or_default(),
@@ -563,7 +570,7 @@ impl Connections {
                     Backend::Mcp {
                         url,
                         token,
-                        client: self.client(row.shared()),
+                        client: self.client(row.private_ok()),
                         session: None,
                     },
                     String::new(),
@@ -1206,8 +1213,9 @@ async fn create(
     }
     let mut options = clean_options(kind, &body.options, !body.shared)?;
     output_possible(&connections, &options)?;
-    let url = mcp::check_url(&body.url, body.shared || connections.private_allowed)
-        .map_err(ApiError::bad)?;
+    let private = body.shared || user.is_admin();
+    let url =
+        mcp::check_url(&body.url, private || connections.private_allowed).map_err(ApiError::bad)?;
     let owner = (!body.shared).then_some(user.id);
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM connections WHERE owner_id IS NOT DISTINCT FROM $1",
@@ -1221,7 +1229,7 @@ async fn create(
         )));
     }
     let checked = connections
-        .check(kind, &url, token.clone(), &options, body.shared)
+        .check(kind, &url, token.clone(), &options, private)
         .await
         .map_err(unreachable_server)?;
     if kind == Kind::Kubernetes && !body.shared {
@@ -1315,7 +1323,7 @@ async fn update(
             .transpose()?
             .unwrap_or(row.name.clone());
         let url = match &body.url {
-            Some(raw) => mcp::check_url(raw, row.shared() || connections.private_allowed)
+            Some(raw) => mcp::check_url(raw, row.private_ok() || connections.private_allowed)
                 .map_err(ApiError::bad)?,
             None => Url::parse(&row.url).map_err(|_| ApiError::internal())?,
         };
@@ -1355,7 +1363,7 @@ async fn update(
         let probed = url.as_str() != row.url || body.token.is_some() || body.options.is_some();
         if probed {
             let checked = connections
-                .check(kind, &url, token.clone(), &options, row.shared())
+                .check(kind, &url, token.clone(), &options, row.private_ok())
                 .await
                 .map_err(unreachable_server)?;
             tools = Value::Array(checked.tools.iter().map(mcp::Tool::to_json).collect());
@@ -1409,7 +1417,7 @@ async fn refresh(
         None => None,
     };
     let checked = connections
-        .check(row.kind(), &url, token, &row.options, row.shared())
+        .check(row.kind(), &url, token, &row.options, row.private_ok())
         .await
         .map_err(unreachable_server)?;
     sqlx::query("UPDATE connections SET tools=$2,server_name=$3,checked_at=NOW() WHERE id=$1")

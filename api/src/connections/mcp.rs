@@ -517,14 +517,27 @@ fn check_status(response: &reqwest::Response) -> Result<(), String> {
     })
 }
 
-fn describe(error: &reqwest::Error, url: &Url) -> String {
-    let host = url.host_str().unwrap_or("the server");
+/// Whether the request was refused because its host is on a private network.
+pub(crate) fn blocked(error: &reqwest::Error) -> bool {
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
         if cause.downcast_ref::<Blocked>().is_some() {
-            return format!("{host} resolves to a private address, which connections cannot reach");
+            return true;
         }
         source = cause.source();
+    }
+    false
+}
+
+/// Why a host on a private network was refused.
+pub(crate) fn private_refusal(host: &str) -> String {
+    format!("{host} resolves to a private address, which only a connection an administrator adds can reach")
+}
+
+fn describe(error: &reqwest::Error, url: &Url) -> String {
+    let host = url.host_str().unwrap_or("the server");
+    if blocked(error) {
+        return private_refusal(host);
     }
     if error.is_timeout() {
         format!("{host} did not answer in time")

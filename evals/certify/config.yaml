@@ -1,0 +1,8 @@
+# Names of the fixtures in the test account, as run.py passes them to start_chat.
+projects:
+  reef-lab: Reef Lab
+connections:
+  kubernetes: certify-k8s
+  # The same cluster with a token that no longer works, for J06.
+  kubernetes-expired: certify-k8s-expired
+  slurm: certify-slurm

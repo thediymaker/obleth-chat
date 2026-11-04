@@ -125,7 +125,10 @@ fn tools(token: &TokenUser) -> Vec<Value> {
                     "message":{"type":"string","description":"The first message, as the person would write it"},
                     "title":{"type":"string","description":"A title; the start of the message by default"},
                     "model":{"type":"string","description":"A model id from list_models; the person's default model otherwise"},
-                    "workspace":{"type":"boolean","description":"Turn on the chat's workspace first, for building and running code"}},
+                    "workspace":{"type":"boolean","description":"Turn on the chat's workspace first, for building and running code"},
+                    "project":{"type":"string","description":"The id or name of one of the person's projects to start the chat in"},
+                    "browser":{"type":"boolean","description":"Turn on the chat's browser"},
+                    "connections":{"type":"array","items":{"type":"string"},"description":"The names of the only connections the chat may use; all of the person's connections otherwise"}},
                     "required":["message"],"additionalProperties":false},
                 "annotations":{"readOnlyHint":false,"destructiveHint":false}}),
             json!({"name":"send_message","title":"Send a message","description":"Send the next message in a chat that is not running, such as an answer to its questions. Returns at once; check on it with get_chat.",
@@ -260,10 +263,16 @@ async fn get_chat(s: &AppState, user: &Identity, args: &Value) -> Result<Value, 
     } else {
         last.map(|m| m.status.as_str()).unwrap_or("idle")
     };
+    // Each step of the latest reply, in order: the tool it called or the card it showed.
+    let steps: Vec<Value> = activity
+        .iter()
+        .filter(|e| e.get("tool").is_some() || e.get("kind").is_some())
+        .map(|e| json!({"tool":e.get("tool"),"kind":e.get("kind"),"status":e.get("status")}))
+        .collect();
     Ok(json!({
         "id": chat.id, "title": chat.title, "model": chat.model, "url": link(s, chat.id),
         "state": state, "now": now, "waitingFor": waiting, "messages": messages,
-        "messageCount": chat.messages.len(),
+        "messageCount": chat.messages.len(), "steps": steps,
     }))
 }
 
@@ -300,7 +309,10 @@ async fn start_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Val
         .store
         .create_with_effort(user.id, &title, &model, preferences.reasoning_effort)
         .await?;
-    let started = begin(s, token, chat.id, content, model, args, &preferences).await;
+    let started = match prepare(s, user, chat.id, args).await {
+        Ok(()) => begin(s, token, chat.id, content, model, args, &preferences).await,
+        Err(error) => Err(error),
+    };
     if let Err(error) = started {
         // A chat that could not start is not left behind empty.
         let _ = sqlx::query(
@@ -315,6 +327,66 @@ async fn start_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Val
     }
     audit(s, token, "mcp_chat_started", chat.id).await?;
     Ok(json!({"id":chat.id,"title":chat.title,"url":link(s, chat.id),"state":"running"}))
+}
+
+/// Sets up a new chat as the person would before sending: its project, its browser,
+/// and which of their connections it may use.
+async fn prepare(s: &AppState, user: &Identity, id: Uuid, args: &Value) -> Result<(), ApiError> {
+    let pool = &s.store.pool;
+    if let Some(project) = args["project"]
+        .as_str()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let found: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM projects WHERE owner_id=$1 AND (id::text=$2 OR name=$2) ORDER BY id::text=$2 DESC LIMIT 1",
+        )
+        .bind(user.id)
+        .bind(project)
+        .fetch_optional(pool)
+        .await?;
+        let project =
+            found.ok_or_else(|| ApiError::bad("No project of yours has that id or name"))?;
+        sqlx::query("UPDATE conversations SET project_id=$3 WHERE id=$1 AND owner_id=$2")
+            .bind(id)
+            .bind(user.id)
+            .bind(project)
+            .execute(pool)
+            .await?;
+    }
+    if args["browser"].as_bool() == Some(true) {
+        let browsers = s
+            .browsers
+            .as_ref()
+            .filter(|b| b.allowed(user))
+            .ok_or_else(|| ApiError::bad("The browser is not available to this account"))?;
+        browsers.set_on(user.id, id, true).await?;
+    }
+    if let Some(names) = args.get("connections").filter(|v| !v.is_null()) {
+        let names: Vec<String> = serde_json::from_value(names.clone())
+            .map_err(|_| ApiError::bad("connections is a list of connection names"))?;
+        let known: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT name) FROM connections WHERE (owner_id=$1 OR owner_id IS NULL) AND name=ANY($2)",
+        )
+        .bind(user.id)
+        .bind(&names)
+        .fetch_one(pool)
+        .await?;
+        if known as usize != names.iter().collect::<std::collections::HashSet<_>>().len() {
+            return Err(ApiError::bad("A named connection is not one of yours"));
+        }
+        sqlx::query(
+            "INSERT INTO conversation_connections_off(conversation_id,connection_id) \
+             SELECT $1,id FROM connections WHERE (owner_id=$2 OR owner_id IS NULL) AND NOT name=ANY($3) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(user.id)
+        .bind(&names)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn send_message(s: &AppState, token: &TokenUser, args: &Value) -> Result<Value, ApiError> {

@@ -4,6 +4,7 @@ import { PanelLeft, Search } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ChromeProvider, useChrome } from "@/components/app-shell/chrome";
+import { FeedbackDialog } from "@/components/app-shell/feedback-dialog";
 import { Sidebar } from "@/components/app-shell/sidebar";
 import { ChatDialogs } from "@/components/chat/chat-dialogs";
 import { NEW_CHAT_EVENT, OPEN_SEARCH_EVENT } from "@/components/chat/chat-provider";
@@ -30,6 +31,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function Frame({ children }: { children: React.ReactNode }) {
   const [drawer, setDrawer] = useState(false);
   const [search, setSearch] = useState(false);
+  const [feedback, setFeedback] = useState(false);
   const router = useRouter();
   const path = usePathname();
   const { title, actions, crumb } = useChrome();
@@ -71,12 +73,12 @@ function Frame({ children }: { children: React.ReactNode }) {
         Skip to content
       </a>
       <div className={cn("hidden", !focus && "min-[761px]:flex")}>
-        <Sidebar onSearch={() => setSearch(true)} />
+        <Sidebar onSearch={() => setSearch(true)} onFeedback={() => setFeedback(true)} />
       </div>
       <Sheet open={drawer} onOpenChange={setDrawer}>
         <SheetContent side="left" className="w-56 p-0">
           <SheetTitle className="sr-only">Navigation</SheetTitle>
-          <Sidebar onNavigate={() => setDrawer(false)} onSearch={() => setSearch(true)} />
+          <Sidebar onNavigate={() => setDrawer(false)} onSearch={() => setSearch(true)} onFeedback={() => setFeedback(true)} />
         </SheetContent>
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">
@@ -107,6 +109,7 @@ function Frame({ children }: { children: React.ReactNode }) {
         <StatusBar />
       </div>
       <SearchDialog open={search} onOpenChange={setSearch} />
+      <FeedbackDialog open={feedback} onOpenChange={setFeedback} />
       <ChatDialogs />
     </div>
   );

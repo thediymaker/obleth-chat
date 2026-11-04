@@ -24,6 +24,8 @@ export interface Capabilities {
   mode: "connected" | "preview";
   liveExecution?: boolean;
   adminGatewayUrl?: string;
+  /** How the sidebar shows the Feedback button. */
+  feedback?: "off" | "sidebar" | "highlighted";
   integrations?: Record<string, { configured: boolean }>;
   features: {
     knowledge?: boolean;

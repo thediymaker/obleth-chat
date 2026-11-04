@@ -1,6 +1,6 @@
 "use client";
 
-import { Bookmark, ChevronDown, ChevronRight, Folder, LogOut, MessageSquare, MoreHorizontal, Plus, Search, Server, Settings, Users } from "lucide-react";
+import { Bookmark, ChevronDown, ChevronRight, Folder, LogOut, MessageSquare, MessageSquarePlus, MoreHorizontal, Plus, Search, Server, Settings, Users } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Brand } from "@/components/brand";
@@ -32,7 +32,7 @@ export function sectionOf(path: string): string {
   return first;
 }
 
-export function Sidebar({ onNavigate, onSearch }: { onNavigate?: () => void; onSearch: () => void }) {
+export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () => void; onSearch: () => void; onFeedback: () => void }) {
   const path = usePathname();
   const router = useRouter();
   const user = useUser();
@@ -53,6 +53,12 @@ export function Sidebar({ onNavigate, onSearch }: { onNavigate?: () => void; onS
   const chatId = path.startsWith("/chat/") ? decodeURIComponent(path.split("/")[2] ?? "") : "";
   const projectId = path.startsWith("/projects/") ? decodeURIComponent(path.split("/")[2] ?? "") : "";
   const settingsOn = path.startsWith("/settings");
+  // Administration › Feedback sets how the button shows; highlighted suits a site in development.
+  const feedback = capabilities?.feedback ?? "off";
+  const openFeedback = () => {
+    onNavigate?.();
+    onFeedback();
+  };
   return (
     // 224px (208px up to 1200px wide), 8px gutters, the brand bar as tall as the top bar.
     <aside aria-label="Main navigation" className="flex h-full w-56 shrink-0 flex-col border-r leading-[normal] border-sidebar-border bg-sidebar px-2 text-sidebar-foreground max-[1200px]:w-52">
@@ -144,6 +150,28 @@ export function Sidebar({ onNavigate, onSearch }: { onNavigate?: () => void; onS
         </div>
       </div>
       <div className="grid border-t border-sidebar-border pt-2">
+        {feedback === "highlighted" && (
+          <button
+            type="button"
+            onClick={openFeedback}
+            className="mb-2 flex items-center gap-2.5 rounded-md border border-line-strong bg-secondary px-3 py-2 text-left leading-[normal] text-foreground transition-colors hover:bg-sidebar-accent"
+          >
+            <MessageSquarePlus className="size-4 shrink-0" />
+            <span className="min-w-0">
+              <span className="block text-base font-medium">Send feedback</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">Report a problem or share an idea</span>
+            </span>
+          </button>
+        )}
+        {feedback === "sidebar" && (
+          <button
+            type="button"
+            onClick={openFeedback}
+            className="flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-base leading-[normal] text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+          >
+            <MessageSquarePlus className="size-4 opacity-80" /> Feedback
+          </button>
+        )}
         <Link
           href="/settings"
           onClick={onNavigate}

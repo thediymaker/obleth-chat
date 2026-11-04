@@ -29,6 +29,7 @@ pub mod research;
 pub mod retention;
 pub mod sandbox;
 pub mod secrets;
+pub mod sent_feedback;
 pub mod shares;
 pub mod steer;
 pub mod store;
@@ -128,6 +129,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let embedding = knowledge::embedding::router(state.clone());
     let decisions = decisions::router(state.clone());
     let feedback = feedback::router(state.clone());
+    let sent_feedback = sent_feedback::router(state.clone());
     let insights = insights::router(state.clone());
     let workspace_usage = workspace_usage::router(state.clone());
     let apps = apps::router(state.clone());
@@ -187,6 +189,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(embedding)
         .merge(decisions)
         .merge(feedback)
+        .merge(sent_feedback)
         .merge(insights)
         .merge(workspace_usage)
         .merge(apps)
@@ -325,6 +328,13 @@ async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Val
     value["features"]["browser"] = json!(match (&s.browsers, &user) {
         (Some(b), Some(user)) => b.allowed(user),
         _ => false,
+    });
+    // How the sidebar shows the Feedback button: off, sidebar or highlighted.
+    value["feedback"] = json!(match &user {
+        Some(_) => sent_feedback::mode(&s.store.pool)
+            .await
+            .unwrap_or_else(|_| "sidebar".into()),
+        None => "off".into(),
     });
     Json(value)
 }

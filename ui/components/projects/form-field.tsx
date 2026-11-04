@@ -72,7 +72,7 @@ export function Confirm({
           <AlertDialogCancel disabled={busy}>{cancel}</AlertDialogCancel>
           <AlertDialogAction
             disabled={busy}
-            className={destructive ? "bg-destructive text-white hover:bg-destructive/90" : undefined}
+            variant={destructive ? "destructive" : "default"}
             onClick={async (event) => {
               event.preventDefault();
               setBusy(true);

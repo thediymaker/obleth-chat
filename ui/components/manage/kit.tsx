@@ -330,7 +330,7 @@ export function useConfirm() {
           <AlertDialogCancel disabled={busy}>{pending?.cancel || "Cancel"}</AlertDialogCancel>
           <AlertDialogAction
             disabled={busy}
-            className={cn(pending?.tone !== "default" && "bg-destructive text-white hover:bg-destructive/90")}
+            variant={pending?.tone !== "default" ? "destructive" : "default"}
             onClick={async (event) => {
               event.preventDefault();
               const p = current.current;

@@ -2,6 +2,13 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.0.1
+
+**Fixes**
+
+- A workspace or browser that was starting when Chat restarted no longer shows Starting for good. Chat now settles a start that is overdue: running if its pod came up, otherwise an error with Start again.
+- The workspace page keeps checking a starting workspace when one check fails, as while Chat restarts, instead of waiting on Starting.
+
 ## v1.0.0
 
 The first release of obleth-chat: a self-hosted chat app in front of the [obleth gateway](https://github.com/thediymaker/obleth-gateway), where each person signs in with their own account and every request reaches the gateway as that person.

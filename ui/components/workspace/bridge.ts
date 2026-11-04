@@ -166,6 +166,9 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
       watch(id);
     } catch {
       space.loaded = true;
+      // A check that fails, as while Chat restarts, is tried again: a workspace that
+      // is starting keeps its status until Chat says it runs or could not start.
+      watch(id);
     }
     changed();
   }

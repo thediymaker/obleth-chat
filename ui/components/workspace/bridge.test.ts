@@ -211,6 +211,28 @@ describe("the workspace bridge", () => {
     }
   });
 
+  it("keeps checking a starting workspace when a check fails", async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      const api = {
+        request: vi.fn(async () => {
+          n++;
+          if (n === 2) throw new Error("The web interface is not available right now.");
+          return { workspace: { status: n < 4 ? "starting" : "running", previewPort: 3000 } };
+        }),
+      };
+      const bridge = createWorkspaceBridge({ api, enabled: () => true, changed: () => {}, showTab: () => {}, viewing: () => true });
+      await bridge.load("c1");
+      for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(2000);
+      // Starting, a failed check, starting, then running: it got there.
+      expect(api.request).toHaveBeenCalledTimes(4);
+      expect(bridge.space("c1").workspace?.status).toBe("running");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("deletes a workspace", async () => {
     const { bridge, calls } = setup(() => ({ workspace: running }));
     await bridge.load("c1");

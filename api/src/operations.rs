@@ -40,7 +40,7 @@ impl Default for Limits {
         Self {
             daily_requests: None,
             daily_tokens: None,
-            concurrent_requests: 3,
+            concurrent_requests: 12,
         }
     }
 }

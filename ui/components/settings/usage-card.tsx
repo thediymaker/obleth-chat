@@ -139,7 +139,7 @@ export function UsageCard({ usage, models }: { usage: OwnUsage; models: Model[] 
           <Eyebrow className="mt-2">Today’s allowance</Eyebrow>
           <Allowance label="Requests" used={today.requests} limit={limits.dailyRequests} />
           <Allowance label="Tokens" used={today.totalTokens} limit={limits.dailyTokens} value={Number(today.totalTokens || 0) + Number(today.reservedTokens || 0)} />
-          <Allowance label="At once" used={today.activeGenerations} limit={limits.concurrentRequests || 3} />
+          <Allowance label="At once" used={today.activeGenerations} limit={limits.concurrentRequests || 12} />
         </div>
       </div>
       <Note>

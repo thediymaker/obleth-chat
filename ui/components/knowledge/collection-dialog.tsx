@@ -17,8 +17,21 @@ import { count } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { type CollectionDetail, collectionPath, knowledgeKeys, refreshKnowledge, type Scope, useCollections } from "./api";
 
-/** New collection, or Edit with Delete. */
-export function CollectionDialog({ open, onOpenChange, detail }: { open: boolean; onOpenChange: (open: boolean) => void; detail?: CollectionDetail }) {
+/** New collection, or Edit with Delete. A new one opens its page, or goes to `onCreated`
+ * when given, as from a project, with `name` to start from. */
+export function CollectionDialog({
+  open,
+  onOpenChange,
+  detail,
+  name: startName = "",
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  detail?: CollectionDetail;
+  name?: string;
+  onCreated?: (id: string) => void | Promise<void>;
+}) {
   const router = useRouter();
   const client = useQueryClient();
   const { isAdmin } = useSession();
@@ -35,7 +48,7 @@ export function CollectionDialog({ open, onOpenChange, detail }: { open: boolean
 
   useEffect(() => {
     if (!open) return;
-    setName(c?.name ?? "");
+    setName(c?.name ?? startName);
     setDescription(c?.description ?? "");
     setScope(c?.scope ?? "personal");
     setGroup("");
@@ -66,6 +79,7 @@ export function CollectionDialog({ open, onOpenChange, detail }: { open: boolean
       onOpenChange(false);
       refreshKnowledge(client, c?.id);
       if (c) toast("Collection saved");
+      else if (onCreated) await onCreated(r.collection.id);
       else {
         router.push(`/knowledge/${encodeURIComponent(r.collection.id)}`);
         toast("Collection created. Add documents next.");

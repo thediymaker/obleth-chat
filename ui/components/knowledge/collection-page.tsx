@@ -36,6 +36,7 @@ import {
   scopeLabel,
   type SearchResult,
   size,
+  uploadDocument,
   useCollection,
   useCollections,
 } from "./api";
@@ -227,7 +228,7 @@ function Documents({ detail, maxFileBytes }: { detail: CollectionDetail; maxFile
       }
       setUploading((u) => [...u, file.name]);
       try {
-        await api.request(`${collectionPath(c.id)}/documents?name=${encodeURIComponent(file.name)}`, { method: "POST", raw: file, contentType: file.type || "application/octet-stream" });
+        await uploadDocument(c.id, file);
       } catch (e) {
         if ((e as Error).name !== "AbortError") toast(`${file.name}: ${messageOf(e)}`);
       } finally {

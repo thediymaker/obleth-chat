@@ -13,6 +13,8 @@ import { toast } from "sonner";
 import { moveChatToResearchProject } from "./api";
 import { applyChatDraft, chatDraft } from "./chat-draft";
 import { ProjectContextSection } from "./chat-project";
+import { CollectionsPicker } from "./collections-picker";
+import { Confirm } from "./form-field";
 import { ProjectDialog } from "./project-dialog";
 
 const request = api.request as unknown as ReturnType<typeof vi.fn>;
@@ -107,5 +109,35 @@ describe("the chat's Context panel", () => {
     wrap(<ProjectContextSection conversationId="c1" />);
     expect(await screen.findByText(/Move this chat into a project/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Move to project" })).toBeInTheDocument();
+  });
+});
+
+describe("a project's collections", () => {
+  it("makes a new collection named after the project and turns it on there", async () => {
+    request.mockImplementation(async (path: string, options: { method?: string; body?: unknown } = {}) => {
+      calls.push([options.method || "GET", path, options.body]);
+      if (path === "/api/knowledge/collections" && options.method === "POST") return { collection: { id: "c9" } };
+      if (path === "/api/knowledge/collections") return { collections: [], groups: [] };
+      return {};
+    });
+    const detail = { project: project("p1", "Reef Lab"), collections: [{ id: "c1", name: "Protocols", documents: 2 }], chats: [], saved: [], app: null };
+    wrap(<CollectionsPicker open onOpenChange={() => {}} detail={detail as never} />);
+    expect(await screen.findByText("No collections yet")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "New collection" }));
+    const name = await screen.findByLabelText("Name");
+    expect(name).toHaveValue("Reef Lab");
+    await userEvent.click(screen.getByRole("button", { name: "Create collection" }));
+    await waitFor(() => expect(calls).toContainEqual(["PUT", "/api/projects/p1/collections", { collectionIds: ["c1", "c9"] }]));
+    expect(calls).toContainEqual(["POST", "/api/knowledge/collections", { name: "Reef Lab", description: "", scope: "personal" }]);
+    expect(push).not.toHaveBeenCalled();
+  });
+});
+
+describe("a confirmation that deletes", () => {
+  it("shows its button in the destructive colors, not the default ones", async () => {
+    wrap(<Confirm open onOpenChange={() => {}} title="Delete this project?" text="Gone for good." confirm="Delete project" cancel="Keep project" onConfirm={() => {}} />);
+    const button = await screen.findByRole("button", { name: "Delete project" });
+    expect(button.className).toMatch(/bg-destructive/);
+    expect(button.className).not.toMatch(/bg-primary/);
   });
 });

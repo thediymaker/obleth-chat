@@ -70,6 +70,9 @@ export const fileUrl = (id: string, page?: number | null) => `/api/knowledge/doc
 export const busy = (d: Pick<KnowledgeDocument, "status">) => d.status === "queued" || d.status === "processing";
 export const scopeLabel = (c: Pick<Collection, "scope" | "groupName">) => (c.scope === "everyone" ? "Everyone" : c.scope === "group" ? c.groupName || "Group" : "Personal");
 export const collectionPath = (id: string) => `/api/knowledge/collections/${encodeURIComponent(id)}`;
+/** Adds one file to a collection; it is indexed in the background. */
+export const uploadDocument = (collectionId: string, file: File) =>
+  api.request(`${collectionPath(collectionId)}/documents?name=${encodeURIComponent(file.name)}`, { method: "POST", raw: file, contentType: file.type || "application/octet-stream" });
 
 export const knowledgeKeys = {
   list: ["knowledge", "collections"] as const,

@@ -4,9 +4,9 @@
 // collections its chats search and who can see it.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Bookmark, ChevronRight, MessageSquare, Pin, Plus } from "lucide-react";
+import { BookOpen, Bookmark, ChevronRight, MessageSquare, Pin, Plus, Upload } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Eyebrow } from "@/components/app-shell/page";
 import { kindLabel, kindOf, refreshSaved, savedPath } from "@/components/library/api";
@@ -14,11 +14,12 @@ import { useLibraryDialogs } from "@/components/library/saved-dialogs";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { count, initials, when } from "@/lib/format";
-import { useFeature } from "@/lib/queries";
+import { keys, useFeature } from "@/lib/queries";
 import { useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import type { SavedSummary } from "./api";
-import { CollectionsPicker } from "./collections-picker";
+import { ACCEPT, DEFAULT_MAX_FILE, refreshKnowledge, size, uploadDocument, useCollections } from "@/components/knowledge/api";
+import { CollectionsPicker, NewProjectCollection } from "./collections-picker";
 import { messageOf } from "./form-field";
 import { useProjectFrame } from "./project-frame";
 import { useRouter } from "next/navigation";
@@ -81,6 +82,11 @@ export function ProjectOverview() {
   const knowledge = useFeature("knowledge");
   const library = useLibraryDialogs();
   const [picking, setPicking] = useState(false);
+  const [making, setMaking] = useState(false);
+  // Documents go only into the person's own collections.
+  const { data: collections } = useCollections(mine && knowledge);
+  const owned = new Set((collections?.collections ?? []).filter((c) => c.mine).map((c) => c.id));
+  const maxFileBytes = collections?.maxFileBytes ?? DEFAULT_MAX_FILE;
 
   async function pin(item: SavedSummary) {
     try {
@@ -165,11 +171,12 @@ export function ProjectOverview() {
       <div className="grid gap-1">
         {d.collections.map((c) => (
           <div key={c.id} className="flex items-center gap-2 text-md">
-            <BookOpen className="size-4 text-muted-foreground" />
+            <BookOpen className="size-4 shrink-0 text-muted-foreground" />
             <Link href={`/knowledge/${encodeURIComponent(c.id)}`} className="grow truncate hover:underline">
               {c.name}
             </Link>
             <span className="text-xs text-faint">{count(c.documents, "doc")}</span>
+            {mine && knowledge && owned.has(c.id) && <AddDocuments collection={c} projectId={p.id} maxFileBytes={maxFileBytes} />}
           </div>
         ))}
         {knowledge && (
@@ -182,9 +189,14 @@ export function ProjectOverview() {
         {!d.collections.length && !knowledge && <Note>Just the instructions.</Note>}
       </div>
       {mine && knowledge && (
-        <Button variant="outline" size="sm" className="justify-self-start" onClick={() => setPicking(true)}>
-          <BookOpen /> Choose collections
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={() => setPicking(true)}>
+            <BookOpen /> Choose collections
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setMaking(true)}>
+            <Plus /> New collection
+          </Button>
+        </div>
       )}
     </Section>
   );
@@ -223,6 +235,53 @@ export function ProjectOverview() {
       </div>
       {library.element}
       {mine && knowledge && <CollectionsPicker open={picking} onOpenChange={setPicking} detail={d} />}
+      {mine && knowledge && <NewProjectCollection open={making} onOpenChange={setMaking} detail={d} />}
     </div>
+  );
+}
+
+/** Uploads files straight into one of the project's collections. */
+function AddDocuments({ collection, projectId, maxFileBytes }: { collection: { id: string; name: string }; projectId: string; maxFileBytes: number }) {
+  const client = useQueryClient();
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  async function add(files: File[]) {
+    setBusy(true);
+    let added = 0;
+    for (const file of files) {
+      if (file.size > maxFileBytes) {
+        toast(`${file.name} is larger than ${size(maxFileBytes)}.`);
+        continue;
+      }
+      try {
+        await uploadDocument(collection.id, file);
+        added++;
+      } catch (e) {
+        toast(`${file.name}: ${messageOf(e)}`);
+      }
+    }
+    setBusy(false);
+    refreshKnowledge(client, collection.id);
+    await client.invalidateQueries({ queryKey: keys.project(projectId) });
+    if (added) toast(`Added ${count(added, "document")} to ${collection.name}. Chats can search ${added === 1 ? "it" : "them"} once indexed.`);
+  }
+  return (
+    <>
+      <Button variant="outline" size="xs" aria-label={`Add documents to ${collection.name}`} disabled={busy} onClick={() => input.current?.click()}>
+        <Upload /> {busy ? "Adding…" : "Add"}
+      </Button>
+      <input
+        ref={input}
+        type="file"
+        multiple
+        accept={ACCEPT}
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length) add(files);
+        }}
+      />
+    </>
   );
 }

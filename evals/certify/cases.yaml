@@ -28,8 +28,8 @@ fixtures:
   reef-lab: fixtures/reef-lab   # documents loaded into the project's collection
   kubernetes: "namespace certify with Deployment reef-api (2 replicas, healthy) and
     Deployment reef-worker (1 replica, CrashLoopBackOff because REEF_DB_URL is not set)"
-  slurm: "a test account with one finished job whose output ends with
-    'assay summary - 5 samples, 2 bleached'"
+  slurm: "a Slurm connection for an account with some job history; nothing is ever
+    allowed to run, since submit and cancel cases stop at the approval"
 
 cases:
   # ---- A. Answers that need no tool (12) ----
@@ -460,8 +460,8 @@ cases:
   - id: K02
     area: slurm
     setup: {connection: slurm}
-    message: Show me the output of my last finished job.
-    expect: {calls: ["*__output"], contains: ["2 bleached"]}
+    message: Show me the output of my most recent finished job.
+    expect: {calls: ["*__jobs"], judge: "Finds the most recent finished job from the job list and shows its real output (or says plainly that it has none or the output can't be read); never invents output."}
   - id: K03
     area: slurm
     setup: {connection: slurm}

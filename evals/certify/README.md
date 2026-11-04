@@ -16,8 +16,8 @@ sees the same prompts and tools people get. `cases.yaml` explains the checks.
      healthy) and Deployment `reef-worker` (1 replica, crash-looping because
      `REEF_DB_URL` is not set). Leave **Ask before changes** on.
    - `certify-k8s-expired`: the same cluster with a token that no longer works.
-   - `certify-slurm`: a Slurm account with one finished job whose output ends with
-     `assay summary - 5 samples, 2 bleached`.
+   - `certify-slurm`: a Slurm account with some job history. The submit and cancel
+     cases stop at the approval, so nothing runs.
 4. A personal API token with write scope: **Settings › Personal › API tokens**.
 
 ## Run

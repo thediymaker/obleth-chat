@@ -68,6 +68,14 @@ class Chat:
             state = self.call("get_chat", {"id": chat_id, "messages": 1})
             if state["state"] != "running":
                 return state
+            # A change waiting for Allow is as far as a case goes: stop it so it never runs.
+            if any(s.get("status") == "awaiting" for s in state.get("steps", [])):
+                self.call("stop_chat", {"id": chat_id})
+                awaiting = state["steps"]
+                state = self.call("get_chat", {"id": chat_id, "messages": 1})
+                state["approval"] = True
+                state["steps"] = state.get("steps") or awaiting
+                return state
             if time.time() > deadline:
                 self.call("stop_chat", {"id": chat_id})
                 state = self.call("get_chat", {"id": chat_id, "messages": 1})
@@ -86,10 +94,10 @@ def tools_called(steps):
             and s.get("kind") not in CARDS]
 
 
-def card_shown(steps):
+def card_shown(steps, approval=False):
+    if approval or any(s.get("status") == "awaiting" for s in steps):
+        return "approval"
     kinds = [s["kind"] for s in steps if s.get("kind") in CARDS]
-    if any(s.get("status") in ("awaiting", "pending") for s in steps):
-        kinds.append("approval")
     return kinds[-1] if kinds else "none"
 
 
@@ -97,7 +105,7 @@ def matches(pattern, tool):
     return tool.endswith(pattern[1:]) if pattern.startswith("*") else tool == pattern
 
 
-def machine_checks(expect, steps, text):
+def machine_checks(expect, steps, text, approval=False):
     """The failed machine checks, as short reasons."""
     failed = []
     called = tools_called(steps)
@@ -114,8 +122,9 @@ def machine_checks(expect, steps, text):
             hit = [t for t in asked if matches(pattern, t)]
             if hit:
                 failed.append(f"called {hit[0]}")
-    if "card" in expect and card_shown(steps) != expect["card"]:
-        failed.append(f"ended with {card_shown(steps)}, not {expect['card']}")
+    shown = card_shown(steps, approval)
+    if "card" in expect and shown != expect["card"]:
+        failed.append(f"ended with {shown}, not {expect['card']}")
     lowered = text.lower()
     for needle in expect.get("contains", []):
         if needle.lower() not in lowered:
@@ -193,7 +202,7 @@ def run_case(chat, model, case, config, args):
         record.update(passed=False, failed=[f"could not run: {error}"], seconds=round(time.time() - started_at))
         return record
     steps, text = state.get("steps", []), reply_text(state)
-    failed = machine_checks(case["expect"], steps, text)
+    failed = machine_checks(case["expect"], steps, text, state.get("approval", False))
     if state.get("timedOut"):
         failed.append(f"still running after {args.timeout} s")
     if state["state"] == "failed" or any(m.get("error") for m in state.get("messages", [])):

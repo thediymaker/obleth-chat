@@ -199,6 +199,9 @@ fn new_slug() -> String {
 const SELECT: &str = "SELECT s.id,s.conversation_id,s.owner_id,s.slug,s.pod_id,p.slug AS pod_slug,p.status,p.pod_ip,s.port,s.preview_port,p.error_message,p.disk_bytes,s.created_at,s.last_used_at FROM sandboxes s JOIN sandbox_pods p ON p.id=s.pod_id";
 /// How often a running workspace's disk use is measured.
 const DISK_CHECK: Duration = Duration::from_secs(5 * 60);
+/// A start still recorded as starting this long after it began lost its replica
+/// (a start gives up within four minutes), and the reconciler settles it.
+pub(crate) const START_OVERDUE: Duration = Duration::from_secs(5 * 60);
 /// Dev servers of projects unused this long are stopped; the pod keeps running.
 const SERVER_IDLE: Duration = Duration::from_secs(30 * 60);
 /// How long a confirmed pod address is trusted before the API server is asked again.
@@ -630,7 +633,7 @@ impl Sandboxes {
                 PodState::Pending => {}
             }
         }
-        sqlx::query("UPDATE sandbox_pods SET status='starting',error_message=NULL WHERE id=$1 AND status<>'starting'")
+        sqlx::query("UPDATE sandbox_pods SET status='starting',error_message=NULL,starting_since=NOW() WHERE id=$1")
             .bind(sandbox.pod_id)
             .execute(&self.inner.pool)
             .await?;
@@ -833,7 +836,8 @@ impl Sandboxes {
 
     /// One replica at a time: stop idle dev servers and idle pods (keeping their
     /// volumes), remove volumes past retention, measure disks, mark records stopped
-    /// whose pod is gone or moved, and delete cluster objects whose pod record no
+    /// whose pod is gone or moved, settle starts whose replica stopped before they
+    /// finished, and delete cluster objects whose pod record no
     /// longer exists. The transaction only holds the lock: writes go through the pool
     /// and commit at once, because `stop_stale` and the pod check update the same rows
     /// on other connections and would otherwise wait on this transaction for good.
@@ -890,6 +894,27 @@ impl Sandboxes {
         }
         if let Err(error) = self.stop_stale().await {
             tracing::warn!("could not check workspace pods: {error:#}");
+        }
+        let overdue: Vec<(Uuid, String)> = sqlx::query_as("SELECT id,slug FROM sandbox_pods WHERE status='starting' AND starting_since<NOW()-make_interval(secs=>$1)")
+            .bind(START_OVERDUE.as_secs() as f64).fetch_all(&mut *tx).await?;
+        for (id, slug) in overdue {
+            let pod = kube.get("pods", &pod_name(&slug)).await?;
+            // Only a record still overdue is settled, so a start begun since is left alone.
+            let ready = match pod.as_ref().map(pod_state) {
+                Some(PodState::Ready(ip)) => Some(ip),
+                _ => None,
+            };
+            let settle = sqlx::query(if ready.is_some() {
+                "UPDATE sandbox_pods SET status='running',pod_ip=$3,error_message=NULL WHERE id=$1 AND status='starting' AND starting_since<NOW()-make_interval(secs=>$2)"
+            } else {
+                "UPDATE sandbox_pods SET status='error',error_message='Chat restarted while the workspace was starting. Start it again.' WHERE id=$1 AND status='starting' AND starting_since<NOW()-make_interval(secs=>$2)"
+            })
+            .bind(id)
+            .bind(START_OVERDUE.as_secs() as f64);
+            match ready {
+                Some(ip) => settle.bind(ip).execute(pool).await?,
+                None => settle.execute(pool).await?,
+            };
         }
         let known: Vec<String> = sqlx::query_scalar("SELECT slug FROM sandbox_pods")
             .fetch_all(&mut *tx)

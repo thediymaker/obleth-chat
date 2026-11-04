@@ -12,7 +12,7 @@ use crate::{
     error::ApiError,
     sandbox::{
         create_pod, kube::Kube, pod_state, quantity_bytes, release_image, waiting_reason, PodState,
-        SandboxConfig, SLOTS_FULL,
+        SandboxConfig, SLOTS_FULL, START_OVERDUE,
     },
     AppState,
 };
@@ -337,7 +337,7 @@ impl Browsers {
         }
         // The idle sweep stops 'starting' browsers not used for a while; a browser
         // last used hours ago would otherwise be stopped while its pod starts.
-        sqlx::query("UPDATE browsers SET status='starting',error_message=NULL,last_used_at=NOW() WHERE id=$1")
+        sqlx::query("UPDATE browsers SET status='starting',error_message=NULL,starting_since=NOW(),last_used_at=NOW() WHERE id=$1")
             .bind(browser.id)
             .execute(&self.inner.pool)
             .await?;
@@ -585,7 +585,8 @@ impl Browsers {
     }
 
     /// One replica at a time: stop idle browsers, delete profiles unused past the
-    /// workspace retention, and remove pods and volumes nobody owns.
+    /// workspace retention, settle starts whose replica stopped before they finished,
+    /// and remove pods and volumes nobody owns.
     async fn reconcile(&self) -> Result<()> {
         let pool = &self.inner.pool;
         let mut tx = pool.begin().await?;
@@ -615,6 +616,31 @@ impl Browsers {
         .await?;
         for browser in idle {
             self.sleep(&browser).await?;
+        }
+        let overdue = sqlx::query_as::<_, Browser>(&format!(
+            "{BROWSER} WHERE status='starting' AND starting_since<NOW()-make_interval(secs=>$1)"
+        ))
+        .bind(START_OVERDUE.as_secs() as f64)
+        .fetch_all(&mut *tx)
+        .await?;
+        for browser in overdue {
+            let pod = kube.get("pods", &pod_name(&browser.slug)).await?;
+            // Only a record still overdue is settled, so a start begun since is left alone.
+            let ready = match pod.as_ref().map(pod_state) {
+                Some(PodState::Ready(ip)) => Some(ip),
+                _ => None,
+            };
+            let settle = sqlx::query(if ready.is_some() {
+                "UPDATE browsers SET status='running',pod_ip=$3,error_message=NULL WHERE id=$1 AND status='starting' AND starting_since<NOW()-make_interval(secs=>$2)"
+            } else {
+                "UPDATE browsers SET status='error',error_message='Chat restarted while the browser was starting. Try again.' WHERE id=$1 AND status='starting' AND starting_since<NOW()-make_interval(secs=>$2)"
+            })
+            .bind(browser.id)
+            .bind(START_OVERDUE.as_secs() as f64);
+            match ready {
+                Some(ip) => settle.bind(ip).execute(pool).await?,
+                None => settle.execute(pool).await?,
+            };
         }
         let known: Vec<String> = sqlx::query_scalar("SELECT slug FROM browsers")
             .fetch_all(&mut *tx)

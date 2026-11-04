@@ -2,6 +2,18 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.0.3
+
+**New**
+
+- **Collections from a project.** A project's page and its collections picker have **New collection**, which makes a collection named after the project and turns it on there. **Add** next to one of your own collections uploads documents straight into it.
+- **Administrators' connections.** An administrator's own connections may reach internal addresses, as shared ones already may. A connection refused for a private address now says so instead of "Could not connect".
+
+**Fixes**
+
+- A long title no longer widens a dialog past its frame.
+- Delete buttons in confirmations show in red; the default button colors no longer override them.
+
 ## v1.0.2
 
 **New**

@@ -5,7 +5,8 @@ Each results folder holds <model>.jsonl files from run.py. A later folder's reco
 the same model and case replaces an earlier one, so a rerun of a few cases can be
 layered over a full run. Every record's machine checks are applied again from the
 case file. A record that now passes them but was never judged (the old checks failed
-it first) is judged with --rejudge, from its saved steps and reply.
+it first) is judged with --rejudge, from its saved steps and reply. --rejudge-cases
+judges every record of the cases named again, for a rubric that changed.
 
 Writes the merged records and summary.md to --out, and rerun.json: per model, the cases
 that could not run, timed out or ran into a busy service, to run again.
@@ -30,15 +31,17 @@ def main():
     parser.add_argument("--judge", help="the model that grades rubrics, for --rejudge")
     parser.add_argument("--judge-for", default="", help="model=judge pairs")
     parser.add_argument("--rejudge", action="store_true", help="judge records the old checks stopped before judging")
+    parser.add_argument("--rejudge-cases", default="", help="cases whose rubric changed: judge all their records again")
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
     judge_for = dict(pair.split("=", 1) for pair in args.judge_for.split(",") if pair)
+    again = set(filter(None, args.rejudge_cases.split(",")))
     cases = {c["id"]: c for c in yaml.safe_load((Path(__file__).parent / args.suite).read_text())["cases"]}
     chat = None
-    if args.rejudge:
+    if args.rejudge or again:
         token = os.environ.get("CERTIFY_TOKEN") or sys.exit("Set CERTIFY_TOKEN to a Chat API token")
         if not (args.base and args.judge):
-            sys.exit("--rejudge needs --base and --judge")
+            sys.exit("judging needs --base and --judge")
         chat = run.Chat(args.base, token)
 
     merged = {}
@@ -62,9 +65,9 @@ def main():
             rerun.setdefault(model, []).append(case_id)
         rubric = case["expect"].get("judge")
         verdict = record.get("judge")
-        if verdict and verdict["verdict"] == "the judge was busy":
+        if verdict and (verdict["verdict"] == "the judge was busy" or case_id in again):
             verdict = None
-        if not failed and rubric and not verdict and chat:
+        if not failed and rubric and not verdict and chat:  # with --rejudge or --rejudge-cases
             judge_model = judge_for.get(model, args.judge)
             passed, text = run.judge(chat, judge_model, case, record["steps"], record.get("reply") or "", args.timeout,
                                      record.get("cards", ()), record.get("sent", ()))

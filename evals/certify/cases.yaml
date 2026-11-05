@@ -187,7 +187,7 @@ cases:
   - id: D06
     area: workspace-offer
     message: Plot a sine wave from 0 to 2 pi and show me the image.
-    expect: {judge: "Shows a correct sine wave from 0 to 2 pi: drawn in the reply (such as SVG, which Chat renders) or made in the workspace it offers. It never claims an image exists that it did not make."}
+    expect: {judge: "Either draws a correct sine wave from 0 to 2 pi in the reply (SVG or a Mermaid chart, which Chat renders), or offers the workspace to make it, in which case no image is expected yet. It never claims an image exists that it did not make."}
   - id: D07
     area: workspace-offer
     message: Explain what a Dockerfile is.

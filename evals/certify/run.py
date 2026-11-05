@@ -13,10 +13,13 @@ fixtures (see README.md). Only the standard library and PyYAML are needed.
 """
 import argparse
 import concurrent.futures
+import contextlib
+import fcntl
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -41,6 +44,11 @@ PAUSE = 90
 # A token may make 120 calls a minute; with 28 cases running, checking each chat
 # this often stays under that.
 POLL = 20
+# An account's workspace chats share one pod and its browser chats one browser, each
+# with a memory limit, so across every run on this box only this many such cases run
+# at once. A case marked heavy (big data or long computation) has the workspace alone.
+LIMITS = {"workspace": 6, "browser": 2}
+LOCKS = Path(tempfile.gettempdir()) / "obleth-certify-slots"
 
 
 class Chat:
@@ -292,13 +300,45 @@ def run_case(chat, model, case, config, args):
         time.sleep(PAUSE)
 
 
+@contextlib.contextmanager
+def slot(kind, alone=False):
+    """Holds one of the box's slots for a kind of case, or all of them when alone."""
+    if not kind:
+        yield
+        return
+    LOCKS.mkdir(exist_ok=True)
+    files = [open(LOCKS / f"{kind}-{i}", "w") for i in range(LIMITS[kind])]
+    try:
+        if alone:
+            for f in files:
+                fcntl.flock(f, fcntl.LOCK_EX)
+        else:
+            while not any(take(f) for f in files):
+                time.sleep(5)
+        yield
+    finally:
+        for f in files:
+            f.close()
+
+
+def take(f):
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
 def run_once(chat, model, case, config, args):
     started = {}
-    try:
-        return run_turns(chat, model, case, config, args, started)
-    finally:
-        if not started.get("keep"):
-            chat.discard(started.get("id"))
+    setup = case.get("setup", {})
+    kind = "workspace" if setup.get("workspace") else "browser" if setup.get("browser") else None
+    with slot(kind, alone=case.get("heavy", False)):
+        try:
+            return run_turns(chat, model, case, config, args, started)
+        finally:
+            if not started.get("keep"):
+                chat.discard(started.get("id"))
 
 
 def run_turns(chat, model, case, config, args, started):

@@ -212,30 +212,35 @@ cases:
   # ---- Many measured tries: offer a research project, and only then (7) ----
   - id: P45
     area: research-offer
+    heavy: true
     setup: {workspace: true}
     message: can you try a bunch of learning rate and batch size combos for my small CNN on CIFAR-10 and find what gives the best accuracy
     turns: ["pick:1"]
     expect: {calls: [suggest_research], card: research}
   - id: P46
     area: research-offer
+    heavy: true
     setup: {workspace: true}
     message: write a little json parser in pure python, then make it as fast as it can possibly get - keep trying stuff until it stops improving
     turns: ["pick:1"]
     expect: {calls: [suggest_research], card: research}
   - id: P47
     area: research-offer
+    heavy: true
     setup: {workspace: true}
     message: whats the fastest way to sum 100 million floats in python on this box? numpy, numba, plain loops, whatever - time them all and keep going until nothing beats the best
     turns: ["pick:1"]
     expect: {calls: [suggest_research], card: research}
   - id: P48
     area: research-offer
+    heavy: true
     setup: {workspace: true}
     message: make a 50 MB file of fake sensor readings, then leave something running overnight that keeps trying to get it to compress smaller
     turns: ["pick:1"]
     expect: {calls: [suggest_research], card: research}
   - id: P49
     area: research-offer
+    heavy: true
     setup: {workspace: true}
     message: build a sqlite db with a million fake orders and a slow query for each customer's monthly total, then try different indexes and rewrites, time each one, and keep the fastest
     turns: ["pick:1"]

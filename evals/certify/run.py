@@ -220,11 +220,25 @@ picked with a click; the card can be the whole reply): {cards}
 Rubric: {rubric}"""
 
 
+MESSAGE_LIMIT = 12000
+
+
+def shorten(text, size):
+    """Text cut to size, keeping its start and end."""
+    if len(text) <= size:
+        return text
+    cut = "\n[... cut ...]\n"
+    half = max(size - len(cut), 0) // 2
+    return text[:half] + cut + text[len(text) - half:]
+
+
 def judge(chat, model, case, steps, text, timeout, cards=(), sent=()):
     later = "".join(f"\nThen the person sent:\n<<<\n{m}\n>>>\n" for m in sent)
-    prompt = JUDGE_PROMPT.format(message=case["message"], later=later, steps=json.dumps(steps),
-                                 reply=text[:12000], cards=json.dumps(list(cards)) if cards else "none",
-                                 rubric=case["expect"]["judge"])
+    fields = dict(message=case["message"], later=later, steps=shorten(json.dumps(steps), 3000),
+                  cards=shorten(json.dumps(list(cards)), 2000) if cards else "none", rubric=case["expect"]["judge"])
+    # Chat takes messages of up to 12,000 characters; the reply gets what the rest leaves.
+    room = MESSAGE_LIMIT - len(JUDGE_PROMPT.format(reply="", **fields))
+    prompt = JUDGE_PROMPT.format(reply=shorten(text, room), **fields)
     for attempt in range(ATTEMPTS):
         try:
             started = chat.call("start_chat", {"message": prompt, "model": model,

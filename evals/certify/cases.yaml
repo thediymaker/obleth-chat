@@ -6,8 +6,8 @@
 # and text; `judge` is a rubric a judge model grades pass or fail on the final reply.
 #
 # Fields
-#   heavy:    true when the work can take most of the workspace's memory; the runner
-#             gives such a case the workspace alone
+#   heavy:    true when the work can take much of the workspace's memory; the runner
+#             runs only a few such cases at once
 #   setup:    what the chat starts with
 #     workspace: true     the chat's workspace is on
 #     project: reef-lab   the chat is in the fixture project, with its collection

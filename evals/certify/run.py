@@ -46,8 +46,8 @@ PAUSE = 90
 POLL = 20
 # An account's workspace chats share one pod and its browser chats one browser, each
 # with a memory limit, so across every run on this box only this many such cases run
-# at once. A case marked heavy (big data or long computation) has the workspace alone.
-LIMITS = {"workspace": 6, "browser": 2}
+# at once. Cases marked heavy (big data or long computation) have their own few.
+LIMITS = {"workspace": 8, "heavy": 3, "browser": 2}
 LOCKS = Path(tempfile.gettempdir()) / "obleth-certify-slots"
 
 
@@ -301,20 +301,16 @@ def run_case(chat, model, case, config, args):
 
 
 @contextlib.contextmanager
-def slot(kind, alone=False):
-    """Holds one of the box's slots for a kind of case, or all of them when alone."""
+def slot(kind):
+    """Holds one of the box's slots for a kind of case while it runs."""
     if not kind:
         yield
         return
     LOCKS.mkdir(exist_ok=True)
     files = [open(LOCKS / f"{kind}-{i}", "w") for i in range(LIMITS[kind])]
     try:
-        if alone:
-            for f in files:
-                fcntl.flock(f, fcntl.LOCK_EX)
-        else:
-            while not any(take(f) for f in files):
-                time.sleep(5)
+        while not any(take(f) for f in files):
+            time.sleep(5)
         yield
     finally:
         for f in files:
@@ -332,10 +328,14 @@ def take(f):
 def run_once(chat, model, case, config, args):
     started = {}
     setup = case.get("setup", {})
-    kind = "workspace" if setup.get("workspace") else "browser" if setup.get("browser") else None
-    with slot(kind, alone=case.get("heavy", False)):
+    kind = "browser" if setup.get("browser") else None
+    if setup.get("workspace"):
+        kind = "heavy" if case.get("heavy") else "workspace"
+    with slot(kind):
+        began = time.time()
         try:
-            return run_turns(chat, model, case, config, args, started)
+            # When it ran, so a failure can be matched against the pods' restarts.
+            return dict(run_turns(chat, model, case, config, args, started), ran=[round(began), round(time.time())])
         finally:
             if not started.get("keep"):
                 chat.discard(started.get("id"))

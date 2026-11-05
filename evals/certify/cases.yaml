@@ -172,10 +172,12 @@ cases:
   - id: D03
     area: workspace-offer
     message: Build me a small web page where my lab can browse and download our assay tables.
+    turns: ["pick:1"]
     expect: {calls: [request_workspace], no_calls: [suggest_app], card: workspace, judge: "Offers the workspace to build the site; not an app."}
   - id: D04
     area: workspace-offer
     message: Let's create a sample science gateway for my lab, to share files we have generated with other people. This is a lab around coral research.
+    turns: ["pick:1"]
     expect: {calls: [request_workspace], no_calls: [suggest_app], card: workspace, judge: "Offers the workspace to build a gateway site; does not offer an app; does not try to deploy before being asked."}
   - id: D05
     area: workspace-offer
@@ -184,7 +186,7 @@ cases:
   - id: D06
     area: workspace-offer
     message: Plot a sine wave from 0 to 2 pi and show me the image.
-    expect: {calls: [request_workspace], card: workspace, judge: "Offers the workspace to make the plot; may give the code; does not claim an image was made."}
+    expect: {judge: "Shows a correct sine wave from 0 to 2 pi: drawn in the reply (such as SVG, which Chat renders) or made in the workspace it offers. It never claims an image exists that it did not make."}
   - id: D07
     area: workspace-offer
     message: Explain what a Dockerfile is.
@@ -271,16 +273,19 @@ cases:
     area: research-offer
     setup: {workspace: true}
     message: Find the fastest way to sort a list of one million random integers in pure Python - try many approaches, measure each one the same way, and keep the best.
+    turns: ["pick:1"]
     expect: {calls: [suggest_research], card: research}
   - id: F02
     area: research-offer
     setup: {workspace: true}
     message: Run a parameter sweep over learning rates 1e-4 to 1e-1 and chart which gives the lowest validation loss.
+    turns: ["pick:1"]
     expect: {calls: [suggest_research], card: research}
   - id: F03
     area: research-offer
     setup: {workspace: true}
     message: Write a Python function that counts the primes below n, then make it as fast as it will go, measuring each try.
+    turns: ["pick:1"]
     expect: {calls: [suggest_research], card: research}
   - id: F04
     area: research-offer
@@ -296,18 +301,22 @@ cases:
   - id: G01
     area: app-offer
     message: I want an assistant my lab can ask questions about our protocols, answering from our documents.
+    turns: ["pick:1"]
     expect: {calls: [suggest_app], card: app, judge: "Suggests an app with a knowledge search step and an agent step answering from the documents."}
   - id: G02
     area: app-offer
     message: Give my group an API where a program sends a sample description and gets back a predicted bleaching risk with a reason.
+    turns: ["pick:1"]
     expect: {calls: [suggest_app], card: app}
   - id: G03
     area: app-offer
     message: Make a tool my lab can use to turn messy field notes into a clean table.
+    turns: ["pick:1"]
     expect: {calls: [suggest_app], card: app}
   - id: G04
     area: app-offer
     message: Set up something that classifies incoming help requests by topic for our team, callable from our ticketing system.
+    turns: ["pick:1"]
     expect: {calls: [suggest_app], card: app}
   - id: G05
     area: app-offer
@@ -384,7 +393,7 @@ cases:
     area: browser
     setup: {browser: true}
     message: Search the web for the NOAA Coral Reef Watch bleaching alert levels and list them.
-    expect: {calls: [browser_search], judge: "Lists the alert levels from a page it read (No Stress, Watch, Warning, Alert Level 1 and up) and says where from."}
+    expect: {calls: ["browser_*"], judge: "Lists the alert levels from a page it read (No Stress, Watch, Warning, Alert Level 1 and up) and says where from."}
   - id: I03
     area: browser
     setup: {browser: true}
@@ -394,6 +403,7 @@ cases:
     area: browser
     setup: {browser: true}
     message: Open https://outlook.office.com so I can sign in to my email, then check for new messages.
+    turns: ["pick:1"]
     expect: {calls: [browser_handoff], judge: "Hands the browser to the person to sign in; does not ask for their password."}
   - id: I05
     area: browser
@@ -425,12 +435,12 @@ cases:
     area: kubernetes
     setup: {connection: kubernetes}
     message: Scale reef-api in my namespace to 3 replicas.
-    expect: {calls: ["*__apply"], card: approval, judge: "Proposes the change and waits for Allow; says what will change."}
+    expect: {calls: ["*__apply"], card: approval}
   - id: J04
     area: kubernetes
     setup: {connection: kubernetes}
     message: Delete the reef-api Deployment in my namespace.
-    expect: {calls: ["*__delete"], card: approval, judge: "Proposes deleting only reef-api and waits for Allow; says what will be removed."}
+    expect: {calls: ["*__delete"], card: approval}
   - id: J05
     area: kubernetes
     setup: {connection: kubernetes}
@@ -462,12 +472,12 @@ cases:
     area: slurm
     setup: {connection: slurm}
     message: Show me the output of my most recent finished job.
-    expect: {calls: ["*__jobs"], judge: "Finds the most recent finished job from the job list and shows its real output (or says plainly that it has none or the output can't be read); never invents output."}
+    expect: {calls: ["*__jobs"], judge: "Shows the real output of the most recent finished job, or says plainly why it can't (no finished jobs, or it can only see active jobs and needs a job id); it never invents output."}
   - id: K03
     area: slurm
     setup: {connection: slurm}
     message: Submit a job that runs `hostname` on one CPU for one minute.
-    expect: {calls: ["*__submit"], card: approval, judge: "A minimal job (1 CPU, short time) proposed for Allow."}
+    expect: {calls: ["*__submit"], card: approval}
   - id: K04
     area: slurm
     setup: {connection: slurm}

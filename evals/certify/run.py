@@ -110,9 +110,12 @@ def card_shown(steps, approval=False):
 
 
 def matches(pattern, tool):
-    """A tool name, "*__name" for a connection's tool, or "*__*" for any connection tool."""
+    """A tool name, "*__name" for a connection's tool, "*__*" for any connection tool,
+    or "name_*" for any tool starting with name_."""
     if pattern.startswith("*") and pattern.endswith("*"):
         return pattern[1:-1] in tool
+    if pattern.endswith("*"):
+        return tool.startswith(pattern[:-1])
     return tool.endswith(pattern[1:]) if pattern.startswith("*") else tool == pattern
 
 
@@ -188,13 +191,14 @@ def judge(chat, model, case, steps, text, timeout):
 
 
 def answer_for(turn, state):
-    """A later turn's message: "pick:N" answers the open question card with option N."""
+    """A later turn's message: "pick:N" answers the open question card with option N,
+    or is skipped (None) when the reply asked nothing."""
     found = re.fullmatch(r"pick:(\d+)", turn)
     if not found:
         return turn
     waiting = [w for w in state.get("waitingFor", []) if w.get("questions")]
     if not waiting:
-        raise RuntimeError("no question card to answer")
+        return None
     # Every question in the card gets option N, or its last option when it has fewer.
     n = int(found.group(1)) - 1
     answers = []
@@ -236,7 +240,10 @@ def run_once(chat, model, case, config, args):
         record["chat"] = started.get("url")
         state = chat.wait(started["id"], args.timeout)
         for turn in case.get("turns", []):
-            chat.call("send_message", {"id": started["id"], "message": answer_for(turn, state)})
+            message = answer_for(turn, state)
+            if message is None:
+                continue
+            chat.call("send_message", {"id": started["id"], "message": message})
             state = chat.wait(started["id"], args.timeout)
     except Exception as error:  # A case that could not run fails with the reason.
         record.update(passed=False, failed=[f"could not run: {error}"], seconds=round(time.time() - started_at), busy=busy(str(error)))

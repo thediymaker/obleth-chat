@@ -41,7 +41,7 @@ fn tool(
 pub fn tools(output: bool) -> Vec<Tool> {
     let mut tools = vec![
         tool("cluster", "Cluster", "The Slurm cluster's partitions: idle nodes, CPUs and GPUs, time limits, and the queue's size. Name a partition to also list its nodes.", true, json!({"partition":{"type":"string","description":"Also list this partition's nodes, one line each"}}), &[]),
-        tool("jobs", "Jobs", "Your running and pending Slurm jobs. For one job, including a finished one, use Job details.", true, json!({"state":{"type":"string","enum":["RUNNING","PENDING"],"description":"Only jobs in this state"}}), &[]),
+        tool("jobs", "Jobs", "Your running and pending Slurm jobs; with finished_days, also the ones that ended in the last days, newest first, with their exit codes. For one job, use Job details.", true, json!({"state":{"type":"string","enum":["RUNNING","PENDING"],"description":"Only jobs in this state"},"finished_days":{"type":"integer","minimum":1,"maximum":FINISHED_DAYS_MAX,"description":"Also list jobs that ended in this many past days"}}), &[]),
         tool("job", "Job details", "Details of one job: state, reason, resources, working directory and output files.", true, json!({"job_id":{"type":"integer"}}), &["job_id"]),
         tool("submit", "Submit job", "Submit a batch script as your account. Output goes to slurm-<job id>.out in the working directory unless output is set.", false, json!({
             "script":{"type":"string","description":"The batch script, starting with #!/bin/bash. #SBATCH lines are not read; use the other fields."},
@@ -636,6 +636,20 @@ impl Client {
         Ok(jobs)
     }
 
+    /// The person's jobs that ended in the last `days` days, the most recent end first.
+    async fn finished_jobs(&mut self, days: i64) -> Result<Vec<Value>, String> {
+        let since = chrono::Utc::now().timestamp() - days * 86_400;
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("users", &self.user)
+            .append_pair("start_time", &since.to_string())
+            .finish();
+        let data = self.call_db(&format!("jobs?{query}")).await?;
+        Ok(ended_since(
+            data["jobs"].as_array().cloned().unwrap_or_default(),
+            since,
+        ))
+    }
+
     async fn jobs(&mut self, args: &Value) -> Result<String, String> {
         let state = args["state"]
             .as_str()
@@ -670,7 +684,7 @@ impl Client {
                 )
             })
             .collect();
-        Ok(if lines.is_empty() {
+        let mut text = if lines.is_empty() {
             format!(
                 "No {} jobs of yours.",
                 state
@@ -680,7 +694,33 @@ impl Client {
             )
         } else {
             lines.join("\n")
-        })
+        };
+        if let Some(days) = args["finished_days"].as_i64() {
+            let days = days.clamp(1, FINISHED_DAYS_MAX);
+            let finished = self.finished_jobs(days).await?;
+            text.push_str(&format!("\n\nEnded in the last {days} days:\n"));
+            if finished.is_empty() {
+                text.push_str("none");
+            }
+            let lines: Vec<String> = finished
+                .iter()
+                .map(|j| {
+                    let job = own_job(j);
+                    format!(
+                        "- {} {} [{}] partition {}, ran {}, ended {}, exit code {}",
+                        job["id"],
+                        job["name"].as_str().unwrap_or(""),
+                        job["state"].as_str().unwrap_or(""),
+                        job["partition"].as_str().unwrap_or(""),
+                        job["elapsed"].as_str().unwrap_or(""),
+                        time(&j["time"]["end"]),
+                        job["exit"].as_i64().map_or("-".into(), |c| c.to_string())
+                    )
+                })
+                .collect();
+            text.push_str(&lines.join("\n"));
+        }
+        Ok(text)
     }
 
     async fn job(&mut self, args: &Value) -> Result<String, String> {
@@ -853,6 +893,15 @@ impl Client {
         let summary = self.summary().await?;
         let mine = self.own_jobs(&ACTIVE).await?;
         let mine: Vec<Value> = mine.iter().take(25).map(own_job).collect();
+        // Recent ends are a convenience: the page still shows if accounting can't list them.
+        let recent: Vec<Value> = self
+            .finished_jobs(RECENT_DAYS)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .take(10)
+            .map(own_job)
+            .collect();
         let partitions: Vec<Value> = summary
             .partitions
             .iter()
@@ -866,6 +915,7 @@ impl Client {
             .collect();
         Ok(json!({
             "user": self.user,
+            "recent": recent,
             "partitions": partitions,
             "totals": summary.total.json(),
             "queue": {
@@ -1000,8 +1050,30 @@ fn finished_job(id: i64, j: &Value) -> String {
     .join("\n")
 }
 
+/// Accounting's jobs that ended at or after `since`, the most recent end first: it also
+/// returns jobs still running or pending, and ones that started before but ended after.
+fn ended_since(jobs: Vec<Value>, since: i64) -> Vec<Value> {
+    let mut jobs: Vec<Value> = jobs
+        .into_iter()
+        .filter(|j| num(&j["time"]["end"]).is_some_and(|end| end >= since))
+        .filter(|j| {
+            !ACTIVE
+                .iter()
+                .any(|a| text(&j["state"]["current"]).contains(a))
+        })
+        .collect();
+    jobs.sort_by_key(|j| std::cmp::Reverse(num(&j["time"]["end"]).unwrap_or(0)));
+    jobs.truncate(FINISHED_LISTED);
+    jobs
+}
+
 /// The states the person's job list shows, asked for one at a time.
 const ACTIVE: [&str; 2] = ["RUNNING", "PENDING"];
+/// How far back the Jobs tool may list finished jobs, and how many it lists.
+const FINISHED_DAYS_MAX: i64 = 30;
+const FINISHED_LISTED: usize = 20;
+/// The Clusters page lists jobs that ended this many days back.
+const RECENT_DAYS: i64 = 7;
 
 /// One of the person's jobs from the accounting database.
 fn own_job(j: &Value) -> Value {
@@ -1016,6 +1088,8 @@ fn own_job(j: &Value) -> Value {
         "nodes": text(&j["nodes"]).replace("None assigned", ""),
         "reason": j["state"]["reason"].as_str().filter(|r| *r != "None").unwrap_or(""),
         "submitted": num(&j["time"]["submission"]),
+        "ended": num(&j["time"]["end"]).filter(|t| *t > 0),
+        "exit": num(&j["exit_code"]["return_code"]),
     })
 }
 
@@ -1045,6 +1119,23 @@ fn time(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_jobs_are_those_that_ended_in_the_window_latest_first() {
+        let job = |id: i64, state: &str, end: i64| json!({"job_id": id, "state": {"current": [state]}, "time": {"end": end}});
+        let jobs = vec![
+            job(1, "COMPLETED", 1_000),
+            job(2, "FAILED", 3_000),
+            job(3, "RUNNING", 0),
+            job(4, "TIMEOUT", 2_000),
+            job(5, "PENDING", 0),
+        ];
+        let ids: Vec<i64> = ended_since(jobs, 1_500)
+            .iter()
+            .filter_map(|j| num(&j["job_id"]))
+            .collect();
+        assert_eq!(ids, vec![2, 4]);
+    }
 
     #[test]
     fn slurm_numbers_and_times_read_every_shape() {

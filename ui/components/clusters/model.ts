@@ -9,6 +9,8 @@ export interface SlurmStatus {
   totals?: { cpus?: number; allocCpus?: number; gpus?: number; allocGpus?: number; memoryMb?: number; allocMemoryMb?: number; nodes?: number; idleNodes?: number; unavailableNodes?: number };
   queue?: { running?: number; pending?: number };
   jobs?: { id: string | number; name?: string; state?: string; partition?: string; elapsed?: string; timeLimit?: string; nodes?: string; reason?: string }[];
+  /** Jobs that ended in the last 7 days, the most recent first; `ended` is Unix seconds. */
+  recent?: { id: string | number; name?: string; state?: string; partition?: string; elapsed?: string; ended?: number | null; exit?: number | null }[];
   partitions?: { name: string; state?: string; nodes?: number; idleNodes?: number; cpus?: number; idleCpus?: number; gpus?: number; idleGpus?: number; maxTime?: string }[];
 }
 

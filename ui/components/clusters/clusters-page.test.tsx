@@ -21,6 +21,7 @@ const slurmStatus = {
     totals: { cpus: 100, allocCpus: 40, gpus: 8, allocGpus: 2, memoryMb: 409600, allocMemoryMb: 102400, nodes: 4, idleNodes: 1 },
     queue: { running: 1, pending: 2 },
     jobs: [{ id: 42, name: "train", state: "RUNNING", partition: "gpu", elapsed: "1:00", timeLimit: "4:00", nodes: "g1" }],
+    recent: [{ id: 41, name: "assay-summary", state: "FAILED", partition: "general", elapsed: "0:12", ended: 1_762_200_000, exit: 2 }],
     partitions: [{ name: "gpu", state: "UP", nodes: 4, idleNodes: 1, cpus: 100, idleCpus: 60, gpus: 8, idleGpus: 6, maxTime: "7-00:00:00" }],
   },
 };
@@ -37,6 +38,10 @@ describe("Compute › Clusters", () => {
     expect(screen.getByText("40 / 100")).toBeInTheDocument();
     expect(screen.getByText("Your jobs as ana")).toBeInTheDocument();
     expect(screen.getByText("train")).toBeInTheDocument();
+    const ended = screen.getByText("assay-summary").closest("tr")!;
+    expect(ended).toHaveTextContent("FAILED");
+    expect(ended).toHaveTextContent("2");
+    expect(screen.getByText("Recent jobs")).toBeInTheDocument();
     expect(screen.getByText("Idle GPUs")).toBeInTheDocument();
     expect(screen.getByText("Needs your token")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add your token" })).toBeInTheDocument();

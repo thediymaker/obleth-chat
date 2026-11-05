@@ -89,6 +89,7 @@ function Slurm({ s }: { s: SlurmStatus }) {
   const t = s.totals || {};
   const parts = s.partitions || [];
   const jobs = s.jobs || [];
+  const recent = s.recent || [];
   const gpus = (t.gpus || 0) > 0;
   const idle = (n?: number, all?: number) => (
     <>
@@ -121,6 +122,23 @@ function Slurm({ s }: { s: SlurmStatus }) {
             j.nodes || j.reason || "–",
           ])}
           empty="No running or pending jobs of yours."
+        />
+      </Part>
+      <Part title="Recent jobs" count={recent.length}>
+        <Table
+          heads={["Job", "State", "Partition", "Ran", "Ended", "Exit code"]}
+          rows={recent.map((j) => [
+            <>
+              <strong className="font-medium">{j.id}</strong>
+              <Sub>{j.name}</Sub>
+            </>,
+            <State text={j.state} />,
+            j.partition,
+            j.elapsed,
+            j.ended ? when(j.ended * 1000) : "–",
+            j.exit ?? "–",
+          ])}
+          empty="No jobs of yours ended in the last 7 days."
         />
       </Part>
       <Part title="Partitions" count={parts.length}>

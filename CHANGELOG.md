@@ -2,6 +2,14 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.0.4
+
+**Changes**
+
+- **12 replies at once.** A person may now run 12 replies at once by default, up from 3. A site still at the old default of 3 moves to 12; one that chose another number keeps it.
+- **Knowledge search.** Models search a person's collections and saved items only when the answer may be in that material, not for general questions.
+- **Certification.** The cases and runner in `evals/certify` were corrected from the first gold runs.
+
 ## v1.0.3
 
 **New**

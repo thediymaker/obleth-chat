@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "obleth-chat"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "argon2",

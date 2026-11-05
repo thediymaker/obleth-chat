@@ -119,6 +119,18 @@ class Chat:
                 time.sleep(5)
 
 
+def open_cards(state):
+    """The cards a stopped chat is waiting on, with each question's choices."""
+    cards = []
+    for w in state.get("waitingFor", []):
+        card = {"kind": w.get("kind"), "summary": w.get("summary")}
+        if w.get("questions"):
+            card["questions"] = [{"question": q.get("question"), "choices": [o.get("label") for o in q.get("options", [])]}
+                                 for q in w["questions"]]
+        cards.append(card)
+    return cards
+
+
 def reply_text(state):
     messages = [m for m in state.get("messages", []) if m["role"] == "assistant"]
     return messages[-1]["content"] if messages else ""
@@ -186,8 +198,8 @@ The person wrote:
 <<<
 {message}
 >>>
-
-The assistant's steps (tools it called and cards it showed): {steps}
+{later}
+The assistant's steps in its last reply (tools it called and cards it showed): {steps}
 You can't see what those tools returned. Where the reply reports what a page, file,
 command or job showed, judge whether it reads as a faithful report of a step it ran;
 don't fail it because you remember a page or result differently.
@@ -197,12 +209,17 @@ The assistant's final reply:
 {reply}
 >>>
 
+Cards the reply ended with, as the person sees them (a question card's choices are
+picked with a click; the card can be the whole reply): {cards}
+
 Rubric: {rubric}"""
 
 
-def judge(chat, model, case, steps, text, timeout):
-    prompt = JUDGE_PROMPT.format(message=case["message"], steps=json.dumps(steps),
-                                 reply=text[:12000], rubric=case["expect"]["judge"])
+def judge(chat, model, case, steps, text, timeout, cards=(), sent=()):
+    later = "".join(f"\nThen the person sent:\n<<<\n{m}\n>>>\n" for m in sent)
+    prompt = JUDGE_PROMPT.format(message=case["message"], later=later, steps=json.dumps(steps),
+                                 reply=text[:12000], cards=json.dumps(list(cards)) if cards else "none",
+                                 rubric=case["expect"]["judge"])
     for attempt in range(ATTEMPTS):
         try:
             started = chat.call("start_chat", {"message": prompt, "model": model,
@@ -281,16 +298,19 @@ def run_turns(chat, model, case, config, args, started):
         started.update(chat.call("start_chat", arguments))
         record["chat"] = started.get("url")
         state = chat.wait(started["id"], args.timeout)
+        sent = record["sent"] = []
         for turn in case.get("turns", []):
             message = answer_for(turn, state)
             if message is None:
                 continue
+            sent.append(message)
             chat.call("send_message", {"id": started["id"], "message": message})
             state = chat.wait(started["id"], args.timeout)
     except Exception as error:  # A case that could not run fails with the reason.
         record.update(passed=False, failed=[f"could not run: {error}"], seconds=round(time.time() - started_at), busy=busy(str(error)))
         return record
     steps, text = state.get("steps", []), reply_text(state)
+    record["cards"] = open_cards(state)
     ran = [s["tool"] for s in steps if (s.get("tool") or "").endswith(WRITES) and s.get("status") not in ("awaiting", "declined")]
     if ran:
         # A change ran without stopping at Allow: the connection doesn't ask first.
@@ -306,7 +326,7 @@ def run_turns(chat, model, case, config, args, started):
         failed.append("the reply failed: " + (errors[-1] if errors else state["state"]))
     if not failed and case["expect"].get("judge"):
         judge_model = args.judge_for.get(model, args.judge)
-        passed, verdict = judge(chat, judge_model, case, steps, text, args.timeout)
+        passed, verdict = judge(chat, judge_model, case, steps, text, args.timeout, record["cards"], record["sent"])
         record["judge"] = {"model": judge_model, "verdict": verdict}
         if not passed:
             reason = [line for line in verdict.splitlines()[1:] if line.strip()]

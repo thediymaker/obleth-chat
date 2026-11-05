@@ -66,7 +66,8 @@ def main():
             verdict = None
         if not failed and rubric and not verdict and chat:
             judge_model = judge_for.get(model, args.judge)
-            passed, text = run.judge(chat, judge_model, case, record["steps"], record.get("reply") or "", args.timeout)
+            passed, text = run.judge(chat, judge_model, case, record["steps"], record.get("reply") or "", args.timeout,
+                                     record.get("cards", ()), record.get("sent", ()))
             verdict = record["judge"] = {"model": judge_model, "verdict": text}
             print(f"{model} {case_id}: judged {'pass' if passed else 'FAIL'}", flush=True)
         if not failed and rubric:

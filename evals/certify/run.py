@@ -89,7 +89,8 @@ class Chat:
                 awaiting = state["steps"]
                 state = self.call("get_chat", {"id": chat_id, "messages": 1})
                 state["approval"] = True
-                state["steps"] = state.get("steps") or awaiting
+                # The steps as they stood at Allow: once stopped, a waiting step reads "error".
+                state["steps"] = awaiting
                 return state
             if time.time() > deadline:
                 self.call("stop_chat", {"id": chat_id})
@@ -150,7 +151,9 @@ def card_shown(steps, approval=False):
 
 def matches(pattern, tool):
     """A tool name, "*__name" for a connection's tool, "*__*" for any connection tool,
-    or "name_*" for any tool starting with name_."""
+    or "name_*" for any tool starting with name_; "a|b" matches either."""
+    if "|" in pattern:
+        return any(matches(p, tool) for p in pattern.split("|"))
     if pattern.startswith("*") and pattern.endswith("*"):
         return pattern[1:-1] in tool
     if pattern.endswith("*"):
@@ -278,7 +281,8 @@ def run_once(chat, model, case, config, args):
     try:
         return run_turns(chat, model, case, config, args, started)
     finally:
-        chat.discard(started.get("id"))
+        if not started.get("keep"):
+            chat.discard(started.get("id"))
 
 
 def run_turns(chat, model, case, config, args, started):
@@ -311,10 +315,14 @@ def run_turns(chat, model, case, config, args, started):
         return record
     steps, text = state.get("steps", []), reply_text(state)
     record["cards"] = open_cards(state)
-    ran = [s["tool"] for s in steps if (s.get("tool") or "").endswith(WRITES) and s.get("status") not in ("awaiting", "declined")]
+    ran = [s for s in steps if (s.get("tool") or "").endswith(WRITES) and s.get("status") not in ("awaiting", "declined")]
     if ran:
-        # A change ran without stopping at Allow: the connection doesn't ask first.
-        sys.exit(f"{model} {case['id']}: {ran[0]} ran without an approval. Turn on Ask before changes for that connection before running again.")
+        # A change ran without stopping at Allow. The run stops after saving this
+        # record, and the chat is kept so the step can be looked at.
+        started["keep"] = True
+        record.update(passed=False, steps=steps, reply=text, unapproved=True,
+                      failed=[f"{ran[0]['tool']} ran without an approval (status {ran[0].get('status')}: {ran[0].get('detail')})"])
+        return record
     failed = machine_checks(case["expect"], steps, text, state.get("approval", False))
     if state.get("timedOut"):
         failed.append(f"still running after {args.timeout} s")
@@ -390,6 +398,11 @@ def main():
                 sink.flush()
                 mark = "pass" if record["passed"] else "FAIL " + "; ".join(record["failed"])
                 print(f"{model} {record['id']}: {mark}", flush=True)
+                if record.get("unapproved"):
+                    for f in futures:
+                        f.cancel()
+                    sys.exit(f"{model} {record['id']}: stopped; the chat is kept at {record.get('chat')}. "
+                             "Turn on Ask before changes for that connection before running again.")
     areas = dict.fromkeys(c["area"] for c in cases)
     table = summary(records, models, areas)
     (out / "summary.md").write_text(table + "\n")

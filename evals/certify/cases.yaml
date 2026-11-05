@@ -13,7 +13,8 @@
 #     connection: kubernetes | slurm   the fixture cluster connection is on
 #   turns:    later messages; "pick:N" answers the open question card with option N
 #   expect:   checks on the last reply
-#     calls:     tools that must be called (a *__name pattern matches a connection tool)
+#     calls:     tools that must be called (a *__name pattern matches a connection tool;
+#                "a|b" is met by either)
 #     no_calls:  tools that must not be called; "any" means no tool at all
 #     card:      the card the reply ends with: question, workspace, research, app,
 #                browser-request, approval, or none

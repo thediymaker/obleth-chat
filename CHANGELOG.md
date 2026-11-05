@@ -2,6 +2,16 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.0.5
+
+**New**
+
+- **Delete chats over MCP.** `delete_chat` deletes one of the person's chats, as Delete does in the browser, so a client that starts many chats can stay under the 1,000-chat limit. It needs a token that may start chats, and it is recorded in the audit log.
+
+**Changes**
+
+- **Certification.** The runner deletes each test and judge chat once it is graded (`--keep` keeps them), checks on chats less often so a dozen cases at once stay under a token's 120 calls a minute, and waits out that limit instead of failing. `cleanup.py` removes chats an interrupted run left, `rescore.py` merges and regrades runs, and `cases-people.yaml` adds a second set of 100 everyday requests. Chat's own search of attached collections no longer counts as the model calling `search_knowledge`.
+
 ## v1.0.4
 
 **New**

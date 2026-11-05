@@ -107,6 +107,7 @@ export function auditSentence(e: AuditEvent): Part[] {
     mcp_chat_started: () => [actor, " started a chat over MCP"],
     mcp_message_sent: () => [actor, " sent a message over MCP"],
     mcp_chat_stopped: () => [actor, " stopped a reply over MCP"],
+    mcp_chat_deleted: () => [actor, " deleted a chat over MCP"],
   };
   return sentences[e.action]?.() || [actor, ` · ${titleCase(e.action)}`];
 }

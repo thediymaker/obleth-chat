@@ -558,7 +558,12 @@ const AUDIT_KINDS: [(&str, &[&str]); 8] = [
     ),
     (
         "mcp",
-        &["mcp_chat_started", "mcp_message_sent", "mcp_chat_stopped"],
+        &[
+            "mcp_chat_started",
+            "mcp_message_sent",
+            "mcp_chat_stopped",
+            "mcp_chat_deleted",
+        ],
     ),
     (
         "apps",

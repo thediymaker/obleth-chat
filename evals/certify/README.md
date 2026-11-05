@@ -38,5 +38,11 @@ CERTIFY_TOKEN=obc_... ./run.py --base https://chat.example.edu \
 gets `results/<model>.jsonl`, one line per case with its steps, reply, the failed
 checks and a link to the chat; `results/summary.md` has the score table.
 
+Each chat a run makes, and each judge chat, is deleted once it is graded, since an
+account holds at most 1,000 chats; the record keeps the steps and the reply. `--keep`
+keeps them. `cleanup.py` deletes chats titled `certify ...` that an interrupted run
+left. `rescore.py` merges a full run with reruns of some cases and grades them all
+again with the current checks.
+
 Gold models should pass every case. When one fails a case, the case, a fixture, a
 prompt or the harness is wrong until shown otherwise.

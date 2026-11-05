@@ -140,6 +140,9 @@ fn tools(token: &TokenUser) -> Vec<Value> {
             json!({"name":"stop_chat","title":"Stop a chat","description":"Stop the reply a chat is writing. What it wrote so far is kept.",
                 "inputSchema":{"type":"object","properties":{"id":id},"required":["id"],"additionalProperties":false},
                 "annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true}}),
+            json!({"name":"delete_chat","title":"Delete a chat","description":"Delete one of the person's chats for good, as Delete does in the browser. Stop a running chat first.",
+                "inputSchema":{"type":"object","properties":{"id":id},"required":["id"],"additionalProperties":false},
+                "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false}}),
         ]);
     }
     list
@@ -148,7 +151,10 @@ fn tools(token: &TokenUser) -> Vec<Value> {
 async fn call(s: &AppState, token: &TokenUser, params: &Value) -> Value {
     let name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
-    let write = matches!(name, "start_chat" | "send_message" | "stop_chat");
+    let write = matches!(
+        name,
+        "start_chat" | "send_message" | "stop_chat" | "delete_chat"
+    );
     let outcome = if !token.allows(if write { WRITE } else { READ }) {
         Err(ApiError::bad("This token may only read chats"))
     } else {
@@ -159,6 +165,7 @@ async fn call(s: &AppState, token: &TokenUser, params: &Value) -> Value {
             "start_chat" => start_chat(s, token, args).await,
             "send_message" => send_message(s, token, args).await,
             "stop_chat" => stop_chat(s, token, args).await,
+            "delete_chat" => delete_chat(s, token, args).await,
             _ => Err(ApiError::bad(format!("There is no tool named {name}"))),
         }
     };
@@ -477,6 +484,13 @@ async fn stop_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Valu
         audit(s, token, "mcp_chat_stopped", id).await?;
     }
     Ok(json!({"id":id,"stopped":stopped}))
+}
+
+async fn delete_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Value, ApiError> {
+    let id = chat_id(args)?;
+    s.store.delete(token.user.id, id).await?;
+    audit(s, token, "mcp_chat_deleted", id).await?;
+    Ok(json!({"id":id,"deleted":true}))
 }
 
 async fn audit(s: &AppState, token: &TokenUser, action: &str, chat: Uuid) -> Result<(), ApiError> {

@@ -38,12 +38,19 @@ TERMINAL = {"completed", "error", "stopped", "waiting", "idle", "failed"}
 BUSY = ("stayed full", "responses at once", "Try again in a few minutes")
 ATTEMPTS = 6
 PAUSE = 90
+# A token may make 120 calls a minute; with a dozen cases running, checking each chat
+# this often stays well under that.
+POLL = 12
 
 
 class Chat:
-    def __init__(self, base, token):
+    # Set when the server has no delete_chat, so the warning shows once.
+    cannot_delete = False
+
+    def __init__(self, base, token, keep=False):
         self.url = base.rstrip("/") + "/mcp"
         self.token = token
+        self.keep = keep
         self.next_id = 0
 
     def call(self, name, arguments):
@@ -52,15 +59,15 @@ class Chat:
                            "params": {"name": name, "arguments": arguments}}).encode()
         request = urllib.request.Request(self.url, data=body, method="POST", headers={
             "Authorization": f"Bearer {self.token}", "Content-Type": "application/json"})
-        for attempt in range(5):
+        for attempt in range(10):
             try:
                 with urllib.request.urlopen(request, timeout=60) as response:
                     message = json.load(response)
                 break
             except urllib.error.HTTPError as error:
-                # The token has a per-minute limit; wait it out.
-                if error.code == 429 and attempt < 4:
-                    time.sleep(15)
+                # The token has a per-minute limit; wait for the next minute.
+                if error.code == 429 and attempt < 9:
+                    time.sleep(20)
                     continue
                 raise
         if "error" in message:
@@ -89,7 +96,27 @@ class Chat:
                 state = self.call("get_chat", {"id": chat_id, "messages": 1})
                 state["timedOut"] = True
                 return state
-            time.sleep(5)
+            time.sleep(POLL)
+
+    def discard(self, chat_id):
+        """Deletes a chat the run made, so runs don't fill the account's 1,000 chats.
+        A reply that is still stopping is waited for."""
+        if self.keep or Chat.cannot_delete or not chat_id:
+            return
+        for _ in range(6):
+            try:
+                self.call("delete_chat", {"id": chat_id})
+                return
+            except RuntimeError as error:
+                if "no tool named" in str(error):
+                    Chat.cannot_delete = True
+                    print("warning: this Chat has no delete_chat, so the run's chats are kept", file=sys.stderr, flush=True)
+                    return
+                if "Stop the response" not in str(error):
+                    print(f"warning: could not delete chat {chat_id}: {error}", file=sys.stderr, flush=True)
+                    return
+                self.call("stop_chat", {"id": chat_id})
+                time.sleep(5)
 
 
 def reply_text(state):
@@ -186,6 +213,7 @@ def judge(chat, model, case, steps, text, timeout):
                 continue
             raise
         state = chat.wait(started["id"], timeout)
+        chat.discard(started["id"])
         errors = [m["error"] for m in state.get("messages", []) if m.get("error")]
         if errors and busy(errors[-1]) and attempt < ATTEMPTS - 1:
             time.sleep(PAUSE)
@@ -229,6 +257,14 @@ def run_case(chat, model, case, config, args):
 
 
 def run_once(chat, model, case, config, args):
+    started = {}
+    try:
+        return run_turns(chat, model, case, config, args, started)
+    finally:
+        chat.discard(started.get("id"))
+
+
+def run_turns(chat, model, case, config, args, started):
     setup = case.get("setup", {})
     arguments = {"message": case["message"], "model": model,
                  "title": f"certify {case['id']} {model}",
@@ -242,7 +278,7 @@ def run_once(chat, model, case, config, args):
     record = {"id": case["id"], "area": case["area"], "model": model}
     started_at = time.time()
     try:
-        started = chat.call("start_chat", arguments)
+        started.update(chat.call("start_chat", arguments))
         record["chat"] = started.get("url")
         state = chat.wait(started["id"], args.timeout)
         for turn in case.get("turns", []):
@@ -307,10 +343,11 @@ def main():
     parser.add_argument("--out", default="results")
     parser.add_argument("--parallel", type=int, default=2, help="cases at once per model; each may also start a judge chat")
     parser.add_argument("--timeout", type=int, default=600, help="seconds a turn may run")
+    parser.add_argument("--keep", action="store_true", help="keep the chats a run makes; each is deleted once graded otherwise")
     args = parser.parse_args()
     args.judge_for = dict(pair.split("=", 1) for pair in args.judge_for.split(",") if pair)
     token = os.environ.get("CERTIFY_TOKEN") or sys.exit("Set CERTIFY_TOKEN to a Chat API token")
-    chat = Chat(args.base, token)
+    chat = Chat(args.base, token, args.keep)
     here = Path(__file__).parent
     cases = yaml.safe_load((here / args.suite).read_text())["cases"]
     if args.cases:
@@ -325,7 +362,7 @@ def main():
         path = out / f"{model}.jsonl"
         with concurrent.futures.ThreadPoolExecutor(args.parallel) as pool, path.open("w") as sink:
             # Each worker gets its own client so request ids stay apart.
-            futures = [pool.submit(run_case, Chat(args.base, token), model, c, config, args) for c in cases]
+            futures = [pool.submit(run_case, Chat(args.base, token, args.keep), model, c, config, args) for c in cases]
             for future in concurrent.futures.as_completed(futures):
                 record = future.result()
                 records.append(record)

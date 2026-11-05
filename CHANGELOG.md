@@ -4,10 +4,14 @@ Each release's section is also its GitHub Release notes.
 
 ## v1.0.7
 
+**Changes**
+
+- **What a card offers, over MCP.** `get_chat` now reports what each waiting card offers: an app's name, description and steps, a research suggestion's goal and metric, and the reason a workspace was asked for.
+
 **Fixes**
 
 - **Deleted chats' workspace servers.** Deleting a chat left the server its workspace started running, and its project folder on disk. The next new workspace was given the same port and could not start its preview. Chat now stops those servers and removes those folders when a workspace starts and every few minutes.
-- **Certification.** Each chat is checked every 20 seconds, so 28 cases at once stay under a token's 120 calls a minute.
+- **Certification.** Each chat is checked every 20 seconds, so 28 cases at once stay under a token's 120 calls a minute, and the judge sees what an app, research or workspace card offers.
 
 ## v1.0.6
 

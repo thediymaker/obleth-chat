@@ -109,7 +109,7 @@ fn tools(token: &TokenUser) -> Vec<Value> {
                 "limit":{"type":"integer","minimum":1,"maximum":50,"description":"How many to return, 20 by default"}},
                 "additionalProperties":false},
             "annotations":{"readOnlyHint":true}}),
-        json!({"name":"get_chat","title":"Get a chat","description":"A chat's state: whether it is still running, what it is doing now, its latest messages, and any questions it is waiting on.",
+        json!({"name":"get_chat","title":"Get a chat","description":"A chat's state: whether it is still running, what it is doing now, its latest messages, and the cards it is waiting on: questions with their options, and what an app, research or workspace card offers.",
             "inputSchema":{"type":"object","properties":{"id":id,
                 "messages":{"type":"integer","minimum":1,"maximum":20,"description":"How many of the latest messages to return, 2 by default"}},
                 "required":["id"],"additionalProperties":false},
@@ -258,9 +258,24 @@ async fn get_chat(s: &AppState, user: &Identity, args: &Value) -> Result<Value, 
         activity
             .iter()
             .filter(|e| e["status"] == "asked")
-            .map(
-                |e| json!({"kind":e["kind"],"summary":e["summary"],"questions":e.get("questions")}),
-            )
+            .map(|e| {
+                let mut card =
+                    json!({"kind":e["kind"],"summary":e["summary"],"questions":e.get("questions")});
+                // What the card offers: an app's steps, research's goal, a workspace's reason.
+                for key in [
+                    "name",
+                    "description",
+                    "definition",
+                    "goal",
+                    "metric",
+                    "reason",
+                ] {
+                    if let Some(value) = e.get(key) {
+                        card[key] = value.clone();
+                    }
+                }
+                card
+            })
             .collect()
     };
     let state = if running {

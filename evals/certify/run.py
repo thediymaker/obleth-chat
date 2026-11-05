@@ -128,6 +128,8 @@ def open_cards(state):
         if w.get("questions"):
             card["questions"] = [{"question": q.get("question"), "choices": [o.get("label") for o in q.get("options", [])]}
                                  for q in w["questions"]]
+        # What an app, research or workspace card offers, from a Chat that reports it.
+        card.update({k: w[k] for k in ("name", "description", "definition", "goal", "metric", "reason") if w.get(k)})
         cards.append(card)
     return cards
 

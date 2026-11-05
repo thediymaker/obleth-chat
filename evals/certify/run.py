@@ -49,6 +49,8 @@ POLL = 20
 # at once. Cases marked heavy (big data or long computation) have their own few.
 LIMITS = {"workspace": 8, "heavy": 3, "browser": 2}
 LOCKS = Path(tempfile.gettempdir()) / "obleth-certify-slots"
+# Seconds a call may take: a start or a message waits for the workspace to be running.
+SLOW = {"start_chat": 180, "send_message": 180}
 
 
 class Chat:
@@ -69,7 +71,7 @@ class Chat:
             "Authorization": f"Bearer {self.token}", "Content-Type": "application/json"})
         for attempt in range(10):
             try:
-                with urllib.request.urlopen(request, timeout=60) as response:
+                with urllib.request.urlopen(request, timeout=SLOW.get(name, 60)) as response:
                     message = json.load(response)
                 break
             except urllib.error.HTTPError as error:

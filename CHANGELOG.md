@@ -12,6 +12,7 @@ Each release's section is also its GitHub Release notes.
 
 - **Deleted chats' workspace servers.** Deleting a chat left the server its workspace started running, and its project folder on disk. The next new workspace was given the same port and could not start its preview. Chat now stops those servers and removes those folders when a workspace starts and every few minutes.
 - **Certification.** Each chat is checked every 20 seconds, so 28 cases at once stay under a token's 120 calls a minute, and the judge sees what an app, research or workspace card offers.
+- **Certification runs at scale.** An account's workspace chats share one pod and its browser chats one browser, so the runner limits how many such cases run at once across every run on the machine, and cases marked `heavy` have their own few slots. Each record says when it ran, so a failure can be matched against a pod restart. The runner's own stop at Allow no longer counts as a failed reply, a judge prompt stays within Chat's 12,000-character message limit, a multi-turn case stops when a turn runs out of time, and a chat's start may wait for its workspace.
 
 ## v1.0.6
 

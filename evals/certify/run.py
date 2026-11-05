@@ -302,6 +302,7 @@ def main():
     parser.add_argument("--judge", required=True, help="the model that grades rubrics")
     parser.add_argument("--judge-for", default="", help="model=judge pairs, so no model grades itself")
     parser.add_argument("--cases", help="comma-separated case ids or areas to run")
+    parser.add_argument("--suite", default="cases.yaml", help="the case file, next to this script")
     parser.add_argument("--config", default=str(Path(__file__).with_name("config.yaml")))
     parser.add_argument("--out", default="results")
     parser.add_argument("--parallel", type=int, default=2, help="cases at once per model; each may also start a judge chat")
@@ -311,7 +312,7 @@ def main():
     token = os.environ.get("CERTIFY_TOKEN") or sys.exit("Set CERTIFY_TOKEN to a Chat API token")
     chat = Chat(args.base, token)
     here = Path(__file__).parent
-    cases = yaml.safe_load((here / "cases.yaml").read_text())["cases"]
+    cases = yaml.safe_load((here / args.suite).read_text())["cases"]
     if args.cases:
         wanted = set(args.cases.split(","))
         cases = [c for c in cases if c["id"] in wanted or c["area"] in wanted]

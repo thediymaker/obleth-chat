@@ -6,6 +6,11 @@ knowledge, the browser, Kubernetes and Slurm connections, worker agents, and
 several turns. Each case runs as a real chat through Chat's MCP endpoint, so a model
 sees the same prompts and tools people get. `cases.yaml` explains the checks.
 
+`cases-people.yaml` is a second set of 100, written the way people actually type:
+short, vague or missing context. It checks that a model picks the right thing from
+everyday wording, and holds back when no tool or offer fits. Run it with
+`--suite cases-people.yaml`.
+
 ## Set up the test account
 
 1. An administrator account with workspaces and the browser allowed.
@@ -28,7 +33,8 @@ CERTIFY_TOKEN=obc_... ./run.py --base https://chat.example.edu \
   --out results/
 ```
 
-`--cases` runs only some cases, by id or area (`--cases C01,knowledge`). Each model
+`--cases` runs only some cases, by id or area (`--cases C01,knowledge`), and
+`--suite` picks the case file. Each model
 gets `results/<model>.jsonl`, one line per case with its steps, reply, the failed
 checks and a link to the chat; `results/summary.md` has the score table.
 

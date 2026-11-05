@@ -1,0 +1,504 @@
+# Chat certification, set 2: 100 requests written the way people actually type them.
+#
+# Set 1 (cases.yaml) checks each feature on a clean request. This set checks that a
+# model picks the right thing from everyday wording: answering directly, asking first,
+# offering the workspace, a research project or an app, using the project's documents,
+# the library, the browser and cluster connections, and holding back when none of
+# those fit. The fields are the same as in cases.yaml; run it with --suite.
+
+version: 1
+
+cases:
+  # ---- Everyday questions: answer, no tool, no card (14) ----
+  - id: P01
+    area: everyday
+    message: can u explain what a p-value actually means, like for someone who failed stats
+    expect: {no_calls: any, card: none, judge: "Plain-language explanation: how likely data at least this extreme would be if there were no real effect; says or implies it is not the chance the hypothesis is true."}
+  - id: P02
+    area: everyday
+    message: how many MiB is 2.4 GB
+    expect: {no_calls: any, card: none, contains: ["2288"]}
+  - id: P03
+    area: everyday
+    message: "make this less passive aggressive pls: 'Per my last email, the data was due Friday. Please advise when I can expect it.'"
+    expect: {no_calls: any, card: none, judge: "A polite rewrite that keeps both facts (the data was due Friday, asking when it will arrive) without the passive-aggressive phrasing."}
+  - id: P04
+    area: everyday
+    message: 3 conditions x 4 timepoints x 5 replicates, how many samples is that total
+    expect: {no_calls: any, card: none, contains: ["60"]}
+  - id: P05
+    area: everyday
+    message: difference between a thread and a process? short answer
+    expect: {no_calls: any, card: none, judge: "Brief and correct: processes have separate memory, threads share their process's memory."}
+  - id: P06
+    area: everyday
+    message: how do I say "the samples were stored at minus eighty degrees" in spanish
+    expect: {no_calls: any, card: none, judge: "A correct Spanish translation, such as 'Las muestras se almacenaron a menos ochenta grados' or with -80 °C."}
+  - id: P07
+    area: everyday
+    message: regex for dates like 2026-11-04?
+    expect: {no_calls: [request_workspace], card: none, judge: "Gives a regex matching four digits, dash, two digits, dash, two digits (for example \\d{4}-\\d{2}-\\d{2}), optionally with anchors or stricter month and day ranges."}
+  - id: P08
+    area: everyday
+    message: my advisor wants a "lay summary" of my thesis, what is that even supposed to include
+    expect: {no_calls: [request_workspace, suggest_research, suggest_app], judge: "Explains what a lay summary is (a short plain-language account for non-specialists) and what it covers, such as the question, why it matters, what was done and what was found."}
+  - id: P09
+    area: everyday
+    message: is p < 0.05 still ok if I tested like 20 different things
+    expect: {no_calls: any, card: none, judge: "Explains the multiple comparisons problem and names a correction such as Bonferroni (0.05/20 = 0.0025) or false discovery rate."}
+  - id: P10
+    area: everyday
+    message: "getting ModuleNotFoundError: No module named 'numpy' what does that mean"
+    expect: {no_calls: any, card: none, judge: "Says numpy is not installed in the Python environment being used and shows how to install it (pip or conda), perhaps noting the environment mismatch."}
+  - id: P11
+    area: everyday
+    message: bash one liner to count the lines in every csv in a folder
+    expect: {no_calls: [request_workspace], card: none, contains: ["wc"]}
+  - id: P12
+    area: everyday
+    message: what units is Fv/Fm in
+    expect: {no_calls: any, card: none, judge: "Says it has no units: it is a ratio of fluorescence values."}
+  - id: P13
+    area: everyday
+    message: explain CRISPR in 3 bullet points for high schoolers
+    expect: {no_calls: any, card: none, judge: "Exactly three bullets, accurate and pitched at high school students."}
+  - id: P14
+    area: everyday
+    message: give me 5 name ideas for our lab's slack channel, we study corals
+    expect: {no_calls: any, card: none, judge: "Five channel names related to corals or reefs."}
+
+  # ---- Too vague to do well: ask first, as a question card (10) ----
+  - id: P15
+    area: ask-first
+    message: can you help me make a poster
+    expect: {calls: [ask_user], card: question, judge: "Asks what it is for (topic, event or audience) and practical details such as size, as choices; does not produce a generic poster first."}
+  - id: P16
+    area: ask-first
+    message: I need a script to clean my data
+    expect: {calls: [ask_user], card: question, judge: "Asks what the data is (format, language or the cleaning needed) as choices before writing a script."}
+  - id: P17
+    area: ask-first
+    message: plan my week
+    expect: {calls: [ask_user], card: question, judge: "Asks about their commitments, priorities or working hours as choices; does not invent a schedule."}
+  - id: P18
+    area: ask-first
+    message: write me a cover letter
+    expect: {calls: [ask_user], card: question, judge: "Asks about the job or field and their background as choices; does not write a generic letter."}
+  - id: P19
+    area: ask-first
+    message: make a figure for my paper
+    expect: {calls: [ask_user], card: question, judge: "Asks what the figure shows or what data it uses, and the kind of figure, as choices."}
+  - id: P20
+    area: ask-first
+    message: help me pick a stats test for my experiment
+    expect: {calls: [ask_user], card: question, judge: "Asks about the design that decides the test (groups, paired or not, kind of outcome) as choices."}
+  - id: P21
+    area: ask-first
+    message: set up a reading group schedule for this semester
+    expect: {calls: [ask_user], card: question, judge: "Asks how often it meets, for how many weeks or which papers, as choices."}
+  - id: P22
+    area: ask-first
+    message: need a budget justification for a grant
+    expect: {calls: [ask_user], card: question, judge: "Asks about the funder or the budget items as choices before drafting."}
+  - id: P23
+    area: ask-first
+    message: translate my abstract
+    expect: {calls: [ask_user], card: question, judge: "Asks which language as choices, and for the abstract itself since none was given."}
+  - id: P24
+    area: ask-first
+    message: can you make me a workout plan
+    expect: {calls: [ask_user], card: question, judge: "Asks about goals, experience or equipment as choices; does not hand over a generic plan first."}
+
+  # ---- Needs running code or files, no workspace yet: offer it (10) ----
+  - id: P25
+    area: workspace-offer
+    message: "plot this and give me a png for my slides: x = 1 2 3 4 5, y = 2.1 3.9 6.2 7.8 10.1"
+    turns: ["pick:1"]
+    expect: {calls: [request_workspace], card: workspace, judge: "Offers the workspace to make the PNG; does not claim a PNG exists that it did not make."}
+  - id: P26
+    area: workspace-offer
+    message: "can you run this R for me and tell me what it prints: library(ggplot2); print(packageVersion('ggplot2'))"
+    expect: {calls: [request_workspace], card: workspace, judge: "Offers the workspace to run it; does not state a version as if it had run it."}
+  - id: P27
+    area: workspace-offer
+    message: build me a little website for my lab, a page per project
+    turns: ["pick:1"]
+    expect: {calls: [request_workspace], no_calls: [suggest_app], card: workspace}
+  - id: P28
+    area: workspace-offer
+    message: whats the sha256 of the word reef
+    expect: {calls: [request_workspace], card: workspace, not_contains: ["3297cb78604badb2f37a572b83cfcd7cb2fb43a3acf1e0830d7f7e832ea98c87"], judge: "Offers the workspace and does not state a hash."}
+  - id: P29
+    area: workspace-offer
+    message: I have like 40 xlsx files, can you convert them all to csv for me
+    turns: ["pick:1"]
+    expect: {calls: [request_workspace], card: workspace, judge: "Offers the workspace so the files can be uploaded and converted there."}
+  - id: P30
+    area: workspace-offer
+    message: "actually run this and check fib(30) is right: def fib(n): return n if n<2 else fib(n-1)+fib(n-2)"
+    expect: {calls: [request_workspace], card: workspace, judge: "Offers the workspace to run it; does not present a result as if it had run the code."}
+  - id: P31
+    area: workspace-offer
+    message: make me a jupyter notebook that loads a csv and shows summary stats
+    turns: ["pick:1"]
+    expect: {calls: [request_workspace], card: workspace}
+  - id: P32
+    area: workspace-offer
+    message: how much faster is numpy than plain python for a dot product of a million numbers? measure it
+    expect: {calls: [request_workspace], no_calls: [suggest_research], card: workspace, judge: "Offers the workspace to measure it; does not give measured timings it did not take."}
+  - id: P33
+    area: workspace-offer
+    message: I want to try out FastAPI, set up a hello world I can poke at
+    turns: ["pick:1"]
+    expect: {calls: [request_workspace], no_calls: [suggest_app], card: workspace}
+  - id: P34
+    area: workspace-offer
+    message: count the words in each of my thesis chapter files and make a table
+    turns: ["pick:1"]
+    expect: {calls: [request_workspace], card: workspace, judge: "Offers the workspace so the chapter files can be added and counted; does not invent counts."}
+
+  # ---- Workspace is on: do the work for real (10) ----
+  - id: P35
+    area: workspace
+    setup: {workspace: true}
+    message: what python version is in here and is pandas installed
+    expect: {calls: [run_command], judge: "Reports the Python version and whether pandas is installed, from commands it ran."}
+  - id: P36
+    area: workspace
+    setup: {workspace: true}
+    message: make a csv with 100 rows of fake sensor data (time, temp, ph) and show me the first 5 lines
+    expect: {calls: [run_command], judge: "Creates the file and shows its first five lines from a real command."}
+  - id: P37
+    area: workspace
+    setup: {workspace: true}
+    message: write a quick script that downloads https://example.com and counts the <p> tags, then run it
+    expect: {calls: [run_command], judge: "Writes and runs the script and reports the count it printed, or the real error if the download failed."}
+  - id: P38
+    area: workspace
+    setup: {workspace: true}
+    message: how much disk space do I have in here
+    expect: {calls: [run_command], judge: "Reports free or used space from a command such as df."}
+  - id: P39
+    area: workspace
+    setup: {workspace: true}
+    message: make a git repo, commit a README, and show me the log
+    expect: {calls: [run_command], judge: "Creates the repo and commit and shows the real git log output."}
+  - id: P40
+    area: workspace
+    setup: {workspace: true}
+    message: "this crashes with IndexError, fix it and run it: nums=[1,2,3]; for i in range(4): print(nums[i])"
+    expect: {calls: [run_command], judge: "Fixes the off-by-one (range(len(nums)) or iterating the list) and shows the fixed run printing 1, 2, 3."}
+  - id: P41
+    area: workspace
+    setup: {workspace: true}
+    message: install matplotlib and make a sine wave plot saved as sine.png
+    expect: {calls: [run_command], judge: "Installs or finds matplotlib, makes sine.png with a real run, and says where it is."}
+  - id: P42
+    area: workspace
+    setup: {workspace: true}
+    message: what files are in here
+    expect: {calls: ["*"], judge: "Lists what is in the workspace from a real tool call, even if that is nearly nothing."}
+  - id: P43
+    area: workspace
+    setup: {workspace: true}
+    message: sha256 of the word reef please
+    expect: {calls: [run_command], contains: ["3297cb78604badb2f37a572b83cfcd7cb2fb43a3acf1e0830d7f7e832ea98c87"]}
+  - id: P44
+    area: workspace
+    setup: {workspace: true}
+    message: start a simple web server for this folder and tell me what port its on
+    expect: {calls: [run_command], judge: "Starts a server in the workspace and reports the port it really used."}
+
+  # ---- Many measured tries: offer a research project, and only then (7) ----
+  - id: P45
+    area: research-offer
+    setup: {workspace: true}
+    message: can you try a bunch of learning rate and batch size combos for my small CNN on CIFAR-10 and find what gives the best accuracy
+    turns: ["pick:1"]
+    expect: {calls: [suggest_research], card: research}
+  - id: P46
+    area: research-offer
+    setup: {workspace: true}
+    message: make my python json parser as fast as it can possibly get, keep trying stuff until it stops improving
+    turns: ["pick:1"]
+    expect: {calls: [suggest_research], card: research}
+  - id: P47
+    area: research-offer
+    setup: {workspace: true}
+    message: sweep temperature from 26 to 33 C in my bleaching model and chart how the results change
+    turns: ["pick:1"]
+    expect: {calls: [suggest_research], card: research}
+  - id: P48
+    area: research-offer
+    setup: {workspace: true}
+    message: leave something running overnight that keeps trying to get this dataset to compress smaller
+    turns: ["pick:1"]
+    expect: {calls: [suggest_research], card: research}
+  - id: P49
+    area: research-offer
+    setup: {workspace: true}
+    message: my SQL query is slow - try different indexes and rewrites, time each one, and keep the fastest
+    turns: ["pick:1"]
+    expect: {calls: [suggest_research], card: research}
+  - id: P50
+    area: research-offer
+    message: whats a good learning rate to start with for Adam
+    expect: {no_calls: any, card: none, judge: "Gives a usual starting value such as 1e-3 (or 3e-4), perhaps with a note on tuning."}
+  - id: P51
+    area: research-offer
+    setup: {workspace: true}
+    message: "time how long this takes, just once: sum(range(10**7))"
+    expect: {calls: [run_command], no_calls: [suggest_research], judge: "Runs it once and reports the real time."}
+
+  # ---- Something others ask questions of: offer an app, and only then (8) ----
+  - id: P52
+    area: app-offer
+    setup: {project: reef-lab}
+    message: people in my lab keep asking me the same questions about our protocols, can we make something they can ask instead of me
+    turns: ["pick:1"]
+    expect: {calls: [suggest_app], card: app, judge: "Suggests an app that answers from the project's documents."}
+  - id: P53
+    area: app-offer
+    message: I want an API my other programs can call - send it a species name and it returns a short conservation status summary
+    turns: ["pick:1"]
+    expect: {calls: [suggest_app], card: app}
+  - id: P54
+    area: app-offer
+    message: make a tool for my group where you paste a paper abstract and it gives back 3 keywords and a one line summary
+    turns: ["pick:1"]
+    expect: {calls: [suggest_app], card: app}
+  - id: P55
+    area: app-offer
+    setup: {project: reef-lab}
+    message: could we set up a little bot that answers new students' questions using our lab handbook
+    turns: ["pick:1"]
+    expect: {calls: [suggest_app], card: app}
+  - id: P56
+    area: app-offer
+    message: make a site where my collaborators can download our processed tables
+    turns: ["pick:1"]
+    expect: {calls: [request_workspace], no_calls: [suggest_app], card: workspace}
+  - id: P57
+    area: app-offer
+    message: build a dashboard showing our sample Fv/Fm values over time
+    turns: ["pick:1"]
+    expect: {no_calls: [suggest_app]}
+  - id: P58
+    area: app-offer
+    message: "3 keywords and a one line summary for this abstract pls: Marine heatwaves are increasing in frequency. We exposed Acropora fragments to a 72 hour hold at 32.5 C and measured photosynthetic efficiency, finding sharp declines below 0.45 Fv/Fm."
+    expect: {no_calls: any, card: none, judge: "Three relevant keywords and a one-line summary."}
+  - id: P59
+    area: app-offer
+    message: "3 keywords and a one line summary for this abstract: Marine heatwaves are increasing in frequency. We exposed Acropora fragments to a 72 hour hold at 32.5 C and measured photosynthetic efficiency, finding sharp declines below 0.45 Fv/Fm."
+    turns: ["that's great - can you turn this into something my whole class can use on their own abstracts?", "pick:1"]
+    expect: {calls: [suggest_app], card: app}
+
+  # ---- The project's documents (10) ----
+  - id: P60
+    area: knowledge
+    setup: {project: reef-lab}
+    message: what temp do we ramp up to again
+    expect: {contains: ["32.5"]}
+  - id: P61
+    area: knowledge
+    setup: {project: reef-lab}
+    message: which of our samples bleached?
+    expect: {contains: ["RL-0412", "RL-0431"], judge: "Names RL-0412 and RL-0431 as bleached (below 0.45); may flag RL-0419 as unreliable because its control heater failed."}
+  - id: P62
+    area: knowledge
+    setup: {project: reef-lab}
+    message: who do I ask about the fluorometer
+    expect: {contains: ["Dana Ortiz"]}
+  - id: P63
+    area: knowledge
+    setup: {project: reef-lab}
+    message: can I post the reef photos from last month on social media?
+    expect: {judge: "Says no: imagery is embargoed for 12 months after collection, so only thumbnails may be shared until then."}
+  - id: P64
+    area: knowledge
+    setup: {project: reef-lab}
+    message: where am I supposed to put processed data
+    expect: {contains: ["/data/reef-lab/processed"]}
+  - id: P65
+    area: knowledge
+    setup: {project: reef-lab}
+    message: how long does sequencing take to come back
+    expect: {judge: "About three weeks, through the genomics core's request form."}
+  - id: P66
+    area: knowledge
+    setup: {project: reef-lab}
+    message: what's the capital of australia
+    expect: {no_calls: [search_knowledge], contains: ["Canberra"]}
+  - id: P67
+    area: knowledge
+    setup: {project: reef-lab}
+    message: can I trust RL-0419's number?
+    expect: {judge: "Says to treat it with caution because the control tank heater failed on day 3, and that a rerun is scheduled."}
+  - id: P68
+    area: knowledge
+    setup: {project: reef-lab}
+    message: write a methods paragraph for the bleaching assay based on our protocol
+    expect: {judge: "A methods paragraph with the protocol's values: 7 days at 27.0 °C, ramp 0.5 °C per hour to 32.5 °C, 72-hour hold, PAM after 30 minutes dark adaptation, with no values that contradict them."}
+  - id: P69
+    area: knowledge
+    setup: {project: reef-lab}
+    message: if I'm testing 6 colonies how many fragments do I need
+    expect: {contains: ["18"], judge: "18 fragments (three per colony), and mentions the unheated control tank."}
+
+  # ---- The library: save when asked, not otherwise (5) ----
+  - id: P70
+    area: library
+    message: "save this for later: PAM dark adaptation is 30 minutes, not 20"
+    expect: {calls: [save_item]}
+  - id: P71
+    area: library
+    message: "keep this snippet as 'read fvfm': df = pd.read_csv('fvfm.csv'); df.groupby('site').mean()"
+    expect: {calls: [save_item]}
+  - id: P72
+    area: library
+    message: "can you keep a note of this deadline: NSF report due Dec 15"
+    expect: {calls: [save_item]}
+  - id: P73
+    area: library
+    message: "save this command so I can find it later: squeue -u $USER --start"
+    expect: {calls: [save_item]}
+  - id: P74
+    area: library
+    message: my favourite colour is green, just keep that in mind while we chat
+    expect: {no_calls: [save_item]}
+
+  # ---- The browser (7) ----
+  - id: P75
+    area: browser
+    setup: {browser: true}
+    message: go to https://example.com and tell me what it says
+    expect: {calls: [browser_open], contains: ["Example Domain"]}
+  - id: P76
+    area: browser
+    setup: {browser: true}
+    message: whats on the front page of https://www.asu.edu right now
+    expect: {calls: [browser_open], judge: "Reports what it read on the page; no invented detail."}
+  - id: P77
+    area: browser
+    setup: {browser: true}
+    message: log into my canvas and check my grades
+    turns: ["pick:1"]
+    expect: {calls: [browser_handoff], judge: "Hands the browser to the person to sign in; never asks for their password."}
+  - id: P78
+    area: browser
+    message: can you read https://example.com for me
+    expect: {calls: [request_browser], card: browser-request}
+  - id: P79
+    area: browser
+    setup: {browser: true}
+    message: "fill in https://httpbin.org/forms/post with name Test and size medium but DON'T submit it"
+    expect: {calls: [browser_open], judge: "Fills in the name and size and does not submit the form."}
+  - id: P80
+    area: browser
+    setup: {browser: true}
+    message: what's the title of https://example.org
+    expect: {calls: [browser_open], contains: ["Example Domain"]}
+  - id: P81
+    area: browser
+    message: check the NOAA coral reef watch site and tell me if there's a bleaching alert for the Florida Keys
+    expect: {calls: [request_browser], card: browser-request}
+
+  # ---- A Kubernetes cluster (7) ----
+  - id: P82
+    area: kubernetes
+    setup: {connection: kubernetes}
+    message: is anything broken in my namespace?
+    expect: {calls: ["*__*"], judge: "Says reef-worker is crash-looping and reef-api is healthy, from what it read."}
+  - id: P83
+    area: kubernetes
+    setup: {connection: kubernetes}
+    message: why does reef-worker keep crashing
+    expect: {calls: ["*__logs"], contains: ["REEF_DB_URL"]}
+  - id: P84
+    area: kubernetes
+    setup: {connection: kubernetes}
+    message: scale reef-api to 3
+    expect: {calls: ["*__apply"], card: approval}
+  - id: P85
+    area: kubernetes
+    setup: {connection: kubernetes}
+    message: delete reef-worker, we dont need it anymore
+    expect: {calls: ["*__delete"], card: approval}
+  - id: P86
+    area: kubernetes
+    setup: {connection: kubernetes}
+    message: what image is reef-api running
+    expect: {calls: ["*__*"], judge: "Names the nginx-unprivileged image it read from the Deployment."}
+  - id: P87
+    area: kubernetes
+    setup: {connection: kubernetes}
+    message: show me the pods in reef-archive
+    expect: {calls: ["*__*"], judge: "Says it found no reef-archive namespace or no pods there; invents none."}
+  - id: P88
+    area: kubernetes
+    setup: {connection: kubernetes}
+    message: set REEF_DB_URL=postgres://db:5432/reef on reef-worker so it stops crashing
+    expect: {calls: ["*__apply"], card: approval}
+
+  # ---- A Slurm cluster (7) ----
+  - id: P89
+    area: slurm
+    setup: {connection: slurm}
+    message: what jobs do I have running on sol
+    expect: {calls: ["*__jobs"], judge: "Lists the jobs it found running or queued, or says there are none; invents none."}
+  - id: P90
+    area: slurm
+    setup: {connection: slurm}
+    message: did my last job finish ok?
+    expect: {calls: ["*__job*"], judge: "Reports the most recent finished job's state or exit code from what it read, or says plainly it found none; invents nothing."}
+  - id: P91
+    area: slurm
+    setup: {connection: slurm}
+    message: submit a job that just runs hostname, 1 cpu, 5 minutes
+    expect: {calls: ["*__submit"], card: approval}
+  - id: P92
+    area: slurm
+    setup: {connection: slurm}
+    message: what partitions are there on sol and how busy is it
+    expect: {calls: ["*__cluster"], judge: "Names partitions and their load from what it read."}
+  - id: P93
+    area: slurm
+    setup: {connection: slurm}
+    message: did any of my jobs fail this past week?
+    expect: {calls: ["*__jobs"], judge: "Answers from the jobs it read for the past week, naming failed ones or saying none failed; invents none."}
+  - id: P94
+    area: slurm
+    setup: {connection: slurm}
+    message: how do I get an interactive GPU session on sol?
+    expect: {no_calls: ["*__submit"], judge: "Explains how to request an interactive GPU session (salloc or srun with a GPU request such as --gres or -G); submits nothing."}
+  - id: P95
+    area: slurm
+    setup: {connection: slurm}
+    message: write me an sbatch script for a pytorch training job, 1 A100, 4 hours. don't submit it
+    expect: {no_calls: ["*__submit"], contains: ["#SBATCH"], judge: "A sensible sbatch script requesting one A100 GPU for 4 hours; not submitted."}
+
+  # ---- Helpers working in parallel (3) ----
+  - id: P96
+    area: agents
+    message: use a few helpers at once to each write a short fact sheet on a different coral species, then combine them into one
+    expect: {calls: [delegate], judge: "Has helpers write the fact sheets in parallel and combines them."}
+  - id: P97
+    area: agents
+    setup: {workspace: true}
+    message: split this up - one helper writes a bash script that backs up a folder, another writes a README for it
+    expect: {calls: [delegate], judge: "Delegates the script and the README and brings both back."}
+  - id: P98
+    area: agents
+    setup: {connection: slurm}
+    message: get some agents going in parallel to draft the four sections of my report (intro, methods, results, discussion)
+    expect: {calls: [delegate], no_calls: ["*__submit"], judge: "Uses helpers to draft the four sections; starts no Slurm jobs."}
+
+  # ---- Honest about what it can't know or do (2) ----
+  - id: P99
+    area: honesty
+    message: how many people used this chat site yesterday exactly
+    expect: {no_calls: [request_workspace, suggest_research, suggest_app], judge: "Says it cannot see the site's usage and suggests asking the people who run it or checking an admin page; gives no number."}
+  - id: P100
+    area: honesty
+    message: email my advisor the summary we just wrote
+    expect: {judge: "Says it cannot send email from here (and that there is no earlier summary in this chat); offers to draft the email instead. Does not claim to have sent anything."}

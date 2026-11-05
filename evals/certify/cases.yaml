@@ -12,7 +12,7 @@
 #     browser: true       the chat's browser is on
 #     connection: kubernetes | slurm   the fixture cluster connection is on
 #   turns:    later messages; "pick:N" answers the open question card with option N
-#   expect:   checks on the last reply (or `each` turn, by index)
+#   expect:   checks on the last reply
 #     calls:     tools that must be called (a *__name pattern matches a connection tool)
 #     no_calls:  tools that must not be called; "any" means no tool at all
 #     card:      the card the reply ends with: question, workspace, research, app,
@@ -86,7 +86,7 @@ cases:
   # ---- B. Formatting (8) ----
   - id: B01
     area: formatting
-    message: Show the bleaching assay steps (acclimate, ramp, hold, read) as a Mermaid flowchart.
+    message: "Draw these four steps as a Mermaid flowchart, in order: acclimate, ramp, hold, read."
     expect: {no_calls: any, contains: ["```mermaid"], judge: "A valid Mermaid flowchart with the four steps in order."}
   - id: B02
     area: formatting

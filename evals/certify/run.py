@@ -47,7 +47,7 @@ POLL = 20
 # An account's workspace chats share one pod and its browser chats one browser, each
 # with a memory limit, so across every run on this box only this many such cases run
 # at once. Cases marked heavy (big data or long computation) have their own few.
-LIMITS = {"workspace": 8, "heavy": 3, "browser": 2}
+LIMITS = {"workspace": 8, "heavy": 3, "browser": 1}
 LOCKS = Path(tempfile.gettempdir()) / "obleth-certify-slots"
 # Seconds a call may take: a start or a message waits for the workspace to be running.
 SLOW = {"start_chat": 180, "send_message": 180}

@@ -2,6 +2,13 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.0.7
+
+**Fixes**
+
+- **Deleted chats' workspace servers.** Deleting a chat left the server its workspace started running, and its project folder on disk. The next new workspace was given the same port and could not start its preview. Chat now stops those servers and removes those folders when a workspace starts and every few minutes.
+- **Certification.** Each chat is checked every 20 seconds, so 28 cases at once stay under a token's 120 calls a minute.
+
 ## v1.0.6
 
 **Changes**

@@ -340,6 +340,16 @@ impl Sandboxes {
         Some(bytes)
     }
 
+    /// The project folder names of a pod's workspaces.
+    pub async fn slugs(&self, pod: Uuid) -> Result<Vec<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT slug FROM sandboxes WHERE pod_id=$1")
+                .bind(pod)
+                .fetch_all(&self.inner.pool)
+                .await?,
+        )
+    }
+
     pub fn allowed(&self, user: &Identity) -> bool {
         self.inner.config.everyone || user.is_admin()
     }
@@ -545,6 +555,8 @@ impl Sandboxes {
         let starting = sandbox.clone();
         tokio::spawn(async move {
             if let Ok(running) = this.ensure_running(&starting).await {
+                // This workspace's port may be one a deleted chat's server still holds.
+                tools::forget_deleted(&this, &running).await;
                 if let Err(error) = tools::ensure_dev_server(&this, &running).await {
                     tracing::warn!("could not restart the workspace server: {error}");
                 }
@@ -891,6 +903,7 @@ impl Sandboxes {
             .bind(DISK_CHECK.as_secs() as f64).fetch_all(&mut *tx).await?;
         for sandbox in unmeasured {
             self.measure(&sandbox).await;
+            tools::forget_deleted(self, &sandbox).await;
         }
         if let Err(error) = self.stop_stale().await {
             tracing::warn!("could not check workspace pods: {error:#}");

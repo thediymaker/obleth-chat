@@ -1411,6 +1411,72 @@ pub async fn stop_server(sb: &Sandboxes, sandbox: &Sandbox) {
     }
 }
 
+/// Stops the servers and removes the folders of projects whose chats were deleted in
+/// this sandbox's pod. Deleting a chat drops its workspace record with it, but a server
+/// it started keeps running and holds the port Chat gives the next new workspace. The
+/// pod is listed before the records are read, so a project created meanwhile is never
+/// taken for a deleted one: its record exists before its folder or server does.
+pub async fn forget_deleted(sb: &Sandboxes, sandbox: &Sandbox) {
+    const LIST: &str = "cd /tmp && for f in obleth-*.pid; do [ -e \"$f\" ] && s=${f#obleth-} && echo \"${s%.pid}\"; done; \
+        cd /workspace && for d in */; do [ -d \"$d\" ] && echo \"${d%/}\"; done; true";
+    let listed = match tokio::time::timeout(
+        Duration::from_secs(30),
+        sb.exec(sandbox, &["sh", "-c", LIST], None),
+    )
+    .await
+    {
+        Ok(Ok(output)) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Ok(Err(error)) => {
+            tracing::warn!("could not list a workspace's projects: {error:#}");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!("listing a workspace's projects did not finish in time");
+            return;
+        }
+    };
+    let known = match sb.slugs(sandbox.pod_id).await {
+        Ok(known) => known,
+        Err(error) => {
+            tracing::warn!("could not read a workspace's projects: {error:#}");
+            return;
+        }
+    };
+    let mut gone: Vec<&str> = listed
+        .lines()
+        .filter(|s| is_slug(s) && !known.iter().any(|k| k == s))
+        .collect();
+    gone.sort_unstable();
+    gone.dedup();
+    if gone.is_empty() {
+        return;
+    }
+    let [pid, port, kind, log] = [SERVER_PID, SERVER_PORT, SERVER_KIND, SERVER_LOG]
+        .map(|path| path.replace("$OBLETH_SLUG", "$s"));
+    let script = format!(
+        "for s in \"$@\"; do pid=$(cat {pid} 2>/dev/null); [ -n \"$pid\" ] && kill -TERM -\"$pid\" 2>/dev/null; \
+         rm -f {pid} {port} {kind} {log}; rm -rf -- \"/workspace/$s\" \"/workspace/.obleth-checkpoints/$s.git\"; done"
+    );
+    let mut argv = vec!["sh", "-c", script.as_str(), "sh"];
+    argv.extend(gone.iter().copied());
+    match tokio::time::timeout(Duration::from_secs(60), sb.exec(sandbox, &argv, None)).await {
+        Ok(Ok(_)) => tracing::info!(
+            count = gone.len(),
+            "removed projects of deleted chats from a workspace"
+        ),
+        Ok(Err(error)) => tracing::warn!("could not remove projects of deleted chats: {error:#}"),
+        Err(_) => tracing::warn!("removing projects of deleted chats did not finish in time"),
+    }
+}
+
+/// A project folder's name as Chat makes them: 16 lowercase letters and digits.
+fn is_slug(name: &str) -> bool {
+    name.len() == 16
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
 async fn logs(sb: &Sandboxes, sandbox: &Sandbox, args: &Value) -> ToolResult {
     let lines = args
         .get("lines")
@@ -1485,6 +1551,22 @@ mod tests {
         assert_eq!(tool_as_command("server_logs").unwrap().0, "server_logs");
         assert!(tool_as_command("start_servers.sh").is_none());
         assert!(tool_as_command("cargo build && ./start_server").is_none());
+    }
+
+    #[test]
+    fn only_project_folder_names_count_as_projects() {
+        assert!(is_slug("a1b2c3d4e5f6g7h8"));
+        for name in [
+            "",
+            "uploads",
+            "a1b2c3d4e5f6g7h",
+            "A1b2c3d4e5f6g7h8",
+            "a1b2c3d4e5f6g7h8x",
+            ".obleth-checkpoint",
+            "a1b2c3d4e5f6g7-8",
+        ] {
+            assert!(!is_slug(name), "{name}");
+        }
     }
 
     #[test]

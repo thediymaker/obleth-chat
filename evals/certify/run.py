@@ -38,9 +38,9 @@ TERMINAL = {"completed", "error", "stopped", "waiting", "idle", "failed"}
 BUSY = ("stayed full", "responses at once", "Try again in a few minutes")
 ATTEMPTS = 6
 PAUSE = 90
-# A token may make 120 calls a minute; with a dozen cases running, checking each chat
-# this often stays well under that.
-POLL = 12
+# A token may make 120 calls a minute; with 28 cases running, checking each chat
+# this often stays under that.
+POLL = 20
 
 
 class Chat:

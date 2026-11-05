@@ -99,7 +99,7 @@ def reply_text(state):
 
 def tools_called(steps):
     return [s["tool"] for s in steps if s.get("tool") and s["tool"] not in HOUSEKEEPING
-            and s.get("kind") not in CARDS]
+            and s.get("kind") not in CARDS and s.get("kind") != "sources"]
 
 
 def card_shown(steps, approval=False):
@@ -124,6 +124,9 @@ def machine_checks(expect, steps, text, approval=False):
     failed = []
     called = tools_called(steps)
     asked = [s["tool"] for s in steps if s.get("tool")]
+    # A "sources" step is the search Chat runs on every message when collections are
+    # attached, not one the model chose: it meets a calls rule but never breaks a no_calls one.
+    chosen = [s["tool"] for s in steps if s.get("tool") and s.get("kind") != "sources"]
     for pattern in expect.get("calls", []):
         if not any(matches(pattern, t) for t in asked):
             failed.append(f"did not call {pattern}")
@@ -133,7 +136,7 @@ def machine_checks(expect, steps, text, approval=False):
             failed.append(f"called {', '.join(called)} but should call no tool")
     else:
         for pattern in no_calls:
-            hit = [t for t in asked if matches(pattern, t)]
+            hit = [t for t in chosen if matches(pattern, t)]
             if hit:
                 failed.append(f"called {hit[0]}")
     shown = card_shown(steps, approval)

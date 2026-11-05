@@ -226,7 +226,7 @@ impl Turn {
         if self.library {
             text.push_str(&format!("# The person's library\nWhen the person asks you to remember, keep or save something (a function, a fact, a link, a decision), call {SAVE_TOOL} with a clear title, the content and a few tags. Only save what they ask for."));
             if self.saved {
-                text.push_str(&format!(" They also keep saved items from earlier work; when they refer to something they saved, or to earlier work you cannot see, call {TOOL} to find it."));
+                text.push_str(&format!(" They also keep saved items from earlier work; when they refer to something they saved, or to earlier work you cannot see, call {TOOL} to find it. Don't search them for anything else."));
             }
         }
         if self.collections.is_empty() {
@@ -240,7 +240,7 @@ impl Turn {
             self.names.join(", ")
         ));
         if self.tool {
-            text.push_str(&format!(" To look for more, call {TOOL} with a short query; its passages continue the numbering."));
+            text.push_str(&format!(" To look for more, call {TOOL} with a short query; its passages continue the numbering. Search only when the question is about their material; answer general questions, and anything they say needs no documents, without searching."));
         }
         if self.sources.is_empty() {
             text.push_str("\n\nNo passages matched the person's message.");
@@ -269,7 +269,7 @@ impl Turn {
 
 pub fn definition() -> Value {
     json!({"type":"function","function":{"name":TOOL,
-        "description":"Search the person's attached knowledge collections for passages about a topic. Use short, specific queries; call again with different words if the first search misses. Results are numbered so you can cite them as [n].",
+        "description":"Search the person's own material, their attached knowledge collections and saved items, for passages about a topic. Call it only when the answer may be in what they uploaded or saved, or when they refer to it; answer general questions from what you know without searching. Use short, specific queries; call again with different words if the first search misses. Results are numbered so you can cite them as [n].",
         "parameters":{"type":"object","properties":{"query":{"type":"string","description":"What to look for, in a few words or a short question"}},"required":["query"],"additionalProperties":false}}})
 }
 

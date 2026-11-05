@@ -195,9 +195,13 @@ def answer_for(turn, state):
     waiting = [w for w in state.get("waitingFor", []) if w.get("questions")]
     if not waiting:
         raise RuntimeError("no question card to answer")
-    question = waiting[-1]["questions"][0]
-    option = question["options"][int(found.group(1)) - 1]
-    return f"{question['question']} {option['label']}"
+    # Every question in the card gets option N, or its last option when it has fewer.
+    n = int(found.group(1)) - 1
+    answers = []
+    for question in waiting[-1]["questions"]:
+        options = question["options"]
+        answers.append(f"{question['question']} {options[min(n, len(options) - 1)]['label']}")
+    return "\n".join(answers)
 
 
 def busy(error):
@@ -256,7 +260,8 @@ def run_once(chat, model, case, config, args):
         passed, verdict = judge(chat, judge_model, case, steps, text, args.timeout)
         record["judge"] = {"model": judge_model, "verdict": verdict}
         if not passed:
-            failed.append("judge: " + (verdict.splitlines()[1] if len(verdict.splitlines()) > 1 else verdict))
+            reason = [line for line in verdict.splitlines()[1:] if line.strip()]
+            failed.append("judge: " + (reason[0] if reason else verdict))
     record.update(passed=not failed, failed=failed, steps=steps, reply=text[:4000],
                   seconds=round(time.time() - started_at))
     return record

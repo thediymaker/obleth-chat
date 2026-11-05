@@ -158,6 +158,9 @@ The person wrote:
 >>>
 
 The assistant's steps (tools it called and cards it showed): {steps}
+You can't see what those tools returned. Where the reply reports what a page, file,
+command or job showed, judge whether it reads as a faithful report of a step it ran;
+don't fail it because you remember a page or result differently.
 
 The assistant's final reply:
 <<<

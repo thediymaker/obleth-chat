@@ -4,11 +4,15 @@ Each release's section is also its GitHub Release notes.
 
 ## v1.0.4
 
+**New**
+
+- **Past Slurm jobs.** The Jobs tool can list jobs that ended in the last 30 days, with their state and exit code, and the Clusters page shows a cluster's jobs from the last 7 days under **Recent jobs**.
+
 **Changes**
 
 - **12 replies at once.** A person may now run 12 replies at once by default, up from 3. A site still at the old default of 3 moves to 12; one that chose another number keeps it.
 - **Knowledge search.** Models search a person's collections and saved items only when the answer may be in that material, not for general questions.
-- **Certification.** The cases and runner in `evals/certify` were corrected from the first gold runs.
+- **Certification.** The cases and runner in `evals/certify` were corrected from the first gold runs. The judge no longer fails a reply because it remembers a page differently from what the assistant read.
 
 ## v1.0.3
 

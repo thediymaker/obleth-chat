@@ -398,7 +398,7 @@ cases:
     area: browser
     setup: {browser: true}
     message: Go to https://en.wikipedia.org/wiki/Coral_bleaching and give me the first sentence of the article.
-    expect: {calls: [browser_open], judge: "Quotes the article's actual first sentence."}
+    expect: {calls: [browser_open], contains: ["symbiotic algae and photosynthetic pigments"], judge: "Quotes one sentence from the article as its first sentence."}
   - id: I04
     area: browser
     setup: {browser: true}

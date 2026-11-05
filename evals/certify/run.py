@@ -39,6 +39,8 @@ TERMINAL = {"completed", "error", "stopped", "waiting", "idle", "failed"}
 # Errors that say the service was busy, not that the model did anything wrong: the
 # case is run again after a pause instead of failing.
 BUSY = ("stayed full", "responses at once", "Try again in a few minutes")
+# The error a reply shows once stop_chat has stopped it.
+STOPPED = "Response stopped"
 ATTEMPTS = 6
 PAUSE = 90
 # A token may make 120 calls a minute; with 28 cases running, checking each chat
@@ -387,6 +389,9 @@ def run_turns(chat, model, case, config, args, started):
     if state.get("timedOut"):
         failed.append(f"still running after {args.timeout} s")
     errors = [m["error"] for m in state.get("messages", []) if m.get("error")]
+    if state.get("approval"):
+        # The runner stopped it at Allow; that stop is not the reply failing.
+        errors = [e for e in errors if e != STOPPED]
     if errors and busy(errors[-1]):
         record.update(passed=False, failed=[f"busy: {errors[-1]}"], busy=True, seconds=round(time.time() - started_at))
         return record

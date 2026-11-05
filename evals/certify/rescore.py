@@ -60,7 +60,11 @@ def main():
             rerun.setdefault(model, []).append(case_id)
             continue
         failed = run.machine_checks(case["expect"], record["steps"], record.get("reply") or "", record.get("approval", False))
-        failed += [f for f in record["failed"] if f.startswith(("still running", "the reply failed"))]
+        # The runner's own stop at Allow is not the reply failing.
+        stopped = f"the reply failed: {run.STOPPED}"
+        at_allow = run.card_shown(record["steps"]) == "approval"
+        failed += [f for f in record["failed"] if f.startswith(("still running", "the reply failed"))
+                   and not (at_allow and f == stopped)]
         if any(f.startswith("still running") for f in failed):
             rerun.setdefault(model, []).append(case_id)
         rubric = case["expect"].get("judge")

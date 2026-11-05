@@ -320,6 +320,8 @@ def run_turns(chat, model, case, config, args, started):
         state = chat.wait(started["id"], args.timeout)
         sent = record["sent"] = []
         for turn in case.get("turns", []):
+            if state.get("timedOut"):
+                break  # The reply is still running, so a next message would be refused.
             message = answer_for(turn, state)
             if message is None:
                 continue

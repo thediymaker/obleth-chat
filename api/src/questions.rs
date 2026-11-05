@@ -129,8 +129,9 @@ pub fn workspace_entry(call_id: &str, arguments: &str) -> Value {
 pub const RESEARCH_TOOL: &str = "suggest_research";
 
 /// Said in the system prompt while the tool is offered: from the tool list alone, models
-/// start a long tuning job in the chat itself, where nothing keeps or compares the tries.
-pub const RESEARCH_PROMPT: &str = "When the person wants something pushed as far as it will go over many measured tries, such as tuning or optimizing for speed, accuracy, size or cost, a parameter sweep, or a run left going overnight, call suggest_research before doing that work here. A research project keeps each try on its own branch, runs them the same way and charts the results; work done in a plain chat keeps none of that.";
+/// start a long tuning job in the chat itself, where nothing keeps or compares the tries,
+/// and when data or a baseline has to be made first, they make it and never offer research.
+pub const RESEARCH_PROMPT: &str = "When the person wants something pushed as far as it will go over many measured tries, such as tuning or optimizing for speed, accuracy, size or cost, a parameter sweep, or a run left going overnight, call suggest_research as your first step for that request: before writing code, making data, building a baseline or measuring anything here, even when that setup has to come first, since the research project sets those up too. If the person turns it down, do the work here. A research project keeps each try on its own branch, runs them the same way and charts the results; work done in a plain chat keeps none of that.";
 
 pub fn research_definition() -> Value {
     json!({"type":"function","function":{"name":RESEARCH_TOOL,

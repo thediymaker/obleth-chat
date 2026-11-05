@@ -2,6 +2,13 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.0.6
+
+**Changes**
+
+- **Research suggestions.** When someone asks for something tuned or optimized over many measured tries, the model now suggests a research project before it starts, even when data or a baseline has to be made first. Before, models often built the baseline themselves and never offered one.
+- **Certification.** A change that stops at Allow is no longer mistaken for one that ran without approval when the runner stops the chat. A `calls` rule can name alternatives (`run_command|start_server`), and nine set-2 cases were reworded so they don't depend on files the workspace doesn't have.
+
 ## v1.0.5
 
 **New**

@@ -2085,10 +2085,13 @@ async fn cluster_status_shows_what_the_persons_account_sees(pool: PgPool) {
         .iter()
         .map(|r| r["query"].as_str().unwrap().to_owned())
         .collect();
+    // Running and pending jobs, then the ones that ended recently.
     assert_eq!(
-        asked,
+        asked[..2],
         ["users=alice&state=RUNNING", "users=alice&state=PENDING"]
     );
+    assert_eq!(asked.len(), 3);
+    assert!(asked[2].starts_with("users=alice&start_time="));
     assert!(cluster_requests(&f, "GET", "/slurm/v0.0.45/jobs").is_empty());
     // A second look within half a minute asks for partitions with the person's own
     // token again, but takes the nodes from the first.

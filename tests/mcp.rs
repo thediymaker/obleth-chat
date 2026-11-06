@@ -260,7 +260,8 @@ async fn a_token_runs_chats_over_mcp_and_reaches_nothing_else(pool: PgPool) {
             "list_models",
             "start_chat",
             "send_message",
-            "stop_chat"
+            "stop_chat",
+            "delete_chat"
         ]
     );
 

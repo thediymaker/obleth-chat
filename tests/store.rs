@@ -330,7 +330,8 @@ async fn active_generation_cap_is_atomic_across_replicas(pool: PgPool) {
     let owner = user(&pool).await;
     let store = Store::new(pool.clone());
     let mut chats = Vec::new();
-    for number in 0..8 {
+    // One more than twice the default limit of 12 responses at once.
+    for number in 0..15 {
         chats.push(
             store
                 .create(owner, &format!("Chat {number}"), "model")
@@ -359,7 +360,7 @@ async fn active_generation_cap_is_atomic_across_replicas(pool: PgPool) {
             }
         }
     }
-    assert_eq!((allowed, rejected), (3, 5));
+    assert_eq!((allowed, rejected), (12, 3));
     let other_user = user(&pool).await;
     let other_chat = store
         .create(other_user, "Other user", "model")

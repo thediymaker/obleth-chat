@@ -38,7 +38,8 @@ CARDS = {"question", "workspace", "research", "app", "browser-request", "approva
 TERMINAL = {"completed", "error", "stopped", "waiting", "idle", "failed"}
 # Errors that say the service was busy, not that the model did anything wrong: the
 # case is run again after a pause instead of failing.
-BUSY = ("stayed full", "responses at once", "Try again in a few minutes")
+BUSY = ("stayed full", "responses at once", "Try again in a few minutes",
+        "identity provider is unavailable")
 # The error a reply shows once stop_chat has stopped it.
 STOPPED = "Response stopped"
 ATTEMPTS = 6

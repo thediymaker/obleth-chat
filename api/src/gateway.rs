@@ -390,6 +390,25 @@ impl Gateway {
         conversation: Uuid,
         body: Value,
     ) -> Result<Response, ApiError> {
+        self.chat_escalating(user, conversation, body, None).await
+    }
+    /// A chat request that can tell `auto` the model it gave this conversation
+    /// is failing (`x-obleth-auto-escalate`, such as `tool_loop`), so the
+    /// gateway moves it to a stronger one.
+    pub async fn chat_escalating(
+        &self,
+        user: &Identity,
+        conversation: Uuid,
+        body: Value,
+        escalate: Option<&'static str>,
+    ) -> Result<Response, ApiError> {
+        let mut extra = effort_header(&body);
+        if let Some(signal) = escalate.filter(|_| body["model"] == "auto") {
+            extra.insert(
+                "x-obleth-auto-escalate",
+                reqwest::header::HeaderValue::from_static(signal),
+            );
+        }
         let response = self
             .client
             .post(self.base.join("v1/chat/completions").unwrap())
@@ -398,7 +417,7 @@ impl Gateway {
                 self.authorization(user).await?,
             )
             .header("x-obleth-session-id", conversation.to_string())
-            .headers(effort_header(&body))
+            .headers(extra)
             .json(&body)
             .send()
             .await

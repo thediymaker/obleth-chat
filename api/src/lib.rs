@@ -756,6 +756,69 @@ fn server_failure(error: &Value) -> bool {
 const STEP_THINKING_BYTES: usize = 64 * 1024;
 const MAX_OVERTHINKS: u32 = 2;
 const OVERTHOUGHT: &str = "[Chat: you thought for a long time without writing anything, so that step was stopped. Stop planning everything up front. Take the next small step now, such as writing the first part of a file with write_file, then continue in parts and check as you go.]";
+/// Writes to one file, with nothing run in between, that count as a loop.
+const LOOP_WRITES: u32 = 4;
+/// Times a model may put back a version of a file it replaced before that
+/// counts as a loop.
+const LOOP_REVERTS: u32 = 2;
+
+/// Watches a turn's file writes for a model going in circles: writing one file
+/// over and over with nothing run in between, or putting back a version of it
+/// that it already replaced (two manifests in turn, each "fixing" the other).
+#[derive(Default)]
+struct LoopWatch {
+    /// Writes per file since the model last ran something.
+    rewrites: std::collections::HashMap<String, u32>,
+    /// Each file's versions this turn, as content fingerprints.
+    versions: std::collections::HashMap<String, Vec<u64>>,
+    /// Times each file went back to a version it had already left.
+    reverts: std::collections::HashMap<String, u32>,
+}
+
+impl LoopWatch {
+    fn wrote(&mut self, path: &str, content: Option<&str>) {
+        *self.rewrites.entry(path.to_owned()).or_default() += 1;
+        let Some(text) = content else { return };
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        let hash = h.finish();
+        let seen = self.versions.entry(path.to_owned()).or_default();
+        if seen.last() != Some(&hash) && seen.contains(&hash) {
+            *self.reverts.entry(path.to_owned()).or_default() += 1;
+        }
+        seen.push(hash);
+    }
+
+    /// The model ran something, which is how it checks what it wrote.
+    fn ran(&mut self) {
+        self.rewrites.clear();
+    }
+
+    /// The file the model is stuck on and how many times it wrote it this turn,
+    /// once. Counting starts over after a loop is reported.
+    fn looping(&mut self) -> Option<(String, u32)> {
+        let path = self
+            .rewrites
+            .iter()
+            .filter(|(_, n)| **n >= LOOP_WRITES)
+            .chain(self.reverts.iter().filter(|(_, n)| **n >= LOOP_REVERTS))
+            .map(|(path, _)| path.clone())
+            .min()?;
+        let times = self
+            .versions
+            .get(&path)
+            .map_or(LOOP_WRITES as usize, Vec::len) as u32;
+        self.rewrites.clear();
+        self.reverts.clear();
+        Some((path, times))
+    }
+}
+/// What Chat tells a model that keeps rewriting one file. Models that loop
+/// this way often think something else is changing the file.
+fn loop_note(path: &str, times: u32) -> String {
+    format!("[Chat: you have written {path} {times} times this turn without getting anywhere. Nothing else changes your files: what you read back is exactly what you last wrote. Stop rewriting {path}. Decide what it should hold once, then write the next file the work needs, and build or run it to check.]")
+}
 const STEPS_DROPPED: &str = "[Earlier steps of this turn were dropped to save context:";
 const ARGUMENTS_OMITTED: &str =
     r#"{"omitted":"Earlier arguments omitted to save context. The tool result still applies."}"#;
@@ -1725,6 +1788,12 @@ async fn run_generation(
         // already asked it to check its work this turn.
         let mut unchecked = false;
         let mut gated = false;
+        // Writes per file since the model last ran something, how often Chat
+        // has stopped a loop this turn, and whether the next request asks
+        // `auto` for a stronger model.
+        let mut watch = LoopWatch::default();
+        let mut loops = 0u32;
+        let mut escalate: Option<&'static str> = None;
         loop {
             steps += 1;
             finish_reason = None;
@@ -1753,7 +1822,7 @@ async fn run_generation(
             let response = loop {
                 match tokio::time::timeout(
                     Duration::from_secs(STALL_SECS),
-                    gateway.chat(&user, id, payload.clone()),
+                    gateway.chat_escalating(&user, id, payload.clone(), escalate),
                 )
                 .await
                 {
@@ -2706,11 +2775,16 @@ async fn run_generation(
                 if outcome.ok && matches!(call.name.as_str(), "write_file" | "edit_file") {
                     wrote = true;
                     unchecked = true;
+                    let args: Value = serde_json::from_str(&call.arguments).unwrap_or_default();
+                    if let Some(path) = args["path"].as_str() {
+                        watch.wrote(path, args["content"].as_str());
+                    }
                 } else if matches!(
                     call.name.as_str(),
                     "run_command" | "run_in_terminal" | "start_server" | "experiment_run"
                 ) {
                     unchecked = false;
+                    watch.ran();
                 }
                 if entry["check"] == "error" {
                     broken = true;
@@ -2738,6 +2812,31 @@ async fn run_generation(
                     record(&mut activity, &entry, true);
                     emit(&mut tx, "tool", entry);
                 }
+            }
+            // A model that rewrites one file over and over, or keeps putting back
+            // a version it replaced, is stuck: tell it so, and on the second loop
+            // of an auto turn ask the gateway for a stronger model.
+            escalate = None;
+            if let Some((path, times)) = watch.looping() {
+                loops += 1;
+                payload["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"role":"user","content":loop_note(&path, times)}));
+                let stronger = loops >= 2 && resolved.model == "auto";
+                if stronger {
+                    payload["model"] = json!("auto");
+                    escalate = Some("tool_loop");
+                    served = None;
+                }
+                let summary = if stronger {
+                    "Chat moved this turn to a stronger model"
+                } else {
+                    "Chat stopped a loop"
+                };
+                let entry = json!({"id":format!("loop-{steps}"),"tool":"check","summary":summary,"detail":format!("The model kept rewriting {path} without getting anywhere."),"status":"completed","startedAt":chrono::Utc::now()});
+                record(&mut activity, &entry, true);
+                emit(&mut tx, "tool", entry);
             }
             drop_old_steps(&mut payload);
             trim_tool_history(&mut payload);
@@ -2990,6 +3089,51 @@ async fn run_generation(
 #[cfg(test)]
 mod draft_tests {
     use super::*;
+
+    #[test]
+    fn loop_watch_sees_two_versions_taking_turns() {
+        let mut w = LoopWatch::default();
+        w.wrote("Cargo.toml", Some("[workspace]"));
+        w.wrote("Cargo.toml", Some("[package]"));
+        assert!(w.looping().is_none());
+        // Back to the first version, then the second again: going in circles,
+        // even with a look around in between.
+        w.wrote("Cargo.toml", Some("[workspace]"));
+        w.ran();
+        assert!(w.looping().is_none());
+        w.wrote("Cargo.toml", Some("[package]"));
+        assert_eq!(w.looping(), Some(("Cargo.toml".to_string(), 4)));
+        // Reported once; counting starts over.
+        assert!(w.looping().is_none());
+    }
+
+    #[test]
+    fn loop_watch_sees_one_file_rewritten_with_nothing_run() {
+        let mut w = LoopWatch::default();
+        for i in 0..LOOP_WRITES - 1 {
+            w.wrote("src/main.rs", Some(&format!("v{i}")));
+        }
+        assert!(w.looping().is_none());
+        w.wrote("src/main.rs", Some("v9"));
+        assert_eq!(w.looping().map(|(p, _)| p), Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn loop_watch_lets_write_build_fix_cycles_run() {
+        let mut w = LoopWatch::default();
+        for i in 0..10 {
+            w.wrote("src/main.rs", Some(&format!("attempt {i}")));
+            w.wrote("Cargo.toml", Some(&format!("deps {i}")));
+            w.ran();
+            assert!(w.looping().is_none(), "round {i}");
+        }
+        // Edits carry no whole file to compare; only their count matters.
+        for _ in 0..LOOP_WRITES - 1 {
+            w.wrote("src/lib.rs", None);
+        }
+        w.ran();
+        assert!(w.looping().is_none());
+    }
 
     #[test]
     fn only_server_side_stream_errors_are_tried_again() {

@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.0.8
+
+**Fixes**
+
+- **Models that go in circles on one file.** A model that kept rewriting one file without running anything, or kept putting back a version it had replaced (two `Cargo.toml` files in turn, each "fixing" the other), could spend a whole turn that way. Chat now tells it that nothing else changes its files and to move on to the next file. If it loops again in a chat on Auto, Chat asks the gateway for a stronger model for the rest of the turn, and the steps show "Chat moved this turn to a stronger model".
+
 ## v1.0.7
 
 **Changes**

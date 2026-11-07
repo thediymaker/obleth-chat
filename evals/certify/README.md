@@ -1,12 +1,12 @@
 # Certification
 
-100 cases over the ways a model works inside Chat: answering, formatting, asking with
-the question card, offering and using a workspace, research and app offers,
+106 cases over the ways a model works inside Chat: answering, formatting, asking with
+the question card, offering and using a workspace, research, app and project offers,
 knowledge, the browser, Kubernetes and Slurm connections, worker agents, and
 several turns. Each case runs as a real chat through Chat's MCP endpoint, so a model
 sees the same prompts and tools people get. `cases.yaml` explains the checks.
 
-`cases-people.yaml` is a second set of 100, written the way people actually type:
+`cases-people.yaml` is a second set of 106, written the way people actually type:
 short, vague or missing context. It checks that a model picks the right thing from
 everyday wording, and holds back when no tool or offer fits. Run it with
 `--suite cases-people.yaml`.

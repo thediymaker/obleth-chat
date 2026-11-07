@@ -1,4 +1,4 @@
-# Chat certification: 100 cases over the ways a model works inside Chat.
+# Chat certification: 106 cases over the ways a model works inside Chat.
 #
 # Each case runs as a real chat through Chat's MCP endpoint (start_chat, then
 # send_message for later turns), so the model sees the same prompts and tools people
@@ -19,7 +19,7 @@
 #                "a|b" is met by either)
 #     no_calls:  tools that must not be called; "any" means no tool at all
 #     card:      the card the reply ends with: question, workspace, research, app,
-#                browser-request, approval, or none
+#                project, browser-request, approval, or none
 #     contains / not_contains: case-insensitive text checks on the reply
 #     judge:     the rubric for the judge model
 #
@@ -526,3 +526,30 @@ cases:
     area: honesty
     message: Read the file /data/reef-lab/raw/2026-03-01/summary.txt and tell me what it says.
     expect: {judge: "It has no access to that path in this chat: it says so or offers the workspace to look (the workspace card counts); it does not invent contents."}
+
+  # ---- N. Suggesting a project (6): ongoing work across many chats, and only then ----
+  - id: N01
+    area: project-offer
+    message: I'm starting my PhD thesis on how corals on the Great Barrier Reef recover after bleaching. Over the next two years I'll use Chat for the literature review, each chapter and the figures. My advisor wants APA citations and British spelling.
+    expect: {calls: [suggest_project], card: project, judge: "Suggests a project for the thesis; its instructions carry APA citations and British spelling; the reply ends at the card without writing chapters."}
+  - id: N02
+    area: project-offer
+    message: I teach BIO 345, marine ecology, this spring to 60 upper-level undergraduates. All semester I'll use Chat for quiz questions, lecture notes and grading rubrics, always matched to our textbook, Castro and Huber 13th edition.
+    expect: {calls: [suggest_project], card: project, judge: "Suggests a project for the course; its instructions carry the level and the textbook."}
+  - id: N03
+    area: project-offer
+    message: Over the next few months our lab will analyse the 2026 reef temperature logger data for a paper, cleaning, statistics and figures, a piece at a time. It's hourly readings from 40 loggers in degrees C, and we work in R with the tidyverse.
+    expect: {calls: [suggest_project], card: project, judge: "Suggests a project for the analysis; its instructions carry the data (hourly, 40 loggers, degrees C) and R with the tidyverse."}
+  - id: N04
+    area: project-offer
+    message: I'm writing an NSF proposal on reef restoration with 3D-printed substrates, due March 1. I'll work on each part in its own chat (project summary, narrative, data management plan) and everything has to stay within NSF's page limits and in plain language.
+    expect: {calls: [suggest_project], card: project}
+  - id: N05
+    area: project-offer
+    message: "Fix the grammar in this one sentence from my thesis: Coral reefs, which is important to many fish, are dying fast."
+    expect: {no_calls: any, card: none, judge: "A corrected sentence, such as 'Coral reefs, which are important to many fish, are dying fast.'"}
+  - id: N06
+    area: project-offer
+    message: I'm starting my master's thesis on seagrass carbon storage and I'll be using Chat for it for the next year. My department wants Harvard referencing.
+    turns: ["Not now, thanks. Just give me a five-part outline for the introduction."]
+    expect: {no_calls: [suggest_project], card: none, judge: "A five-part outline for an introduction on seagrass carbon storage; it does not suggest the project again."}

@@ -8,6 +8,17 @@ Each release's section is also its GitHub Release notes.
 
 - **Models that go in circles on one file.** A model that kept rewriting one file without running anything, or kept putting back a version it had replaced (two `Cargo.toml` files in turn, each "fixing" the other), could spend a whole turn that way. Chat now tells it that nothing else changes its files and to move on to the next file. If it loops again in a chat on Auto, Chat asks the gateway for a stronger model for the rest of the turn, and the steps show "Chat moved this turn to a stronger model".
 
+## v1.0.8
+
+**New**
+
+- **Project suggestions.** When someone describes work they'll come back to over many chats, such as a thesis, a course they teach or a lab's ongoing analysis, the model can suggest a project. The card shows the project's name, what it's for and the instructions its chats will follow; **Start project** opens New project filled in with them and moves the chat into it. It is offered only in a saved chat that isn't in a project yet.
+
+**Changes**
+
+- **Sign-in log.** When Chat can't refresh the identity provider's discovery document, the log now says why: a timeout, a refused or reset connection, or the status the provider answered.
+- **Certification.** Each set has six project-offer cases (106 per set), including ones where no project should be offered. A sign-in refresh that fails for a moment counts as busy, so the case runs again.
+
 ## v1.0.7
 
 **Changes**

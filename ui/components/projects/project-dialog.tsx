@@ -33,6 +33,10 @@ export interface ProjectDialogProps {
   asApp?: boolean;
   /** The chat to move into the new project ("Start a project from this chat"). */
   fromChat?: string;
+  /** What a new project's form starts with, such as a project the model suggested. */
+  initial?: { name?: string; description?: string; instructions?: string };
+  /** Called once a chat has moved into the new project. */
+  onMoved?: (project: Project) => void;
 }
 
 /** Copies a repository into a project's code. Throws with the reason it couldn't. */
@@ -42,7 +46,7 @@ export async function importRepository(projectId: string, url: string, token: st
   return r;
 }
 
-export function ProjectDialog({ open, onOpenChange, project, asApp = false, fromChat }: ProjectDialogProps) {
+export function ProjectDialog({ open, onOpenChange, project, asApp = false, fromChat, initial, onMoved }: ProjectDialogProps) {
   const router = useRouter();
   const client = useQueryClient();
   const { data } = useProjects();
@@ -62,9 +66,9 @@ export function ProjectDialog({ open, onOpenChange, project, asApp = false, from
 
   useEffect(() => {
     if (!open) return;
-    setName(project?.name ?? "");
-    setDescription(project?.description ?? "");
-    setInstructions(project?.instructions ?? "");
+    setName(project?.name ?? initial?.name ?? "");
+    setDescription(project?.description ?? initial?.description ?? "");
+    setInstructions(project?.instructions ?? initial?.instructions ?? "");
     setColor(project?.color ?? (asApp ? "green" : COLORS[(data?.projects?.length ?? 0) % COLORS.length]!));
     setShare(project?.scope === "group" && project.groupId ? project.groupId : ONLY_ME);
     setRepo("");
@@ -128,6 +132,7 @@ export function ProjectDialog({ open, onOpenChange, project, asApp = false, from
         const moved = await moveChat(client, fromChat, id);
         onOpenChange(false);
         toast(moved ? `Moved to ${moved.name}` : "Removed from the project");
+        if (moved) onMoved?.(moved);
         return;
       }
       onOpenChange(false);

@@ -26,7 +26,7 @@ import { citeHtml, KnowledgeSources } from "@/components/knowledge/chat-knowledg
 import { SavedNotes } from "@/components/library/saved-notes";
 import { useChatProjectId } from "@/components/projects/chat-project";
 import { codeTitle, Markdown } from "./markdown-view";
-import { AppOffer, QuestionCard, ResearchOffer, WorkspaceOffer } from "./question-cards";
+import { AppOffer, ProjectOffer, QuestionCard, ResearchOffer, WorkspaceOffer } from "./question-cards";
 import { SteerForm, TurnAfter, TurnBefore } from "./turn-view";
 
 function IconButton({ label, onClick, children, pressed, disabled, ...rest }: { label: string; onClick: () => void; children: React.ReactNode; pressed?: boolean; disabled?: boolean; [key: string]: unknown }) {
@@ -298,7 +298,7 @@ function AnswerContent({ m, index }: { m: ChatMessage; index: number }) {
     m.status === "completed" &&
     m.reasoningContent &&
     !String(m.content || "").trim() &&
-    !(m.activity || []).some((e) => ["question", "workspace", "research", "app"].includes(e.kind || ""));
+    !(m.activity || []).some((e) => ["question", "workspace", "research", "app", "project"].includes(e.kind || ""));
   const canSave = store.feature("knowledge") && !store.active?.temporary;
   const project = useChatProjectId(store.shared ? null : (store.active?.id ?? null));
   return (
@@ -425,6 +425,7 @@ export const MessageView = memo(
               <WorkspaceOffer m={m} index={index} />
               <ResearchOffer m={m} index={index} />
               <AppOffer m={m} index={index} />
+              <ProjectOffer m={m} index={index} />
               <BrowserCard m={m} index={index} isLast={isLast} streaming={store.streaming} />
             </>
           )}

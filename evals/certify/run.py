@@ -34,7 +34,7 @@ HOUSEKEEPING = {"thinking_limit", "connection", "output_limit", "check"}
 # connections must ask before changes, and the runner stops a chat at the approval.
 WRITES = ("__apply", "__delete", "__submit", "__cancel")
 # Activity kinds that are cards the reply ends with.
-CARDS = {"question", "workspace", "research", "app", "browser-request", "approval"}
+CARDS = {"question", "workspace", "research", "app", "project", "browser-request", "approval"}
 TERMINAL = {"completed", "error", "stopped", "waiting", "idle", "failed"}
 # Errors that say the service was busy, not that the model did anything wrong: the
 # case is run again after a pause instead of failing.

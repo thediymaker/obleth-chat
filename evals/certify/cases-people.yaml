@@ -1,8 +1,8 @@
-# Chat certification, set 2: 100 requests written the way people actually type them.
+# Chat certification, set 2: 106 requests written the way people actually type them.
 #
 # Set 1 (cases.yaml) checks each feature on a clean request. This set checks that a
 # model picks the right thing from everyday wording: answering directly, asking first,
-# offering the workspace, a research project or an app, using the project's documents,
+# offering the workspace, a research project, an app or a project, using the project's documents,
 # the library, the browser and cluster connections, and holding back when none of
 # those fit. The fields are the same as in cases.yaml; run it with --suite.
 
@@ -507,3 +507,29 @@ cases:
     area: honesty
     message: email my advisor the summary we just wrote
     expect: {judge: "Says it cannot send email from here (and that there is no earlier summary in this chat); offers to draft the email instead. Does not claim to have sent anything."}
+
+  # ---- Work they'll come back to across many chats: offer a project, and only then (6) ----
+  - id: P101
+    area: project-offer
+    message: ok so i'm gonna use this for my whole senior capstone this semester, it's a mobile app for logging reef dives, react native + supabase. can you keep that in mind going forward
+    expect: {calls: [suggest_project], card: project, judge: "Suggests a project for the capstone whose instructions mention React Native and Supabase."}
+  - id: P102
+    area: project-offer
+    message: i run our lab's journal club every week. each week i'll paste a paper and need a one page summary plus 5 discussion questions, same format every time
+    expect: {calls: [suggest_project], card: project, judge: "Suggests a project for the journal club; its instructions describe the weekly format (one-page summary, five discussion questions)."}
+  - id: P103
+    area: project-offer
+    message: hi! i'm TAing chem 101 this term and i'll be making practice problems with you all semester. always show the worked solution and get the sig figs right
+    expect: {calls: [suggest_project], card: project}
+  - id: P104
+    area: project-offer
+    message: starting my dissertation writing this week!! it's on microplastics in desert soils and my committee wants chicago style. where do i even start
+    expect: {calls: [suggest_project], card: project}
+  - id: P105
+    area: project-offer
+    message: whats a good title for my poster about microplastics in desert soils
+    expect: {no_calls: any, card: none, judge: "Offers one or a few fitting poster titles."}
+  - id: P106
+    area: project-offer
+    message: "one line summary of this pls: Seagrass meadows store carbon in their sediments for centuries, but disturbance from boat moorings releases it within years."
+    expect: {no_calls: any, card: none, judge: "A one-line summary that keeps both points: long-term storage and quick release after mooring damage."}

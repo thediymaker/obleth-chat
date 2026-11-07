@@ -1649,6 +1649,15 @@ async fn run_generation(
     if app_room.is_some() {
         preamble.push(questions::APP_PROMPT.into());
     }
+    // Ongoing work can be moved into a project from a saved chat that isn't in one.
+    let offers_project = asks
+        && project.is_none()
+        && !crate::store::is_temporary(&s.store.pool, user.id, id)
+            .await
+            .unwrap_or(true);
+    if offers_project {
+        preamble.push(questions::PROJECT_PROMPT.into());
+    }
     if let Some(prompt) = knowledge_turn
         .as_ref()
         .map(|k| k.prompt())
@@ -1743,6 +1752,9 @@ async fn run_generation(
     }
     if app_room.is_some() {
         tools.push(questions::app_definition());
+    }
+    if offers_project {
+        tools.push(questions::project_definition());
     }
     if research_tools {
         tools.extend(research::tools::definitions());
@@ -2230,6 +2242,7 @@ async fn run_generation(
                     && c.name != questions::WORKSPACE_TOOL
                     && c.name != questions::RESEARCH_TOOL
                     && c.name != questions::APP_TOOL
+                    && c.name != questions::PROJECT_TOOL
                     && c.name != browser::tools::HANDOFF
                     && c.name != browser::tools::REQUEST
                     && c.name != agents::TOOL
@@ -2300,6 +2313,29 @@ async fn run_generation(
                             record(&mut activity, &entry, true);
                             emit(&mut tx, "tool", entry);
                             questions::APP_SHOWN.to_string()
+                        }
+                        Some(Ok(_)) => {
+                            "Ask for one thing at a time: your reply already ends with a question."
+                                .to_string()
+                        }
+                        Some(Err(problem)) => problem,
+                        None => format!("There is no tool named {}.", call.name),
+                    };
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
+                if call.name == questions::PROJECT_TOOL {
+                    let output = match offers_project
+                        .then(|| questions::project_entry(&call.id, &call.arguments))
+                    {
+                        Some(Ok(entry)) if !asked => {
+                            asked = true;
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry);
+                            questions::PROJECT_SHOWN.to_string()
                         }
                         Some(Ok(_)) => {
                             "Ask for one thing at a time: your reply already ends with a question."
@@ -3041,7 +3077,10 @@ async fn run_generation(
     // Suggested follow-ups would compete with the model's own questions.
     let asked = activity
         .iter()
-        .any(|e| ["question", "workspace", "research"].contains(&e["kind"].as_str().unwrap_or("")));
+        .any(|e| {
+            ["question", "workspace", "research", "app", "project"]
+                .contains(&e["kind"].as_str().unwrap_or(""))
+        });
     let followups = if status == "completed" && !content.is_empty() && !asked && s.followups_enabled
     {
         tokio::time::timeout(

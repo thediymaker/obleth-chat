@@ -149,6 +149,38 @@ pub fn research_entry(call_id: &str, arguments: &str, in_project: bool) -> Value
     json!({"id":call_id,"kind":"research","tool":RESEARCH_TOOL,"status":"asked","summary":"Suggested research","goal":text(&args["goal"], 200),"metric":text(&args["metric"], 120),"inProject":in_project})
 }
 
+/// Offered in a chat that isn't in a project: the model can suggest starting a project
+/// for ongoing work, and the card's button opens New project filled in and moves the
+/// chat into it.
+pub const PROJECT_TOOL: &str = "suggest_project";
+
+/// Said in the system prompt while the tool is offered: from the tool list alone, models
+/// never suggest one, and people with work that spans many chats keep starting over.
+pub const PROJECT_PROMPT: &str = "Chat keeps ongoing work in projects: a project's chats share its instructions, knowledge collections, saved items and code, so a new chat there starts with what the earlier ones set up. When the person describes work they will come back to over many chats, such as a thesis or paper, a course they teach or take, a lab's ongoing analysis, a grant, or an app or tool they will keep building, and especially when they give standing context (their topic, data, style, rules or deadlines) that every later chat would need, call suggest_project with a name and the instructions those chats should follow, then end your reply. Suggest it at most once, not for a one-off question or task, and not when research or an app fits better, since those make their own project. If the person turns it down, carry on here.";
+
+pub fn project_definition() -> Value {
+    json!({"type":"function","function":{"name":PROJECT_TOOL,
+        "description":"Suggest starting a project for this chat. The person sees a card with the project's name, what it is for and its instructions, and a button that opens New project filled in with them and moves this chat into it. Your reply ends at the card; if they start it, their next message says so and you carry on in the project.",
+        "parameters":{"type":"object","properties":{
+            "name":{"type":"string","description":"A short name, such as \"Coral bleaching thesis\""},
+            "description":{"type":"string","description":"What the project is for, in one sentence"},
+            "instructions":{"type":"string","description":"Standing instructions every chat in the project follows: the context the person gave (topic, data, audience, style, rules, deadlines), written to the model, in a few short lines. Leave it empty when they gave none."}},
+        "required":["name"],"additionalProperties":false}}})
+}
+
+/// The card for a project suggestion, or what the model must fix.
+pub fn project_entry(call_id: &str, arguments: &str) -> Result<Value, String> {
+    let args: Value = serde_json::from_str(arguments)
+        .map_err(|_| "The arguments were not valid JSON.".to_string())?;
+    let name = text(&args["name"], 80);
+    if name.is_empty() {
+        return Err("Give the project a name.".into());
+    }
+    Ok(json!({"id":call_id,"kind":"project","tool":PROJECT_TOOL,"status":"asked","summary":"Suggested a project","name":name,"description":text(&args["description"], 300),"instructions":text(&args["instructions"], 2000)}))
+}
+
+pub const PROJECT_SHOWN: &str = "The person sees a card suggesting the project, with a button to start it. End your reply now in at most one short sentence, without repeating the name or instructions; if they start it, their next message says so and you carry on with the task in the project.";
+
 /// Offered to administrators: the model can suggest turning what the person describes
 /// into an app, and the card's button makes the project and app with its steps.
 pub const APP_TOOL: &str = "suggest_app";
@@ -246,6 +278,20 @@ mod tests {
         assert_eq!(entry["kind"], "workspace");
         assert_eq!(entry["reason"], "To build the app and show a preview.");
         assert_eq!(workspace_entry("call_2", "not json")["reason"], "");
+    }
+
+    #[test]
+    fn a_project_suggestion_needs_a_name_and_keeps_its_instructions() {
+        let entry = project_entry(
+            "call_1",
+            &json!({"name":"Coral thesis","description":"My PhD thesis.","instructions":"Cite in APA.\nUse British spelling."}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(entry["kind"], "project");
+        assert_eq!(entry["name"], "Coral thesis");
+        assert_eq!(entry["instructions"], "Cite in APA.\nUse British spelling.");
+        assert!(project_entry("call_2", &json!({"name":" "}).to_string()).is_err());
+        assert!(project_entry("call_3", "not json").is_err());
     }
 
     #[test]

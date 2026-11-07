@@ -33,7 +33,7 @@ const STAGES: Record<string, Stages> = {
 };
 export const stagesOf = (e: ActivityEntry) => STAGES[e.service as string] || STAGES.mcp!;
 export const browsing = (e: ActivityEntry) => String(e.tool || "").startsWith("browser_");
-const CARDS = new Set(["sources", "saved", "question", "workspace", "research", "browser-handoff", "browser-request"]);
+const CARDS = new Set(["sources", "saved", "question", "workspace", "research", "project", "browser-handoff", "browser-request"]);
 export const FILE_TOOLS = new Set(["write_file", "edit_file"]);
 export const COMMANDS = new Set(["run_command", "start_server", "run_in_terminal"]);
 // Searching knowledge, saving and asking are not work to show: their cards sit below the answer.

@@ -2,16 +2,18 @@
 
 // Cards at the end of a reply that ask the person something: the
 // model's questions with a few choices each (ask_user), its offers to turn on a
-// workspace (request_workspace), to set the chat up for research (suggest_research)
-// and to make an app (suggest_app). Only the newest reply's card can be answered.
+// workspace (request_workspace), to set the chat up for research (suggest_research),
+// to make an app (suggest_app) and to start a project for the chat (suggest_project).
+// Only the newest reply's card can be answered.
 
-import { Box, Check, CircleHelp, FlaskConical, Terminal } from "lucide-react";
+import { Box, Check, CircleHelp, FlaskConical, Folder, Terminal } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { researchAllowed, startResearch } from "@/components/research/start";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useChatProjectId } from "@/components/projects/chat-project";
+import { useChatProject, useChatProjectId } from "@/components/projects/chat-project";
+import { NewProjectDialog } from "@/components/projects/project-dialog";
 import type { ChatStore } from "@/lib/chat/store";
 import type { ActivityEntry, Message } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
@@ -42,6 +44,7 @@ export const questionEntry = (m?: Message) => activityOf(m).find((e) => e.kind =
 const offerOf = (m?: Message) => activityOf(m).find((e) => e.kind === "workspace");
 const suggestionOf = (m?: Message) => activityOf(m).find((e) => e.kind === "research");
 const appOf = (m?: Message) => activityOf(m).find((e) => e.kind === "app");
+const projectOf = (m?: Message) => activityOf(m).find((e) => e.kind === "project");
 const keyOf = (m: Message, index: number) => m.id || `message-${index}`;
 const answered = (form: Form, i: number) => form.picks[i]!.size > 0 || !!form.other[i]!.trim();
 
@@ -446,5 +449,72 @@ export function AppOffer({ m, index }: { m: Message; index: number }) {
         {entry.documents ? ", with a collection for its documents" : ""}. Try it, change it and publish it from the project’s App tab.
       </p>
     </Offer>
+  );
+}
+
+export function ProjectOffer({ m, index }: { m: Message; index: number }) {
+  const store = useChat();
+  const id = store.active?.id ?? null;
+  const current = useChatProject(id);
+  const entry = projectOf(m);
+  const key = keyOf(m, index);
+  const [offer, setOffer] = useOffer(store, key);
+  const [editing, setEditing] = useState(false);
+  if (!entry) return null;
+  const { made } = stateOf(store);
+  const project = made.get(key);
+  const isLast = index === (store.active?.messages?.length || 0) - 1;
+  const name = (
+    <p>
+      <strong className="font-medium">Project</strong> {entry.name || "Suggested project."}
+    </p>
+  );
+  if (project || current)
+    return (
+      <Closed icon={Folder}>
+        {name}
+        <p className="text-faint">
+          {project ? "Started. " : "This chat is in a project. "}
+          <Link className="underline underline-offset-2" href={`/projects/${encodeURIComponent(project || current!.id)}`}>
+            Open {project ? "it" : current!.name}
+          </Link>
+        </p>
+      </Closed>
+    );
+  if (!isLast || m.status !== "completed" || store.streaming || offer === "dismissed" || !id)
+    return (
+      <Closed icon={Folder}>
+        {name}
+        {offer === "dismissed" && <p className="text-faint">Not started. Use the project menu above the chat whenever you want it.</p>}
+      </Closed>
+    );
+  return (
+    <>
+      <Offer
+        icon={Folder}
+        label="Start a project"
+        title={entry.name}
+        busy={editing}
+        busyLabel="Start project"
+        acceptLabel="Start project"
+        onDismiss={() => setOffer("dismissed")}
+        onAccept={() => setEditing(true)}
+      >
+        {entry.description && <p>{entry.description}</p>}
+        {entry.instructions && <p className="line-clamp-4 whitespace-pre-line text-sm">{entry.instructions}</p>}
+        <p className="text-sm text-faint">Moves this chat into a new project. Its chats share the instructions, collections, saved items and code, so a new chat there starts with what this one set up.</p>
+      </Offer>
+      <NewProjectDialog
+        open={editing}
+        onOpenChange={setEditing}
+        fromChat={id}
+        initial={{ name: entry.name, description: entry.description, instructions: entry.instructions }}
+        onMoved={(p) => {
+          made.set(key, p.id);
+          setOffer("done");
+          store.send(`I started the project “${p.name}” for this chat. Go ahead.`);
+        }}
+      />
+    </>
   );
 }

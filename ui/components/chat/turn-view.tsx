@@ -760,7 +760,7 @@ function ResultCard({ m, s }: { m: Message; s: Stats }) {
   if (!s.files.length) return null;
   const stopped = m.status !== "completed";
   const id = store.route.id;
-  const previews = store.capabilities.features?.previews !== false;
+  const previews = store.capabilities.features?.previews === true;
   return (
     <section className="grid gap-3 rounded-lg border bg-card p-3" aria-label="What changed">
       <div className="flex flex-wrap items-start gap-3">

@@ -65,14 +65,14 @@ export function AdminPage({ segments = [] }: { segments?: string[] }) {
   return (
     <div className="min-w-0">
       <SectionHeading title="Administration" description="Accounts, model access, and service activity." actions={<Pill tone="accent">Administrator</Pill>} />
-      <nav aria-label="Administration sections" className="-mx-4 mb-6 flex gap-1 overflow-x-auto border-b px-4 sm:mx-0 sm:px-0">
+      <nav aria-label="Administration sections" className="-mx-4 mb-6 flex gap-1 overflow-x-auto px-4 shadow-[inset_0_-1px_0_var(--border)] [scrollbar-width:none] sm:mx-0 sm:px-0 [&::-webkit-scrollbar]:hidden">
         {ADMIN_TABS.map(([id, Icon, label]) => (
           <Link
             key={id}
             href={`/settings/admin/${id}`}
             aria-current={id === section ? "page" : undefined}
             className={cn(
-              "-mb-px inline-flex shrink-0 items-center gap-1.5 border-b-2 border-transparent px-3 py-2 text-sm whitespace-nowrap text-muted-foreground hover:text-foreground",
+              "inline-flex shrink-0 items-center gap-1.5 border-b-2 border-transparent px-3 py-2 text-sm whitespace-nowrap text-muted-foreground hover:text-foreground",
               id === section && "border-foreground text-foreground",
             )}
           >

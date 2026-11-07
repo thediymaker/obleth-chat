@@ -26,7 +26,7 @@ describe("the workspace panel", () => {
           : path.includes("/workspace/file?")
             ? { content: "name,n\nada,1\n" }
             : { workspace: { status: "running", previewPort: null, diskBytes: 2 ** 30 }, diskLimit: 10 * 2 ** 30 },
-      { workspaces: true },
+      { workspaces: true, previews: true },
     );
     renderPage(<WorkspacePanel conversationId="c1" tab="files" />);
     fireEvent.click(await screen.findByText("data.csv"));
@@ -40,7 +40,7 @@ describe("the workspace panel", () => {
   });
 
   it("offers to wake an asleep workspace", async () => {
-    const calls = mockApi((_path, options) => ({ workspace: { status: options.method === "POST" ? "starting" : "stopped" } }), { workspaces: true });
+    const calls = mockApi((_path, options) => ({ workspace: { status: options.method === "POST" ? "starting" : "stopped" } }), { workspaces: true, previews: true });
     renderPage(<WorkspacePanel conversationId="c1" tab="preview" />);
     expect(await screen.findByText("The workspace is asleep.")).toBeInTheDocument();
     expect(screen.getByText("Asleep")).toBeInTheDocument();
@@ -50,7 +50,7 @@ describe("the workspace panel", () => {
   });
 
   it("says what went wrong when it could not start", async () => {
-    mockApi(() => ({ workspace: { status: "error", errorMessage: "Quota exceeded" } }), { workspaces: true });
+    mockApi(() => ({ workspace: { status: "error", errorMessage: "Quota exceeded" } }), { workspaces: true, previews: true });
     renderPage(<WorkspacePanel conversationId="c1" tab="preview" />);
     expect(await screen.findByText("The workspace could not start.")).toBeInTheDocument();
     expect(screen.getByText("Quota exceeded")).toBeInTheDocument();
@@ -73,7 +73,7 @@ describe("Compute › Workspaces", () => {
         return {};
       }
       return path === "/api/workspaces" ? items : {};
-    }, { workspaces: true });
+    }, { workspaces: true, previews: true });
     renderPage(<WorkspacesPage />);
     expect(await screen.findByText("Reading group site")).toBeInTheDocument();
     expect(screen.getByText("2.0 of 10 GB used")).toBeInTheDocument();
@@ -86,7 +86,7 @@ describe("Compute › Workspaces", () => {
   });
 
   it("starts building from the empty page", async () => {
-    mockApi(() => ({ workspaces: [], diskLimit: 0 }), { workspaces: true });
+    mockApi(() => ({ workspaces: [], diskLimit: 0 }), { workspaces: true, previews: true });
     const store = fakeStore();
     renderPage(<WorkspacesPage />);
     fireEvent.click(await screen.findByRole("button", { name: "Start building" }));

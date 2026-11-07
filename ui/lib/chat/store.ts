@@ -474,7 +474,8 @@ export class ChatStore {
   /** Tabs the pane offers for a chat. */
   /** The server has a preview domain; without one a workspace has no Preview tab. */
   previews() {
-    return this.capabilities.features?.previews !== false;
+    // Only once the server says so: before it knows who is signed in it leaves it out.
+    return this.capabilities.features?.previews === true;
   }
   paneTabs(id: string): string[] {
     const tabs: string[] = [];

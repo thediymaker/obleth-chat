@@ -24,7 +24,7 @@ export type WorkspaceTab = "preview" | "files" | "terminal";
 export function usePreviewsFlag(bridge: WorkspaceBridge) {
   const previews = useCapabilities().data?.features?.previews;
   useEffect(() => {
-    bridge.configure({ previews: previews !== false });
+    bridge.configure({ previews: previews === true });
   }, [bridge, previews]);
   return bridge.previews();
 }

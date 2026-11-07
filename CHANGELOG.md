@@ -12,6 +12,11 @@ Each release's section is also its GitHub Release notes.
 - **Dropdowns in the theme.** Every dropdown, in Settings, Administration, the Memory page, sharing and project code, now opens a list drawn in Chat's own colors, light or dark, instead of the browser's plain system list.
 - **Administration › System › Memory.** Turn memory on, choose the model that keeps memories, and choose whether it starts on for people who haven't chosen. Memories are matched to messages by meaning when knowledge search is set up, and by their words otherwise.
 
+**Fixes**
+
+- **A Preview tab that vanished.** On a server without a preview domain, a workspace chat could show a Preview tab for its first minute and then lose it. The tab now shows only once Chat knows previews are set up.
+- **Tab rows that scrolled.** The workspace pane's tabs and Administration's sections showed a tiny scrollbar beside them. They no longer do; a row too long for a narrow window still scrolls sideways.
+
 ## v1.0.9
 
 **New**

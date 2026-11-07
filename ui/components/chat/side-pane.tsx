@@ -226,7 +226,8 @@ export function SidePane({ id }: { id: string }) {
       {!detailsOnly && <ResizeHandle pane={ref} width={width} setWidth={setWidth} />}
       {/* The tab bar, with underlined tabs. */}
       <div className="flex min-h-11 shrink-0 items-center gap-3 border-b pr-2 pl-4 leading-[normal]">
-        <div className="flex min-w-0 flex-1 gap-4 overflow-x-auto" role="tablist">
+        {/* Stretched 1px over the bar's border, so the underline sits on it without the row scrolling. */}
+        <div className="-mb-px flex min-w-0 flex-1 gap-4 self-stretch overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" role="tablist">
           {tabs.map((t) => {
             const [label] = TABS[t] || [t];
             return (
@@ -237,7 +238,7 @@ export function SidePane({ id }: { id: string }) {
                 aria-selected={tab === t}
                 onClick={() => store.showTab(id, t)}
                 className={cn(
-                  "-mb-px flex shrink-0 items-center gap-[7px] border-b border-transparent py-3 text-md text-muted-foreground hover:text-foreground",
+                  "flex shrink-0 items-center gap-[7px] border-b border-transparent py-3 text-md text-muted-foreground hover:text-foreground",
                   tab === t && "border-foreground text-foreground",
                 )}
               >

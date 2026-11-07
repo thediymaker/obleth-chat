@@ -66,7 +66,7 @@ export interface WorkspaceBridge {
   /** Disk all of the person's workspaces may use, in bytes (0 when unknown). */
   diskLimit(): number;
   setDiskLimit(bytes: number | undefined): void;
-  /** Whether the server has a preview domain (capabilities.features.previews !== false). */
+  /** Whether the server has a preview domain (capabilities.features.previews === true). */
   previews(): boolean;
   /** The panel passes what capabilities say about previews. */
   configure(options: { previews?: boolean }): void;

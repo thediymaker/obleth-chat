@@ -50,7 +50,7 @@ export function WorkspacesPage() {
   usePageChrome("Compute");
   const caps = useCapabilities();
   const on = useFeature("workspaces");
-  const previews = caps.data?.features?.previews !== false;
+  const previews = caps.data?.features?.previews === true;
   const list = useWorkspaceList();
   const queries = useQueryClient();
   const store = useChat();

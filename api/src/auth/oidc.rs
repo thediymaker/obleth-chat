@@ -198,6 +198,9 @@ impl Oidc {
         )
         .await;
         let mut cache = self.cache.lock().unwrap();
+        let refreshed = refreshed.map_err(|_| {
+            anyhow::anyhow!("OIDC discovery took longer than {DISCOVERY_TIMEOUT:?}")
+        });
         match refreshed {
             Ok(Ok(discovered)) => {
                 *cache = Cache {
@@ -207,8 +210,8 @@ impl Oidc {
                 };
                 Ok(discovered)
             }
-            _ => {
-                tracing::warn!("OIDC discovery refresh failed");
+            Ok(Err(error)) | Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "OIDC discovery refresh failed");
                 cache.failed_at = Some(std::time::Instant::now());
                 Err(provider_unavailable())
             }
@@ -337,6 +340,31 @@ fn asymmetric(algorithm: &CoreJwsSigningAlgorithm) -> bool {
     )
 }
 
+/// Why discovery failed, for the log: how the request failed or the status that came
+/// back, never the response itself.
+fn discovery_failure<E: std::error::Error + 'static>(
+    error: &openidconnect::DiscoveryError<E>,
+) -> String {
+    use openidconnect::DiscoveryError as D;
+    match error {
+        D::Request(e) => {
+            // The transport's own chain says timeout, refused, reset or TLS.
+            let mut text = e.to_string();
+            let mut cause = e.source();
+            while let Some(c) = cause {
+                text = format!("{text}: {c}");
+                cause = c.source();
+            }
+            format!("the request failed ({text})")
+        }
+        D::Response(status, _, _) => format!("the provider answered {status}"),
+        D::Parse(_) => "the answer was not valid metadata or keys".into(),
+        D::Validation(_) => "the metadata did not validate".into(),
+        D::UrlParse(_) => "the issuer is not a valid URL".into(),
+        _ => "another error".into(),
+    }
+}
+
 async fn discover(
     config: &OidcConfig,
     origin: &str,
@@ -346,7 +374,12 @@ async fn discover(
     // The JWKS may live on another host than the issuer.
     let metadata = Metadata::discover_async(IssuerUrl::new(config.issuer.clone())?, http)
         .await
-        .map_err(|_| anyhow::anyhow!("OIDC discovery failed for the configured issuer"))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "OIDC discovery failed for the configured issuer: {}",
+                discovery_failure(&e)
+            )
+        })?;
     validate_transport(metadata.authorization_endpoint().url())?;
     validate_transport(metadata.jwks_uri().url())?;
     validate_transport(

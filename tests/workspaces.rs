@@ -242,6 +242,7 @@ async fn app_with(
         everyone: false,
         slots: 8,
         preview_domain: preview_domain.map(Into::into),
+        preview_suffix: String::new(),
         preview_scheme: "http".into(),
         chat_origin: ORIGIN.into(),
         idle: Duration::from_secs(3600),

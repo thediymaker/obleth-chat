@@ -16,6 +16,7 @@ Each release's section is also its GitHub Release notes.
 **Fixes**
 
 - **A Preview tab that vanished.** On a server without a preview domain, a workspace chat could show a Preview tab for its first minute and then lose it. The tab now shows only once Chat knows previews are set up.
+- **Two Chats on one preview domain.** `OBLETH_CHAT_PREVIEW_HOST_SUFFIX` (such as `-dev`) is added to each preview's name, `<id>-dev.<domain>`, so a second Chat can share the first one's wildcard DNS and certificate and answer only its own previews.
 - **Tab rows that scrolled.** The workspace pane's tabs and Administration's sections showed a tiny scrollbar beside them. They no longer do; a row too long for a narrow window still scrolls sideways.
 
 ## v1.0.9

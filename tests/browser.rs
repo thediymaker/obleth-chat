@@ -128,6 +128,7 @@ async fn fixture(pool: PgPool) -> Fixture {
         everyone: false,
         slots: 8,
         preview_domain: Some("sbx.example.com".into()),
+        preview_suffix: String::new(),
         preview_scheme: "http".into(),
         chat_origin: ORIGIN.into(),
         idle: Duration::from_secs(3600),

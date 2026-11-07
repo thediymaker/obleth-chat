@@ -50,6 +50,9 @@ pub struct SandboxConfig {
     pub slots: usize,
     /// Unset turns previews off; workspaces still run.
     pub preview_domain: Option<String>,
+    /// Added to each preview's first label (`<slug><suffix>.<domain>`), so two
+    /// Chats can share one wildcard domain and certificate. Usually empty.
+    pub preview_suffix: String,
     pub preview_scheme: String,
     pub chat_origin: String,
     pub idle: Duration,
@@ -75,6 +78,19 @@ impl SandboxConfig {
         };
         let image = var("OBLETH_CHAT_SANDBOX_IMAGE").unwrap_or_else(|| release_image("workspace"));
         let preview_domain = var("OBLETH_CHAT_PREVIEW_DOMAIN").map(|d| d.to_ascii_lowercase());
+        let preview_suffix = var("OBLETH_CHAT_PREVIEW_HOST_SUFFIX")
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !preview_suffix.is_empty()
+            && !(preview_suffix.len() <= 16
+                && preview_suffix.starts_with('-')
+                && !preview_suffix.ends_with('-')
+                && preview_suffix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        {
+            bail!("OBLETH_CHAT_PREVIEW_HOST_SUFFIX must start with - and hold letters, digits and dashes, such as -dev");
+        }
         let chat_origin =
             var("OBLETH_CHAT_ORIGIN").unwrap_or_else(|| "http://localhost:8085".into());
         let origin = Url::parse(&chat_origin).context("Invalid OBLETH_CHAT_ORIGIN")?;
@@ -138,6 +154,7 @@ impl SandboxConfig {
             .into(),
             chat_origin: origin.origin().ascii_serialization(),
             preview_domain,
+            preview_suffix,
             idle: minutes("OBLETH_CHAT_SANDBOX_IDLE_MINUTES", 60)?,
             retention: minutes("OBLETH_CHAT_SANDBOX_RETENTION_MINUTES", 60 * 24 * 7)?,
         }))
@@ -440,7 +457,10 @@ impl Sandboxes {
     pub fn preview_origin(&self, sandbox: &Sandbox) -> Option<String> {
         let c = &self.inner.config;
         let domain = c.preview_domain.as_ref()?;
-        Some(format!("{}://{}.{domain}", c.preview_scheme, sandbox.slug))
+        Some(format!(
+            "{}://{}{}.{domain}",
+            c.preview_scheme, sandbox.slug, c.preview_suffix
+        ))
     }
 
     pub async fn get(&self, owner: Uuid, conversation: Uuid) -> Result<Option<Sandbox>, ApiError> {

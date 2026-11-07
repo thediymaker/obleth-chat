@@ -139,7 +139,7 @@ fn cookie_name(sb: &Sandboxes) -> &'static str {
 }
 
 /// The workspace slug when the request is addressed to a preview host.
-fn preview_slug(headers: &HeaderMap, domain: &str) -> Option<String> {
+fn preview_slug(headers: &HeaderMap, domain: &str, suffix: &str) -> Option<String> {
     let host = headers.get(header::HOST)?.to_str().ok()?;
     let host = host.rsplit_once(':').map_or(host, |(name, port)| {
         if port.chars().all(|c| c.is_ascii_digit()) {
@@ -150,7 +150,7 @@ fn preview_slug(headers: &HeaderMap, domain: &str) -> Option<String> {
     });
     let slug = host
         .to_ascii_lowercase()
-        .strip_suffix(&format!(".{domain}"))?
+        .strip_suffix(&format!("{suffix}.{domain}"))?
         .to_owned();
     (slug.len() == 16
         && slug
@@ -171,7 +171,7 @@ pub async fn dispatch(
     let Some(domain) = sb.config().preview_domain.clone() else {
         return next.run(request).await;
     };
-    let Some(slug) = preview_slug(request.headers(), &domain) else {
+    let Some(slug) = preview_slug(request.headers(), &domain, &sb.config().preview_suffix) else {
         if request
             .headers()
             .get(header::HOST)
@@ -817,8 +817,20 @@ mod tests {
         let host = |h: &str| {
             let mut headers = HeaderMap::new();
             headers.insert(header::HOST, HeaderValue::from_str(h).unwrap());
-            preview_slug(&headers, "sbx.example.com")
+            preview_slug(&headers, "sbx.example.com", "")
         };
+        let suffixed = |h: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_str(h).unwrap());
+            preview_slug(&headers, "sbx.example.com", "-dev")
+        };
+        // A second Chat on the same domain answers only its own suffix.
+        assert_eq!(
+            suffixed("abcdefghijklmnop-dev.sbx.example.com").as_deref(),
+            Some("abcdefghijklmnop")
+        );
+        assert_eq!(suffixed("abcdefghijklmnop.sbx.example.com"), None);
+        assert_eq!(host("abcdefghijklmnop-dev.sbx.example.com"), None);
         assert_eq!(
             host("abcdefghijklmnop.sbx.example.com").as_deref(),
             Some("abcdefghijklmnop")

@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**New**
+
+- **Batches.** Run one prompt over every row of a spreadsheet, in the background. On the new Batches page, upload a CSV or TSV (up to 50,000 rows), click its columns into a prompt such as "Summarize {abstract}", add instructions for every row if you like, pick a model and a deadline (a day, 3 days or a week), and see the first rows' prompts before starting. Each row becomes one request that the gateway runs as you, while the model has room to spare, so people chatting never wait behind a batch. The page shows each batch's progress bar, the time left at its pace, and when it is waiting because the model is busy; cancel one at any time. **Download results** gives back the same spreadsheet with an answer, status and error column added, and works while the batch runs, with the rows still to come marked as waiting. Batches are private to each person. Needs an obleth gateway with batches turned on; the page says so otherwise.
+
 ## v1.1.0
 
 **New**

@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod auth;
 pub mod autopilot;
 pub mod banner;
+pub mod batches;
 pub mod browser;
 pub mod code;
 pub mod config;
@@ -137,6 +138,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let apps = apps::router(state.clone());
     let mcp = mcp::router(state.clone());
     let memory = memory::router(state.clone());
+    let batches = batches::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
     let _ = CSP.set(content_security_policy(sandboxes.as_ref()));
@@ -198,6 +200,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(apps)
         .merge(mcp)
         .merge(memory)
+        .merge(batches)
         .fallback_service(web(branding_dir, sandboxes.as_ref()))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn(security_headers))
@@ -321,6 +324,7 @@ async fn metrics_endpoint(
 async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Value> {
     let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":s.auth.password_sign_in(),"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"jobOutput":s.connections.as_ref().is_some_and(|c| c.clusters_enabled() && c.job_output_available()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
     value["features"]["memory"] = json!(memory::available(&s).await);
+    value["features"]["batches"] = json!(s.gateway.is_some());
     let user = s.auth.require(&headers, false).await.ok();
     if user.as_ref().is_some_and(|u| u.is_admin()) {
         value["adminGatewayUrl"] = json!(s.admin_gateway_url);

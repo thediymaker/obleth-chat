@@ -160,6 +160,14 @@ impl Gateway {
     pub fn signs(&self) -> bool {
         self.signer.is_some()
     }
+    /// The HTTP client gateway calls share.
+    pub(crate) fn http(&self) -> &Client {
+        &self.client
+    }
+    /// A gateway path, such as `v1/batches`, as a full URL.
+    pub(crate) fn url(&self, path: &str) -> Url {
+        self.base.join(path).unwrap_or_else(|_| self.base.clone())
+    }
     /// The Authorization header for a call made for `user`. Someone who signs in
     /// with the identity provider gets their own provider token whenever tokens are
     /// forwarded, never Chat's; everyone else gets Chat's signed token.
@@ -653,7 +661,7 @@ fn gave_up_waiting(status: u16, reason: Option<&str>) -> bool {
 }
 /// The gateway's reason, when it gave one, follows Chat's own words, so a person can
 /// tell a retired model from a bad request. It is cut short and kept to one line.
-async fn upstream_error(response: Response) -> ApiError {
+pub(crate) async fn upstream_error(response: Response) -> ApiError {
     let status = response.status();
     tracing::warn!(status = status.as_u16(), "gateway request failed");
     let message = match status.as_u16() {

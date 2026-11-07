@@ -390,17 +390,21 @@ impl Gateway {
         conversation: Uuid,
         body: Value,
     ) -> Result<Response, ApiError> {
-        self.chat_escalating(user, conversation, body, None).await
+        self.chat_escalating(user, conversation, body, None, None)
+            .await
     }
     /// A chat request that can tell `auto` the model it gave this conversation
     /// is failing (`x-obleth-auto-escalate`, such as `tool_loop`), so the
-    /// gateway moves it to a stronger one.
+    /// gateway moves it to a stronger one. `own_system` is how many bytes at the
+    /// end of the system message the person wrote; `auto` classifies the request
+    /// from those and the person's turns only (`x-obleth-classify-system`).
     pub async fn chat_escalating(
         &self,
         user: &Identity,
         conversation: Uuid,
         body: Value,
         escalate: Option<&'static str>,
+        own_system: Option<usize>,
     ) -> Result<Response, ApiError> {
         let mut extra = effort_header(&body);
         if let Some(signal) = escalate.filter(|_| body["model"] == "auto") {
@@ -408,6 +412,9 @@ impl Gateway {
                 "x-obleth-auto-escalate",
                 reqwest::header::HeaderValue::from_static(signal),
             );
+        }
+        if let Some(bytes) = own_system.filter(|_| body["model"] == "auto") {
+            extra.insert("x-obleth-classify-system", bytes.into());
         }
         let response = self
             .client

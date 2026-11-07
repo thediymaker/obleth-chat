@@ -1694,6 +1694,10 @@ async fn run_generation(
     if recalled {
         preamble.push(format!("Earlier replies in this conversation may end with a bracketed note that starts with \"{}\". Chat adds it so you remember which tools ran; you did not write it and the person does not see it. Never write such a note yourself: your tools report their own results.", store::RECORD));
     }
+    // Chat's own instructions come first and the person's system prompt last; Auto's
+    // classifier reads only the person's part, so tool and format instructions do not
+    // make every request look like code.
+    let own_system = (!preamble.is_empty()).then_some(parameters.system_prompt.len());
     if !preamble.is_empty() {
         if !parameters.system_prompt.is_empty() {
             preamble.push(parameters.system_prompt.clone());
@@ -1867,7 +1871,7 @@ async fn run_generation(
             let response = loop {
                 match tokio::time::timeout(
                     Duration::from_secs(STALL_SECS),
-                    gateway.chat_escalating(&user, id, payload.clone(), escalate),
+                    gateway.chat_escalating(&user, id, payload.clone(), escalate, own_system),
                 )
                 .await
                 {

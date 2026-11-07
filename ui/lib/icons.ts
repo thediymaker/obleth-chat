@@ -4,7 +4,7 @@ import {
   Archive, ArrowRight, Bookmark, BookOpen, Box, ChartColumn, Check, ChevronDown, ChevronUp, CircleHelp, Clock,
   Code, Columns2, Copy, Download, Ellipsis, ExternalLink, File, FlaskConical, Folder, Gauge, Gauge as Meter,
   GitBranch, Globe, Grid2x2, Hand, Image, Info, Link, LockKeyhole, LogIn, MessageSquare, Monitor, Moon,
-  MousePointer2, Orbit, PanelLeft, Paperclip, Pencil, Pin, Play, Plus, Power, RefreshCw, Search, Server,
+  MousePointer2, Orbit, PanelLeft, Paperclip, Pause, Pencil, Pin, Play, Plus, Power, RefreshCw, Search, Server,
   Settings, Shield, Square, Sun, Terminal, Trash2, Undo2, Upload, Users, X, Zap, type LucideIcon,
 } from "lucide-react";
 
@@ -17,6 +17,6 @@ export const BRAND_ICONS: Record<string, LucideIcon> = {
   refresh: RefreshCw, download: Download, upload: Upload, more: Ellipsis, bolt: Zap, chart: ChartColumn,
   undo: Undo2, compare: Columns2, branch: GitBranch, play: Play, stop: Square, external: ExternalLink,
   shield: Shield, grid: Grid2x2, help: CircleHelp, globe: Globe, cursor: MousePointer2, hand: Hand,
-  power: Power, signin: LogIn, info: Info, sun: Sun, moon: Moon, monitor: Monitor, meter: Meter,
+  power: Power, pause: Pause, signin: LogIn, info: Info, sun: Sun, moon: Moon, monitor: Monitor, meter: Meter,
 };
 export const BRAND_ICON_NAMES: ReadonlySet<string> = new Set(Object.keys(BRAND_ICONS));

@@ -24,6 +24,7 @@ pub mod memory;
 pub mod metrics;
 pub mod models;
 pub mod operations;
+pub mod pause;
 pub mod projects;
 pub mod questions;
 pub mod research;
@@ -1786,6 +1787,15 @@ async fn run_generation(
     if offers_browser {
         tools.push(browser::tools::request_definition());
     }
+    // Long work can be paused at the person's request, with a note to carry on from.
+    let offers_pause = workspace.is_some()
+        || research_tools
+        || browsing.is_some()
+        || toolset.is_some()
+        || !workers.is_empty();
+    if offers_pause {
+        tools.push(pause::definition());
+    }
     if !tools.is_empty() {
         payload["tools"] = Value::Array(tools);
     }
@@ -1827,6 +1837,8 @@ async fn run_generation(
         let mut watch = LoopWatch::default();
         let mut loops = 0u32;
         let mut escalate: Option<&'static str> = None;
+        // The note the model paused with; the reply ends after that round.
+        let mut paused: Option<(pause::Note, bool)> = None;
         loop {
             steps += 1;
             finish_reason = None;
@@ -2290,6 +2302,43 @@ async fn run_generation(
             }
             let (mut wrote, mut broken, mut asked) = (false, false, false);
             for call in &calls {
+                if call.name == pause::TOOL {
+                    let output = match offers_pause.then(|| pause::parse(&call.arguments)) {
+                        None => format!("There is no tool named {}.", call.name),
+                        Some(Err(problem)) => problem,
+                        Some(Ok(_)) if paused.is_some() => pause::SHOWN.to_string(),
+                        Some(Ok(note)) => {
+                            // The note goes in the workspace, where a later chat finds it.
+                            let saved = match &running {
+                                Some((sandbox, sandboxes)) => {
+                                    let args = json!({"path":pause::FILE,"content":note.file(chrono::Utc::now())}).to_string();
+                                    sandbox::tools::run(sandboxes, sandbox, "write_file", &args)
+                                        .await
+                                        .ok
+                                }
+                                None => false,
+                            };
+                            wrote |= saved;
+                            let entry = pause::entry(&call.id, saved.then_some(pause::FILE));
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry);
+                            // Auto mode leaves a paused chat alone until the person writes.
+                            let _ = sqlx::query("UPDATE conversations SET auto_nudges=$3 WHERE id=$1 AND owner_id=$2")
+                                .bind(id)
+                                .bind(user.id)
+                                .bind(autopilot::MAX_NUDGES)
+                                .execute(&s.store.pool)
+                                .await;
+                            paused = Some((note, saved));
+                            pause::SHOWN.to_string()
+                        }
+                    };
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
                 if call.name == questions::WORKSPACE_TOOL || call.name == questions::RESEARCH_TOOL {
                     let research = call.name == questions::RESEARCH_TOOL;
                     let offered = if research {
@@ -2906,6 +2955,18 @@ async fn run_generation(
             }
             // The reply ends at the questions; the answers start the next turn.
             if asked {
+                break;
+            }
+            // A pause ends the reply with where the work stands.
+            if let Some((note, saved)) = &paused {
+                let text = note.reply(*saved);
+                if !content.trim().is_empty() {
+                    let trimmed = content.trim_end().len();
+                    content.truncate(trimmed);
+                    content.push_str("\n\n");
+                }
+                content.push_str(&text);
+                emit(&mut tx, "content", json!({"content":content}));
                 break;
             }
             if !content.is_empty() && !content.ends_with("\n\n") {

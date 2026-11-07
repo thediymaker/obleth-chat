@@ -11,6 +11,7 @@ Each release's section is also its GitHub Release notes.
 - **Memory page.** A graph of you, the topics your memories are about and each memory, which you can drag and zoom, with a list view. Open a memory to edit it, change its topics or kind, pin it so every chat gets it, or delete it. Open a topic to rename it (a name another topic has merges the two), remove it, or forget everything about it. Add memories yourself, turn off using or learning memories, or delete them all.
 - **Dropdowns in the theme.** Every dropdown, in Settings, Administration, the Memory page, sharing and project code, now opens a list drawn in Chat's own colors, light or dark, instead of the browser's plain system list.
 - **Administration › System › Memory.** Turn memory on, choose the model that keeps memories, and choose whether it starts on for people who haven't chosen. Memories are matched to messages by meaning when knowledge search is set up, and by their words otherwise.
+- **Pause the work.** Ask the model to pause, in a Steer note or a message, and it brings the work to a clean stop and writes where it stands: what is done, where it stopped, what is still running and the next steps. Chat saves that to `PAUSED.md` in the workspace with a checkpoint, shows it at the end of the reply and ends the turn, and Auto mode leaves the chat paused until you write. The next turn starts from `PAUSED.md`. Before, a model asked to pause in a workspace was sent back to check its work and carried on.
 
 **Fixes**
 

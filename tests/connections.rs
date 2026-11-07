@@ -785,7 +785,10 @@ async fn read_only_tools_run_and_actions_wait_for_allow(pool: PgPool) {
         .iter()
         .map(|t| t["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["fixture__lookup", "fixture__submit_job"]);
+    assert_eq!(
+        names,
+        ["fixture__lookup", "fixture__submit_job", "pause_work"]
+    );
     assert!(first["messages"][0]["content"]
         .as_str()
         .unwrap()
@@ -2461,4 +2464,82 @@ async fn a_secret_key_takes_over_tokens_sealed_with_the_signing_key(pool: PgPool
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{refreshed}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn pausing_ends_the_reply_with_where_the_work_stands(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    // A pause without next steps is sent back, and the reply goes on.
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_p", "pause_work", json!({"state":"Stopped the job."}))]);
+    let (first, stream) = start_turn(&f, &admin).await;
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Nothing was paused"), "{text}");
+    let offered: Vec<String> = f.gateway_seen.lock().unwrap()[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(offered.iter().any(|t| t == "pause_work"), "{offered:?}");
+
+    // A full note ends the reply after that round, shown at its end.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_q",
+        "pause_work",
+        json!({"done":"Looked up job 42.","state":"Nothing is running.","next":"Resubmit job 42 with the same script."}),
+    )]);
+    let before = f.gateway_seen.lock().unwrap().len();
+    let (id, stream) = send(&f, &admin, "Check job 42, then pause there").await;
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        f.gateway_seen.lock().unwrap().len(),
+        before + 1,
+        "nothing runs after the pause"
+    );
+    let uuid: uuid::Uuid = id.parse().unwrap();
+    let (content, status, activity): (String, String, Value) = sqlx::query_as(
+        "SELECT content,status,activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "completed");
+    assert!(
+        content.starts_with("**Paused.** Where the work stands is below."),
+        "{content}"
+    );
+    assert!(
+        content.ends_with("**Next**\n\nResubmit job 42 with the same script."),
+        "{content}"
+    );
+    let step = activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["tool"] == "pause_work")
+        .expect("a pause step");
+    assert_eq!(step["summary"], "Paused at your request");
+    // Auto mode leaves it alone until the person writes again.
+    let nudges: i32 = sqlx::query_scalar("SELECT auto_nudges FROM conversations WHERE id=$1")
+        .bind(uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(nudges, obleth_chat::autopilot::MAX_NUDGES);
+    let other: uuid::Uuid = first.parse().unwrap();
+    let nudges: i32 = sqlx::query_scalar("SELECT auto_nudges FROM conversations WHERE id=$1")
+        .bind(other)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(nudges, 0);
 }

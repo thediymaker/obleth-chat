@@ -10,7 +10,7 @@ import type { ActivityEntry, Message } from "@/lib/chat/types";
 import { NamedIcon } from "@/components/chat/icon";
 
 const HIDDEN_KINDS = new Set(["sources", "thought", "saved", "recalled", "learned", "question", "workspace", "research", "project", "browser-request", "browser-handoff"]);
-const TOOL_ICONS: Record<string, string> = { sync_code: "branch", write_file: "edit", edit_file: "edit", read_file: "file", list_files: "grid", run_command: "terminal", start_server: "play", server_logs: "file" };
+const TOOL_ICONS: Record<string, string> = { sync_code: "branch", write_file: "edit", edit_file: "edit", read_file: "file", list_files: "grid", run_command: "terminal", start_server: "play", server_logs: "file", pause_work: "pause" };
 const STEP_STATE: Record<string, string> = { running: "Running…", awaiting: "Needs your answer", error: "Failed", declined: "Declined" };
 
 export const activitySteps = (m: Message) =>

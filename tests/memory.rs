@@ -299,13 +299,12 @@ async fn replies_teach_memories_linked_to_topics(pool: PgPool) {
             "You train flood models with PyTorch"
         ]
     );
-    let topics: Vec<(String, String)> = sqlx::query_as(
-        "SELECT name, kind FROM memory_topics WHERE owner_id = $1 ORDER BY name",
-    )
-    .bind(person.id)
-    .fetch_all(&pool)
-    .await
-    .unwrap();
+    let topics: Vec<(String, String)> =
+        sqlx::query_as("SELECT name, kind FROM memory_topics WHERE owner_id = $1 ORDER BY name")
+            .bind(person.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         topics,
         vec![
@@ -391,7 +390,10 @@ async fn new_messages_update_and_forget_but_pinned_memories_stay(pool: PgPool) {
     enable(&pool).await;
     let person = session(&pool, "user").await;
     let user = identity(&person);
-    for (text, pinned) in [("You use TensorFlow", false), ("Always answer in French", true)] {
+    for (text, pinned) in [
+        ("You use TensorFlow", false),
+        ("Always answer in French", true),
+    ] {
         let (status, _) = call(
             &app,
             &person,
@@ -447,16 +449,19 @@ async fn replies_get_pinned_memories_and_the_ones_that_fit(pool: PgPool) {
     let entry = found.entry();
     assert_eq!(entry["kind"], "recalled");
     assert_eq!(entry["items"].as_array().unwrap().len(), 2);
-    let uses: i32 = sqlx::query_scalar("SELECT uses FROM memories WHERE content LIKE '%hydrology%'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let uses: i32 =
+        sqlx::query_scalar("SELECT uses FROM memories WHERE content LIKE '%hydrology%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(uses, 1);
     // Not in a temporary chat, and not for a person who turned memory off.
     let (temporary, _) = chat(&pool, person.id, &[], true).await;
-    assert!(memory::recall(&state, &gateway, &user, temporary, &messages)
-        .await
-        .is_none());
+    assert!(
+        memory::recall(&state, &gateway, &user, temporary, &messages)
+            .await
+            .is_none()
+    );
     call(
         &app,
         &person,
@@ -531,7 +536,9 @@ async fn people_see_change_and_delete_their_memories(pool: PgPool) {
     assert_eq!(added["memory"]["origin"], "added");
     let mut page = Value::Null;
     for _ in 0..100 {
-        page = call(&app, &person, "GET", "/api/memory", Value::Null).await.1;
+        page = call(&app, &person, "GET", "/api/memory", Value::Null)
+            .await
+            .1;
         if page["topics"].as_array().is_some_and(|t| !t.is_empty()) {
             break;
         }

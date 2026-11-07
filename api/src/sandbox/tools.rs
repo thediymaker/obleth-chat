@@ -114,11 +114,13 @@ pub async fn project_context(sb: &Sandboxes, sandbox: &Sandbox) -> String {
         return context;
     }
     let script = "find . -mindepth 1 -maxdepth 4 \\( -name node_modules -o -name .next -o -name .git -o -name dist -o -name build -o -name .venv -o -name __pycache__ \\) -prune -o \\( -type d -printf '%P/\\n' \\) -o \\( -type f -printf '%P\\n' \\) 2>/dev/null | sort | head -n 201; \
-        echo '@@obleth-agents@@'; [ -f AGENTS.md ] && head -c 8192 AGENTS.md";
+        echo '@@obleth-agents@@'; [ -f AGENTS.md ] && head -c 8192 AGENTS.md; \
+        echo '@@obleth-paused@@'; [ -f PAUSED.md ] && head -c 8192 PAUSED.md";
     let Ok((out, _, _)) = sh(sb, sandbox, script, &[], None, Duration::from_secs(10)).await else {
         return context;
     };
-    let (files, agents) = out.split_once("@@obleth-agents@@").unwrap_or((&out, ""));
+    let (files, rest) = out.split_once("@@obleth-agents@@").unwrap_or((&out, ""));
+    let (agents, paused) = rest.split_once("@@obleth-paused@@").unwrap_or((rest, ""));
     let files: Vec<&str> = files.lines().filter(|l| !l.trim().is_empty()).collect();
     if files.is_empty() {
         context.push_str("The project folder is empty.");
@@ -135,6 +137,10 @@ pub async fn project_context(sb: &Sandboxes, sandbox: &Sandbox) -> String {
     let agents = agents.trim();
     if !agents.is_empty() {
         context.push_str(&format!("\nThe project's AGENTS.md:\n{agents}"));
+    }
+    let paused = paused.trim();
+    if !paused.is_empty() {
+        context.push_str(&crate::pause::context(paused));
     }
     context.trim_end().to_owned()
 }

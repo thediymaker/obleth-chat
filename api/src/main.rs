@@ -177,6 +177,11 @@ async fn main() -> Result<()> {
         state.clone(),
         state.shutdown.clone(),
     ));
+    // Memory embeds what it kept while the embedding model was busy.
+    tokio::spawn(obleth_chat::memory::worker(
+        state.clone(),
+        state.shutdown.clone(),
+    ));
     tokio::spawn(obleth_chat::retention::temporary_worker(
         state.store.clone(),
         state.shutdown.clone(),

@@ -245,3 +245,36 @@
     scrollbar-color: rgb(127 127 127 / 25%) transparent;
   }
 }
+
+/* Memory graph: links of the memory or topic in focus flow, and memories used today
+   glow. Still for people who ask for less motion. */
+@keyframes memory-flow {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+@keyframes memory-glow {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+.memory-flow {
+  stroke-dasharray: 5 3;
+  animation: memory-flow 0.9s linear infinite;
+}
+.memory-glow {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: memory-glow 2.4s ease-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .memory-flow,
+  .memory-glow {
+    animation: none;
+  }
+}

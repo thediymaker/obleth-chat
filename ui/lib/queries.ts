@@ -43,7 +43,7 @@ export interface Capabilities {
 }
 
 /** Only fetched once someone is signed in: most queries need the session. */
-function useSignedIn() {
+export function useSignedIn() {
   return useSession().phase === "ready";
 }
 

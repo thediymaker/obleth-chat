@@ -1,7 +1,7 @@
 "use client";
 
 // Administration › System: which Chat this is, the banner, data retention, knowledge
-// search's embedding model, decisions, and guides for everything set where Chat runs.
+// search's embedding model, decisions, memory, and guides for everything set where Chat runs.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, BookOpen, Box, ExternalLink, Link2, Lock, Settings, Shield, Terminal } from "lucide-react";
@@ -15,6 +15,7 @@ import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useFeature } from "@/lib/queries";
 import { useSession, type Banner } from "@/lib/session";
+import { MemoryCard, type MemorySettings } from "./memory-card";
 
 // ---- About ----
 
@@ -621,6 +622,7 @@ export function SystemTab() {
   const embedding = useQuery({ queryKey: ["admin", "embedding"], queryFn: () => orError<Embedding>("/api/admin/knowledge/embedding"), enabled: knowledge });
   const health = useQuery({ queryKey: ["admin", "health"], queryFn: () => api.request<Health>("/api/admin/health").catch(() => null) });
   const decisions = useQuery({ queryKey: ["admin", "decisions"], queryFn: () => orError<Decisions>("/api/admin/decisions") });
+  const memory = useQuery({ queryKey: ["admin", "memory"], queryFn: () => orError<MemorySettings>("/api/admin/memory") });
   const banner = useQuery({ queryKey: ["admin", "banner"], queryFn: () => orError<BannerSettings & { error?: string }>("/api/admin/banner") });
   const set = <T,>(key: string) => (value: T) => queries.setQueryData(["admin", key], value);
   const pages: [typeof Box, string, string, string][] = [
@@ -678,6 +680,21 @@ export function SystemTab() {
               </Section>
             ) : (
               <DecisionsCard key={JSON.stringify(d)} decisions={d} onSaved={set<Decisions>("decisions")} />
+            ))}
+          {memory.data &&
+            (memory.data.error ? (
+              <Section title="Memory">
+                <ErrorBox error={memory.data.error} />
+              </Section>
+            ) : (
+              <MemoryCard
+                key={JSON.stringify(memory.data)}
+                memory={memory.data}
+                onSaved={(saved) => {
+                  set<MemorySettings>("memory")(saved);
+                  queries.invalidateQueries({ queryKey: ["capabilities"] });
+                }}
+              />
             ))}
           <Section title="Set where Chat runs" description="The rest is configured with environment variables when Chat is deployed. These guides show how.">
             <div className="grid gap-1">

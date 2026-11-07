@@ -1,6 +1,6 @@
 "use client";
 
-import { Bookmark, ChevronDown, ChevronRight, Folder, LogOut, MessageSquare, MessageSquarePlus, MoreHorizontal, Plus, Search, Server, Settings, Users } from "lucide-react";
+import { Bookmark, Brain, ChevronDown, ChevronRight, Folder, LogOut, MessageSquare, MessageSquarePlus, MoreHorizontal, Plus, Search, Server, Settings, Users } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Brand } from "@/components/brand";
@@ -47,6 +47,7 @@ export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () 
     { id: "chat", href: "/", label: "Chat", icon: MessageSquare, on: true },
     { id: "projects", href: "/projects", label: "Projects", icon: Folder, on: true },
     { id: "library", href: "/library", label: "Library", icon: Bookmark, on: !!features.knowledge },
+    { id: "memory", href: "/memory", label: "Memory", icon: Brain, on: !!features.memory },
     { id: "compute", href: features.workspaces ? "/workspaces" : "/clusters", label: "Compute", icon: Server, on: !!features.workspaces || !!features.clusters },
     { id: "groups", href: "/groups", label: "Groups", icon: Users, on: true },
   ].filter((item) => item.on);

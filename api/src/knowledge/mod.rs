@@ -493,7 +493,7 @@ pub fn excerpt(text: &str, max: usize) -> String {
 }
 
 /// Cuts a vector to DIMENSIONS, renormalises it and formats it for a halfvec cast.
-fn vector_literal(mut v: Vec<f32>) -> String {
+pub(crate) fn vector_literal(mut v: Vec<f32>) -> String {
     v.truncate(DIMENSIONS);
     v.resize(DIMENSIONS, 0.0);
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
@@ -502,7 +502,7 @@ fn vector_literal(mut v: Vec<f32>) -> String {
 }
 
 /// An OR query over the question's words, safe to hand to to_tsquery.
-fn words(text: &str) -> String {
+pub(crate) fn words(text: &str) -> String {
     let mut seen = Vec::new();
     for word in text
         .split(|c: char| !c.is_alphanumeric())

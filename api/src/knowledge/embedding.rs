@@ -186,7 +186,7 @@ async fn reconcile_in(
     }
     let reindex = indexed.is_some();
     if reindex {
-        tracing::info!(settings = %current, "embedding settings changed; indexing every document and saved item again");
+        tracing::info!(settings = %current, "embedding settings changed; indexing every document, saved item and memory again");
         sqlx::query(
             "UPDATE knowledge_documents SET status='queued', stage='', error=NULL, attempts=0, progress_done=0, claimed_at=NULL, updated_at=NOW()
              WHERE status IN ('ready', 'processing', 'failed')",
@@ -194,6 +194,9 @@ async fn reconcile_in(
         .execute(&mut **tx)
         .await?;
         sqlx::query("UPDATE saved_items SET embedding=NULL, embedding_attempts=0")
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("UPDATE memories SET embedding=NULL, embedding_attempts=0")
             .execute(&mut **tx)
             .await?;
     }

@@ -24,6 +24,7 @@ import { useChatStore as useChat } from "./chat-provider";
 import { NamedIcon } from "./icon";
 import { citeHtml, KnowledgeSources } from "@/components/knowledge/chat-knowledge";
 import { SavedNotes } from "@/components/library/saved-notes";
+import { MemoryCards } from "@/components/memory/memory-cards";
 import { useChatProjectId } from "@/components/projects/chat-project";
 import { codeTitle, Markdown } from "./markdown-view";
 import { AppOffer, ProjectOffer, QuestionCard, ResearchOffer, WorkspaceOffer } from "./question-cards";
@@ -421,6 +422,7 @@ export const MessageView = memo(
               <LoadNotice m={m} index={index} />
               <KnowledgeSources message={m} />
               <SavedNotes message={m} />
+              <MemoryCards message={m} />
               <QuestionCard m={m} index={index} />
               <WorkspaceOffer m={m} index={index} />
               <ResearchOffer m={m} index={index} />

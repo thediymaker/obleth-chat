@@ -20,6 +20,7 @@ pub mod insights;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod mcp;
+pub mod memory;
 pub mod metrics;
 pub mod models;
 pub mod operations;
@@ -134,6 +135,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let workspace_usage = workspace_usage::router(state.clone());
     let apps = apps::router(state.clone());
     let mcp = mcp::router(state.clone());
+    let memory = memory::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
     let _ = CSP.set(content_security_policy(sandboxes.as_ref()));
@@ -194,6 +196,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(workspace_usage)
         .merge(apps)
         .merge(mcp)
+        .merge(memory)
         .fallback_service(web(branding_dir, sandboxes.as_ref()))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn(security_headers))
@@ -316,6 +319,7 @@ async fn metrics_endpoint(
 }
 async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Value> {
     let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":s.auth.password_sign_in(),"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"jobOutput":s.connections.as_ref().is_some_and(|c| c.clusters_enabled() && c.job_output_available()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
+    value["features"]["memory"] = json!(memory::available(&s).await);
     let user = s.auth.require(&headers, false).await.ok();
     if user.as_ref().is_some_and(|u| u.is_admin()) {
         value["adminGatewayUrl"] = json!(s.admin_gateway_url);
@@ -1474,6 +1478,15 @@ async fn run_generation(
         }
         None => None,
     };
+    // What Chat remembers about the person that fits this message.
+    let memory_turn = {
+        let messages: Vec<(String, String)> = turn
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        memory::recall(&s, &gateway, &user, id, &messages).await
+    };
     // Models with tools may ask the person to choose before going on.
     let asks = resolved.capabilities.supports_function_calling == Some(true);
     // A chat with the browser on gets the browser tools and its owner's search engine.
@@ -1588,6 +1601,9 @@ async fn run_generation(
         "# Right now\nToday is {}.",
         chrono::Utc::now().format("%A %-d %B %Y")
     )];
+    if let Some(memory) = &memory_turn {
+        preamble.push(memory.prompt());
+    }
     if let Some(project) = &project {
         preamble.push(project.prompt());
     }
@@ -1782,6 +1798,11 @@ async fn run_generation(
     );
     if let Some(knowledge) = knowledge_turn.as_ref().filter(|k| k.has_collections()) {
         let entry = knowledge.entry();
+        record(&mut activity, &entry, true);
+        emit(&mut tx, "tool", entry);
+    }
+    if let Some(memory) = &memory_turn {
+        let entry = memory.entry();
         record(&mut activity, &entry, true);
         emit(&mut tx, "tool", entry);
     }
@@ -3075,12 +3096,10 @@ async fn run_generation(
         .observe(started.elapsed().as_secs_f64());
     drop(permit);
     // Suggested follow-ups would compete with the model's own questions.
-    let asked = activity
-        .iter()
-        .any(|e| {
-            ["question", "workspace", "research", "app", "project"]
-                .contains(&e["kind"].as_str().unwrap_or(""))
-        });
+    let asked = activity.iter().any(|e| {
+        ["question", "workspace", "research", "app", "project"]
+            .contains(&e["kind"].as_str().unwrap_or(""))
+    });
     let followups = if status == "completed" && !content.is_empty() && !asked && s.followups_enabled
     {
         tokio::time::timeout(
@@ -3101,6 +3120,10 @@ async fn run_generation(
     // Labels and a better title for a chat whose reply just finished, when they are on.
     let title_pending =
         status == "completed" && !content.is_empty() && insights::after_reply(&s, &user, id).await;
+    // What the person said is read for memories, when memory is on for them.
+    let memory_pending = status == "completed"
+        && !content.is_empty()
+        && memory::after_reply(&s, &user, id, turn.assistant_id).await;
     if persisted.is_err() {
         emit(
             &mut tx,
@@ -3120,6 +3143,9 @@ async fn run_generation(
         }
         if title_pending {
             done["titlePending"] = json!(true);
+        }
+        if memory_pending {
+            done["memoryPending"] = json!(true);
         }
         done
     });

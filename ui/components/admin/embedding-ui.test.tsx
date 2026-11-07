@@ -23,6 +23,7 @@ function tab() {
     (path, options) => {
       if (path === "/api/admin/retention") return { conversationDays: null, unusedFileDays: null, auditDays: null };
       if (path === "/api/admin/knowledge/embedding") return options.method === "PATCH" ? { ...settings, reindexed: true } : settings;
+      if (path === "/api/admin/memory") return { enabled: false, defaultOn: true, model: null, people: 0, memories: 0, gateway: true, embeddings: true };
       return {};
     },
     { knowledge: true },

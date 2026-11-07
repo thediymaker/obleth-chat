@@ -1231,6 +1231,8 @@ export class ChatStore {
         assistant.status = data.status || "completed";
         op.terminal = true;
         if (data.titlePending) for (const wait of [3000, 9000]) setTimeout(() => this.reconcileConversation(c.id), wait);
+        // Memory reads the exchange in the background; its card joins the reply when done.
+        if (data.memoryPending) for (const wait of [5000, 12000, 25000]) setTimeout(() => this.reconcileConversation(c.id), wait);
         break;
       case "error":
         assistant.status = "error";

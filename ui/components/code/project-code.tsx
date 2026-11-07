@@ -13,7 +13,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ErrorBox, Eyebrow } from "@/components/app-shell/page";
-import { NativeSelect, Pill, Quota, useConfirm } from "@/components/manage/kit";
+import { Dropdown, Pill, Quota, useConfirm } from "@/components/manage/kit";
 import { useNewChatInProject, useProjectFrame } from "@/components/projects/project-frame";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
@@ -367,7 +367,7 @@ function Compare({ projectId, from, to, log }: { projectId: string; from: string
     return (
       <label className="grid min-w-0 flex-1 gap-1">
         <Eyebrow>{side === "from" ? "From" : "To"}</Eyebrow>
-        <NativeSelect aria-label={side === "from" ? "From" : "To"} value={selected} onChange={(e) => choose(side, e.target.value)}>
+        <Dropdown aria-label={side === "from" ? "From" : "To"} value={selected} onChange={(e) => choose(side, e.target.value)}>
           <option value="main">Now (main)</option>
           {!log?.some((e) => e.sha === selected) && selected !== "main" && <option value={selected}>{short(selected)}</option>}
           {(log || []).map((e) => (
@@ -375,7 +375,7 @@ function Compare({ projectId, from, to, log }: { projectId: string; from: string
               {short(e.sha)} · {e.subject.slice(0, 60)}
             </option>
           ))}
-        </NativeSelect>
+        </Dropdown>
       </label>
     );
   };

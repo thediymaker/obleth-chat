@@ -1,7 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import { mockApi, renderPage } from "@/components/manage/test-utils";
+import { choose, mockApi, renderPage } from "@/components/manage/test-utils";
 import { DecisionsCard, checkResult, decisionsBody, type Decisions } from "./system-tab";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
@@ -20,7 +20,7 @@ const form = (values: Record<string, string>) => {
 
 test("the card says where decisions go and whose usage they count toward", () => {
   const { container } = (card(), { container: document.body });
-  expect(screen.getByLabelText("Ask")).toHaveValue("gateway");
+  expect(screen.getByLabelText("Ask")).toHaveTextContent("This gateway");
   expect(container.textContent).toContain("count toward that person’s usage");
   expect(screen.getByTestId("decisions-custom")).not.toBeVisible();
   expect(container.querySelector('datalist#decisions-models option[value="judge-31b"]')).not.toBeNull();
@@ -49,7 +49,7 @@ test("another endpoint sends its URL, and a blank key keeps the saved one", () =
 
 test("Check asks with the form as it is and says what came back", async () => {
   const calls = card();
-  await userEvent.selectOptions(screen.getByLabelText("Ask"), "custom");
+  await choose(screen.getByLabelText("Ask"), "Another endpoint");
   await userEvent.type(screen.getByLabelText("Endpoint URL"), "https://d.example.com");
   await userEvent.click(screen.getByRole("button", { name: "Check" }));
   expect(await screen.findByText("Working. judge-31b answered a sample true statement correctly (98% yes) in 412 ms.")).toBeInTheDocument();
@@ -60,7 +60,7 @@ test("Check asks with the form as it is and says what came back", async () => {
 
 test("choosing another endpoint shows its fields and who its usage counts against", async () => {
   card();
-  await userEvent.selectOptions(screen.getByLabelText("Ask"), "custom");
+  await choose(screen.getByLabelText("Ask"), "Another endpoint");
   expect(screen.getByTestId("decisions-custom")).toBeVisible();
   expect(screen.getByText(/counts against the key, not against people/)).toBeInTheDocument();
 });

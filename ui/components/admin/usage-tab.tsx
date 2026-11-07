@@ -12,7 +12,7 @@ import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { INPUT, Legend, OUTPUT, TimeBars } from "@/components/manage/bar-chart";
-import { CheckField, Chips, FormActions, FormDialog, FormError, Meter, NativeSelect, Note, Pill, Quota, Section, TableWrap, TextField, Tiles, displayName, td, th, useSubmit } from "@/components/manage/kit";
+import { CheckField, Chips, FormActions, FormDialog, FormError, Meter, Dropdown, Note, Pill, Quota, Section, TableWrap, TextField, Tiles, displayName, td, th, useSubmit } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { ChangeNote, GroupPicker, KindBar, KindLegend } from "./parts";
@@ -51,14 +51,14 @@ function Toolbar({ data, state, on }: { data?: UsageOverview; state: UsageState;
             <label className="sr-only" htmlFor="admin-usage-model">
               Model
             </label>
-            <NativeSelect id="admin-usage-model" value={state.model} onChange={(e) => on.setModel(e.target.value)} className="h-7 w-auto min-w-36 text-sm">
+            <Dropdown id="admin-usage-model" value={state.model} onChange={(e) => on.setModel(e.target.value)} className="h-7 w-auto min-w-36 text-sm">
               <option value="">All models</option>
               {models.map((m) => (
                 <option key={m} value={m}>
                   {m}
                 </option>
               ))}
-            </NativeSelect>
+            </Dropdown>
           </>
         )}
       </div>

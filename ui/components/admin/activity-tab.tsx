@@ -8,7 +8,7 @@ import { ChevronDown, RefreshCw } from "lucide-react";
 import { Fragment, useState } from "react";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { NativeSelect, Note } from "@/components/manage/kit";
+import { Dropdown, Note } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -114,14 +114,14 @@ export function ActivityTab() {
           <label className="sr-only" htmlFor="admin-audit-kind">
             Kind of activity
           </label>
-          <NativeSelect id="admin-audit-kind" value={kind} onChange={(e) => setKind(e.target.value)} className="h-8 w-auto">
+          <Dropdown id="admin-audit-kind" value={kind} onChange={(e) => setKind(e.target.value)} className="h-8 w-auto">
             <option value="">All activity</option>
             {AUDIT_KINDS.map(([id, , name]) => (
               <option key={id} value={id}>
                 {name}
               </option>
             ))}
-          </NativeSelect>
+          </Dropdown>
           <Button size="sm" variant="outline" onClick={() => audit.refetch()}>
             <RefreshCw /> Refresh
           </Button>

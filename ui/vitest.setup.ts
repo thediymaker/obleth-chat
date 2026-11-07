@@ -12,3 +12,12 @@ if (typeof window !== "undefined" && !window.matchMedia) {
   window.matchMedia = (query: string) =>
     ({ matches: false, media: query, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }) as MediaQueryList;
 }
+
+// Radix Select (the app's Dropdown) captures the pointer and scrolls the chosen
+// option into view; jsdom has neither.
+if (typeof Element !== "undefined") {
+  Element.prototype.hasPointerCapture ||= () => false;
+  Element.prototype.setPointerCapture ||= () => {};
+  Element.prototype.releasePointerCapture ||= () => {};
+  Element.prototype.scrollIntoView ||= () => {};
+}

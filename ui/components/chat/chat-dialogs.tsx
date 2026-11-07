@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dropdown } from "@/components/ui/dropdown";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -456,13 +457,13 @@ export function ShareDialog({ id, close }: { id: string; close: () => void }) {
             );
           })}
           {options.length > 0 && scope === "group" && (
-            <select aria-label="Group" value={share.groupId} onChange={(e) => save("group", e.target.value)} className="h-9 rounded-md border bg-background px-2 text-md">
+            <Dropdown aria-label="Group" value={share.groupId ?? undefined} onChange={(e) => save("group", e.target.value)}>
               {options.map((g) => (
                 <option key={g.id} value={g.id}>
                   {g.name}
                 </option>
               ))}
-            </select>
+            </Dropdown>
           )}
         </div>
         {scope !== "none" && (

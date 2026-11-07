@@ -6,7 +6,8 @@
 //   renderPage(<PeopleTab />, { user: { role: "admin" } });
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { api, type RequestOptions } from "@/lib/api";
 import type { Banner, User } from "@/lib/session";
@@ -67,4 +68,10 @@ export function renderPage(ui: React.ReactElement, { user, passwords = true, oid
   state.signOut.mockClear();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return { client, session: state, ...render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>) };
+}
+
+/** Picks an option in a Dropdown: opens it and clicks the option with that name. */
+export async function choose(trigger: HTMLElement, name: string | RegExp) {
+  await userEvent.click(trigger);
+  await userEvent.click(await screen.findByRole("option", { name }));
 }

@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import { mockApi, renderPage } from "@/components/manage/test-utils";
+import { choose, mockApi, renderPage } from "@/components/manage/test-utils";
 import { AboutCard, SystemTab, bannerBody, workspaceStatus } from "./system-tab";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
@@ -45,13 +45,13 @@ test("the banner card shows the saved banner and saves what the form says", asyn
   const { session } = renderPage(<SystemTab />);
   const text = await screen.findByLabelText("Text");
   expect(text).toHaveValue("In development");
-  expect(screen.getByLabelText("Style")).toHaveValue("warning");
+  expect(screen.getByLabelText("Style")).toHaveTextContent("Warning");
   expect(screen.getByRole("checkbox", { name: "Show it on the sign-in page" })).toBeChecked();
   await userEvent.clear(text);
   await userEvent.type(text, "Maintenance Friday");
   await userEvent.type(screen.getByLabelText("Link text"), "Details");
   await userEvent.type(screen.getByLabelText("Link address"), "https://status.example.edu");
-  await userEvent.selectOptions(screen.getByLabelText("Style"), "info");
+  await choose(screen.getByLabelText("Style"), "Notice");
   await userEvent.click(screen.getByRole("checkbox", { name: "Show it on the sign-in page" }));
   await userEvent.click(screen.getByRole("checkbox", { name: "Let people close it" }));
   await userEvent.click(screen.getByRole("button", { name: "Save banner" }));

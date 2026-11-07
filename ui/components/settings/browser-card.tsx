@@ -9,7 +9,7 @@ import { X } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { DetailRow, Field, NativeSelect, Note, Pill, Section, useConfirm } from "@/components/manage/kit";
+import { DetailRow, Field, Dropdown, Note, Pill, Section, useConfirm } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 
 export interface BrowserSettings {
@@ -67,13 +67,13 @@ export function BrowserCard() {
         </div>
       )}
       <Field id="browser-engine" label="Search with" help="The model searches by opening this search page in your browser.">
-        <NativeSelect id="browser-engine" value={d.searchEngine} onChange={(e) => engine.mutate(e.target.value)}>
+        <Dropdown id="browser-engine" value={d.searchEngine} onChange={(e) => engine.mutate(e.target.value)}>
           {ENGINES.map(([v, n]) => (
             <option key={v} value={v}>
               {n}
             </option>
           ))}
-        </NativeSelect>
+        </Dropdown>
       </Field>
       <div className="grid gap-1">
         <h3 className="text-md font-medium">Ask before</h3>

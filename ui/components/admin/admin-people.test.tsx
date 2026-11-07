@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import { mockApi, renderPage } from "@/components/manage/test-utils";
+import { choose, mockApi, renderPage } from "@/components/manage/test-utils";
 import { PeopleTab } from "./people-tab";
 import { forgetKept } from "./state";
 
@@ -31,7 +31,7 @@ test("searching asks the server, and changing a role is confirmed first", async 
   expect(calls.some((c) => c.path === "/api/admin/users?q=bo")).toBe(true);
   const row = screen.getByText("bo").closest("tr")!;
   await userEvent.click(within(row).getByRole("button", { name: "Manage" }));
-  await userEvent.selectOptions(screen.getByLabelText("Role"), "admin");
+  await choose(screen.getByLabelText("Role"), "Administrator");
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   expect(await screen.findByText("Change this account’s role?")).toBeInTheDocument();
   expect(calls.some((c) => c.method === "PATCH")).toBe(false);

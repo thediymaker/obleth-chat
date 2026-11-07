@@ -1,7 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import { mockApi, renderPage } from "@/components/manage/test-utils";
+import { choose, mockApi, renderPage } from "@/components/manage/test-utils";
 import { ActivityTab } from "./activity-tab";
 import { auditDay, auditDetails, auditSentence, sentenceText, type AuditEvent } from "./audit";
 import { forgetKept } from "./state";
@@ -45,7 +45,7 @@ test("the Activity tab filters by kind and loads older pages", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
   expect(await screen.findByText(/invited/)).toBeInTheDocument();
   expect(calls.some((c) => c.path === "/api/admin/audit?limit=50&before=c1")).toBe(true);
-  await userEvent.selectOptions(screen.getByLabelText("Kind of activity"), "groups");
+  await choose(screen.getByLabelText("Kind of activity"), "Groups");
   await waitFor(() => expect(calls.at(-1)!.path).toBe("/api/admin/audit?limit=50&kind=groups"));
 });
 

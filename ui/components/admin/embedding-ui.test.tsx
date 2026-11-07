@@ -1,7 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import { mockApi, renderPage } from "@/components/manage/test-utils";
+import { choose, mockApi, renderPage } from "@/components/manage/test-utils";
 import { SystemTab, embeddingBody, nextPrefixes, type Embedding } from "./system-tab";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
@@ -35,7 +35,7 @@ const patch = (calls: { path: string; method: string }[]) => calls.filter((c) =>
 
 test("changing the embedding model fills in its prefixes and re-indexes only after confirmation", async () => {
   const calls = tab();
-  await userEvent.selectOptions(await screen.findByLabelText("Embedding model"), "embeddinggemma-2");
+  await choose(await screen.findByLabelText("Embedding model"), /^embeddinggemma-2/);
   expect(screen.getByLabelText("Search prefix")).toHaveValue("task: search result | query: ");
   expect(screen.getByLabelText("Passage prefix")).toHaveValue("title: none | text: ");
   await userEvent.click(screen.getAllByRole("button", { name: "Save" })[0]!);

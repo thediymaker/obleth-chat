@@ -46,7 +46,7 @@ test("personal settings save defaults, appearance and favorites to the account",
   const calls = page();
   expect(await screen.findByText("Your usage")).toBeInTheDocument();
   expect(screen.getAllByText("GLM").length).toBeGreaterThan(0);
-  await waitFor(() => expect(screen.getByLabelText("Default model")).toHaveValue("glm"));
+  await waitFor(() => expect(screen.getByLabelText("Default model")).toHaveTextContent("GLM"));
   await userEvent.click(screen.getByRole("button", { name: "Save defaults" }));
   await waitFor(() => expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ defaultModel: "glm", systemPrompt: "", reasoningEffort: "medium", temperature: 0.3, topP: 1, maxTokens: 0 }));
   await userEvent.click(screen.getByRole("checkbox", { name: "Compact spacing" }));

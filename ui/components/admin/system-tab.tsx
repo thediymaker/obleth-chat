@@ -9,7 +9,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { CheckField, Columns, Field, FormActions, FormError, NativeSelect, Note, Pill, Section, SelectField, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
+import { CheckField, Columns, Field, FormActions, FormError, Dropdown, Note, Pill, Section, SelectField, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { when } from "@/lib/format";
@@ -363,7 +363,7 @@ export function EmbeddingCard({ embedding: e, onSaved, confirm }: { embedding: E
           label="Embedding model"
           help={e.models ? "Embedding models your gateway offers." : "The gateway could not list its embedding models, so only the current and default models are shown."}
         >
-          <NativeSelect
+          <Dropdown
             id="embedding-model"
             name="embedding-model"
             value={model}
@@ -378,7 +378,7 @@ export function EmbeddingCard({ embedding: e, onSaved, confirm }: { embedding: E
                 {id === e.defaults.model ? " (default)" : ""}
               </option>
             ))}
-          </NativeSelect>
+          </Dropdown>
         </Field>
         <Field id="embedding-query" label="Search prefix" help="Put before each search. Chat fills in the prefix the model’s makers publish; change it only if the model’s documentation says otherwise.">
           <Textarea

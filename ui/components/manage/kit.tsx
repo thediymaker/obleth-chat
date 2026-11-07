@@ -20,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dropdown, type DropdownProps } from "@/components/ui/dropdown";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -129,18 +130,9 @@ export function TextAreaField({ id, label, help, className, ...input }: AreaProp
   );
 }
 
-/** A native select styled like the inputs: its list is drawn by the system, and FormData reads it. */
-export function NativeSelect({ className, ...props }: React.ComponentProps<"select">) {
-  return (
-    <select
-      className={cn(
-        "h-9 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-md shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30",
-        className,
-      )}
-      {...props}
-    />
-  );
-}
+/** A dropdown styled like the inputs, drawn in the theme; it takes <option> children
+ * like a <select>, and with a name it sends its value with the form. */
+export { Dropdown } from "@/components/ui/dropdown";
 
 export function SelectField({
   id,
@@ -149,16 +141,16 @@ export function SelectField({
   options,
   className,
   ...select
-}: Omit<React.ComponentProps<"select">, "id" | "name"> & { id: string; label: React.ReactNode; help?: React.ReactNode; options: readonly (readonly [string, string])[] }) {
+}: Omit<DropdownProps, "id" | "name"> & { id: string; label: React.ReactNode; help?: React.ReactNode; options: readonly (readonly [string, string])[] }) {
   return (
     <Field id={id} label={label} help={help} className={className}>
-      <NativeSelect id={id} name={id} aria-describedby={help ? `${id}-help` : undefined} {...select}>
+      <Dropdown id={id} name={id} aria-describedby={help ? `${id}-help` : undefined} {...select}>
         {options.map(([value, name]) => (
           <option key={value} value={value}>
             {name}
           </option>
         ))}
-      </NativeSelect>
+      </Dropdown>
     </Field>
   );
 }

@@ -2,7 +2,7 @@
 
 // Pieces the Usage, Insights and Workspaces tabs share.
 
-import { NativeSelect } from "@/components/manage/kit";
+import { Dropdown } from "@/components/manage/kit";
 import { cn } from "@/lib/utils";
 import { KINDS, kindColor, percent, share, tokens, type Change } from "./insights";
 
@@ -28,14 +28,14 @@ export function GroupPicker({ id, groups, value, onChange }: { id: string; group
       <label className="sr-only" htmlFor={id}>
         Group
       </label>
-      <NativeSelect id={id} value={value} onChange={(e) => onChange(e.target.value)} className="h-7 w-auto min-w-36 text-sm">
+      <Dropdown id={id} value={value} onChange={(e) => onChange(e.target.value)} className="h-7 w-auto min-w-36 text-sm">
         <option value="">Everyone</option>
         {groups.map((g) => (
           <option key={g.id} value={g.id}>
             {g.name}
           </option>
         ))}
-      </NativeSelect>
+      </Dropdown>
     </>
   );
 }

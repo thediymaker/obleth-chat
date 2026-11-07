@@ -11,7 +11,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { Field, FormActions, FormDialog, FormError, NativeSelect, Note, Section, TableWrap, TextAreaField, TextField, displayName, td, th, titleCase, useConfirm, useSubmit } from "@/components/manage/kit";
+import { Field, FormActions, FormDialog, FormError, Dropdown, Note, Section, TableWrap, TextAreaField, TextField, displayName, td, th, titleCase, useConfirm, useSubmit } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { SearchForm, useAdminUsers } from "./people-tab";
 import { useKept } from "./state";
@@ -228,7 +228,7 @@ function GroupDetail({ id }: { id: string }) {
         <SearchForm id="admin-member-query" label="Find an account" placeholder="Search name or username…" value={query} onSearch={setQuery} />
         <form onSubmit={add.onSubmit} className="flex flex-wrap items-end gap-2">
           <Field id="member-user" label="Account" className="min-w-0 grow sm:max-w-md">
-            <NativeSelect id="member-user" name="member-user" disabled={!candidates.length}>
+            <Dropdown id="member-user" name="member-user" disabled={!candidates.length}>
               {candidates.length ? (
                 candidates.map((u) => (
                   <option key={u.id} value={u.id}>
@@ -238,7 +238,7 @@ function GroupDetail({ id }: { id: string }) {
               ) : (
                 <option value="">No matching accounts to add</option>
               )}
-            </NativeSelect>
+            </Dropdown>
           </Field>
           <Button type="submit" size="sm" disabled={!candidates.length || add.busy}>
             Add member

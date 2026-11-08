@@ -176,7 +176,9 @@ pub fn project_entry(call_id: &str, arguments: &str) -> Result<Value, String> {
     if name.is_empty() {
         return Err("Give the project a name.".into());
     }
-    Ok(json!({"id":call_id,"kind":"project","tool":PROJECT_TOOL,"status":"asked","summary":"Suggested a project","name":name,"description":text(&args["description"], 300),"instructions":text(&args["instructions"], 2000)}))
+    Ok(
+        json!({"id":call_id,"kind":"project","tool":PROJECT_TOOL,"status":"asked","summary":"Suggested a project","name":name,"description":text(&args["description"], 300),"instructions":text(&args["instructions"], 2000)}),
+    )
 }
 
 pub const PROJECT_SHOWN: &str = "The person sees a card suggesting the project, with a button to start it. End your reply now in at most one short sentence, without repeating the name or instructions; if they start it, their next message says so and you carry on with the task in the project.";

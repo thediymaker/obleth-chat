@@ -198,9 +198,8 @@ impl Oidc {
         )
         .await;
         let mut cache = self.cache.lock().unwrap();
-        let refreshed = refreshed.map_err(|_| {
-            anyhow::anyhow!("OIDC discovery took longer than {DISCOVERY_TIMEOUT:?}")
-        });
+        let refreshed = refreshed
+            .map_err(|_| anyhow::anyhow!("OIDC discovery took longer than {DISCOVERY_TIMEOUT:?}"));
         match refreshed {
             Ok(Ok(discovered)) => {
                 *cache = Cache {

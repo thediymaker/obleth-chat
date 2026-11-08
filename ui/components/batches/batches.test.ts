@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { doneOf, duration, etaSecs, percentOf, stateOf, type Batch } from "./api";
 import { detectDelimiter, parseCsv, renderPrompt, toSheet, unknownPlaceholders, usedColumns } from "./csv";
+import { EXAMPLE_CSV, EXAMPLE_TEMPLATE } from "./example";
 
 const NOW = Date.parse("2026-11-07T12:00:00Z");
 const batch = (over: Partial<Batch> = {}): Batch => ({
@@ -73,5 +74,17 @@ describe("batch states", () => {
     expect(stateOf(batch({ status: "completed", completed: 398, failed: 2 }), NOW)).toMatchObject({ tone: "problem", detail: "2 rows failed. The results show why." });
     expect(stateOf(batch({ status: "expired", completed: 300 }), NOW).detail).toContain("100 rows didn't run");
     expect(stateOf(batch({ status: "failed", error: "Line 2: bad" }), NOW).detail).toBe("Line 2: bad");
+  });
+});
+
+describe("the example", () => {
+  it("parses into ten rows whose prompt uses known columns", () => {
+    const sheet = toSheet(parseCsv(EXAMPLE_CSV), true);
+    expect(sheet.columns).toEqual(["id", "product", "feedback"]);
+    expect(sheet.rows).toHaveLength(10);
+    expect(sheet.rows.every((r) => r.length === 3 && r.every((c) => c.trim()))).toBe(true);
+    expect(unknownPlaceholders(EXAMPLE_TEMPLATE, sheet.columns)).toEqual([]);
+    expect(usedColumns(EXAMPLE_TEMPLATE, sheet.columns)).toEqual(["product", "feedback"]);
+    expect(sheet.rows[3][2]).toBe('Makes great coffee. The "clean" light stays on even after descaling, though.');
   });
 });

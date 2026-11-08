@@ -4,7 +4,7 @@
 // get the spreadsheet back with the answers added. Endpoints in api/src/batches.rs.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Download, FileSpreadsheet, Layers, Plus, Upload, X } from "lucide-react";
+import { Download, FileSpreadsheet, Layers, Plus, Sparkles, Upload, X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
@@ -34,6 +34,7 @@ import {
   type Tone,
 } from "./api";
 import { parseCsv, renderPrompt, toSheet, unknownPlaceholders, usedColumns, type Sheet } from "./csv";
+import { EXAMPLE_CSV, EXAMPLE_FILE_NAME, EXAMPLE_NAME, EXAMPLE_SYSTEM, EXAMPLE_TEMPLATE, exampleHref } from "./example";
 
 const MAX_ROWS = 50_000;
 const MAX_FILE_BYTES = 90 * 1024 * 1024;
@@ -76,7 +77,7 @@ export function BatchesPage() {
         <EmptyState
           icon={FileSpreadsheet}
           title="No batches yet"
-          text="Upload a spreadsheet, write a prompt that uses its columns, and pick a model. Each row becomes one request, and the answers come back as a new column."
+          text="Upload a spreadsheet, write a prompt that uses its columns, and pick a model. Each row becomes one request, and the answers come back as a new column. There's a short example to try first."
           action={
             <Button onClick={() => setCreating(true)}>
               <Plus /> New batch
@@ -222,6 +223,17 @@ function NewBatchPanel({ onClose }: { onClose: () => void }) {
     if (!name) setName(f.name.replace(/\.[^.]+$/, ""));
   }
 
+  function loadExample() {
+    setError("");
+    setCells(parseCsv(EXAMPLE_CSV));
+    setFileName(EXAMPLE_FILE_NAME);
+    setHeaders(true);
+    setTemplate(EXAMPLE_TEMPLATE);
+    setSystem(EXAMPLE_SYSTEM);
+    setShowSystem(true);
+    setName(EXAMPLE_NAME);
+  }
+
   function insert(column: string) {
     const token = `{${column}}`;
     const el = prompt.current;
@@ -285,7 +297,23 @@ function NewBatchPanel({ onClose }: { onClose: () => void }) {
           <span className="text-sm text-muted-foreground">CSV or TSV with a row of column names first. Up to {MAX_ROWS.toLocaleString()} rows.</span>
           <input ref={file} type="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" className="sr-only" onChange={(e) => void read(e.target.files?.[0])} />
         </label>
-      ) : (
+      ) : null}
+      {!sheet && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5">
+          <span className="text-sm text-muted-foreground">New to batches? Try a 10-row example with the prompt filled in.</span>
+          <span className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" asChild>
+              <a href={exampleHref()} download={EXAMPLE_FILE_NAME}>
+                <Download /> Download it
+              </a>
+            </Button>
+            <Button variant="outline" size="sm" onClick={loadExample}>
+              <Sparkles /> Try the example
+            </Button>
+          </span>
+        </div>
+      )}
+      {sheet && (
         <div className="grid gap-5">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background px-3 py-2">
             <span className="flex min-w-0 items-center gap-2 text-sm">

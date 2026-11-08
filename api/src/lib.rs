@@ -1670,9 +1670,11 @@ async fn run_generation(
     if app_room.is_some() {
         preamble.push(questions::APP_PROMPT.into());
     }
-    // Ongoing work can be moved into a project from a saved chat that isn't in one.
+    // Ongoing work can be moved into a project from a saved chat that isn't in one,
+    // once per chat.
     let offers_project = asks
         && project.is_none()
+        && !questions::project_suggested(&turn.messages)
         && !crate::store::is_temporary(&s.store.pool, user.id, id)
             .await
             .unwrap_or(true);

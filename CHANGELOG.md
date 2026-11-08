@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.2.1
+
+**Fixes**
+
+- **One project suggestion per chat.** After someone answered a project suggestion with "Not now", the model could suggest the same project again a turn later. Chat now offers the suggestion only in a chat that hasn't had one.
+
 ## v1.2.0
 
 **New**

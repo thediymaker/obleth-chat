@@ -1540,6 +1540,21 @@ mod replay_tests {
     }
 
     #[test]
+    fn a_chat_gets_one_project_suggestion() {
+        let plain = reply("Here is the outline.", "completed", json!([]), None);
+        let suggested = reply(
+            "",
+            "completed",
+            json!([{"kind":"project","status":"asked","name":"Seagrass thesis"}]),
+            None,
+        );
+        assert!(!crate::questions::project_suggested(std::slice::from_ref(
+            &plain
+        )));
+        assert!(crate::questions::project_suggested(&[suggested, plain]));
+    }
+
+    #[test]
     fn plain_replies_replay_unchanged() {
         assert_eq!(
             replay_content(&reply("Hi", "completed", json!([]), None)),

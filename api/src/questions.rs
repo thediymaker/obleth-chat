@@ -181,6 +181,16 @@ pub fn project_entry(call_id: &str, arguments: &str) -> Result<Value, String> {
     )
 }
 
+/// True once an earlier reply in the chat suggested a project, started or not: a chat
+/// gets one suggestion, so a "not now" is not met with another card.
+pub fn project_suggested(messages: &[crate::store::Message]) -> bool {
+    messages.iter().any(|m| {
+        m.activity
+            .as_array()
+            .is_some_and(|steps| steps.iter().any(|s| s["kind"] == "project"))
+    })
+}
+
 pub const PROJECT_SHOWN: &str = "The person sees a card suggesting the project, with a button to start it. End your reply now in at most one short sentence, without repeating the name or instructions; if they start it, their next message says so and you carry on with the task in the project.";
 
 /// Offered to administrators: the model can suggest turning what the person describes

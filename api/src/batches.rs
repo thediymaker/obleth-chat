@@ -4,7 +4,8 @@
 //!
 //! The gateway owns the batch: its queue, its progress and its results, private to
 //! the person's gateway identity. Chat keeps only what it needs to put the answers
-//! back next to the rows they came from (`batch_sources`).
+//! back next to the rows they came from (`batch_sources`), and the tags and names
+//! people give their batches (`batch_labels`).
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -13,7 +14,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use chrono::{DateTime, TimeZone, Utc};
@@ -48,6 +49,8 @@ const MAX_RESULTS: usize = 512 * 1024 * 1024;
 const KEEP_DAYS: i32 = 35;
 /// Deadlines a person may choose.
 const WINDOWS: &[&str] = &["24h", "3d", "7d"];
+/// The gateway lists 100 batches a page; the page shows up to this many pages.
+const LIST_PAGES: usize = 5;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -57,6 +60,7 @@ pub fn router(state: AppState) -> Router {
                 .post(create)
                 .layer(DefaultBodyLimit::max(MAX_BODY)),
         )
+        .route("/api/batches/{id}", patch(update).delete(remove))
         .route("/api/batches/{id}/cancel", post(cancel))
         .route("/api/batches/{id}/results", get(results))
         .with_state(state)
@@ -97,6 +101,7 @@ async fn refused(response: reqwest::Response) -> ApiError {
             });
             let code = match status {
                 404 => StatusCode::NOT_FOUND,
+                409 => StatusCode::CONFLICT,
                 413 => StatusCode::PAYLOAD_TOO_LARGE,
                 _ => StatusCode::BAD_REQUEST,
             };
@@ -159,8 +164,15 @@ fn time(v: &Value) -> Option<String> {
         .map(|t: DateTime<Utc>| t.to_rfc3339())
 }
 
+/// The tags and name a person gave a batch.
+#[derive(Default, Clone)]
+struct Label {
+    name: Option<String>,
+    tags: Vec<String>,
+}
+
 /// A gateway batch object as the page reads it.
-fn entry(b: &Value, source: Option<&Source>) -> Value {
+fn entry(b: &Value, source: Option<&Source>, label: Option<&Label>) -> Value {
     let counts = &b["request_counts"];
     let n = |k: &str| counts[k].as_i64().unwrap_or(0);
     let finished = ["completed_at", "failed_at", "expired_at", "cancelled_at"]
@@ -172,8 +184,9 @@ fn entry(b: &Value, source: Option<&Source>) -> Value {
             None => m.to_string(),
         }
     });
-    let name = source
-        .map(|s| s.name.clone())
+    let name = label
+        .and_then(|l| l.name.clone())
+        .or_else(|| source.map(|s| s.name.clone()))
         .or_else(|| b["metadata"]["name"].as_str().map(String::from))
         .unwrap_or_else(|| b["id"].as_str().unwrap_or_default().to_string());
     json!({
@@ -195,7 +208,36 @@ fn entry(b: &Value, source: Option<&Source>) -> Value {
         "fileName": source.map(|s| s.file_name.clone()),
         "rows": source.map(|s| s.row_count),
         "fromChat": source.is_some(),
+        "tags": label.map(|l| l.tags.clone()).unwrap_or_default(),
     })
+}
+
+async fn labels(
+    state: &AppState,
+    user: Uuid,
+    ids: &[String],
+) -> Result<HashMap<String, Label>, ApiError> {
+    let rows: Vec<(String, Option<String>, Vec<String>)> = sqlx::query_as(
+        "SELECT batch_id, name, tags FROM batch_labels
+         WHERE user_id = $1 AND batch_id = ANY($2)",
+    )
+    .bind(user)
+    .bind(ids)
+    .fetch_all(&state.store.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, tags)| (id, Label { name, tags }))
+        .collect())
+}
+
+/// One batch as the page reads it, with what Chat kept about it.
+async fn entry_for(state: &AppState, user: Uuid, b: &Value) -> Result<Value, ApiError> {
+    let id = b["id"].as_str().unwrap_or_default().to_string();
+    let ids = std::slice::from_ref(&id);
+    let kept = sources(state, user, ids).await?;
+    let label = labels(state, user, ids).await?;
+    Ok(entry(b, kept.get(&id), label.get(&id)))
 }
 
 async fn sources(
@@ -230,42 +272,68 @@ async fn sources(
 async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let user = state.auth.require(&headers, false).await?;
     let gw = gateway(&state)?;
-    let response = gw
-        .http()
-        .get(gw.url("v1/batches?limit=100"))
-        .header(header::AUTHORIZATION, gw.authorization(&user).await?)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|_| crate::gateway::unavailable())?;
-    // A gateway without batches (another kind, an older one, or turned off).
-    if matches!(response.status().as_u16(), 404 | 405 | 501) {
-        return Ok(Json(json!({"available": false, "batches": []})));
+    let mut list: Vec<Value> = Vec::new();
+    let mut more = false;
+    for page in 0..LIST_PAGES {
+        let path = match list.last().and_then(|b| b["id"].as_str()) {
+            Some(after) => format!("v1/batches?limit=100&after={after}"),
+            None => "v1/batches?limit=100".to_string(),
+        };
+        let response = gw
+            .http()
+            .get(gw.url(&path))
+            .header(header::AUTHORIZATION, gw.authorization(&user).await?)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|_| crate::gateway::unavailable())?;
+        // A gateway without batches (another kind, an older one, or turned off).
+        if page == 0 && matches!(response.status().as_u16(), 404 | 405 | 501) {
+            return Ok(Json(json!({"available": false, "batches": []})));
+        }
+        if !response.status().is_success() {
+            return Err(refused(response).await);
+        }
+        let data = json_of(response).await?;
+        let got = data["data"].as_array().cloned().unwrap_or_default();
+        more = data["has_more"].as_bool().unwrap_or(false) && !got.is_empty();
+        list.extend(got);
+        if !more {
+            break;
+        }
     }
-    if !response.status().is_success() {
-        return Err(refused(response).await);
-    }
-    let data = json_of(response).await?;
-    let list = data["data"].as_array().cloned().unwrap_or_default();
     let ids: Vec<String> = list
         .iter()
         .filter_map(|b| b["id"].as_str().map(String::from))
         .collect();
     let kept = sources(&state, user.id, &ids).await?;
+    let label = labels(&state, user.id, &ids).await?;
     // Rows outlive the gateway's own retention by a few days, then go.
-    sqlx::query(
-        "DELETE FROM batch_sources WHERE user_id = $1
-         AND created_at < NOW() - make_interval(days => $2)",
-    )
-    .bind(user.id)
-    .bind(KEEP_DAYS)
-    .execute(&state.store.pool)
-    .await?;
+    for table in ["batch_sources", "batch_labels"] {
+        let stamp = if table == "batch_sources" {
+            "created_at"
+        } else {
+            "updated_at"
+        };
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE user_id = $1
+             AND {stamp} < NOW() - make_interval(days => $2)"
+        ))
+        .bind(user.id)
+        .bind(KEEP_DAYS)
+        .execute(&state.store.pool)
+        .await?;
+    }
     let batches: Vec<Value> = list
         .iter()
-        .map(|b| entry(b, b["id"].as_str().and_then(|id| kept.get(id))))
+        .map(|b| {
+            let id = b["id"].as_str().unwrap_or_default();
+            entry(b, kept.get(id), label.get(id))
+        })
         .collect();
-    Ok(Json(json!({"available": true, "batches": batches})))
+    Ok(Json(
+        json!({"available": true, "batches": batches, "more": more}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -560,7 +628,7 @@ async fn create(
         file_name: batch.file_name.clone(),
         row_count: batch.rows.len() as i32,
     };
-    Ok(Json(json!({"batch": entry(&created, Some(&source))})))
+    Ok(Json(json!({"batch": entry(&created, Some(&source), None)})))
 }
 
 async fn cancel(
@@ -582,8 +650,137 @@ async fn cancel(
     )
     .await?;
     let b = json_of(response).await?;
-    let kept = sources(&state, user.id, std::slice::from_ref(&id)).await?;
-    Ok(Json(json!({"batch": entry(&b, kept.get(&id))})))
+    Ok(Json(
+        json!({"batch": entry_for(&state, user.id, &b).await?}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct LabelChange {
+    /// A new name; an empty one goes back to the name the batch started with.
+    name: Option<String>,
+    tags: Option<Vec<String>>,
+}
+
+/// Renames a batch or sets its tags, for this person only.
+async fn update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(change): Json<LabelChange>,
+) -> Result<Json<Value>, ApiError> {
+    let user = state.auth.require(&headers, true).await?;
+    if !valid_id(&id) {
+        return Err(ApiError::not_found());
+    }
+    let gw = gateway(&state)?;
+    // Only a batch the person's gateway identity can see.
+    let response = call(
+        gw,
+        &user,
+        gw.http()
+            .get(gw.url(&format!("v1/batches/{id}")))
+            .timeout(Duration::from_secs(15)),
+    )
+    .await?;
+    let b = json_of(response).await?;
+    let current = labels(&state, user.id, std::slice::from_ref(&id))
+        .await?
+        .remove(&id)
+        .unwrap_or_default();
+    let name = match change.name {
+        Some(n) => {
+            let n = n.trim();
+            if n.chars().count() > MAX_NAME {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    format!("A name can be up to {MAX_NAME} characters"),
+                ));
+            }
+            (!n.is_empty()).then(|| n.to_string())
+        }
+        None => current.name,
+    };
+    let tags = match change.tags {
+        Some(t) => crate::knowledge::saved::clean_tags(&t),
+        None => current.tags,
+    };
+    if name.is_none() && tags.is_empty() {
+        sqlx::query("DELETE FROM batch_labels WHERE user_id = $1 AND batch_id = $2")
+            .bind(user.id)
+            .bind(&id)
+            .execute(&state.store.pool)
+            .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO batch_labels (user_id, batch_id, name, tags) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (user_id, batch_id)
+             DO UPDATE SET name = EXCLUDED.name, tags = EXCLUDED.tags, updated_at = NOW()",
+        )
+        .bind(user.id)
+        .bind(&id)
+        .bind(&name)
+        .bind(&tags)
+        .execute(&state.store.pool)
+        .await?;
+    }
+    Ok(Json(
+        json!({"batch": entry_for(&state, user.id, &b).await?}),
+    ))
+}
+
+/// Deletes a batch that has stopped: the gateway drops its requests, answers and
+/// files, and Chat forgets its rows and labels.
+async fn remove(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let user = state.auth.require(&headers, true).await?;
+    if !valid_id(&id) {
+        return Err(ApiError::not_found());
+    }
+    let gw = gateway(&state)?;
+    let response = gw
+        .http()
+        .delete(gw.url(&format!("v1/batches/{id}")))
+        .header(header::AUTHORIZATION, gw.authorization(&user).await?)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|_| crate::gateway::unavailable())?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() && !matches!(status, 404 | 405) {
+        return Err(refused(response).await);
+    }
+    if !response.status().is_success() {
+        // Gone already, or a gateway that can't delete batches: tell them apart.
+        let still = gw
+            .http()
+            .get(gw.url(&format!("v1/batches/{id}")))
+            .header(header::AUTHORIZATION, gw.authorization(&user).await?)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|_| crate::gateway::unavailable())?;
+        if still.status().is_success() {
+            return Err(ApiError(
+                StatusCode::NOT_IMPLEMENTED,
+                "This gateway can't delete batches yet".into(),
+            ));
+        }
+    }
+    for table in ["batch_sources", "batch_labels"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE user_id = $1 AND batch_id = $2"
+        ))
+        .bind(user.id)
+        .bind(&id)
+        .execute(&state.store.pool)
+        .await?;
+    }
+    tracing::info!(batch = %id, "batch deleted from Chat");
+    Ok(Json(json!({"id": id, "deleted": true})))
 }
 
 /// One finished request: its answer, or what went wrong.
@@ -781,6 +978,12 @@ async fn results(
                 .to_string()
         }
     };
+    // A name the person gave it names the file too.
+    let name = labels(&state, user.id, std::slice::from_ref(&id))
+        .await?
+        .remove(&id)
+        .and_then(|l| l.name)
+        .unwrap_or(name);
     Ok((
         [
             (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),

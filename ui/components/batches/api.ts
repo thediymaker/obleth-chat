@@ -29,11 +29,15 @@ export interface Batch {
   fileName: string | null;
   rows: number | null;
   fromChat: boolean;
+  /** The person's own tags for it. */
+  tags: string[];
 }
 
 export interface BatchList {
   available: boolean;
   batches: Batch[];
+  /** Older batches exist beyond the ones listed. */
+  more?: boolean;
 }
 
 export interface NewBatch {
@@ -70,6 +74,15 @@ export async function startBatch(batch: NewBatch): Promise<Batch> {
 export async function cancelBatch(id: string): Promise<Batch> {
   const r = await api.request<{ batch: Batch }>(`/api/batches/${encodeURIComponent(id)}/cancel`, { method: "POST" });
   return r.batch;
+}
+/** Renames a batch or sets its tags; only this person sees them. An empty name goes back to the first one. */
+export async function updateBatch(id: string, change: { name?: string; tags?: string[] }): Promise<Batch> {
+  const r = await api.request<{ batch: Batch }>(`/api/batches/${encodeURIComponent(id)}`, { method: "PATCH", body: change });
+  return r.batch;
+}
+/** Deletes a batch that has stopped, with its answers and the spreadsheet. */
+export async function deleteBatch(id: string): Promise<void> {
+  await api.request(`/api/batches/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 export const resultsHref = (id: string) => `/api/batches/${encodeURIComponent(id)}/results`;
 
@@ -150,3 +163,53 @@ export const WINDOWS = [
   ["3d", "Within 3 days"],
   ["7d", "Within a week"],
 ] as const;
+
+/** The groups the list filters by. */
+export type Group = "all" | "running" | "done" | "problems" | "cancelled";
+
+export const GROUPS: readonly (readonly [Group, string])[] = [
+  ["all", "All"],
+  ["running", "Running"],
+  ["done", "Done"],
+  ["problems", "Needs a look"],
+  ["cancelled", "Cancelled"],
+];
+
+export function groupOf(b: Pick<Batch, "status" | "failed">): Exclude<Group, "all"> {
+  if (isActive(b)) return "running";
+  if (b.status === "cancelled") return "cancelled";
+  if (b.status === "completed" && b.failed === 0) return "done";
+  return "problems";
+}
+
+export interface ListFilter {
+  group: Group;
+  tag: string;
+  query: string;
+}
+
+/** Whether a batch shows under the filter: its group, its tag, and words in its name, model, file or tags. */
+export function matches(b: Batch, f: ListFilter): boolean {
+  if (f.group !== "all" && groupOf(b) !== f.group) return false;
+  if (f.tag && !b.tags.includes(f.tag)) return false;
+  const words = f.query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  const text = [b.name, b.model, b.fileName ?? "", b.id, ...b.tags.map((t) => `#${t}`)].join(" ").toLowerCase();
+  return words.every((w) => text.includes(w));
+}
+
+/** Each tag the batches use, most used first. */
+export function tagCounts(batches: Pick<Batch, "tags">[]): { tag: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const b of batches) for (const t of b.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
+  return [...counts].map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+}
+
+export function groupCounts(batches: Pick<Batch, "status" | "failed">[]): Record<Group, number> {
+  const counts: Record<Group, number> = { all: batches.length, running: 0, done: 0, problems: 0, cancelled: 0 };
+  for (const b of batches) counts[groupOf(b)] += 1;
+  return counts;
+}
+
+/** A batch can be deleted once it has stopped. */
+export const deletable = (b: Pick<Batch, "status">) => !isActive(b);

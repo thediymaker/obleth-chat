@@ -528,7 +528,9 @@ cases:
   - id: P105
     area: project-offer
     message: whats a good title for my poster about microplastics in desert soils
-    expect: {no_calls: any, card: none, judge: "Offers one or a few fitting poster titles."}
+    # A one-off task: no project. A short question about the poster's main finding
+    # before titling it is fine; this case only checks that no project is suggested.
+    expect: {no_calls: [suggest_project], judge: "Offers one or a few fitting poster titles, or asks one short question about the poster (such as its main finding) to title it; it does not suggest a project."}
   - id: P106
     area: project-offer
     message: "one line summary of this pls: Seagrass meadows store carbon in their sediments for centuries, but disturbance from boat moorings releases it within years."

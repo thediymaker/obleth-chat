@@ -587,7 +587,7 @@ impl Gateway {
                 metadata: ModelMetadata {
                     mode: mode.unwrap_or("chat").to_owned(),
                     context_window,
-                    supports_vision: bool_field("supports_vision"),
+                    supports_vision: takes_images(info),
                     supports_function_calling: bool_field("supports_function_calling"),
                     supports_reasoning: bool_field("supports_reasoning"),
                     healthy: bool_field("healthy"),
@@ -783,9 +783,43 @@ impl Decoder {
         Ok(events)
     }
 }
+/// Whether a model takes images: its own vision, or the gateway's vision boon, which
+/// describes images for a text-only model (obleth lists it in `boon_details`).
+fn takes_images(info: Option<&Value>) -> Option<bool> {
+    let native = info
+        .and_then(|v| v.get("supports_vision"))
+        .and_then(Value::as_bool);
+    let lent = info
+        .and_then(|v| v.pointer("/boon_details/vision/active"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if lent {
+        Some(true)
+    } else {
+        native
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_with_the_vision_boon_takes_images() {
+        let boon = json!({"supports_vision":false,"boons":["vision"],"boon_details":{"vision":{"active":true,"native":false,"helper_model":"gemma4-31b-it"}}});
+        let off = json!({"supports_vision":false,"boons":["vision"],"boon_details":{"vision":{"active":false,"native":false,"inactive_reason":"off"}}});
+        assert_eq!(takes_images(Some(&boon)), Some(true));
+        assert_eq!(takes_images(Some(&off)), Some(false));
+        assert_eq!(
+            takes_images(Some(&json!({"supports_vision":true}))),
+            Some(true)
+        );
+        assert_eq!(
+            takes_images(Some(&json!({"supports_vision":false}))),
+            Some(false)
+        );
+        assert_eq!(takes_images(None), None);
+    }
 
     #[test]
     fn a_request_the_gateway_stopped_queueing_is_told_apart() {

@@ -2273,11 +2273,20 @@ async fn run_generation(
                 break;
             }
             let text = content[step_start..].to_owned();
-            payload["messages"].as_array_mut().unwrap().push(json!({
+            let mut step = json!({
                 "role":"assistant",
                 "content": if text.is_empty() { Value::Null } else { json!(text) },
                 "tool_calls": calls.iter().map(|c| json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.arguments}})).collect::<Vec<_>>(),
-            }));
+            });
+            // The step's thinking goes back with it. Thinking models that call tools
+            // (Kimi, Qwen3, GLM, DeepSeek) expect their earlier steps' thinking in the
+            // history; given empty <think></think> blocks, Kimi starts writing its
+            // thinking into the reply instead.
+            let thought = &reasoning_content[reasoning_start..];
+            if !thought.trim().is_empty() {
+                step["reasoning"] = json!(thought);
+            }
+            payload["messages"].as_array_mut().unwrap().push(step);
             let workspace_call = calls.iter().any(|c| {
                 c.name != knowledge::chat::TOOL
                     && c.name != knowledge::chat::SAVE_TOOL

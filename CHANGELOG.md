@@ -2,10 +2,18 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Fixes**
+
+- **Cancelled rows in batch results.** In a batch's results spreadsheet, a row a cancel stopped before it ran was marked `failed`. It is now `cancelled`.
+
 ## v1.2.1
 
 **Fixes**
 
+- **Images on models the gateway gives vision.** obleth can describe images for a text-only model (its vision boon), but Chat only counted a model's own vision, so attaching an image to one of those models was refused with "Choose a model with confirmed image support". Chat now counts the boon too, and the model picker shows those models as taking images.
+- **Thinking written into the reply.** In a long workspace turn, Kimi could start writing its thinking as the reply, with a stray `</think>`, and the steps showed "No thinking yet". Chat sent each earlier step back to the model without the thinking that led to it, and Kimi, like other thinking models that call tools, expects that thinking in the history. Each step now goes back with its thinking.
 - **One project suggestion per chat.** After someone answered a project suggestion with "Not now", the model could suggest the same project again a turn later. Chat now offers the suggestion only in a chat that hasn't had one.
 
 ## v1.2.0

@@ -815,7 +815,8 @@ fn outcome_of(line: &Value) -> Outcome {
         .unwrap_or_else(|| format!("The model answered with status {code}"));
     let status = match code_name {
         "batch_expired" => "ran out of time",
-        "batch_cancelled" => "cancelled",
+        // The gateway names a row a cancel stopped by its status.
+        "cancelled" | "batch_cancelled" => "cancelled",
         _ => "failed",
     };
     Outcome {
@@ -1105,6 +1106,8 @@ mod tests {
         assert_eq!((o.status, o.error.as_str()), ("failed", "too long"));
         let late = json!({"custom_id": "row-3", "response": null, "error": {"code": "batch_expired", "message": "late"}});
         assert_eq!(outcome_of(&late).status, "ran out of time");
+        let stopped = json!({"custom_id": "row-4", "response": null, "error": {"code": "cancelled", "message": "cancelled"}});
+        assert_eq!(outcome_of(&stopped).status, "cancelled");
     }
 
     #[test]

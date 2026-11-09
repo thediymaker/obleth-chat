@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Fixes**
+
+- **Cancelled rows in batch results.** In a batch's results spreadsheet, a row a cancel stopped before it ran was marked `failed`. It is now `cancelled`.
+
 ## v1.2.1
 
 **Fixes**

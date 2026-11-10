@@ -20,8 +20,7 @@ use crate::{
     AppState,
 };
 use axum::{
-    body::Bytes,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -42,6 +41,8 @@ pub use storage::ObjectStore;
 /// leaves their cosine distances unchanged.
 pub const DIMENSIONS: usize = 1024;
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
+/// How long a browser has to send one.
+const UPLOAD_SECONDS: u64 = 300;
 const MAX_DOCUMENTS: i64 = 2000;
 const EMBED_BATCH: usize = 16;
 pub use embedding::Prompts;
@@ -547,7 +548,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/knowledge/collections/{id}/documents",
-            post(upload).layer(DefaultBodyLimit::max(MAX_FILE_BYTES)),
+            // `upload` reads its own body, after sign-in, up to MAX_FILE_BYTES.
+            post(upload),
         )
         .route(
             "/api/knowledge/documents/{id}",
@@ -827,11 +829,30 @@ async fn upload(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Query(q): Query<UploadQuery>,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let user = s.auth.require(&headers, true).await?;
     let k = knowledge(&s)?;
     owned(&k.pool, user.id, id).await?;
+    // Read only now that the person is signed in and owns the collection.
+    let too_large = || {
+        ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Files must be 50 MB or smaller".into(),
+        )
+    };
+    let body = tokio::time::timeout(
+        Duration::from_secs(UPLOAD_SECONDS),
+        axum::body::to_bytes(body, MAX_FILE_BYTES),
+    )
+    .await
+    .map_err(|_| {
+        ApiError(
+            StatusCode::REQUEST_TIMEOUT,
+            "The upload took too long".into(),
+        )
+    })?
+    .map_err(|_| too_large())?;
     let name: String = q
         .name
         .trim()
@@ -844,12 +865,6 @@ async fn upload(
     }
     if body.is_empty() {
         return Err(bad("The file is empty"));
-    }
-    if body.len() > MAX_FILE_BYTES {
-        return Err(ApiError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Files must be 50 MB or smaller".into(),
-        ));
     }
     let given = headers
         .get(header::CONTENT_TYPE)

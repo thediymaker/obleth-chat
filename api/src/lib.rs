@@ -621,7 +621,7 @@ async fn send(
         .bind(user.id)
         .execute(&s.store.pool)
         .await;
-    let rx = launch_turn(s, gateway, user, Some(headers), id, launch).await?;
+    let rx = launch_turn(s, gateway, user, Started::Session(headers), id, launch).await?;
     let mut response = Sse::new(ReceiverStream::new(rx))
         .keep_alive(
             KeepAlive::new()
@@ -645,13 +645,23 @@ pub(crate) struct Launch {
     pub variant: Option<(Uuid, &'static str)>,
 }
 
-/// Starts a turn and its background worker. Without `headers` the turn runs for
-/// no browser session, as Auto mode's nudges do.
+/// What started a turn, which is checked again while the turn runs: ending the
+/// sign-in, or revoking the token, stops what it began.
+pub(crate) enum Started {
+    /// A person at a browser, by their request's headers.
+    Session(HeaderMap),
+    /// An API token, by its id.
+    Token(Uuid),
+    /// Chat itself, as Auto mode's nudges do: it runs for no session.
+    Alone,
+}
+
+/// Starts a turn and its background worker.
 pub(crate) async fn launch_turn(
     s: AppState,
     gateway: Gateway,
     user: Identity,
-    headers: Option<HeaderMap>,
+    starter: Started,
     id: Uuid,
     launch: Launch,
 ) -> Result<mpsc::Receiver<Result<Event, Infallible>>, ApiError> {
@@ -725,7 +735,7 @@ pub(crate) async fn launch_turn(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
         run_generation(
-            s, gateway, user, headers, id, resolved, turn, tx, permit, workspace, toolset,
+            s, gateway, user, starter, id, resolved, turn, tx, permit, workspace, toolset,
         )
         .await;
     });
@@ -1473,7 +1483,7 @@ async fn run_generation(
     s: AppState,
     gateway: Gateway,
     user: Identity,
-    headers: Option<HeaderMap>,
+    starter: Started,
     id: Uuid,
     resolved: models::ResolvedRequest,
     turn: Turn,
@@ -3078,13 +3088,30 @@ async fn run_generation(
             // A turn in Auto mode outlives the browser session that started it, so
             // research keeps going overnight; Stop or disabling the account ends it.
             let due = ticks.is_multiple_of(15) || recheck_session;
-            let attended = due && (!unattended || !auto_mode(s.clone()).await);
-            if let Some(headers) = headers.as_ref().filter(|_| attended) {
-                match s.auth.require(headers, false).await {
-                    Ok(_) => recheck_session = false,
-                    Err(e) if e.0 == StatusCode::INTERNAL_SERVER_ERROR => recheck_session = true,
-                    Err(_) => break "Sign-in session ended".into(),
+            let live = match &starter {
+                Started::Session(headers)
+                    if due && (!unattended || !auto_mode(s.clone()).await) =>
+                {
+                    Some((
+                        s.auth.require(headers, false).await.map(|_| ()),
+                        "Sign-in session ended",
+                    ))
                 }
+                // A token is revoked to stop what it can do, so that holds in
+                // Auto mode too.
+                Started::Token(token) if due => Some((
+                    s.auth.token_live(*token).await,
+                    "The API token that started this was revoked",
+                )),
+                _ => None,
+            };
+            match live {
+                Some((Ok(()), _)) => recheck_session = false,
+                Some((Err(e), _)) if e.0 == StatusCode::INTERNAL_SERVER_ERROR => {
+                    recheck_session = true
+                }
+                Some((Err(_), ended)) => break ended.into(),
+                None => {}
             }
             ticks += 1;
             tokio::time::sleep(Duration::from_secs(1)).await;

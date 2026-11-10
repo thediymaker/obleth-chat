@@ -45,6 +45,20 @@ struct TokenRow {
 impl Auth {
     /// The person a bearer token acts for, when the token is live and its owner may
     /// still sign in. Each call counts against the token's per-minute allowance.
+    /// Whether a token can still be used, for work it started that is still
+    /// running. Does not count as a call.
+    pub async fn token_live(&self, id: Uuid) -> Result<(), ApiError> {
+        let live: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM api_tokens t JOIN users u ON u.id = t.user_id \
+             WHERE t.id = $1 AND t.revoked_at IS NULL AND t.expires_at > NOW() \
+             AND u.enabled AND NOT u.password_change_required)",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?;
+        live.then_some(()).ok_or_else(ApiError::unauthorized)
+    }
+
     pub async fn require_token(&self, headers: &HeaderMap) -> Result<TokenUser, ApiError> {
         let mut values = headers.get_all(header::AUTHORIZATION).iter();
         let (Some(value), None) = (values.next(), values.next()) else {

@@ -225,39 +225,72 @@ pub(crate) fn in_project(sb: &Sandboxes, sandbox: &Sandbox, script: &str) -> Str
     )
 }
 
-/// Largest project zip served, without dependencies and build output.
-const ARCHIVE_LIMIT: usize = 64 * 1024 * 1024;
+/// Largest download served: the project's zip without dependencies and build
+/// output, a zip of what was picked from it, or one file.
+pub(crate) const ARCHIVE_LIMIT: usize = 64 * 1024 * 1024;
+/// Files and folders that can be picked for one download.
+pub(crate) const ARCHIVE_PICKS: usize = 200;
+/// Zips the project, or the files and folders named as arguments, each kept at its
+/// path in the project. Folders leave out dependencies and build output; a file
+/// picked by name is taken wherever it is. Links are never followed. Exits 3 when
+/// nothing that was picked exists.
 const ARCHIVE_SCRIPT: &str = r#"
 import os, sys, zipfile
 skip = {"node_modules", ".next", "dist", "build", ".venv", "venv", "__pycache__", ".cache", ".turbo"}
+picked = sys.argv[1:] or ["."]
+seen = set()
 with zipfile.ZipFile(sys.stdout.buffer, "w", zipfile.ZIP_DEFLATED) as z:
-    for root, dirs, files in os.walk("."):
-        dirs[:] = sorted(d for d in dirs if d not in skip)
-        for name in sorted(files):
-            path = os.path.join(root, name)
-            if os.path.isfile(path) and not os.path.islink(path):
-                z.write(path, os.path.relpath(path, "."))
+    def add(path):
+        name = os.path.relpath(path, ".")
+        if name in seen or name.startswith("..") or os.path.islink(path) or not os.path.isfile(path):
+            return
+        seen.add(name)
+        z.write(path, name)
+    for top in picked:
+        if os.path.isdir(top) and not os.path.islink(top):
+            for root, dirs, files in os.walk(top):
+                dirs[:] = sorted(d for d in dirs if d not in skip)
+                for name in sorted(files):
+                    add(os.path.join(root, name))
+        else:
+            add(top)
+if not seen and sys.argv[1:]:
+    sys.exit(3)
 "#;
 
-/// The project folder as a zip archive.
-pub async fn archive(sb: &Sandboxes, sandbox: &Sandbox) -> Result<Vec<u8>, String> {
-    let script = in_project(sb, sandbox, "exec python3 -c \"$1\"");
-    let argv = ["sh", "-c", script.as_str(), "sh", ARCHIVE_SCRIPT];
+/// The project folder as a zip archive, or only the files and folders in `picked`.
+pub async fn archive(
+    sb: &Sandboxes,
+    sandbox: &Sandbox,
+    picked: &[String],
+) -> Result<Vec<u8>, String> {
+    let picked: Vec<String> = picked
+        .iter()
+        .map(|path| clean_path(path, &sandbox.slug))
+        .collect::<Result<_, _>>()?;
+    let script = in_project(sb, sandbox, "s=$1; shift; exec python3 -c \"$s\" \"$@\"");
+    let mut argv = vec!["sh", "-c", script.as_str(), "sh", ARCHIVE_SCRIPT];
+    argv.extend(picked.iter().map(String::as_str));
     let output = tokio::time::timeout(
         Duration::from_secs(120),
         sb.exec_limited(sandbox, &argv, ARCHIVE_LIMIT),
     )
     .await
-    .map_err(|_| "Packing the project took too long".to_string())?
-    .map_err(|error| format!("Could not pack the project: {error:#}"))?;
+    .map_err(|_| "Packing the files took too long".to_string())?
+    .map_err(|error| format!("Could not pack the files: {error:#}"))?;
     if output.truncated {
-        return Err(
-            "The project is larger than 64 MB without dependencies and build output".into(),
-        );
+        return Err(match picked.is_empty() {
+            true => "The project is larger than 64 MB without dependencies and build output",
+            false => "What you picked is larger than 64 MB. Pick less, or use the terminal.",
+        }
+        .into());
+    }
+    if output.exit_code == Some(3) {
+        return Err("None of the files you picked are in the project any more.".into());
     }
     if output.exit_code != Some(0) {
         return Err(format!(
-            "Could not pack the project: {}",
+            "Could not pack the files: {}",
             one_line(&String::from_utf8_lossy(&output.stderr), 300)
         ));
     }
@@ -1573,6 +1606,74 @@ mod tests {
         ] {
             assert!(!is_slug(name), "{name}");
         }
+    }
+
+    /// The download packs what was picked, each file at its place in the project,
+    /// and nothing a link points at.
+    #[test]
+    fn a_download_packs_what_was_picked() {
+        let python = |dir: &std::path::Path, picked: &[&str]| {
+            std::process::Command::new("python3")
+                .arg("-c")
+                .arg(ARCHIVE_SCRIPT)
+                .args(picked)
+                .current_dir(dir)
+                .output()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        // Skipped where there is no Python to run the script the workspace runs.
+        if python(dir.path(), &[]).is_err() {
+            return;
+        }
+        for (path, text) in [
+            ("a.txt", "a"),
+            ("src/app.py", "print(1)"),
+            ("src/lib/util.py", "x = 1"),
+            ("src/node_modules/dep/index.js", "x"),
+            ("docs/readme.md", "# Docs"),
+        ] {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hostname", dir.path().join("src/link")).unwrap();
+        let names = |picked: &[&str]| {
+            let out = python(dir.path(), picked).unwrap();
+            let (_, entries) = crate::imports::zip::listing(&out.stdout, 100).unwrap_or_default();
+            let mut names: Vec<String> = entries.into_iter().map(|(name, _)| name).collect();
+            names.sort();
+            (out.status.code(), names)
+        };
+        // A folder, without its dependencies; a file; nothing for what is missing,
+        // outside the project, or a link.
+        assert_eq!(
+            names(&[
+                "src",
+                "a.txt",
+                "missing.txt",
+                "../outside",
+                "src/link",
+                "src/app.py"
+            ]),
+            (
+                Some(0),
+                vec![
+                    "a.txt".to_string(),
+                    "src/app.py".into(),
+                    "src/lib/util.py".into()
+                ]
+            )
+        );
+        // A file picked by name is taken wherever it is.
+        assert_eq!(
+            names(&["src/node_modules/dep/index.js"]),
+            (Some(0), vec!["src/node_modules/dep/index.js".to_string()])
+        );
+        // Nothing picked is the whole project.
+        assert_eq!(names(&[]).1.len(), 4);
+        // Nothing that was picked exists.
+        assert_eq!(names(&["gone.txt"]).0, Some(3));
     }
 
     #[test]

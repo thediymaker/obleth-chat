@@ -4,6 +4,10 @@ Each release's section is also its GitHub Release notes.
 
 ## Unreleased
 
+**New**
+
+- **Download just the files you pick.** The workspace's Files tab has a tick box beside every file and folder. Tick what you want and choose Download: one file comes as itself, anything more as one zip that keeps each file at its place in the project. A ticked folder brings everything in it, without dependencies and build output. The download button in the bar above still takes the whole project. Over the API, `GET /api/conversations/{id}/workspace/download` takes repeated `path` parameters (up to 200, and 64 MB in all).
+
 **Security**
 
 - **The web interface is reached only at its own address.** Chat sends every request that none of its own routes answers to the interface server. A request path written as `//host/…` or `/\host/…` was resolved to that host instead, so Chat would fetch any address it could reach and return the answer from its own origin, cookies included. The address is now always the interface server's, only page loads (`GET` and `HEAD`) are passed on, the session cookie and other credentials stay in Chat, and the interface server cannot set cookies. Installs behind a proxy that rewrites such paths (Traefik does) were not reachable this way from outside.

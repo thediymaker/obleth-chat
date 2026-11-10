@@ -107,7 +107,21 @@ export function csvTable(text: string, truncated = false) {
 export const treeItem = (e: FileEntry) => ({ depth: e.path.split("/").length - 1, name: e.path.split("/").pop() || e.path });
 
 export const workspacePath = (id: string) => `/api/conversations/${encodeURIComponent(id)}/workspace`;
-export const downloadUrl = (id: string) => `${workspacePath(id)}/download`;
+/** The whole project as a zip; with `paths`, only those files and folders (one file comes as itself). */
+export const downloadUrl = (id: string, paths: string[] = []) =>
+  `${workspacePath(id)}/download${paths.length ? `?${paths.map((p) => `path=${encodeURIComponent(p)}`).join("&")}` : ""}`;
+
+/** Whether a folder above `path` is among `picked`, so `path` comes with it. */
+export const pickedAbove = (picked: ReadonlySet<string>, path: string) => {
+  for (let at = path.lastIndexOf("/"); at > 0; at = path.lastIndexOf("/", at - 1)) if (picked.has(path.slice(0, at))) return true;
+  return false;
+};
+
+/** What to ask for: the picked files and folders, without what a picked folder already holds. */
+export const pickedPaths = (picked: ReadonlySet<string>) => [...picked].filter((p) => !pickedAbove(picked, p)).sort();
+
+/** The most a download's address may name; past it, folders are picked instead of their files. */
+export const PICKED_URL_LIMIT = 6000;
 export const rawUrl = (id: string, path: string) => `${workspacePath(id)}/raw?path=${encodeURIComponent(path)}`;
 export const terminalUrl = (id: string, loc: { protocol: string; host: string } = location) =>
   `${loc.protocol === "https:" ? "wss" : "ws"}://${loc.host}${workspacePath(id)}/terminal`;

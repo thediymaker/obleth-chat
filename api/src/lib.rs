@@ -972,7 +972,14 @@ pub(crate) fn accumulate_tool_calls(
 /// `<tool_call>{…}</tool_call>`, Mistral's `[TOOL_CALLS][…]` and Llama 3's
 /// `<|python_tag|>{…}`. They count only when every one names an offered tool;
 /// returns the text without them, and the calls.
+///
+/// A call inside a code block, a code span or a quoted line is something the
+/// model is showing, not doing: a reply that quotes a page or a file which
+/// holds such a call must not run it.
 pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String, Vec<ToolCall>)> {
+    // Follows the reply's own text, leaving out the calls taken from it: a call's
+    // arguments often hold fences and backticks of their own, as a file's content.
+    let mut shown = Shown::default();
     const MARKERS: [&str; 4] = [
         "<function=",
         "<tool_call>",
@@ -1008,6 +1015,13 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
         .min_by_key(|(i, _)| *i)
     {
         let after = &rest[at + marker.len()..];
+        shown.read(&rest[..at]);
+        if shown.here() {
+            shown.read(marker);
+            kept.push_str(&rest[..at + marker.len()]);
+            rest = after;
+            continue;
+        }
         let parsed = match marker {
             "<function=" => after.find('>').and_then(|close| {
                 let name = after[..close].trim().to_owned();
@@ -1037,6 +1051,7 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
                 rest = tail;
             }
             None => {
+                shown.read(marker);
                 kept.push_str(&rest[..at + marker.len()]);
                 rest = after;
             }
@@ -1046,6 +1061,11 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
     if found.is_empty() {
         // Llama 4's pythonic form: [name(key="value", ...), ...]
         let (start, end, calls) = pythonic_calls(text, offered)?;
+        let mut before = Shown::default();
+        before.read(&text[..start]);
+        if before.here() {
+            return None;
+        }
         kept = format!("{}{}", &text[..start], &text[end..]);
         found = calls;
     }
@@ -1065,6 +1085,55 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
         })
         .collect();
     Some((kept.trim().to_owned(), calls))
+}
+
+/// Whether a point in a reply is inside what Markdown shows as code or as a
+/// quotation: a fenced block (to the end of the text when the fence is left
+/// open), a line that starts with `>`, or a span between backticks on one line.
+/// Fed the reply's text in order, it answers for the point reached.
+#[derive(Default)]
+struct Shown {
+    fence: Option<&'static str>,
+    /// How the current line starts, past its indent: enough to tell a fence or a quote.
+    head: String,
+    /// Backticks on the current line so far.
+    ticks: usize,
+}
+
+impl Shown {
+    const FENCES: [&'static str; 2] = ["```", "~~~"];
+
+    fn read(&mut self, text: &str) {
+        for c in text.chars() {
+            match c {
+                '\n' => {
+                    let mark = Self::FENCES.into_iter().find(|m| self.head.starts_with(m));
+                    match (self.fence, mark) {
+                        (Some(open), Some(close)) if open == close => self.fence = None,
+                        (None, Some(open)) => self.fence = Some(open),
+                        _ => {}
+                    }
+                    self.head.clear();
+                    self.ticks = 0;
+                }
+                _ => {
+                    if c == '`' {
+                        self.ticks += 1;
+                    }
+                    if self.head.len() < 3 && !(self.head.is_empty() && c.is_whitespace()) {
+                        self.head.push(c);
+                    }
+                }
+            }
+        }
+    }
+
+    fn here(&self) -> bool {
+        self.fence.is_some()
+            || self.head.starts_with('>')
+            || Self::FENCES.iter().any(|m| self.head.starts_with(m))
+            || self.ticks % 2 == 1
+    }
 }
 
 /// Where the JSON object or array at the start of `s` ends, counting brackets
@@ -3425,6 +3494,32 @@ mod draft_tests {
         .unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].arguments, "{}");
+        // A call the model shows, in a code block, a code span or a quotation, is
+        // not one it makes: quoting a page that holds a call must not run it.
+        let call = r#"<function=write_file>{"path": "a.txt"}</function>"#;
+        for quoted in [
+            format!("The page says:\n```html\n{call}\n```\nI will not run that."),
+            format!("The page says:\n~~~\n{call}\n"),
+            format!("> {call}\n\nThat was in the file."),
+            format!("It contains `{call}` in a comment."),
+            "```\n[write_file(path=\"a\")]\n```".to_string(),
+        ] {
+            assert!(text_tool_calls(&quoted, &offered).is_none(), "{quoted}");
+        }
+        // What a call writes may hold fences of its own; the call after it still runs.
+        let (_, calls) = text_tool_calls(
+            "<function=write_file>{\"path\": \"README.md\", \"content\": \"Run:\n```bash\nnpm i\n\"}</function>\n<function=write_file>{\"path\": \"b.txt\"}</function>",
+            &offered,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        // One made after a code block still runs, and the block stays in the text.
+        let (text, calls) =
+            text_tool_calls(&format!("```\nx = 1\n```\nSaving it.\n{call}"), &offered).unwrap();
+        assert_eq!(
+            (text.as_str(), calls.len()),
+            ("```\nx = 1\n```\nSaving it.", 1)
+        );
         // An unknown tool, prose that mentions the syntax, or broken JSON stays text.
         assert!(text_tool_calls(r#"<function=rm_rf>{}</function>"#, &offered).is_none());
         assert!(text_tool_calls("Models write <function=name> tags.", &offered).is_none());

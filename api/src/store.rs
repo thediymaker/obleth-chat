@@ -73,6 +73,28 @@ pub fn shareable_settings(settings: &Value) -> Value {
     )
 }
 
+/// The kinds of activity entry that only a chat's owner sees: what Chat recalled
+/// from, or added to, the owner's memory while answering. Everything else in a
+/// reply's activity (tool steps, sources, notes) is part of the conversation.
+pub const OWNER_ACTIVITY: [&str; 2] = ["recalled", "learned"];
+
+/// The part of a reply's activity that is shown to someone other than its owner.
+pub fn shareable_activity(activity: &Value) -> Value {
+    Value::Array(
+        activity
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| {
+                !entry["kind"]
+                    .as_str()
+                    .is_some_and(|kind| OWNER_ACTIVITY.contains(&kind))
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -502,12 +524,16 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
-        // Generated images too, with the copied replies pointing at the new ones.
-        let images: Vec<Uuid> =
-            sqlx::query_scalar("SELECT id FROM generated_images WHERE conversation_id = $1")
-                .bind(id)
-                .fetch_all(&mut *tx)
-                .await?;
+        // The generated images the copied replies show, with those replies pointing
+        // at the new ones. Images from replies the owner regenerated or branched
+        // away from are not part of what was shared.
+        let images: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT g.id FROM generated_images g WHERE g.conversation_id = $1 AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = $2 AND POSITION('/api/images/' || g.id::text IN m.content) > 0)",
+        )
+        .bind(id)
+        .bind(fork)
+        .fetch_all(&mut *tx)
+        .await?;
         for old in images {
             let new = Uuid::new_v4();
             let (mime, data, key): (String, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
@@ -1350,8 +1376,9 @@ fn conflict(message: &str) -> ApiError {
     ApiError(StatusCode::CONFLICT, message.into())
 }
 
-/// Copies messages into another chat. With `settings`, each reply keeps only those
-/// settings keys, for a copy made for someone else.
+/// Copies messages into another chat. With `settings`, the copy is made for someone
+/// else: each reply keeps only those settings keys and only the activity that is
+/// shown to a viewer, so the owner's memories do not travel with it.
 async fn copy_selected_messages(
     tx: &mut Transaction<'_, Postgres>,
     source: Uuid,
@@ -1363,9 +1390,12 @@ async fn copy_selected_messages(
     sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,usage,request_id,finish_reason,error_message,created_at,follow_ups,follow_ups_status,activity)
       SELECT mapping.new_id,$2,(mapping.position-1)::integer,m.role,m.content,m.reasoning_content,m.status,CASE WHEN m.role='assistant' THEN gen_random_uuid() ELSE NULL END,
         CASE WHEN $5::text[] IS NULL THEN m.settings WHEN jsonb_typeof(m.settings)='object' THEN (SELECT COALESCE(jsonb_object_agg(e.key,e.value),'{}'::jsonb) FROM jsonb_each(m.settings) e WHERE e.key=ANY($5)) END,
-        m.usage,m.request_id,m.finish_reason,m.error_message,m.created_at,m.follow_ups,CASE WHEN m.follow_ups_status='pending' THEN 'idle' ELSE m.follow_ups_status END,m.activity
+        m.usage,m.request_id,m.finish_reason,m.error_message,m.created_at,m.follow_ups,CASE WHEN m.follow_ups_status='pending' THEN 'idle' ELSE m.follow_ups_status END,
+        CASE WHEN $6::text[] IS NULL THEN m.activity ELSE (SELECT COALESCE(jsonb_agg(entry.value ORDER BY entry.position),'[]'::jsonb) FROM jsonb_array_elements(m.activity) WITH ORDINALITY entry(value,position) WHERE entry.value->>'kind' IS NULL OR NOT (entry.value->>'kind'=ANY($6))) END
       FROM unnest($3::uuid[],$4::uuid[]) WITH ORDINALITY mapping(old_id,new_id,position) JOIN messages m ON m.id=mapping.old_id WHERE m.conversation_id=$1")
-        .bind(source).bind(destination).bind(ids).bind(&copies).bind(settings).execute(&mut **tx).await?;
+        .bind(source).bind(destination).bind(ids).bind(&copies).bind(settings)
+        .bind(settings.map(|_| &OWNER_ACTIVITY[..]))
+        .execute(&mut **tx).await?;
     sqlx::query("INSERT INTO message_attachments(message_id,attachment_id,position) SELECT mapping.new_id,ma.attachment_id,ma.position FROM unnest($1::uuid[],$2::uuid[]) mapping(old_id,new_id) JOIN message_attachments ma ON ma.message_id=mapping.old_id")
         .bind(ids).bind(&copies).execute(&mut **tx).await?;
     Ok(())

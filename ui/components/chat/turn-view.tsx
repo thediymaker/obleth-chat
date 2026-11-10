@@ -458,12 +458,35 @@ function useTraceOpen(id: string): [boolean, () => void] {
   ];
 }
 
-/** A change waiting for approval: what it does, read from its arguments, with the raw text folded away. */
+/** One argument of a call waiting for approval, whole: a line beside its name, or a block that scrolls. */
+function Asked({ name, text }: { name: string; text: string }) {
+  const lines = text.split("\n").length;
+  if (lines === 1 && text.length <= 120)
+    return (
+      <div className="flex flex-wrap items-baseline gap-x-2 text-sm">
+        <span className="text-muted-foreground">{name}</span>
+        <span className="break-all font-mono text-[12px]">{text}</span>
+      </div>
+    );
+  return (
+    <div className="grid gap-1">
+      <span className="text-sm text-muted-foreground">
+        {name} · {plural(lines, "line")}
+      </span>
+      <Pre text={text} className="max-h-80" />
+    </div>
+  );
+}
+
+/**
+ * A call waiting for approval: what it does, as the server read it, and every argument
+ * in full and in view. Nothing the call carries is folded away or cut short, so what
+ * the person allows is what they could read.
+ */
 function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
   const change = changeOf(s),
     waits = Date.parse(s.startedAt || "") + 15 * 60000;
   const head = s.question ? s.question : s.readOnly === false && s.service !== "mcp" ? `Allow this change on ${s.connection}?` : `Allow ${s.connection || "this tool"} to run this?`;
-  const raw = change?.text ?? s.detail;
   return (
     <div className="grid gap-2.5 rounded-md border border-amber/40 bg-amber/5 p-3">
       <div>
@@ -472,13 +495,13 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
           <span className="text-sm text-muted-foreground">It changes {s.service === "mcp" || !s.service ? "something outside Chat" : "the cluster"}, so it waits for you. It runs as your own account.</span>
         )}
       </div>
-      {change && (
+      {change && change.items.length > 0 && (
         <div className="grid gap-2">
           {change.items.map((c, i) => (
             <div key={i} className="rounded-md border bg-card px-2.5 py-2">
               <div className="flex flex-wrap items-center gap-2 text-md">
                 <Badge variant={c.verb === "Delete" || c.verb === "Cancel" ? "destructive" : "secondary"}>{c.verb}</Badge>
-                <span className="font-mono text-[12px]">{c.what}</span>
+                <span className="break-all font-mono text-[12px]">{c.what}</span>
                 {c.where && <span className="text-sm text-muted-foreground">in {c.where}</span>}
               </div>
               {c.facts.length > 0 && (
@@ -486,7 +509,7 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
                   {c.facts.map(([k, v]) => (
                     <div key={k}>
                       <dt className="text-xs text-muted-foreground">{k}</dt>
-                      <dd className="truncate font-mono text-[12px]">{v}</dd>
+                      <dd className="break-all font-mono text-[12px]">{v}</dd>
                     </div>
                   ))}
                 </dl>
@@ -495,15 +518,21 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
           ))}
         </div>
       )}
-      {s.detail && (
-        <details open={!change} className="group/raw">
-          <summary className="flex cursor-pointer list-none items-center gap-1 text-sm text-muted-foreground [&::-webkit-details-marker]:hidden">
-            <ChevronDown className="size-3.5 transition-transform group-open/raw:rotate-180" />
-            {change?.raw || "Arguments"}
-            <span>· {plural(String(raw).trim().split("\n").length, "line")}</span>
-          </summary>
-          <Pre text={String(raw)} />
-        </details>
+      {change ? (
+        change.arguments.length > 0 && (
+          <div className="grid gap-2">
+            {change.arguments.map((a) => (
+              <Asked key={a.name} name={a.name} text={a.text} />
+            ))}
+          </div>
+        )
+      ) : (
+        s.detail && (
+          <div className="grid gap-1">
+            <span className="text-sm text-muted-foreground">Arguments · {plural(String(s.detail).trim().split("\n").length, "line")}</span>
+            <Pre text={String(s.detail)} className="max-h-80" />
+          </div>
+        )
       )}
       <div className="flex flex-wrap items-center gap-2">
         <Decisions s={s} />

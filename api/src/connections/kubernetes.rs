@@ -981,6 +981,37 @@ fn row(
     )
 }
 
+/// What a change does, for the person asked to allow it: each resource applied or
+/// deleted and where. Read with the same functions that carry the change out, so the
+/// card and the request cannot disagree, and a change that would be refused is refused
+/// before anyone is asked.
+pub fn changes(tool: &str, args: &Value, home: &str) -> Result<Vec<Value>, String> {
+    match tool {
+        "apply" => documents(&args["manifest"])?
+            .into_iter()
+            .map(|(head, _)| {
+                let ns = namespace(head.namespace.as_deref().unwrap_or(home))?;
+                let name = object_name(&head.name)?;
+                Ok(json!({"verb":"Apply","what":format!("{}/{name}", head.kind),"where":ns,"facts":[["API version", head.api_version]]}))
+            })
+            .collect(),
+        "delete" => {
+            let kind = args["kind"].as_str().map(str::trim).filter(|k| !k.is_empty());
+            let kind = kind.ok_or("kind is required")?;
+            let name = object_name(args["name"].as_str().ok_or("name is required")?)?;
+            let ns = args["namespace"].as_str().filter(|n| !n.trim().is_empty());
+            let ns = namespace(ns.unwrap_or(home).trim())?;
+            let facts: Vec<Value> = args["api_version"]
+                .as_str()
+                .map(|v| json!(["API version", v]))
+                .into_iter()
+                .collect();
+            Ok(vec![json!({"verb":"Delete","what":format!("{kind}/{name}"),"where":ns,"facts":facts})])
+        }
+        _ => Ok(vec![]),
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct Head {
     api_version: String,

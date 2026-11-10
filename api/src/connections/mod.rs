@@ -773,19 +773,93 @@ impl Toolset {
         self.servers[offered.server].confirm && !offered.tool.read_only
     }
 
-    pub async fn call(&mut self, index: usize, arguments: &str) -> Outcome {
+    /// The call's arguments as the tool will get them. A tool of Chat's own that
+    /// changes something takes only the arguments it names: one it would ignore has
+    /// no place in a call a person is asked to read and allow.
+    fn arguments(&self, index: usize, arguments: &str) -> Result<Value, String> {
         let arguments: Value = match arguments.trim() {
             "" => json!({}),
             text => match serde_json::from_str(text) {
                 Ok(value @ Value::Object(_)) => value,
-                _ => {
-                    return Outcome {
-                        ok: false,
-                        output: "The tool arguments must be a JSON object.".into(),
-                        detail: "Invalid arguments".into(),
-                    }
-                }
+                _ => return Err("The tool arguments must be a JSON object.".into()),
             },
+        };
+        let offered = &self.tools[index];
+        let own = !matches!(self.servers[offered.server].backend, Backend::Mcp { .. });
+        if own && !offered.tool.read_only {
+            let known = offered.tool.input_schema["properties"].as_object();
+            let unknown = arguments
+                .as_object()
+                .into_iter()
+                .flat_map(|given| given.keys())
+                .find(|key| !known.is_some_and(|known| known.contains_key(*key)));
+            if let Some(key) = unknown {
+                let takes: Vec<&str> = known
+                    .into_iter()
+                    .flat_map(|known| known.keys().map(String::as_str))
+                    .collect();
+                return Err(format!(
+                    "This tool has no argument named {:?}. It takes: {}.",
+                    clip(key, 100),
+                    takes.join(", ")
+                ));
+            }
+        }
+        Ok(arguments)
+    }
+
+    /// What the person is asked to allow: the change in a few words, read from the
+    /// arguments by the code that carries it out, and every argument in full. A call
+    /// that would be refused, or whose arguments are too long to show whole, is
+    /// refused here, before anyone is asked.
+    pub fn review(&self, index: usize, arguments: &str) -> Result<Value, String> {
+        let arguments = self.arguments(index, arguments)?;
+        let offered = &self.tools[index];
+        let items = match &self.servers[offered.server].backend {
+            Backend::Mcp { .. } => vec![],
+            Backend::Slurm(..) => slurm::changes(&offered.tool.name, &arguments)?,
+            Backend::Kubernetes(client) => {
+                kubernetes::changes(&offered.tool.name, &arguments, &client.namespace)?
+            }
+        };
+        let shown: Vec<Value> = arguments
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(name, value)| {
+                let text = match value {
+                    Value::String(text) => text.clone(),
+                    other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                };
+                json!({"name":name,"text":text})
+            })
+            .collect();
+        let bytes: usize = shown
+            .iter()
+            .map(|a| {
+                a["name"].as_str().map_or(0, str::len) + a["text"].as_str().map_or(0, str::len)
+            })
+            .sum();
+        if bytes > REVIEW_BYTES {
+            return Err(format!(
+                "These arguments are {} KB, and a call that waits for approval can be at most {} KB, so the person can read all of it. Make the change in smaller parts.",
+                bytes / 1024,
+                REVIEW_BYTES / 1024
+            ));
+        }
+        Ok(json!({"items":items,"arguments":shown}))
+    }
+
+    pub async fn call(&mut self, index: usize, arguments: &str) -> Outcome {
+        let arguments = match self.arguments(index, arguments) {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                return Outcome {
+                    ok: false,
+                    output: error,
+                    detail: "Invalid arguments".into(),
+                }
+            }
         };
         let offered = &self.tools[index];
         let name = offered.tool.name.clone();
@@ -868,7 +942,11 @@ impl Toolset {
     }
 }
 
-/// Shown on the approval card: the arguments the model chose.
+/// The most a call that waits for approval may carry, so the card shows all of it.
+const REVIEW_BYTES: usize = 384 * 1024;
+
+/// The arguments the model chose, in short, for a page that does not show the full
+/// review.
 pub fn arguments_preview(arguments: &str) -> String {
     let preview = match serde_json::from_str::<Value>(arguments) {
         // One line per argument, so a manifest or script reads as itself
@@ -1736,6 +1814,185 @@ async fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A toolset with one Kubernetes cluster, one Slurm cluster and one MCP server,
+    /// none of them reachable: reviewing a call never leaves Chat.
+    fn clusters() -> Toolset {
+        let http = reqwest::Client::new();
+        let url = Url::parse("https://cluster.test:6443").unwrap();
+        let server = |name: &str, backend| Server {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            about: String::new(),
+            confirm: true,
+            backend,
+        };
+        let servers = vec![
+            server(
+                "Lab",
+                Backend::Kubernetes(kubernetes::Client::new(
+                    http.clone(),
+                    url.clone(),
+                    "token".into(),
+                    "home".into(),
+                )),
+            ),
+            server(
+                "Sol",
+                Backend::Slurm(
+                    slurm::Client::new(http.clone(), url.clone(), "ada".into(), "t".into(), None),
+                    false,
+                ),
+            ),
+            server(
+                "Docs",
+                Backend::Mcp {
+                    url,
+                    token: None,
+                    client: http,
+                    session: None,
+                },
+            ),
+        ];
+        let mut tools = vec![];
+        let offered = [kubernetes::tools(), slurm::tools(false)];
+        for (server, list) in offered.into_iter().enumerate() {
+            for tool in list {
+                tools.push(Offered {
+                    exposed: format!("{}__{}", prefix(&servers[server].name), tool.name),
+                    server,
+                    tool,
+                });
+            }
+        }
+        tools.push(Offered {
+            exposed: "docs__send".into(),
+            server: 2,
+            tool: mcp::Tool {
+                name: "send".into(),
+                title: None,
+                description: String::new(),
+                input_schema: json!({"type":"object","properties":{"to":{"type":"string"}}}),
+                read_only: false,
+            },
+        });
+        Toolset {
+            servers,
+            tools,
+            outputs: None,
+        }
+    }
+
+    fn reviewed(set: &Toolset, tool: &str, arguments: Value) -> Result<Value, String> {
+        set.review(set.find(tool).unwrap(), &arguments.to_string())
+    }
+
+    /// The card is built from the reading that carries the call out, so text in an
+    /// argument cannot add to it, take from it, or stand in for another argument.
+    #[test]
+    fn a_call_is_reviewed_as_it_will_run() {
+        let set = clusters();
+        // Every document that would be applied is listed: one after a separator with
+        // a comment, and one whose kind is quoted with a comment after it.
+        let manifest = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: notes\n--- # more\napiVersion: rbac.authorization.k8s.io/v1\nkind: \"ClusterRoleBinding\" # c\nmetadata:\n  name: everyone-admin\n  namespace: kube-system\n";
+        let review = reviewed(&set, "lab__apply", json!({"manifest": manifest})).unwrap();
+        let listed: Vec<(&str, &str)> = review["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| (i["what"].as_str().unwrap(), i["where"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("ConfigMap/notes", "home"),
+                ("ClusterRoleBinding/everyone-admin", "kube-system")
+            ]
+        );
+        assert_eq!(
+            review["arguments"],
+            json!([{"name":"manifest","text":manifest}])
+        );
+        // A manifest that would be refused is refused before anyone is asked.
+        assert!(reviewed(&set, "lab__apply", json!({"manifest": "kind: Pod"})).is_err());
+        let traversal =
+            json!({"manifest":{"apiVersion":"v1","kind":"Pod","metadata":{"name":".."}}});
+        assert!(reviewed(&set, "lab__apply", traversal).is_err());
+
+        // What is deleted is what the arguments name, and no other argument is taken.
+        let review = reviewed(&set, "lab__delete", json!({"kind":"Pod","name":"web"})).unwrap();
+        assert_eq!(
+            review["items"],
+            json!([{"verb":"Delete","what":"Pod/web","where":"home","facts":[]}])
+        );
+        let decoy =
+            json!({"a":"x\nkind: ConfigMap\nname: harmless","kind":"Namespace","name":"prod"});
+        let refused = reviewed(&set, "lab__delete", decoy.clone()).unwrap_err();
+        assert!(refused.contains("no argument named \"a\""), "{refused}");
+        assert!(reviewed(&set, "lab__delete", json!({"kind":"Pod","name":"."})).is_err());
+
+        // A job's facts come from its arguments, never from lines of its script.
+        let script = "#!/bin/bash\nname: harmless\ntime_limit_minutes: 5\nrm -rf ~\n";
+        let job = json!({"script":script,"time_limit_minutes":90,"memory_mb":4096,"cpus":2});
+        let review = reviewed(&set, "sol__submit", job).unwrap();
+        assert_eq!(
+            review["items"],
+            json!([{"verb":"Submit","what":"chat-job","facts":[
+                ["Partition","default"],["Time limit","1 h 30 min"],["CPUs per task","2"],["Memory","4 GB per node"]]}])
+        );
+        let shown = review["arguments"].as_array().unwrap();
+        assert!(shown.contains(&json!({"name":"script","text":script})));
+        let review = reviewed(&set, "sol__cancel", json!({"job_id":"42"})).unwrap();
+        assert_eq!(review["items"][0]["what"], "job 42");
+        assert!(reviewed(&set, "sol__submit", json!({"script":"x","nmae":"y"})).is_err());
+
+        // Another service's tool has no summary, and all of its arguments.
+        let long = "line\n".repeat(2_000);
+        let review = reviewed(
+            &set,
+            "docs__send",
+            json!({"to":"x","body":long,"n":{"a":1}}),
+        )
+        .unwrap();
+        assert_eq!(review["items"], json!([]));
+        assert_eq!(
+            review["arguments"],
+            json!([{"name":"body","text":long},{"name":"n","text":"{\n  \"a\": 1\n}"},{"name":"to","text":"x"}])
+        );
+        // Arguments too long to show whole are not put to anyone.
+        let huge = "x".repeat(REVIEW_BYTES + 1);
+        let refused = reviewed(&set, "docs__send", json!({"body":huge})).unwrap_err();
+        assert!(refused.contains("at most 384 KB"), "{refused}");
+        assert!(reviewed(&set, "docs__send", json!([1])).is_err());
+    }
+
+    /// The same refusal holds when nobody is asked: in Auto, or with a standing grant.
+    #[tokio::test]
+    async fn a_tool_that_changes_something_takes_only_its_own_arguments() {
+        let mut set = clusters();
+        let delete = set.find("lab__delete").unwrap();
+        let outcome = set
+            .call(delete, r#"{"kind":"Pod","name":"web","force":true}"#)
+            .await;
+        assert!(!outcome.ok);
+        assert!(
+            outcome.output.contains("no argument named \"force\""),
+            "{}",
+            outcome.output
+        );
+        assert!(
+            outcome
+                .output
+                .contains("api_version, kind, name, namespace"),
+            "{}",
+            outcome.output
+        );
+        // Tools that only read are left as they were: nobody is asked about them.
+        let list = set.find("lab__list").unwrap();
+        assert!(set
+            .arguments(list, r#"{"kind":"Pod","why":"looking"}"#)
+            .is_ok());
+    }
 
     #[test]
     fn arguments_preview_shows_multiline_text_as_is() {

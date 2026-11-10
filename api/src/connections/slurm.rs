@@ -1101,6 +1101,56 @@ fn not_offered() -> String {
     )
 }
 
+/// What a change does, for the person asked to allow it: the job submitted, with what
+/// it asks for, or the job cancelled. Each value is read as `submit` reads it, so one
+/// the request would ignore is not shown.
+pub fn changes(tool: &str, args: &Value) -> Result<Vec<Value>, String> {
+    match tool {
+        "submit" => {
+            let script = args["script"].as_str().unwrap_or("").trim_start();
+            if script.is_empty() || script.len() > 256 * 1024 {
+                return Err("The script must be between 1 byte and 256 KB".into());
+            }
+            let minutes = args["time_limit_minutes"]
+                .as_i64()
+                .map(|m| match (m / 60, m % 60) {
+                    (0, m) => format!("{m} min"),
+                    (h, 0) => format!("{h} h"),
+                    (h, m) => format!("{h} h {m} min"),
+                });
+            let memory = args["memory_mb"].as_i64().map(|mb| match mb {
+                mb if mb >= 1024 && mb % 1024 == 0 => format!("{} GB per node", mb / 1024),
+                mb => format!("{mb} MB per node"),
+            });
+            let count = |key: &str| args[key].as_i64().map(|n| n.to_string());
+            let text = |key: &str| args[key].as_str().map(str::to_owned);
+            let facts: Vec<Value> = [
+                (
+                    "Partition",
+                    Some(text("partition").unwrap_or_else(|| "default".into())),
+                ),
+                ("Time limit", minutes),
+                ("CPUs per task", count("cpus")),
+                ("Tasks", count("tasks")),
+                ("Nodes", count("nodes")),
+                ("Memory", memory),
+                ("Working directory", text("working_directory")),
+                ("Output", text("output")),
+            ]
+            .into_iter()
+            .filter_map(|(name, value)| value.map(|value| json!([name, value])))
+            .collect();
+            Ok(vec![
+                json!({"verb":"Submit","what":args["name"].as_str().unwrap_or("chat-job"),"facts":facts}),
+            ])
+        }
+        "cancel" => Ok(vec![
+            json!({"verb":"Cancel","what":format!("job {}", job_id(args)?),"facts":[]}),
+        ]),
+        _ => Ok(vec![]),
+    }
+}
+
 pub(super) fn job_id(args: &Value) -> Result<i64, String> {
     args["job_id"]
         .as_i64()

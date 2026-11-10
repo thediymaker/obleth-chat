@@ -2678,8 +2678,24 @@ async fn run_generation(
                         && !auto
                         && !connections::granted(&s.store.pool, id, set.grant(index)).await
                     {
+                        // What the card shows comes from the code that will carry the
+                        // call out; a call it would refuse is refused without asking.
+                        let review = match set.review(index, &call.arguments) {
+                            Ok(review) => review,
+                            Err(error) => {
+                                entry["status"] = json!("error");
+                                entry["detail"] = json!(error);
+                                record(&mut activity, &entry, false);
+                                emit(&mut tx, "tool", entry);
+                                payload["messages"].as_array_mut().unwrap().push(
+                                    json!({"role":"tool","tool_call_id":call.id,"content":error}),
+                                );
+                                continue;
+                            }
+                        };
                         entry["status"] = json!("awaiting");
                         entry["detail"] = json!(connections::arguments_preview(&call.arguments));
+                        entry["change"] = review;
                         record(&mut activity, &entry, false);
                         emit(&mut tx, "tool", entry.clone());
                         // Saved now so a reloaded page shows the question too.
@@ -2704,6 +2720,10 @@ async fn run_generation(
                         let decision =
                             connections::wait(&s.store.pool, generation_id, &call.id).await;
                         entry["status"] = json!("running");
+                        // Answered: the full arguments are not kept with the reply.
+                        if let Some(entry) = entry.as_object_mut() {
+                            entry.remove("change");
+                        }
                         if decision != connections::Decision::Allow {
                             entry["status"] = json!("declined");
                             entry["detail"] =

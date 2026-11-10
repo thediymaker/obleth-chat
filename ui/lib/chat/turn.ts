@@ -130,69 +130,39 @@ export function workOf(m: Message): Work {
   return { rows: fold(rows), steps: list.filter((e) => kindOf(e) === "tool"), entries: list, reasoning, thoughtsRecorded };
 }
 
-const minutes = (m: number) => (!m ? "" : m >= 60 && m % 60 === 0 ? `${m / 60} h` : m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
 export interface ChangeItem {
   verb: string;
   what: string;
   where?: string;
   facts: [string, string][];
 }
+export interface AskedArgument {
+  name: string;
+  text: string;
+}
 /**
- * What a change waiting for approval does, read loosely from its arguments: the
- * resources a Kubernetes manifest applies or deletes, or the Slurm job a script
- * submits. Null when there is nothing to read.
+ * What a call waiting for approval does, and each of its arguments in full, as the
+ * server sent them: it reads the arguments with the code that will carry the call out.
+ * Nothing is read from the text here. A summary worked out on the page could differ
+ * from what runs, and then the person would allow something other than what they saw.
+ * Null for a step that came without one.
  */
-export function changeOf(s: ActivityEntry): { items: ChangeItem[]; raw?: string; text?: string } | null {
-  const text = String(s.detail || "");
-  const field = (src: string, key: string) => src.match(new RegExp(`^${key}:[ \\t]*["']?([^"'\\n]+?)["']?[ \\t]*$`, "m"))?.[1];
-  if (s.service === "kubernetes" && s.action === "apply") {
-    const body = text.replace(/^manifest:[ \t]*\n?/, "");
-    let docs: { kind?: string; name?: string; namespace?: string; text: string }[];
-    try {
-      const v = JSON.parse(body);
-      docs = (Array.isArray(v) ? v : v?.kind === "List" ? v.items || [] : [v]).map((o: any) => ({ kind: o?.kind, name: o?.metadata?.name, namespace: o?.metadata?.namespace, text: JSON.stringify(o) }));
-    } catch {
-      docs = body
-        .split(/^---[ \t]*$/m)
-        .filter((d) => d.trim())
-        .map((d) => {
-          const meta = d.match(/^metadata:[ \t]*\n((?:[ \t]+.*(?:\n|$))*)/m)?.[1] || "";
-          return { kind: field(d, "kind"), name: meta.match(/^[ \t]+name:[ \t]*["']?([^"'\s]+)/m)?.[1], namespace: meta.match(/^[ \t]+namespace:[ \t]*["']?([^"'\s]+)/m)?.[1], text: d };
-        });
-    }
-    const items = docs
-      .filter((d) => d.kind)
-      .map((d) => {
-        const images = [...new Set([...d.text.matchAll(/"?image"?:[ \t]*"?([^"\s,}]+)/g)].map((x) => x[1]!))];
-        const replicas = d.text.match(/"?replicas"?:[ \t]*(\d+)/)?.[1];
-        const ports = [...new Set([...d.text.matchAll(/"?(?:containerPort|port)"?:[ \t]*(\d+)/g)].map((x) => x[1]!))];
-        return {
-          verb: "Apply",
-          what: `${d.kind}/${d.name || "?"}`,
-          where: d.namespace,
-          facts: ([["Image", images.join(", ")], ["Replicas", replicas], ["Port", ports.join(", ")]] as [string, string | undefined][]).filter((f) => f[1]) as [string, string][],
-        };
-      });
-    return items.length ? { items, raw: "Manifest", text: body } : null;
-  }
-  if (s.service === "kubernetes" && s.action === "delete")
-    return { items: [{ verb: "Delete", what: `${field(text, "kind") || "?"}/${field(text, "name") || "?"}`, where: field(text, "namespace"), facts: [] }] };
-  if (s.service === "slurm" && s.action === "submit") {
-    const script = text.match(/^script:[ \t]*\n([\s\S]*?)(?=^(?:cpus|memory_mb|name|nodes|output|partition|tasks|time_limit_minutes|working_directory):|$(?![\s\S]))/m)?.[1];
-    const mb = Number(field(text, "memory_mb"));
-    const facts = (
-      [
-        ["Partition", field(text, "partition") || "default"],
-        ["Time limit", minutes(Number(field(text, "time_limit_minutes")))],
-        ["CPUs", field(text, "cpus")],
-        ["Nodes", field(text, "nodes")],
-        ["Memory", mb ? (mb >= 1024 ? `${+(mb / 1024).toFixed(1)} GB` : `${mb} MB`) : ""],
-      ] as [string, string | undefined][]
-    ).filter((f) => f[1]) as [string, string][];
-    return { items: [{ verb: "Submit", what: field(text, "name") || "batch job", facts }], raw: "Script", text: script?.trimEnd() || text };
-  }
-  if (s.service === "slurm" && s.action === "cancel") return { items: [{ verb: "Cancel", what: `job ${field(text, "job_id") || "?"}`, facts: [] }] };
-  return null;
+export function changeOf(s: ActivityEntry): { items: ChangeItem[]; arguments: AskedArgument[] } | null {
+  const change = s.change;
+  if (!change || typeof change !== "object") return null;
+  const text = (v: unknown) => (typeof v === "string" ? v : "");
+  const list = (v: unknown): any[] => (Array.isArray(v) ? v.filter((x) => x && typeof x === "object") : []);
+  return {
+    items: list(change.items).map((i) => ({
+      verb: text(i.verb),
+      what: text(i.what),
+      where: text(i.where) || undefined,
+      facts: list(i.facts)
+        .filter((f) => Array.isArray(f) && f.length === 2)
+        .map((f) => [String(f[0]), String(f[1])] as [string, string]),
+    })),
+    arguments: list(change.arguments).map((a) => ({ name: text(a.name), text: text(a.text) })),
+  };
 }
 
 type StepRow = Extract<Row, { type: "step" }>;

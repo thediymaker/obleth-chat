@@ -2,6 +2,22 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Security**
+
+- **The web interface is reached only at its own address.** Chat sends every request that none of its own routes answers to the interface server. A request path written as `//host/…` or `/\host/…` was resolved to that host instead, so Chat would fetch any address it could reach and return the answer from its own origin, cookies included. The address is now always the interface server's, only page loads (`GET` and `HEAD`) are passed on, the session cookie and other credentials stay in Chat, and the interface server cannot set cookies. Installs behind a proxy that rewrites such paths (Traefik does) were not reachable this way from outside.
+- **Large uploads are read after sign-in.** Starting a batch and adding a file to a knowledge collection read their bodies (up to 96 MB and 50 MB) before checking who was asking, so anyone who could reach Chat could fill its memory. Both now check sign-in first, a batch's rows and columns are counted while the spreadsheet is read instead of after, two spreadsheets are read at a time, and an upload has five minutes to arrive.
+- **An approval covers one tool call.** With models whose tool calls Chat reads from the reply's text, or that send calls without ids, a later call in the same turn could reuse an earlier call's id and run on its Allow (or be refused on its Deny) without a card. Every call in a turn now has its own id, each question starts unanswered, and an answer is used up when it is read.
+- **Shared chats keep the owner's memories private.** What Chat recalled or learned about the owner while answering was part of each reply's activity, which a shared chat showed and a fork copied. Viewers and forks no longer get those entries. A fork also copies only the generated images the shared replies show, not ones from replies the owner regenerated or branched away from.
+- **Kubernetes tools take names, not paths.** A namespace, resource name or API version went into the request path as the model wrote it, so one containing `/`, `..`, `?` or `#` addressed something else on the cluster's API, such as a pod's proxy or a whole collection, and the read tools ask for no approval. Each is now checked to be a name of its kind, and no request leaves the cluster address the connection was saved with.
+- **Batch results:** a cell starting with `-` that a spreadsheet would read as a formula is written as text. List items (`- first`) and negative numbers are unchanged.
+- **TLS trust store.** `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.11, which stop trusting two intermediate certificates whose keys are public.
+
+**Deployment**
+
+- **New installs get the current release.** `deploy/compose.yaml` and `deploy/k8s.yaml`, which `setup.sh` applies as they are, still named the 1.0.0 images, so a fresh install ran 1.0.0 whatever was checked out. They now name this version, and CI and the release workflow fail when they do not (`scripts/check-versions.sh`).
+
 ## v1.2.2
 
 **Fixes**

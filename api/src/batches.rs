@@ -640,7 +640,13 @@ async fn create(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<Value>, ApiError> {
-    let user = state.auth.require(&headers, true).await?;
+    let user = match state.auth.require(&headers, true).await {
+        Ok(user) => user,
+        Err(refused) => {
+            crate::error::discard(body).await;
+            return Err(refused);
+        }
+    };
     let gw = gateway(&state)?;
     let mut batch = {
         // Waits its turn before reading, so waiting spreadsheets hold no memory.

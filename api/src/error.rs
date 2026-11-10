@@ -27,6 +27,27 @@ impl ApiError {
         )
     }
 }
+/// Reads and drops the rest of a request that was refused before its body was
+/// read, up to a megabyte and for two seconds at most. Answering while the client
+/// is still sending closes the connection under it, and a proxy in front then
+/// reports a bad gateway instead of the answer. Nothing is kept, and a larger or
+/// slower body is still cut off.
+pub async fn discard(body: axum::body::Body) {
+    use futures_util::StreamExt;
+    const MOST: usize = 1024 * 1024;
+    let mut stream = body.into_data_stream();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut seen = 0;
+        while let Some(Ok(chunk)) = stream.next().await {
+            seen += chunk.len();
+            if seen > MOST {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({"error":{"message":self.1}}))).into_response()

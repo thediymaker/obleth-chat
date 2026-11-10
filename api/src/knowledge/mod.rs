@@ -831,9 +831,19 @@ async fn upload(
     Query(q): Query<UploadQuery>,
     body: axum::body::Body,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let user = s.auth.require(&headers, true).await?;
-    let k = knowledge(&s)?;
-    owned(&k.pool, user.id, id).await?;
+    let allowed = async {
+        let user = s.auth.require(&headers, true).await?;
+        let k = knowledge(&s)?;
+        owned(&k.pool, user.id, id).await?;
+        Ok::<_, ApiError>((user, k))
+    };
+    let (user, k) = match allowed.await {
+        Ok(allowed) => allowed,
+        Err(refused) => {
+            crate::error::discard(body).await;
+            return Err(refused);
+        }
+    };
     // Read only now that the person is signed in and owns the collection.
     let too_large = || {
         ApiError(

@@ -980,6 +980,56 @@ async fn metrics_need_the_configured_token(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn uploads_are_not_read_before_sign_in(pool: PgPool) {
+    let (app, _state, _fake, task) = fixture(pool).await;
+    // Bodies no signed-in request could send: one that is not a batch at all, and
+    // one past every other route's size limit. Parsing either would answer 400,
+    // 413 or 422; someone who is not signed in gets 401 whatever they sent.
+    let collection =
+        "/api/knowledge/collections/00000000-0000-0000-0000-000000000000/documents?name=a.txt";
+    for (path, body) in [
+        ("/api/batches", "{}".to_string()),
+        ("/api/batches", "{\"name\":".to_string()),
+        ("/api/batches", format!("{}{{}}", " ".repeat(300 * 1024))),
+        (collection, "x".repeat(300 * 1024)),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("origin", ORIGIN)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+    // Signed in, the same routes read their body: a batch that is not one is a 400.
+    let (cookie, csrf, _) = login(&app, "test-admin").await;
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/batches",
+            json!({"name": "n"}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        value(response).await["error"]["message"],
+        "The batch could not be read"
+    );
+    task.abort();
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn import_route_takes_another_apps_export_past_the_old_size_limit(pool: PgPool) {
     let (app, _state, _fake, task) = fixture(pool).await;
     let (cookie, csrf, _) = login(&app, "test-admin").await;

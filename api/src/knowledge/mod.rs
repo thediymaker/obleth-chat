@@ -224,7 +224,8 @@ impl Knowledge {
             extract::Extracted::Pages(pages) => pages,
         };
         let page_count = pages.iter().filter_map(|p| p.number).max();
-        let passages = extract::split(&pages);
+        // Splitting is CPU work on the whole text, so it runs off the async workers.
+        let passages = tokio::task::spawn_blocking(move || extract::split(&pages)).await?;
         if passages.is_empty() {
             anyhow::bail!("No text was found in this file");
         }
@@ -831,26 +832,82 @@ async fn upload(
     Query(q): Query<UploadQuery>,
     body: axum::body::Body,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let allowed = async {
-        let user = s.auth.require(&headers, true).await?;
-        let k = knowledge(&s)?;
-        owned(&k.pool, user.id, id).await?;
-        Ok::<_, ApiError>((user, k))
-    };
-    let (user, k) = match allowed.await {
-        Ok(allowed) => allowed,
-        Err(refused) => {
-            crate::error::discard(body).await;
-            return Err(refused);
-        }
-    };
-    // Read only now that the person is signed in and owns the collection.
+    let given = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| axum::body::HttpBody::size_hint(&body).exact());
     let too_large = || {
         ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
             "Files must be 50 MB or smaller".into(),
         )
     };
+    let over_quota = |k: &Knowledge| {
+        ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "This would go over your {} MB of knowledge storage",
+                k.user_bytes / 1024 / 1024
+            ),
+        )
+    };
+    let usage = |pool: &PgPool, owner: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+        }
+    };
+    // Everything that can refuse the file is checked before any of it is read: who
+    // sends it, its name and type, and room for it in the person's storage.
+    let allowed = async {
+        let user = s.auth.require(&headers, true).await?;
+        let k = knowledge(&s)?;
+        owned(&k.pool, user.id, id).await?;
+        let name: String = q
+            .name
+            .trim()
+            .replace(['/', '\\'], "_")
+            .chars()
+            .take(255)
+            .collect();
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return Err(bad("The file needs a name"));
+        }
+        let kind = extract::kind(&name, given).ok_or_else(|| {
+            bad("Chat can read PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code files")
+        })?;
+        if declared.is_some_and(|size| size > MAX_FILE_BYTES as u64) {
+            return Err(too_large());
+        }
+        let row = usage(&k.pool, user.id).await?;
+        let (used, count): (i64, i64) = (row.get("used"), row.get("count"));
+        if used + declared.map_or(1, |size| size as i64) > k.user_bytes {
+            return Err(over_quota(k));
+        }
+        if count >= MAX_DOCUMENTS {
+            return Err(bad("You have reached the limit of 2,000 documents"));
+        }
+        Ok::<_, ApiError>((user, k, name, kind))
+    };
+    let (user, k, name, kind) = match allowed.await {
+        Ok(allowed) => allowed,
+        Err(refused) => {
+            crate::error::discard(body).await;
+            return Err(refused);
+        }
+    };
+    // Room in the memory uploads share, for the size the upload states or the most a
+    // file may be, so many at once wait their turn instead of adding up.
+    let _held =
+        crate::attachments::hold(declared.map_or(MAX_FILE_BYTES, |size| size as usize)).await?;
     let body = tokio::time::timeout(
         Duration::from_secs(UPLOAD_SECONDS),
         axum::body::to_bytes(body, MAX_FILE_BYTES),
@@ -863,59 +920,28 @@ async fn upload(
         )
     })?
     .map_err(|_| too_large())?;
-    let name: String = q
-        .name
-        .trim()
-        .replace(['/', '\\'], "_")
-        .chars()
-        .take(255)
-        .collect();
-    if name.is_empty() || name.chars().any(char::is_control) {
-        return Err(bad("The file needs a name"));
-    }
     if body.is_empty() {
         return Err(bad("The file is empty"));
     }
-    let given = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let kind = extract::kind(&name, given).ok_or_else(|| {
-        bad("Chat can read PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code files")
-    })?;
     let mime = extract::mime_for(kind);
     let doc = Uuid::new_v4();
     let key = format!("knowledge/{}/{doc}", user.id);
     let size = body.len() as i64;
-    // Check the quota before storing, then again with the owner locked when recording.
+    // Checked again now the size is known, and once more with the owner locked when
+    // recording.
     let quota = |used: i64, count: i64| -> Result<(), ApiError> {
         if used + size > k.user_bytes {
-            return Err(ApiError(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "This would go over your {} MB of knowledge storage",
-                    k.user_bytes / 1024 / 1024
-                ),
-            ));
+            return Err(over_quota(k));
         }
         if count >= MAX_DOCUMENTS {
             return Err(bad("You have reached the limit of 2,000 documents"));
         }
         Ok(())
     };
-    let usage = |pool: &PgPool| {
-        let pool = pool.clone();
-        async move {
-            sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
-                .bind(user.id)
-                .fetch_one(&pool)
-                .await
-        }
-    };
-    let row = usage(&k.pool).await?;
+    let row = usage(&k.pool, user.id).await?;
     quota(row.get("used"), row.get("count"))?;
     k.store
-        .put(&key, body.to_vec(), &mime)
+        .put(&key, Vec::from(body), &mime)
         .await
         .map_err(|error| {
             tracing::warn!("could not store a knowledge file: {error:#}");

@@ -66,6 +66,19 @@ test('SVG blocks show as an image, so their scripts never run', () => {
   assert.match(markdown('```svg\n<p>nope</p>\n```'), /This isn’t an SVG drawing Chat can show/);
 });
 
+test('text that is not an SVG is told apart at once, however many comments it opens with', () => {
+  // A pattern that repeated over the comments took twice as long for each one more.
+  const started = Date.now();
+  assert.equal(svgImage(`${'<!---->'.repeat(20_000)}x`), null);
+  assert.equal(svgImage(`<!-- never closed ${'<!--'.repeat(20_000)}`), null);
+  assert.match(svgImage(`<?xml version="1.0"?>\n${'<!-- a -->\n'.repeat(10_000)}<!DOCTYPE svg>\n<svg></svg>`) ?? '', /%3Csvg%20xmlns%3D/);
+  // The namespace is added to the drawing's own tag, and looked for only there.
+  assert.match(svgImage('<!-- <svg> --><svg width="4"><g data-x=" xmlns=1"/></svg>') ?? '', /--%3E%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width/);
+  assert.doesNotMatch(svgImage('<svg xmlns="http://www.w3.org/2000/svg"/>') ?? '', /xmlns.*xmlns/);
+  assert.match(svgImage(`<svg>${'<svg '.repeat(39_000)}</svg>`) ?? '', /^<img /);
+  assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
+});
+
 test('once KaTeX loads, math is drawn as the reply is, including chemistry', async () => {
   await loadMath();
   const inline = markdown('Energy $E = mc^2$.');
@@ -89,6 +102,11 @@ test('once the highlighter loads, code is highlighted, with grammars loaded by n
   assert.equal(languageOf('slurm'), 'bash');
   assert.equal(languageOf('Dockerfile'), 'dockerfile');
   assert.equal(languageOf('text'), '');
+  // A fence can name anything; names every object carries are not languages.
+  for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    assert.equal(languageOf(name), name.toLowerCase());
+    assert.match(markdown(`\`\`\`${name}\nx = 1\n\`\`\``), /<code>x = 1\n<\/code>/);
+  }
   assert.match(markdown('```sbatch\n#SBATCH -N 1\necho hi\n```'), /<code class="hljs">/);
   // Highlighted code still escapes what it shows.
   assert.doesNotMatch(markdown('```html\n<script>alert(1)</script>\n```'), /<script>/);

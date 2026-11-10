@@ -54,7 +54,7 @@ pub fn tools() -> Vec<Tool> {
     vec![
         tool("overview", "Overview", "Who you are on the cluster, your namespace's quotas and pods, and what you are allowed to do there.", true, json!({"namespace":namespace}), &[]),
         tool("list", "List", "List resources of one kind with their status.", true, json!({"kind":kind,"namespace":namespace,"all_namespaces":{"type":"boolean"},"label_selector":{"type":"string"},"api_version":api_version}), &["kind"]),
-        tool("get", "Get", "One resource as JSON, without managed fields.", true, json!({"kind":kind,"name":{"type":"string"},"namespace":namespace,"api_version":api_version}), &["kind","name"]),
+        tool("get", "Get", "One resource as JSON, without managed fields. A Secret is shown with its keys but not its values.", true, json!({"kind":kind,"name":{"type":"string"},"namespace":namespace,"api_version":api_version}), &["kind","name"]),
         tool("logs", "Logs", "The latest log lines of a pod's container.", true, json!({"pod":{"type":"string"},"namespace":namespace,"container":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000},"previous":{"type":"boolean","description":"Logs of the previous, crashed container"}}), &["pod"]),
         tool("apply", "Apply", "Create or update resources with server-side apply. Give one manifest object, a list of them, or YAML text (documents separated by ---).", false, json!({"manifest":{"description":"Manifest object, array of objects, or YAML text"}}), &["manifest"]),
         tool("delete", "Delete", "Delete one resource.", false, json!({"kind":kind,"name":{"type":"string"},"namespace":namespace,"api_version":api_version}), &["kind","name"]),
@@ -514,6 +514,7 @@ impl Client {
                 notes.remove("kubectl.kubernetes.io/last-applied-configuration");
             }
         }
+        hide_secret_values(&mut object);
         Ok(serde_json::to_string_pretty(&object).unwrap_or_default())
     }
 
@@ -981,6 +982,28 @@ fn row(
     )
 }
 
+/// A Secret is shown with its keys and the size of each value, as `kubectl describe`
+/// shows one. Reading needs no approval, and what a tool returns goes to the model
+/// and into the chat, so the values themselves stay on the cluster.
+fn hide_secret_values(object: &mut Value) {
+    if object["kind"].as_str() != Some("Secret") {
+        return;
+    }
+    for field in ["data", "stringData"] {
+        let Some(values) = object.get_mut(field).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for value in values.values_mut() {
+            let bytes = value.as_str().map_or(0, |v| match field {
+                // Base64: four characters for every three bytes.
+                "data" => v.trim_end_matches('=').len() * 3 / 4,
+                _ => v.len(),
+            });
+            *value = json!(format!("(hidden, {bytes} bytes)"));
+        }
+    }
+}
+
 /// What a change does, for the person asked to allow it: each resource applied or
 /// deleted and where. Read with the same functions that carry the change out, so the
 /// card and the request cannot disagree, and a change that would be refused is refused
@@ -1126,6 +1149,26 @@ fn head_of_yaml(doc: &str) -> Result<Head, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_is_shown_without_its_values() {
+        let mut secret = json!({"kind":"Secret","metadata":{"name":"db"},"type":"Opaque",
+            "data":{"password":"aHVudGVyMg==","empty":""},"stringData":{"note":"plain"}});
+        hide_secret_values(&mut secret);
+        let text = secret.to_string();
+        assert!(
+            !text.contains("aHVudGVyMg") && !text.contains("plain"),
+            "{text}"
+        );
+        assert_eq!(secret["data"]["password"], "(hidden, 7 bytes)");
+        assert_eq!(secret["data"]["empty"], "(hidden, 0 bytes)");
+        assert_eq!(secret["stringData"]["note"], "(hidden, 5 bytes)");
+        assert_eq!(secret["metadata"]["name"], "db");
+        // Anything else is shown as it is.
+        let mut config = json!({"kind":"ConfigMap","data":{"a":"b"}});
+        hide_secret_values(&mut config);
+        assert_eq!(config["data"]["a"], "b");
+    }
 
     #[test]
     fn only_names_go_into_a_request_path() {

@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { clock } from "@/lib/chat/composer";
+import { steerDraft } from "@/lib/chat/steer-draft";
 import {
   changeOf,
   duration,
@@ -913,11 +914,9 @@ export function TurnAfter({ m }: { m: Message }) {
   );
 }
 
-// What the person typed in Steer, kept across re-renders.
-let steerDraft = "";
 export function SteerForm({ m }: { m: Message }) {
   const store = useChat();
-  const [text, setText] = useState(steerDraft);
+  const [text, setText] = useState(steerDraft.text);
   const [busy, setBusy] = useState(false);
   return (
     <form
@@ -929,7 +928,7 @@ export function SteerForm({ m }: { m: Message }) {
         try {
           await store.steer(text);
           setText("");
-          steerDraft = "";
+          steerDraft.text = "";
         } catch (error) {
           store.run(() => {
             throw error;
@@ -951,7 +950,7 @@ export function SteerForm({ m }: { m: Message }) {
         value={text}
         onChange={(e) => {
           setText(e.target.value);
-          steerDraft = e.target.value;
+          steerDraft.text = e.target.value;
         }}
         className="h-8 min-w-0 flex-1 basis-48 rounded-md border bg-background px-2 text-md outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       />

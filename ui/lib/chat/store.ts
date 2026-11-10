@@ -17,6 +17,7 @@ import { createAttachments, type Attachments } from "./attachments";
 import { EFFORTS } from "./composer";
 import { conversationBusy, isPendingMessage, mergeProgress, renderSignature, suggestionsPending } from "./conversation-state";
 import { applyToolsDraft, chatToolsKey, enableAuto, resetToolsDraft } from "@/components/connections/chat-tools";
+import { resetSteerDraft } from "@/lib/chat/steer-draft";
 import { nextRating } from "./feedback";
 import { createFollow, type Follow } from "./follow";
 import { generationKeys, generationValues, isLocked, type Generation } from "./generation";
@@ -291,6 +292,11 @@ export class ChatStore {
     this.attachments.clear();
     this.workspace.reset();
     this.browser.reset();
+    // What was set up for a chat not yet started, or typed and not sent, is this
+    // person's: the next one to sign in on this page starts clean, with Auto off.
+    resetToolsDraft();
+    chatDraft.reset();
+    resetSteerDraft();
   }
 
   // ---- Helpers ----

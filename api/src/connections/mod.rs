@@ -1050,7 +1050,44 @@ pub async fn finish(pool: &PgPool, generation: Uuid) {
         .await;
 }
 
+/// A connection's address for someone who does not manage it: where it is, without
+/// the path and query, which for many MCP servers carry the key that opens them.
+fn address_only(url: &str) -> String {
+    let Ok(parsed) = Url::parse(url) else {
+        return String::new();
+    };
+    let mut shown = format!(
+        "{}://{}",
+        parsed.scheme(),
+        parsed.host_str().unwrap_or_default()
+    );
+    if let Some(port) = parsed.port() {
+        shown.push_str(&format!(":{port}"));
+    }
+    if parsed.path().len() > 1 || parsed.query().is_some() {
+        shown.push_str("/…");
+    }
+    shown
+}
+
+/// A connection's address for the audit log: without its query, where a key may sit.
+fn without_query(url: &str) -> String {
+    match Url::parse(url) {
+        Ok(mut parsed) => {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            let _ = parsed.set_password(None);
+            parsed.to_string()
+        }
+        Err(_) => String::new(),
+    }
+}
+
 fn view(row: &Row, user: &Identity) -> Value {
+    let url = match row.can_manage(user) {
+        true => row.url.clone(),
+        false => address_only(&row.url),
+    };
     let tools: Vec<Value> = row
         .tools()
         .into_iter()
@@ -1060,7 +1097,7 @@ fn view(row: &Row, user: &Identity) -> Value {
     let credential = (row.personal_tokens() && row.credential.is_some())
         .then(|| json!({"user":settings["user"],"namespace":settings["namespace"],"identity":settings["identity"]}));
     json!({
-        "id": row.id, "name": row.name, "url": row.url, "kind": row.kind, "shared": row.shared(),
+        "id": row.id, "name": row.name, "url": url, "kind": row.kind, "shared": row.shared(),
         "canManage": row.can_manage(user), "enabled": row.enabled, "optedOut": row.opted_out,
         "active": row.enabled && !row.opted_out && row.usable(), "usable": row.usable(),
         "needsCredential": !row.usable(), "credential": credential,
@@ -1135,7 +1172,7 @@ fn duplicate(error: sqlx::Error) -> ApiError {
 
 async fn audit(pool: &PgPool, actor: Uuid, action: &str, row_id: Uuid, name: &str, url: &str) {
     let _ = sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,$3,'connection',$4,$5)")
-        .bind(Uuid::new_v4()).bind(actor).bind(action).bind(row_id.to_string()).bind(json!({"name":name,"url":url}))
+        .bind(Uuid::new_v4()).bind(actor).bind(action).bind(row_id.to_string()).bind(json!({"name":name,"url":without_query(url)}))
         .execute(pool).await;
 }
 
@@ -1992,6 +2029,27 @@ mod tests {
         assert!(set
             .arguments(list, r#"{"kind":"Pod","why":"looking"}"#)
             .is_ok());
+    }
+
+    #[test]
+    fn a_shared_connections_address_is_shown_without_its_key() {
+        assert_eq!(
+            address_only("https://mcp.example.com/v1/sk-secret/mcp?key=abc"),
+            "https://mcp.example.com/…"
+        );
+        assert_eq!(
+            address_only("https://k8s.example.com:6443"),
+            "https://k8s.example.com:6443"
+        );
+        assert_eq!(
+            address_only("http://10.0.0.5:8080/"),
+            "http://10.0.0.5:8080"
+        );
+        assert_eq!(address_only("not a url"), "");
+        assert_eq!(
+            without_query("https://user:pw@mcp.example.com/mcp?key=abc#frag"),
+            "https://user@mcp.example.com/mcp"
+        );
     }
 
     #[test]

@@ -48,6 +48,48 @@ pub async fn discard(body: axum::body::Body) {
     .await;
 }
 
+/// Reads an upload of at most `most` bytes that keeps arriving. Thirty seconds
+/// without a byte, or fifteen minutes in all, ends it, so a stalled upload does not
+/// hold a turn or its memory for as long as its sender likes.
+pub async fn upload(
+    body: axum::body::Body,
+    most: usize,
+    too_large: &'static str,
+) -> Result<Vec<u8>, ApiError> {
+    use futures_util::StreamExt;
+    use std::time::Duration;
+    const QUIET: Duration = Duration::from_secs(30);
+    const WHOLE: Duration = Duration::from_secs(15 * 60);
+    let stalled = || {
+        ApiError(
+            StatusCode::REQUEST_TIMEOUT,
+            "The upload stopped arriving. Try again.".into(),
+        )
+    };
+    let mut stream = body.into_data_stream();
+    let read = async {
+        let mut bytes = Vec::new();
+        loop {
+            match tokio::time::timeout(QUIET, stream.next()).await {
+                Err(_) => return Err(stalled()),
+                Ok(None) => return Ok(bytes),
+                Ok(Some(Err(_))) => {
+                    return Err(ApiError::bad("The upload was cut off. Try again."))
+                }
+                Ok(Some(Ok(chunk))) => {
+                    if bytes.len() + chunk.len() > most {
+                        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, too_large.into()));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+            }
+        }
+    };
+    tokio::time::timeout(WHOLE, read)
+        .await
+        .unwrap_or_else(|_| Err(stalled()))
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({"error":{"message":self.1}}))).into_response()

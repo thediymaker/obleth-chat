@@ -650,3 +650,152 @@ fn a_single_object_is_read_whole_only_up_to_the_size_of_chats_own_exports() {
     assert_eq!(error.0, StatusCode::BAD_REQUEST);
     assert!(error.1.contains("up to 10 MiB"), "{}", error.1);
 }
+
+fn refused(file: &[u8]) -> String {
+    match obleth_chat::imports::read(file) {
+        Err(error) => {
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            error.1
+        }
+        Ok(_) => panic!("the file was read"),
+    }
+}
+
+fn read_chats(file: &[u8]) -> obleth_chat::imports::Parsed {
+    match obleth_chat::imports::read(file) {
+        Ok(obleth_chat::imports::Upload::Chats(parsed)) => parsed,
+        Ok(_) => panic!("read as a Chat export"),
+        Err(error) => panic!("{}", error.1),
+    }
+}
+
+/// A file is small next to what its shape asks for once parsed: empty messages by
+/// the million, or a zip that inflates. Each conversation is held to an allowance
+/// as it is read, so these stop early instead of taking the server's memory.
+#[test]
+fn a_conversation_that_asks_for_too_much_memory_is_refused() {
+    let large = "larger than Chat can read";
+    // Twelve megabytes of empty messages, about a gigabyte once parsed.
+    let mut nodes = String::from(r#"[{"mapping":{"#);
+    for i in 0..1_000_000 {
+        nodes.push_str(&format!(r#""{i}":{{}},"#));
+    }
+    nodes.push_str(r#""end":{}}}]"#);
+    let said = refused(nodes.as_bytes());
+    assert!(said.contains(large), "{said}");
+    // The same in a list of messages, and as lists inside a message.
+    let mut listed = String::from(r#"[{"chat_messages":["#);
+    listed.push_str(&"{},".repeat(2_000_000));
+    listed.push_str("{}]}]");
+    let said = refused(listed.as_bytes());
+    assert!(said.contains(large), "{said}");
+    let mut parts = String::from(r#"[{"chat_messages":[{"sender":"human","content":["#);
+    parts.push_str(&"{},".repeat(8_000_000));
+    parts.push_str("{}]}]}]");
+    let said = refused(parts.as_bytes());
+    assert!(said.contains(large), "{said}");
+
+    // One conversation of a hundred megabytes, in a zip of a few hundred kilobytes.
+    let mut one = String::from(
+        r#"[{"title":"Long","mapping":{"u":{"message":{"author":{"role":"user"},"content":{"content_type":"text","parts":[""#,
+    );
+    one.push_str(&"a".repeat(100 * 1024 * 1024));
+    one.push_str(r#""]}}}}}]"#);
+    let zipped = zip(&[("conversations.json", one.as_bytes(), true)]);
+    assert!(zipped.len() < 1024 * 1024, "{}", zipped.len());
+    let said = refused(&zipped);
+    assert!(said.contains(large), "{said}");
+    // On its own, not in a list, the same shape is refused the same way.
+    let mut single = String::from(r#"{"mapping":{"#);
+    for i in 0..500_000 {
+        single.push_str(&format!(r#""{i}":{{}},"#));
+    }
+    single.push_str(r#""end":{}}}"#);
+    let said = refused(single.as_bytes());
+    assert!(said.contains(large), "{said}");
+}
+
+/// The allowance is each conversation's own: a file may hold more in all than one
+/// conversation may, and what Chat does not read costs only its length.
+#[test]
+fn the_allowance_is_per_conversation_and_skipped_fields_cost_little() {
+    let chat = |id: usize| {
+        json!({"id": format!("c{id}"), "title": "Big", "current_node": "u",
+               // Search results and the like, which Chat does not read.
+               "safe_urls": vec!["https://example.com/"; 1000],
+               "mapping": {"u": {"message": {
+                   "author": {"role": "user"},
+                   "content": {"content_type": "text", "parts": ["x".repeat(2 * 1024 * 1024)]},
+                   "metadata": {"content_references": vec![json!({"a": [1, 2, 3], "b": {"c": "d"}}); 200_000],
+                                "model_slug": "gpt-test"}}}}})
+    };
+    // Ten conversations of some 8 MB each: more than one allowance together.
+    let file = serde_json::to_vec(&(0..10).map(chat).collect::<Vec<_>>()).unwrap();
+    assert!(file.len() > 64 * 1024 * 1024, "{}", file.len());
+    let parsed = read_chats(&file);
+    assert_eq!(parsed.chats.len(), 10);
+    // A message over Chat's limit for one is shortened, as before.
+    assert!(parsed.chats[0].messages[0].content.len() <= 1024 * 1024);
+}
+
+/// Fields of a type Chat does not expect are read as missing, not as a broken file.
+#[test]
+fn fields_of_an_unexpected_type_are_read_as_missing() {
+    let file = json!([
+        {"id": 7, "title": ["not", "text"], "create_time": {"at": 1}, "is_archived": "yes",
+         "current_node": "a",
+         "mapping": {
+             "u": {"parent": 3, "message": {"author": {"role": "user"}, "recipient": ["all"],
+                   "content": {"content_type": "text", "parts": ["hello", 5, null, ["x"], {"content_type": 9}]},
+                   "metadata": "none"}},
+             "a": {"parent": "u", "message": {"author": {"role": "assistant"},
+                   "content": {"content_type": "text", "parts": "not a list", "thoughts": {}},
+                   "metadata": {"model_slug": 4, "attachments": "x", "aggregate_result": [],
+                                "model_dil_v2": {"fallbackMarkdown": "the reply"}}}}
+         }},
+        {"id": "w", "chat": {"title": 1.5, "messages": [
+            {"role": "user", "content": [{"text": "one"}, "two", {"text": 3}, {"text": "four"}],
+             "files": {"name": "x"}, "error": false},
+            {"role": "assistant", "content": "answer", "files": [3, {"type": "image"}, {"name": "notes.txt"}],
+             "error": {"content": "It broke"}, "timestamp": "soon"}
+        ]}},
+        {"uuid": "c", "name": null, "chat_messages": [
+            {"sender": "human", "text": "typed", "content": "not a list", "attachments": [1, {"file_name": "a.png"}],
+             "files": null},
+            {"sender": "assistant", "content": [{"type": "thinking", "thinking": "hm"}, 7, {"type": "text", "text": "said"}]}
+        ]}
+    ]);
+    let parsed = read_chats(&serde_json::to_vec(&file).unwrap());
+    let texts: Vec<Vec<&str>> = parsed
+        .chats
+        .iter()
+        .map(|c| c.messages.iter().map(|m| m.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            vec!["hello", "the reply"],
+            // Something in a list of files that is not a file's record still counts as one.
+            vec![
+                "one\n\nfour",
+                "answer\n\n[File not imported]\n\n[Image not imported]\n\n[File not imported: notes.txt]"
+            ],
+            vec!["typed\n\n[File not imported]\n\n[Image not imported]", "said"],
+        ]
+    );
+    assert_eq!(parsed.chats[0].key.as_deref(), Some("chatgpt:7"));
+    assert_eq!(parsed.chats[1].title, "1.5");
+    assert_eq!(
+        parsed.chats[1].messages[1].error.as_deref(),
+        Some("It broke")
+    );
+    assert_eq!(parsed.chats[2].messages[1].reasoning, "hm");
+    // An id too long to be one is dropped, and the chat still comes over.
+    let long = json!([{"id": "k".repeat(300), "mapping": {"u": {"message": {
+        "author": {"role": "user"}, "content": {"content_type": "text", "parts": ["hi"]}}}}}]);
+    let parsed = read_chats(&serde_json::to_vec(&long).unwrap());
+    assert_eq!(
+        (parsed.chats.len(), parsed.chats[0].key.is_none()),
+        (1, true)
+    );
+}

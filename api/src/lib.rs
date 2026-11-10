@@ -481,20 +481,24 @@ async fn import(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<(StatusCode, Json<store::ImportSummary>), ApiError> {
-    let u = s.auth.require(&headers, true).await?;
+    let u = match s.auth.require(&headers, true).await {
+        Ok(u) => u,
+        Err(refused) => {
+            error::discard(body).await;
+            return Err(refused);
+        }
+    };
     // Waits its turn before reading the body, so waiting uploads hold no memory.
     let _turn = imports::RUNNING
         .acquire()
         .await
         .map_err(|_| ApiError::internal())?;
-    let body = axum::body::to_bytes(body, imports::MAX_IMPORT_BYTES)
-        .await
-        .map_err(|_| {
-            ApiError(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Choose an export of 200 MB or less".into(),
-            )
-        })?;
+    let body = error::upload(
+        body,
+        imports::MAX_IMPORT_BYTES,
+        "Choose an export of 200 MB or less",
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(s.store.import_upload(u.id, body).await?),

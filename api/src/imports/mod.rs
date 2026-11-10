@@ -7,16 +7,18 @@
 //! where they were.
 //!
 //! Parsing walks the export one record at a time, so only the shaped text of each
-//! chat stays in memory, never a second copy of the whole file.
+//! chat stays in memory, never a second copy of the whole file. What one record may
+//! take while it is read is bounded too (`budget`), whatever its shape.
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use chrono::{DateTime, Utc};
-use serde::de::{self, Deserializer as _, SeqAccess, Visitor};
+use serde::de::{self, Deserializer as _, IgnoredAny, SeqAccess, Visitor};
 use serde::Deserialize;
 
 use crate::error::ApiError;
 use crate::store::{ChatArchive, MAX_CONVERSATION_BYTES, MAX_HISTORY, MAX_RESPONSE_BYTES};
 
+mod budget;
 mod formats;
 pub(crate) mod zip;
 
@@ -32,9 +34,15 @@ pub static RUNNING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1
 pub const MAX_IMPORT_CONVERSATIONS: usize = 5_000;
 /// Messages and versions kept per conversation, as Chat stores at most.
 const MAX_IMPORT_MESSAGES: usize = crate::store::MAX_STORED_MESSAGES;
-/// Text kept from one file once shaped, which bounds memory for a zip that inflates.
-const MAX_IMPORT_TEXT: usize = 768 * 1024 * 1024;
+/// What is kept from one file once shaped, which bounds memory for a zip that
+/// inflates. With the upload itself and one record being read, an import stays
+/// well inside the memory a server is given.
+const MAX_IMPORT_TEXT: usize = 256 * 1024 * 1024;
+/// An id longer than any app writes is not kept, so the chat comes over without one.
+const MAX_KEY_BYTES: usize = 200;
 const SHORTENED: &str = "\n\n[Shortened on import]";
+const TOO_LARGE: &str =
+    "One chat in this export is larger than Chat can read. Export it on its own, or leave it out.";
 const UNREADABLE: &str = "This file isn't a chat export Chat can read. Choose an export from Chat, Open WebUI, ChatGPT or Claude.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,36 +125,25 @@ impl Role {
 /// Reads an uploaded export. CPU-bound: run it off the async workers.
 pub fn read(body: &[u8]) -> Result<Upload, ApiError> {
     if body.starts_with(b"PK\x03\x04") || body.starts_with(b"PK\x05\x06") {
-        let mut found = Collector::default();
-        let entry = zip::conversations(body)?;
-        let mut json = serde_json::Deserializer::from_reader(std::io::BufReader::new(entry));
-        let result = (&mut json)
-            .deserialize_seq(Records(&mut found))
-            .and_then(|_| json.end());
-        return found.finish(
-            result.map_err(|e| ApiError::bad(if e.is_io() { zip::BROKEN } else { UNREADABLE })),
-        );
+        return records(zip::conversations(body)?, zip::BROKEN);
     }
     let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
     match body.iter().find(|b| !b.is_ascii_whitespace()) {
-        Some(b'[') => {
-            let mut found = Collector::default();
-            let mut json = serde_json::Deserializer::from_slice(body);
-            let result = (&mut json)
-                .deserialize_seq(Records(&mut found))
-                .and_then(|_| json.end());
-            found.finish(result.map_err(|_| ApiError::bad(UNREADABLE)))
-        }
+        Some(b'[') => records(body, UNREADABLE),
         Some(b'{') => {
             if body.len() > MAX_OBJECT_BYTES {
                 return Err(ApiError::bad(
                     "A Chat export, or a single chat saved on its own, can be up to 10 MiB.",
                 ));
             }
-            let value: serde_json::Value =
-                serde_json::from_slice(body).map_err(|_| ApiError::bad(UNREADABLE))?;
-            if value.get("format").is_some() {
-                return serde_json::from_value(value)
+            // Chat's own export says so; nothing else of the file is kept to find out.
+            #[derive(Deserialize)]
+            struct Kind {
+                format: Option<IgnoredAny>,
+            }
+            let kind: Kind = serde_json::from_slice(body).map_err(|_| ApiError::bad(UNREADABLE))?;
+            if kind.format.is_some() {
+                return serde_json::from_slice(body)
                     .map(Upload::Archive)
                     .map_err(|_| {
                         ApiError::bad(
@@ -155,12 +152,37 @@ pub fn read(body: &[u8]) -> Result<Upload, ApiError> {
                     });
             }
             // One conversation saved on its own rather than in a list.
+            let limit = budget::limit();
             let mut found = Collector::default();
-            let result = formats::Record::deserialize(value).map(|r| found.add(r));
-            found.finish(result.map_err(|_| ApiError::bad(UNREADABLE)))
+            let result = serde_json::from_slice::<formats::Record>(body).map(|r| found.add(r));
+            found.finish(
+                result
+                    .map_err(|_| ApiError::bad(if limit.over() { TOO_LARGE } else { UNREADABLE })),
+            )
         }
         _ => Err(ApiError::bad(UNREADABLE)),
     }
+}
+
+/// Reads a list of conversations, each within its allowance. `damaged` is what to
+/// say when the file itself cannot be read to its end.
+fn records(file: impl std::io::Read, damaged: &'static str) -> Result<Upload, ApiError> {
+    let limit = budget::limit();
+    let mut found = Collector::default();
+    let file = std::io::BufReader::with_capacity(64 * 1024, budget::Charged(file));
+    let mut json = serde_json::Deserializer::from_reader(file);
+    let result = (&mut json)
+        .deserialize_seq(Records(&mut found))
+        .and_then(|_| json.end());
+    found.finish(result.map_err(|e| {
+        ApiError::bad(if limit.over() {
+            TOO_LARGE
+        } else if e.is_io() {
+            damaged
+        } else {
+            UNREADABLE
+        })
+    }))
 }
 
 #[derive(Default)]
@@ -184,10 +206,11 @@ impl Collector {
             ));
             return;
         }
-        let Some((source, raw)) = record.into_raw() else {
+        let Some((source, mut raw)) = record.into_raw() else {
             self.stop = Some(ApiError::bad(UNREADABLE));
             return;
         };
+        raw.key = raw.key.filter(|k| k.len() <= MAX_KEY_BYTES);
         let parsed = self.parsed.get_or_insert(Parsed {
             source,
             chats: vec![],
@@ -207,11 +230,19 @@ impl Collector {
         parsed.messages_left_out += shaped.messages_left_out;
         match shaped.chat {
             Some(chat) => {
-                self.text += chat
-                    .messages
-                    .iter()
-                    .map(|m| m.content.len() + m.reasoning.len())
-                    .sum::<usize>();
+                self.text += chat.title.len()
+                    + chat.key.as_ref().map_or(0, String::len)
+                    + chat
+                        .messages
+                        .iter()
+                        .map(|m| {
+                            std::mem::size_of::<ImportedMessage>()
+                                + m.content.len()
+                                + m.reasoning.len()
+                                + m.error.as_ref().map_or(0, String::len)
+                                + m.model.as_ref().map_or(0, String::len)
+                        })
+                        .sum::<usize>();
                 if self.text > MAX_IMPORT_TEXT {
                     self.stop = Some(ApiError::bad(
                         "This export holds more text than Chat can import at once.",
@@ -244,7 +275,11 @@ impl<'de> Visitor<'de> for Records<'_> {
         f.write_str("a list of conversations")
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        while let Some(record) = seq.next_element::<formats::Record>()? {
+        loop {
+            budget::next_record();
+            let Some(record) = seq.next_element::<formats::Record>()? else {
+                break;
+            };
             self.0.add(record);
             if self.0.stop.is_some() {
                 return Err(de::Error::custom("stopped"));

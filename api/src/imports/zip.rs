@@ -5,8 +5,9 @@ use std::io::Read;
 
 use crate::error::ApiError;
 
-/// conversations.json may inflate well past the upload; parsing streams it.
-const MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// conversations.json may inflate well past the upload; parsing streams it, so
+/// this bounds the time one import takes rather than its memory.
+const MAX_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
 pub(super) const BROKEN: &str =
     "This zip file could not be read. Unzip it and choose the conversations.json file inside.";
 

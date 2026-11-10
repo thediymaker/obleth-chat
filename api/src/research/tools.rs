@@ -766,7 +766,11 @@ async fn read_paper(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome
         Ok(html) => html,
         Err(e) => return outcome(false, "Paper not read", format!("{url}: {e}")),
     };
-    let paper = paper::Paper::from_html(&html);
+    // Up to 16 MB of someone's page: parsed off the async workers.
+    let Ok(paper) = tokio::task::spawn_blocking(move || paper::Paper::from_html(&html)).await
+    else {
+        return outcome(false, "Paper not read", format!("{url} could not be read."));
+    };
     if paper.sections.is_empty() {
         return outcome(false, "No sections", format!("{url} has no headings to read it by. Read its text with run_command and curl instead."));
     }

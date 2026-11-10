@@ -128,35 +128,6 @@ fn folder(root: &Path, name: &str) -> Local {
     Local(root.join(name))
 }
 
-/// Code other people can change is not run for anyone unasked, so Chat needs to
-/// know which workspaces hold it: those of chats in a project shared with a group.
-#[sqlx::test(migrations = "./migrations")]
-async fn a_group_projects_code_counts_as_shared(pool: PgPool) {
-    let jen = person(&pool, "Jen").await;
-    let group = Uuid::new_v4();
-    sqlx::query("INSERT INTO user_groups (id, name) VALUES ($1,'Lab')")
-        .bind(group)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let own = chat(&pool, &jen, project(&pool, &jen, None).await).await;
-    let joint = chat(&pool, &jen, project(&pool, &jen, Some(group)).await).await;
-    let loose = Uuid::new_v4();
-    sqlx::query("INSERT INTO conversations (id, owner_id, title, model) VALUES ($1,$2,'Work','m')")
-        .bind(loose)
-        .bind(jen.id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    use obleth_chat::sandbox::shared_code;
-    assert!(!shared_code(&pool, own).await);
-    assert!(shared_code(&pool, joint).await);
-    assert!(!shared_code(&pool, loose).await);
-    // When it cannot be told, the code counts as shared.
-    pool.close().await;
-    assert!(shared_code(&pool, own).await);
-}
-
 #[sqlx::test(migrations = "./migrations")]
 async fn two_people_sync_one_project(pool: PgPool) {
     let jen = person(&pool, "Jen").await;

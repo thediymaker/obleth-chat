@@ -1244,27 +1244,6 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     })))
 }
 
-/// Whether a chat's workspace holds code that other people can change: the chat is in
-/// a project shared with a group, whose members all sync into the same history. Such
-/// code is not run for anyone unasked. When it cannot be told, it counts as shared.
-pub async fn shared_code(pool: &PgPool, conversation: Uuid) -> bool {
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM conversations c JOIN projects p ON p.id = c.project_id
-         WHERE c.id = $1 AND p.scope = 'group')",
-    )
-    .bind(conversation)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(true)
-}
-
-impl Sandboxes {
-    /// See `shared_code`.
-    pub async fn shared_code(&self, sandbox: &Sandbox) -> bool {
-        shared_code(&self.inner.pool, sandbox.conversation_id).await
-    }
-}
-
 async fn create(
     State(s): State<AppState>,
     headers: HeaderMap,

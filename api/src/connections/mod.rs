@@ -909,7 +909,9 @@ pub async fn ask(
     sqlx::query("DELETE FROM tool_approvals WHERE created_at < NOW() - INTERVAL '1 day'")
         .execute(pool)
         .await?;
-    sqlx::query("INSERT INTO tool_approvals(generation_id,call_id,conversation_id,owner_id,connection_id,tool_name) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
+    // A new question is always undecided: an answer to an earlier call that used
+    // the same id says nothing about this one.
+    sqlx::query("INSERT INTO tool_approvals(generation_id,call_id,conversation_id,owner_id,connection_id,tool_name) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (generation_id,call_id) DO UPDATE SET decision=NULL, connection_id=EXCLUDED.connection_id, tool_name=EXCLUDED.tool_name, created_at=NOW()")
         .bind(generation).bind(call).bind(conversation).bind(owner).bind(connection).bind(tool)
         .execute(pool).await?;
     Ok(())
@@ -922,25 +924,44 @@ pub async fn granted(pool: &PgPool, conversation: Uuid, (connection, tool): (Uui
         .fetch_one(pool).await.unwrap_or(false)
 }
 
-/// Polls for the person's decision. Stopping the response drops this future.
+/// Polls for the person's decision and uses it up: the answer covers this call
+/// and no later one. Stopping the response drops this future.
 pub async fn wait(pool: &PgPool, generation: Uuid, call: &str) -> Decision {
     let deadline = tokio::time::Instant::now() + APPROVAL_WAIT;
     while tokio::time::Instant::now() < deadline {
-        let decision: Result<Option<Option<String>>, _> = sqlx::query_scalar(
-            "SELECT decision FROM tool_approvals WHERE generation_id=$1 AND call_id=$2",
+        let decided: Result<Option<String>, _> = sqlx::query_scalar(
+            "DELETE FROM tool_approvals WHERE generation_id=$1 AND call_id=$2 AND decision IS NOT NULL RETURNING decision",
         )
         .bind(generation)
         .bind(call)
         .fetch_optional(pool)
         .await;
-        match decision {
-            Ok(Some(Some(d))) if d == "allow" => return Decision::Allow,
-            Ok(Some(Some(_))) => return Decision::Deny,
-            Ok(None) => return Decision::Deny,
-            _ => {}
+        match decided {
+            Ok(Some(d)) if d == "allow" => return Decision::Allow,
+            Ok(Some(_)) => return Decision::Deny,
+            Ok(None) => {
+                // Still waiting, unless the question is gone (its chat was deleted).
+                let waiting: Result<bool, _> = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM tool_approvals WHERE generation_id=$1 AND call_id=$2)",
+                )
+                .bind(generation)
+                .bind(call)
+                .fetch_one(pool)
+                .await;
+                if matches!(waiting, Ok(false)) {
+                    return Decision::Deny;
+                }
+            }
+            Err(_) => {}
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    // Nobody answered: the question does not stay open for a later click.
+    let _ = sqlx::query("DELETE FROM tool_approvals WHERE generation_id=$1 AND call_id=$2")
+        .bind(generation)
+        .bind(call)
+        .execute(pool)
+        .await;
     Decision::Expired
 }
 

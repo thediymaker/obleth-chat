@@ -838,6 +838,29 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// Gives each call an id no earlier call in the turn used. Calls read from the
+/// reply's text, and calls a model sends without an id, are numbered from zero in
+/// every step; the step's activity, its approval and its result are all found by
+/// the id, so a repeated one would let a later call pass for an earlier one.
+pub(crate) fn unique_call_ids(
+    calls: &mut [ToolCall],
+    used: &mut std::collections::HashSet<String>,
+    step: usize,
+) {
+    for (position, call) in calls.iter_mut().enumerate() {
+        if used.insert(call.id.clone()) {
+            continue;
+        }
+        let mut id = format!("call_s{step}_{position}");
+        let mut again = 0;
+        while !used.insert(id.clone()) {
+            again += 1;
+            id = format!("call_s{step}_{position}_{again}");
+        }
+        call.id = id;
+    }
+}
+
 /// Merges streamed tool-call fragments, which arrive keyed by index.
 /// The file a streaming write_file or edit_file call is producing: its path and the
 /// last lines typed so far.
@@ -1828,6 +1851,8 @@ async fn run_generation(
     }
     let work = async {
         let mut steps = 0;
+        // Every tool call id this turn has used, so no two calls share one.
+        let mut call_ids = std::collections::HashSet::new();
         let mut checkpoint = tokio::time::interval(Duration::from_millis(750));
         checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut saved_bytes = 0;
@@ -2272,6 +2297,7 @@ async fn run_generation(
                 }
                 break;
             }
+            unique_call_ids(&mut calls, &mut call_ids, steps);
             let text = content[step_start..].to_owned();
             let mut step = json!({
                 "role":"assistant",
@@ -3070,6 +3096,9 @@ async fn run_generation(
     }
     if let Some(toolset) = toolset.take() {
         toolset.close();
+    }
+    // Browser steps ask for approval too, with or without a connection in the chat.
+    if tool_turn {
         connections::finish(&s.store.pool, generation_id).await;
     }
     // A tool turn the model stalls on pauses: what it did is kept and replayed, and
@@ -3293,6 +3322,32 @@ mod draft_tests {
         ));
         assert!(!server_failure(&json!({"message":"no code"})));
         assert!(!server_failure(&json!("boom")));
+    }
+
+    #[test]
+    fn no_two_calls_in_a_turn_share_an_id() {
+        let call = |id: &str| ToolCall {
+            id: id.into(),
+            name: "t".into(),
+            arguments: "{}".into(),
+        };
+        let mut used = std::collections::HashSet::new();
+        let mut first = vec![call("text_call_0"), call("text_call_1")];
+        unique_call_ids(&mut first, &mut used, 1);
+        assert_eq!(first[0].id, "text_call_0");
+        assert_eq!(first[1].id, "text_call_1");
+        // The next step numbers its calls from zero again, and one repeats inside it.
+        let mut second = vec![call("text_call_0"), call("abc"), call("abc")];
+        unique_call_ids(&mut second, &mut used, 2);
+        assert_eq!(second[0].id, "call_s2_0");
+        assert_eq!(second[1].id, "abc");
+        assert_eq!(second[2].id, "call_s2_2");
+        // A model that happens to use the replacement's name still gets its own.
+        let mut third = vec![call("call_s3_0"), call("call_s3_0")];
+        unique_call_ids(&mut third, &mut used, 3);
+        assert_eq!(third[0].id, "call_s3_0");
+        assert_eq!(third[1].id, "call_s3_1");
+        assert_eq!(used.len(), 7);
     }
 
     #[test]

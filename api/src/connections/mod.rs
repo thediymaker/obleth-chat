@@ -8,6 +8,7 @@ pub mod kubernetes;
 pub mod mcp;
 mod output;
 pub mod slurm;
+pub mod vault;
 
 use crate::{
     auth::Identity,
@@ -574,6 +575,7 @@ impl Connections {
         let mut set = Toolset {
             servers: vec![],
             tools: vec![],
+            secrets: vault::names(&self.pool, user).await,
             outputs: self.objects.clone().map(|store| output::Outputs {
                 pool: self.pool.clone(),
                 store,
@@ -729,6 +731,8 @@ pub struct Outcome {
 pub struct Toolset {
     servers: Vec<Server>,
     tools: Vec<Offered>,
+    /// The names of the person's secrets, which a device's login may name.
+    secrets: Vec<String>,
     /// Where job output from Slurm clusters comes back, when there is object storage.
     outputs: Option<output::Outputs>,
     /// Where device calls are filed for the browser; none in unit tests.
@@ -794,10 +798,22 @@ impl Toolset {
                 format!("{}{about} (tools named {}__…)", s.name, prefix(&s.name))
             })
             .collect();
-        format!(
+        let mut prompt = format!(
             "You can use tools from these connected services: {}. Use them when they help with the request. Some tools need the person's approval before they run; if the person declines a call, do not retry it unless they ask.",
             names.join(", ")
-        )
+        );
+        if !self.secrets.is_empty()
+            && self
+                .servers
+                .iter()
+                .any(|s| matches!(s.backend, Backend::Device))
+        {
+            prompt.push_str(&format!(
+                " The person has saved secrets named {}: a tool that takes a secret name uses the value, which you never see or ask for.",
+                self.secrets.join(", ")
+            ));
+        }
+        prompt
     }
     pub fn find(&self, name: &str) -> Option<usize> {
         self.tools.iter().position(|t| t.exposed == name)
@@ -1193,6 +1209,7 @@ fn view(row: &Row, user: &Identity) -> Value {
         "serverName": row.server_name, "checkedAt": row.checked_at, "tools": tools,
         "transport": row.options["transport"], "vendorId": row.options["vendorId"],
         "productId": row.options["productId"], "label": row.options["label"],
+        "secret": row.options["secret"],
     })
 }
 
@@ -1272,6 +1289,7 @@ pub fn router(state: AppState) -> Router {
             "/api/connections/{id}/credential",
             put(save_credential).delete(remove_credential),
         )
+        .merge(vault::routes())
         .route("/api/conversations/{id}/approvals", post(decide))
         .route(
             "/api/conversations/{id}/connections",
@@ -1624,7 +1642,14 @@ async fn update(
                 // ("" removes them); a device keeps its USB ids.
                 let mut options = options.clone();
                 let kept: &[&str] = match kind {
-                    Kind::Device => &["transport", "vendorId", "productId", "label"],
+                    Kind::Device => &[
+                        "transport",
+                        "vendorId",
+                        "productId",
+                        "label",
+                        "user",
+                        "secret",
+                    ],
                     _ => &["ca", "apiVersion", "returnOutput"],
                 };
                 for key in kept {
@@ -2068,6 +2093,7 @@ mod tests {
         Toolset {
             servers,
             tools,
+            secrets: vec![],
             outputs: None,
             pool: None,
             user: Uuid::nil(),

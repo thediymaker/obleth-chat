@@ -1906,6 +1906,12 @@ async fn run_generation(
     if offers_browser {
         tools.push(browser::tools::request_definition());
     }
+    // Where devices are offered, the model can ask for one plugged into the
+    // person's computer.
+    let offers_device = asks && s.connections.as_ref().is_some_and(|c| c.devices_enabled());
+    if offers_device {
+        tools.push(connections::device::request_definition());
+    }
     // Long work can be paused at the person's request, with a note to carry on from.
     let offers_pause = workspace.is_some()
         || research_tools
@@ -2409,6 +2415,7 @@ async fn run_generation(
                     && c.name != questions::PROJECT_TOOL
                     && c.name != browser::tools::HANDOFF
                     && c.name != browser::tools::REQUEST
+                    && c.name != connections::device::REQUEST
                     && c.name != agents::TOOL
                     && !(browsing.is_some() && browser::tools::is_tool(&c.name))
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
@@ -2544,6 +2551,25 @@ async fn run_generation(
                         }
                         Some(Err(problem)) => problem,
                         None => format!("There is no tool named {}.", call.name),
+                    };
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
+                if call.name == connections::device::REQUEST {
+                    let output = if offers_device && !asked {
+                        asked = true;
+                        let entry = connections::device::card_entry(&call.id, &call.arguments);
+                        record(&mut activity, &entry, true);
+                        emit(&mut tx, "tool", entry);
+                        connections::device::REQUEST_SHOWN.to_string()
+                    } else if asked {
+                        "Ask for one thing at a time: your reply already ends with a question."
+                            .to_string()
+                    } else {
+                        format!("There is no tool named {}.", call.name)
                     };
                     payload["messages"]
                         .as_array_mut()

@@ -44,6 +44,8 @@ export interface Connection {
   vendorId?: number | null;
   productId?: number | null;
   label?: string | null;
+  /** A device's console sign-in: the password is in the secret of that name. */
+  secret?: string | null;
   tools: ConnectionTool[];
 }
 

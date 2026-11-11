@@ -120,3 +120,33 @@ test("flash reads each image from the workspace and refuses bad parts before tou
   expect(progress).toEqual(["Reading build/app.bin from the workspace…"]);
   expect(port.opened).toBeNull();
 });
+
+test("login answers the console's prompts with the saved user and the secret's value, which never reaches the result", async () => {
+  const port = new FakePort({ usbVendorId: 0x1d6b, usbProductId: 0x0104 });
+  const a = { id: "dev1", device: new SerialDevice(asPort(port)), vendorId: 0x1d6b, user: "debian", secret: "bb-pass" };
+  const asked: string[] = [];
+  const secretValue = async (name: string) => {
+    asked.push(name);
+    return "temppwd";
+  };
+  // The console answers each line as a BeagleBone's getty would.
+  const script = (async () => {
+    await vi.waitFor(() => expect(port.sent()).toContain("\n"));
+    port.print("\r\nDebian GNU/Linux 12 beaglebone ttyGS0\r\nbeaglebone login: ");
+    await vi.waitFor(() => expect(port.sent()).toContain("debian\n"));
+    port.print("debian\r\nPassword: ");
+    await vi.waitFor(() => expect(port.sent()).toContain("temppwd\n"));
+    port.print("\r\nLast login: Tue\r\ndebian@beaglebone:~$ ");
+  })();
+  const progress: string[] = [];
+  const result = await execute(a, "chat1", { tool: "login", arguments: {} }, (t) => progress.push(t), async () => new Uint8Array(), secretValue);
+  await script;
+  expect(asked).toEqual(["bb-pass"]);
+  expect(result.ok).toBe(true);
+  expect(result.output).toBe("Signed in as debian. The prompt is: debian@beaglebone:~$");
+  expect(result.detail).not.toContain("temppwd");
+  expect(progress).toEqual(["Signing in as debian…"]);
+  // Without a saved sign-in, the call says what to set up instead of guessing.
+  const bare = { id: "dev2", device: new SerialDevice(asPort(new FakePort())), vendorId: 0x1d6b };
+  await expect(execute(bare, "chat1", { tool: "login", arguments: {} }, () => {}, async () => new Uint8Array(), secretValue)).rejects.toThrow("No console sign-in is saved");
+});

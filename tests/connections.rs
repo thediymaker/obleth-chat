@@ -2591,7 +2591,10 @@ async fn device_tools_are_carried_out_by_the_persons_browser(pool: PgPool) {
         .collect();
     assert_eq!(
         tools,
-        ["status", "open", "close", "read", "write", "signals", "identify", "flash", "erase"]
+        [
+            "status", "open", "close", "read", "write", "signals", "login", "identify", "flash",
+            "erase"
+        ]
     );
     let device = created["id"].as_str().unwrap().to_owned();
     let (status, refused) = call(
@@ -2734,13 +2737,199 @@ async fn device_tools_are_carried_out_by_the_persons_browser(pool: PgPool) {
         .map(|t| t["function"]["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"my_board__flash"), "{names:?}");
-    assert!(first["messages"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("My board, a device plugged into the person's computer (ESP32-S3), reached through their browser (tools named my_board__…)"));
+    let prompt = first["messages"][0]["content"].as_str().unwrap();
+    assert!(prompt.contains("My board, a device plugged into the person's computer (ESP32-S3), reached through their browser; no console sign-in is saved"), "{prompt}");
+    assert!(prompt.contains("(tools named my_board__…)"), "{prompt}");
     let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM device_calls")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_model_can_ask_for_a_device_at_the_persons_computer(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_ask",
+        "request_device",
+        json!({"reason":"To read what the BeagleBone prints.","name":"BeagleBone"}),
+    )]);
+    // The auto model is one that calls tools; with no connections, only the offer
+    // tools are on.
+    let (status, chat) = call(
+        &f.app,
+        "POST",
+        "/api/conversations",
+        json!({"title":"Board","model":"auto"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{chat}");
+    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            json!({"content":"Connect to my BeagleBone","model":"auto"}),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let stream = tokio::spawn(async move {
+        String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap()
+    });
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("\"kind\":\"device-request\""), "{text}");
+    assert!(
+        text.contains("To read what the BeagleBone prints."),
+        "{text}"
+    );
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(activity[0]["kind"], "device-request");
+    assert_eq!(activity[0]["name"], "BeagleBone");
+    // The model was told the person sees the button, and had the tool offered.
+    let seen = f.gateway_seen.lock().unwrap().clone();
+    let names: Vec<&str> = seen[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"request_device"), "{names:?}");
+    // The card ends the reply: the model is not called again until the person answers.
+    assert_eq!(seen.len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn secrets_are_named_to_the_model_and_opened_only_by_the_owners_browser(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, refused) = call(
+        &f.app,
+        "PUT",
+        "/api/secrets/has%20space",
+        json!({"value":"x"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    let (status, saved) = call(
+        &f.app,
+        "PUT",
+        "/api/secrets/bb-pass",
+        json!({"value":"temppwd","note":"BeagleBone console"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["name"], "bb-pass");
+    assert_eq!(saved["note"], "BeagleBone console");
+    assert!(saved.get("value").is_none());
+    let (status, listed) = call(&f.app, "GET", "/api/secrets", Value::Null, &admin).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["secrets"][0]["name"], "bb-pass");
+    assert!(!listed.to_string().contains("temppwd"));
+    // Only the note changes when no value is sent; the value opens for the owner.
+    let (status, noted) = call(
+        &f.app,
+        "PUT",
+        "/api/secrets/bb-pass",
+        json!({"note":"console"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{noted}");
+    let (status, value) = call(
+        &f.app,
+        "GET",
+        "/api/secrets/bb-pass/value",
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value, json!({"name":"bb-pass","value":"temppwd"}));
+    // A device set to sign in with it: the model is told the user and the secret's
+    // name, and the names of the secrets, never a value.
+    let (status, created) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Beagle","url":"","kind":"device","options":{"vendorId":0x1d6b,"user":"debian","secret":"bb-pass"}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["user"], "debian");
+    assert_eq!(created["secret"], "bb-pass");
+    *f.script.lock().unwrap() = tool_script(&[("call_l", "beagle__login", json!({}))]);
+    let (id, stream) = send(&f, &admin, "Sign in to the board").await;
+    let first = device_call(&f, &id, &admin).await;
+    assert_eq!(first["tool"], "login");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/device-calls/call_l"),
+        json!({"ok":true,"output":"Signed in as debian."}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Done: Signed in as debian."), "{text}");
+    let seen = f.gateway_seen.lock().unwrap().clone();
+    let prompt = seen[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        prompt.contains("user debian, password in the secret bb-pass"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("saved secrets named bb-pass"), "{prompt}");
+    assert!(!seen.iter().any(|r| r.to_string().contains("temppwd")));
+    let (status, _) = call(
+        &f.app,
+        "DELETE",
+        "/api/secrets/bb-pass",
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &f.app,
+        "GET",
+        "/api/secrets/bb-pass/value",
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

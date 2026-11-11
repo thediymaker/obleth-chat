@@ -6,6 +6,7 @@ import { Bookmark, ChevronDown, ChevronLeft, ChevronRight, Clock, Copy, External
 import { memo, useEffect, useRef, useState } from "react";
 import { BrandLogo } from "@/components/brand";
 import { BrowserCard } from "@/components/browser/browser-card";
+import { DeviceCard } from "@/components/devices/device-card";
 import { MessageActivity } from "@/components/workspace/message-activity";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -429,6 +430,7 @@ export const MessageView = memo(
               <AppOffer m={m} index={index} />
               <ProjectOffer m={m} index={index} />
               <BrowserCard m={m} index={index} isLast={isLast} streaming={store.streaming} />
+              <DeviceCard m={m} index={index} isLast={isLast} streaming={store.streaming} />
             </>
           )}
           {work && <TurnAfter m={m} />}

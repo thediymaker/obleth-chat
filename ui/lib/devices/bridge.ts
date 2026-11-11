@@ -18,6 +18,9 @@ export interface DeviceConnection {
   name?: string;
   vendorId?: number;
   productId?: number;
+  /** The console sign-in saved for it: the user name and the secret holding the password. */
+  user?: string;
+  secret?: string;
 }
 
 /** A port tied to a device connection in this tab. */
@@ -26,6 +29,8 @@ export interface Attached {
   device: SerialDevice;
   vendorId?: number;
   productId?: number;
+  user?: string;
+  secret?: string;
 }
 
 /** A call that waits for its device to be attached in this tab. */
@@ -50,6 +55,8 @@ export interface DevicesBridge {
   adopt(connection: DeviceConnection, port: SerialPort): Attached;
   /** Ties ports the person granted earlier to their connections by USB ids. */
   restore(connections?: DeviceConnection[]): Promise<void>;
+  /** A connection's saved sign-in changed. */
+  update(connection: DeviceConnection): void;
   detach(connectionId: string): Promise<void>;
   /** The port the person picks for a new device, with its USB ids and a suggested name. */
   pick(): Promise<{ port: SerialPort; vendorId?: number; productId?: number }>;
@@ -60,6 +67,9 @@ export interface DevicesBridge {
   /** What a running call is doing right now, for its card. */
   progress(callId: string): string;
   waiting(callId: string): Waiting | undefined;
+  /** A device-request card's answer: being attached, attached, or Not now. */
+  offer(key: string): Offer | undefined;
+  setOffer(key: string, value: Offer | null): void;
   subscribe(listener: () => void): () => void;
   reset(): void;
 }
@@ -70,9 +80,13 @@ interface Context {
   changed: () => void;
   /** Reads a workspace file whole; the default fetches with the session cookie. */
   fetchBytes?: (path: string) => Promise<Uint8Array>;
+  /** Opens one of the person's secrets by name; the default asks the API. */
+  secretValue?: (name: string) => Promise<string>;
   /** The Web Serial API; the default is the browser's. */
   serial?: Serial | null;
 }
+
+export type Offer = "busy" | "done" | "dismissed";
 
 export interface Outcome {
   ok: boolean;
@@ -109,8 +123,36 @@ function parseOffset(value: unknown): number | null {
 
 const hex = (n: number | undefined) => (n == null ? "?" : `0x${n.toString(16).padStart(4, "0")}`);
 
+export const secretPath = (name: string) => `/api/secrets/${encodeURIComponent(name)}/value`;
+
+/** Signs in at a console: wakes it, answers the login and password prompts, reads what follows. */
+async function login(a: Attached, user: string, secretValue: () => Promise<string>, progress: (text: string) => void): Promise<Outcome> {
+  const { device } = a;
+  if (!device.isOpen) await device.open({});
+  // Clear whatever waited, wake the console, and see where it stands.
+  await device.read({ waitMs: 0, maxChars: 100 });
+  await device.writeText("", true);
+  let seen = (await device.read({ waitMs: 3000, until: "ogin:", maxChars: 2000 })).text;
+  const prompt = (text: string) => /[$#>] ?$/.test(text.trimEnd());
+  if (!/ogin:/.test(seen)) {
+    if (prompt(seen)) return { ok: true, output: `Already signed in. The prompt is: ${seen.trimEnd().split("\n").pop()}` };
+    if (!seen.trim()) throw new Error("The console printed nothing. Is the port right, and the board on?");
+    throw new Error(`No login prompt appeared. The console printed:\n${seen.slice(-500)}`);
+  }
+  progress(`Signing in as ${user}…`);
+  await device.writeText(user, true);
+  seen = (await device.read({ waitMs: 5000, until: "assword", maxChars: 2000 })).text;
+  if (!/assword/.test(seen)) throw new Error(`No password prompt appeared after the user name. The console printed:\n${seen.slice(-500)}`);
+  const password = await secretValue();
+  await device.writeText(password, true);
+  seen = (await device.read({ waitMs: 6000, until: "$ ", maxChars: 4000 })).text;
+  if (/incorrect|denied|failed/i.test(seen)) throw new Error("The console said the sign-in was incorrect. Check the user name and the saved secret.");
+  const line = seen.trimEnd().split("\n").pop() || "";
+  return { ok: true, output: `Signed in as ${user}. The prompt is: ${line}`, detail: seen.slice(-1500).replace(password, "••••") };
+}
+
 /** Carries one request out against an attached device. Exported for tests. */
-export async function execute(a: Attached, chatId: string, request: DeviceRequest, progress: (text: string) => void, fetchBytes: (path: string) => Promise<Uint8Array>): Promise<Outcome> {
+export async function execute(a: Attached, chatId: string, request: DeviceRequest, progress: (text: string) => void, fetchBytes: (path: string) => Promise<Uint8Array>, secretValue: (name: string) => Promise<string> = () => Promise.reject(new Error("No secrets here"))): Promise<Outcome> {
   const { device } = a;
   const args = request.arguments || {};
   const log: string[] = [];
@@ -165,6 +207,12 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
       await device.setSignals(signals);
       return { ok: true, output: `Set ${Object.entries(signals).map(([k, v]) => `${k === "dataTerminalReady" ? "DTR" : "RTS"} ${v ? "high" : "low"}`).join(", ")}.` };
     }
+    case "login": {
+      const user = typeof args.user === "string" && args.user.trim() ? args.user.trim() : a.user;
+      const secret = typeof args.secret === "string" && args.secret.trim() ? args.secret.trim() : a.secret;
+      if (!user || !secret) throw new Error("No console sign-in is saved for this device. The person can set a user name and a secret for it under Compute › Devices, or name them in the call.");
+      return login(a, user, () => secretValue(secret), progress);
+    }
     case "identify": {
       progress("Talking to the chip's bootloader…");
       const identity = await device.lend((port) => withFlasher(a.vendorId, (f) => f.identify(port, logLine)));
@@ -202,10 +250,12 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
 export function createDevicesBridge(ctx: Context): DevicesBridge {
   const serial = ctx.serial === undefined ? (typeof navigator !== "undefined" ? (navigator as Navigator & { serial?: Serial }).serial ?? null : null) : ctx.serial;
   const fetchBytes = ctx.fetchBytes ?? fetchBytesDefault;
+  const secretValue = ctx.secretValue ?? (async (name: string) => String((await ctx.api.request(secretPath(name)))?.value ?? ""));
   const attached = new Map<string, Attached>();
   const handled = new Set<string>();
   const waiting = new Map<string, Waiting>();
   const progress = new Map<string, string>();
+  const offers = new Map<string, Offer>();
   const listeners = new Set<() => void>();
   let known: DeviceConnection[] = [];
   let restoredAt = 0;
@@ -220,7 +270,7 @@ export function createDevicesBridge(ctx: Context): DevicesBridge {
     if (old?.device.port === port) return old;
     if (old) old.device.close().catch(() => {});
     const info = portInfo(port);
-    const a: Attached = { id: connection.id, device: new SerialDevice(port), ...info };
+    const a: Attached = { id: connection.id, device: new SerialDevice(port), ...info, user: connection.user, secret: connection.secret };
     a.device.subscribe(changed);
     attached.set(connection.id, a);
     changed();
@@ -256,7 +306,7 @@ export function createDevicesBridge(ctx: Context): DevicesBridge {
       outcome = await execute(a, w.chatId, w.request, (text) => {
         progress.set(w.callId, text);
         changed();
-      }, fetchBytes);
+      }, fetchBytes, secretValue);
     } catch (error) {
       outcome = { ok: false, output: (error as Error).message || String(error) };
     }
@@ -285,7 +335,7 @@ export function createDevicesBridge(ctx: Context): DevicesBridge {
     if (connections) known = connections;
     else {
       const r = await ctx.api.request("/api/connections");
-      known = ((r?.connections ?? []) as any[]).filter((c) => c.kind === "device").map((c) => ({ id: c.id, name: c.name, vendorId: c.vendorId ?? undefined, productId: c.productId ?? undefined }));
+      known = ((r?.connections ?? []) as any[]).filter((c) => c.kind === "device").map((c) => ({ id: c.id, name: c.name, vendorId: c.vendorId ?? undefined, productId: c.productId ?? undefined, user: c.user || undefined, secret: c.secret || undefined }));
     }
     const ports = await serial.getPorts();
     const used = new Set([...attached.values()].map((a) => a.device.port));
@@ -311,6 +361,12 @@ export function createDevicesBridge(ctx: Context): DevicesBridge {
     },
     adopt: tie,
     restore,
+    /** The device's saved sign-in changed on its page. */
+    update(connection) {
+      const a = attached.get(connection.id);
+      if (a) Object.assign(a, { user: connection.user, secret: connection.secret });
+      known = known.map((c) => (c.id === connection.id ? { ...c, ...connection } : c));
+    },
     async detach(id) {
       const a = attached.get(id);
       if (!a) return;
@@ -330,6 +386,12 @@ export function createDevicesBridge(ctx: Context): DevicesBridge {
       for (const step of activity) consider(chatId, step);
     },
     progress: (callId) => progress.get(callId) || "",
+    offer: (key) => offers.get(key),
+    setOffer(key, value) {
+      if (value) offers.set(key, value);
+      else offers.delete(key);
+      changed();
+    },
     waiting: (callId) => [...waiting.values()].find((w) => w.callId === callId),
     subscribe(listener) {
       listeners.add(listener);

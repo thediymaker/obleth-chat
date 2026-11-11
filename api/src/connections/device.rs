@@ -24,6 +24,36 @@ pub const URL: &str = "browser://device";
 /// The transports a device connection can name. Serial covers USB serial adapters
 /// and boards with native USB CDC; more come with the browser's own support.
 pub const TRANSPORTS: &[&str] = &["serial"];
+/// The tool every chat gets while devices are offered: asks the person to attach one.
+pub const REQUEST: &str = "request_device";
+pub const REQUEST_SHOWN: &str = "The person sees a button to attach a device from their computer. End your reply now in at most one short sentence, without repeating the reason; once they attach it, their next message continues the task and you will have the device's tools.";
+
+pub fn request_definition() -> Value {
+    json!({"type":"function","function":{"name":REQUEST,
+        "description":"Ask the person to attach a device plugged into their computer: a development board, a serial adapter, an instrument. Through their browser you can then open its serial port, read what it prints, send it commands, reset it, identify an Espressif chip and flash firmware built in the workspace. Call it when the person wants to work with hardware at their computer and you have no tools for that device. Your reply ends with a button; once they attach it, their next message continues the task with the device's tools.",
+        "parameters":{"type":"object","properties":{
+            "reason":{"type":"string","description":"Why, in one short sentence the person reads, such as \"To read what the BeagleBone prints over its console.\""},
+            "name":{"type":"string","description":"A name for the device, as the person called it, such as \"BeagleBone\""}},
+        "required":["reason"],"additionalProperties":false}}})
+}
+
+/// The card at the end of the reply that asks for a device.
+pub fn card_entry(call_id: &str, arguments: &str) -> Value {
+    let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+    let text = |key: &str, limit: usize| -> String {
+        args[key]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(limit)
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    };
+    json!({"id":call_id,"kind":"device-request","tool":REQUEST,"status":"asked","summary":"Asked for a device","reason":text("reason", 240),"name":text("name", 40)})
+}
+
 /// The longest result a browser may post.
 const RESULT_LIMIT: usize = 48 * 1024;
 const DETAIL_LIMIT: usize = 4 * 1024;
@@ -71,6 +101,10 @@ pub fn tools() -> Vec<Tool> {
             "pulse":{"type":"string","enum":["reset","bootloader"]},
             "dtr":{"type":"boolean"},
             "rts":{"type":"boolean"}
+        }), &[]),
+        tool("login", "Sign in at the console", "Signs in at the device's console: wakes it, answers the login prompt with the user name and the password prompt with a saved secret's value, which you never see, and reads the prompt that follows. Call it before running commands on a board that runs Linux. The device's saved user name and secret are used unless you name others. Opens the port at 115200 if it is closed.", true, json!({
+            "user":{"type":"string","description":"The user name, if not the one saved for the device"},
+            "secret":{"type":"string","description":"The name of the person's secret holding the password, if not the one saved for the device"}
         }), &[]),
         tool("identify", "Identify chip", "Asks the chip's ROM bootloader what it is: chip family and revision, MAC address, flash size and features. Supported today: Espressif ESP32 chips. Pauses the monitor and restarts the board afterwards.", true, json!({}), &[]),
         tool("flash", "Write firmware", "Writes firmware images from the chat's workspace to the chip's flash at the given offsets, then restarts the board. ESP-IDF builds list the offsets in build/flasher_args.json; Arduino and PlatformIO builds put the bootloader at 0x0 (ESP32-S3, C3) or 0x1000 (ESP32), the partition table at 0x8000, boot_app0 at 0xe000 and the app at 0x10000. Supported today: Espressif chips. The workspace must be running.", false, json!({
@@ -196,6 +230,26 @@ pub fn clean_options(options: &Value) -> Result<Value, ApiError> {
             }
         }
     }
+    for (key, what) in [("user", "user name"), ("secret", "secret name")] {
+        if let Some(value) = options[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            let ok = if key == "secret" {
+                super::vault::valid_name(value)
+            } else {
+                value.chars().count() <= 63
+                    && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+            };
+            if !ok {
+                return Err(ApiError::bad(format!(
+                    "The {what} is too long or has spaces"
+                )));
+            }
+            clean[key] = json!(value);
+        }
+    }
     if let Some(label) = options["label"]
         .as_str()
         .map(str::trim)
@@ -211,12 +265,19 @@ pub fn clean_options(options: &Value) -> Result<Value, ApiError> {
 
 /// What the model is told about the device.
 pub fn about(options: &Value) -> String {
-    match options["label"].as_str() {
+    let mut about = match options["label"].as_str() {
         Some(label) => format!(
             "a device plugged into the person's computer ({label}), reached through their browser"
         ),
         None => "a device plugged into the person's computer, reached through their browser".into(),
+    };
+    match (options["user"].as_str(), options["secret"].as_str()) {
+        (Some(user), Some(secret)) => about.push_str(&format!(
+            "; its console sign-in is saved (user {user}, password in the secret {secret}), so call login before running commands"
+        )),
+        _ => about.push_str("; no console sign-in is saved for it, so never guess passwords: if its console asks for one, ask the person to save it as a secret and set it under Compute › Devices"),
     }
+    about
 }
 
 /// Sends one call to the browser and waits for its result.
@@ -364,6 +425,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_request_card_carries_the_reason_and_a_name() {
+        let card = card_entry(
+            "c1",
+            r#"{"reason":"To read the console.","name":"Beagle\u0007Bone"}"#,
+        );
+        assert_eq!(card["kind"], "device-request");
+        assert_eq!(card["reason"], "To read the console.");
+        assert_eq!(card["name"], "BeagleBone");
+        assert_eq!(card_entry("c2", "nonsense")["reason"], "");
+        assert_eq!(request_definition()["function"]["name"], REQUEST);
+    }
+
+    #[test]
     fn offsets_read_hex_and_decimal() {
         assert_eq!(parse_offset("0x10000"), Some(0x10000));
         assert_eq!(parse_offset("0X0"), Some(0));
@@ -425,5 +499,14 @@ mod tests {
             clean_options(&json!({})).unwrap(),
             json!({"transport":"serial"})
         );
+        assert_eq!(
+            clean_options(&json!({"user":" debian ","secret":"bb-pass"})).unwrap(),
+            json!({"transport":"serial","user":"debian","secret":"bb-pass"})
+        );
+        assert!(clean_options(&json!({"user":"de bian"})).is_err());
+        assert!(clean_options(&json!({"secret":"no spaces"})).is_err());
+        assert!(about(&json!({"user":"debian","secret":"bb-pass"}))
+            .contains("user debian, password in the secret bb-pass"));
+        assert!(about(&json!({})).contains("never guess passwords"));
     }
 }

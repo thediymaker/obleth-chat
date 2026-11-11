@@ -4,7 +4,7 @@
 // each settings page. Administration is shown only to administrators, and MCP
 // servers only where connections are on.
 
-import { Link2, Settings, Shield } from "lucide-react";
+import { KeyRound, Link2, Settings, Shield } from "lucide-react";
 import { Page, PageHeader } from "@/components/app-shell/page";
 import { SectionTabs, type SectionTab } from "@/components/app-shell/section-tabs";
 import { useFeature } from "@/lib/queries";
@@ -15,6 +15,7 @@ export function settingsTabs(admin: boolean, connections: boolean): SectionTab[]
   return [
     { href: "/settings", label: "Personal", icon: Settings },
     ...(connections ? [{ href: "/settings/mcp", label: "MCP servers", icon: Link2 }] : []),
+    ...(connections ? [{ href: "/settings/secrets", label: "Secrets", icon: KeyRound }] : []),
     ...(admin ? [{ href: "/settings/admin", label: "Administration", icon: Shield, prefix: true }] : []),
   ];
 }

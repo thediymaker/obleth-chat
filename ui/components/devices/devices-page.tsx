@@ -7,14 +7,15 @@
 // serial monitor for an attached one.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Cpu, Plus, Unplug, Usb } from "lucide-react";
+import { Cpu, KeyRound, Plus, Unplug, Usb } from "lucide-react";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { useChatStore } from "@/components/chat/chat-provider";
 import { connectionsKey, isDevice, useConnections, type Connection } from "@/components/connections/connections";
-import { CheckField, FormActions, FormDialog, FormError, Note, Pill, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
+import { CheckField, FormActions, FormDialog, FormError, Note, Pill, SelectField, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
+import { saveSecret, secretsKey, useSecrets } from "@/components/settings/secrets-page";
 import { Button } from "@/components/ui/button";
 import { ComputeOff, ComputeTabs } from "@/components/workspace/compute";
 import { api } from "@/lib/api";
@@ -35,8 +36,14 @@ function useDevices() {
   return store.devices;
 }
 
+export interface Picked {
+  port: SerialPort;
+  vendorId?: number;
+  productId?: number;
+}
+
 /** The dialog after the person picked a port: name it, and whether changes ask first. */
-function AddDialog({ picked, onClose }: { picked: { port: SerialPort; vendorId?: number; productId?: number } | null; onClose: () => void }) {
+export function AddDeviceDialog({ picked, suggested, onClose, onAdded }: { picked: Picked | null; suggested?: string; onClose: () => void; onAdded?: (item: Connection) => void }) {
   const queries = useQueryClient();
   const devices = useDevices();
   const { busy, error, onSubmit } = useSubmit(async (form) => {
@@ -46,12 +53,13 @@ function AddDialog({ picked, onClose }: { picked: { port: SerialPort; vendorId?:
     devices.adopt({ id: item.id, name: item.name, vendorId: picked.vendorId, productId: picked.productId }, picked.port);
     await queries.invalidateQueries({ queryKey: connectionsKey });
     toast(`${item.name} added. Its tools are on in your chats.`);
-    onClose();
+    if (onAdded) onAdded(item);
+    else onClose();
   });
   return (
     <FormDialog open={!!picked} onOpenChange={(o) => !o && onClose()} title="Add a device" description={picked ? `Port picked: ${portLabel(picked.vendorId, picked.productId)}.` : undefined}>
       <form className="grid gap-4" onSubmit={onSubmit}>
-        <TextField id="device-name" label="Name" required maxLength={40} autoComplete="off" defaultValue={picked ? suggestName(picked.vendorId, picked.productId) : ""} help="How chats and the model refer to it, such as “ESP32-S3 devkit”." />
+        <TextField id="device-name" label="Name" required maxLength={40} autoComplete="off" defaultValue={suggested || (picked ? suggestName(picked.vendorId, picked.productId) : "")} help="How chats and the model refer to it, such as “ESP32-S3 devkit”." />
         <CheckField id="device-confirm" label="Ask before changing calls" description="Sending, resetting, flashing and erasing wait for your Allow. Reading never asks." defaultChecked />
         <Note>The device is reached only from a browser tab where you attached it: this one, now. A tab on another computer asks you to attach it again.</Note>
         <FormError message={error} />
@@ -61,6 +69,55 @@ function AddDialog({ picked, onClose }: { picked: { port: SerialPort; vendorId?:
           </Button>
           <Button type="submit" disabled={busy}>
             Add device
+          </Button>
+        </FormActions>
+      </form>
+    </FormDialog>
+  );
+}
+
+/** The device's console sign-in: a user name, and the secret holding the password. */
+function SignInDialog({ device, onClose }: { device: Connection | null; onClose: () => void }) {
+  const queries = useQueryClient();
+  const devices = useDevices();
+  const secrets = useSecrets().data ?? [];
+  const [choice, setChoice] = useState<string>("");
+  const chosen = choice || device?.secret || (secrets[0]?.name ?? "new");
+  const { busy, error, onSubmit } = useSubmit(async (form) => {
+    if (!device) return;
+    const user = String(form.get("signin-user") || "").trim();
+    let secret = String(form.get("signin-secret") || "");
+    if (secret === "new") {
+      const name = String(form.get("signin-secret-name") || "").trim();
+      const value = String(form.get("signin-secret-value") || "");
+      secret = (await saveSecret(name, value, `${device.name} console password`)).name;
+      await queries.invalidateQueries({ queryKey: secretsKey });
+    }
+    const item = await api.request<Connection>(`/api/connections/${encodeURIComponent(device.id)}`, { method: "PATCH", body: { options: { user, secret } } });
+    devices.update({ id: item.id, name: item.name, user: item.user || undefined, secret: item.secret || undefined });
+    await queries.invalidateQueries({ queryKey: connectionsKey });
+    toast(`${item.name} signs in as ${user}`);
+    onClose();
+  });
+  const options: [string, string][] = [...secrets.map((s) => [s.name, s.note ? `${s.name} · ${s.note}` : s.name] as [string, string]), ["new", "New secret…"]];
+  return (
+    <FormDialog open={!!device} onOpenChange={(o) => !o && onClose()} title="Console sign-in" description="What the browser types at the device's login prompt when the model calls Sign in at the console. The model never sees the password.">
+      <form className="grid gap-4" onSubmit={onSubmit}>
+        <TextField id="signin-user" label="User name" required maxLength={63} autoComplete="off" defaultValue={device?.user || ""} placeholder="debian" />
+        <SelectField id="signin-secret" label="Password" value={chosen} onChange={(e) => setChoice(e.target.value)} options={options} help="A secret from Settings › Secrets, or a new one." />
+        {chosen === "new" && (
+          <>
+            <TextField id="signin-secret-name" label="Secret name" required maxLength={40} autoComplete="off" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*" defaultValue={device ? `${device.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-password` : ""} />
+            <TextField id="signin-secret-value" label="Secret value" type="password" required autoComplete="new-password" maxLength={4096} help="Stored encrypted and never shown again." />
+          </>
+        )}
+        <FormError message={error} />
+        <FormActions>
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={busy}>
+            Save
           </Button>
         </FormActions>
       </form>
@@ -168,7 +225,9 @@ function Monitor({ id }: { id: string }) {
   );
 }
 
-function DeviceCard({ c, onEdit, onRemove }: { c: Connection; onEdit: () => void; onRemove: () => void }) {
+const connectionOf = (c: Connection) => ({ id: c.id, name: c.name, vendorId: c.vendorId ?? undefined, productId: c.productId ?? undefined, user: c.user || undefined, secret: c.secret || undefined });
+
+function DeviceCard({ c, onEdit, onSignIn, onRemove }: { c: Connection; onEdit: () => void; onSignIn: () => void; onRemove: () => void }) {
   const devices = useDevices();
   const a = devices.attached(c.id);
   const [busy, setBusy] = useState("");
@@ -191,6 +250,12 @@ function DeviceCard({ c, onEdit, onRemove }: { c: Connection; onEdit: () => void
             {c.name}
             {a ? <Pill tone="accent">Attached here</Pill> : <Pill>Not attached</Pill>}
             {!c.confirmActions && <Pill tone="amber">Runs without asking</Pill>}
+            {c.user && c.secret && (
+              <Pill>
+                <KeyRound className="mr-1 inline size-3" />
+                Signs in as {c.user}
+              </Pill>
+            )}
           </h3>
           <p className="text-sm text-muted-foreground">{[c.label, ids(c), `${c.tools.length} tools`].filter(Boolean).join(" · ")}</p>
         </div>
@@ -205,10 +270,13 @@ function DeviceCard({ c, onEdit, onRemove }: { c: Connection; onEdit: () => void
               </Button>
             </>
           ) : (
-            <Button size="sm" disabled={!!busy || !devices.supported()} onClick={() => act("attach", () => devices.attach({ id: c.id, name: c.name, vendorId: c.vendorId ?? undefined, productId: c.productId ?? undefined }))}>
+            <Button size="sm" disabled={!!busy || !devices.supported()} onClick={() => act("attach", () => devices.attach(connectionOf(c)))}>
               <Usb /> Attach
             </Button>
           )}
+          <Button size="sm" variant="ghost" onClick={onSignIn}>
+            Console sign-in
+          </Button>
           <Button size="sm" variant="ghost" onClick={onEdit}>
             Edit
           </Button>
@@ -240,13 +308,14 @@ export function DevicesPage() {
   const queries = useQueryClient();
   const { data, error, isPending, refetch } = useConnections();
   const list = (data ?? []).filter(isDevice);
-  const [picked, setPicked] = useState<{ port: SerialPort; vendorId?: number; productId?: number } | null>(null);
+  const [picked, setPicked] = useState<Picked | null>(null);
   const [editing, setEditing] = useState<Connection | null>(null);
+  const [signingIn, setSigningIn] = useState<Connection | null>(null);
   const confirm = useConfirm();
   usePageChrome("Compute");
   // Ports granted before are tied back to their devices when the page opens.
   useEffect(() => {
-    if (list.length && devices.supported()) void devices.restore(list.map((c) => ({ id: c.id, name: c.name, vendorId: c.vendorId ?? undefined, productId: c.productId ?? undefined })));
+    if (list.length && devices.supported()) void devices.restore(list.map(connectionOf));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per list
   }, [data]);
   const add = async () => {
@@ -298,12 +367,13 @@ export function DevicesPage() {
       ) : (
         <div className="grid gap-3">
           {list.map((c) => (
-            <DeviceCard key={c.id} c={c} onEdit={() => setEditing(c)} onRemove={() => remove(c)} />
+            <DeviceCard key={c.id} c={c} onEdit={() => setEditing(c)} onSignIn={() => setSigningIn(c)} onRemove={() => remove(c)} />
           ))}
         </div>
       )}
-      <AddDialog picked={picked} onClose={() => setPicked(null)} />
+      <AddDeviceDialog picked={picked} onClose={() => setPicked(null)} />
       <EditDialog device={editing} onClose={() => setEditing(null)} />
+      <SignInDialog device={signingIn} onClose={() => setSigningIn(null)} />
       {confirm.element}
     </Page>
   );

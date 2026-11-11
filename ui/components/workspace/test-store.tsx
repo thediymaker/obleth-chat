@@ -9,6 +9,7 @@ import { useSyncExternalStore } from "react";
 import { vi } from "vitest";
 import { createBrowserBridge } from "@/components/browser/bridge";
 import { createCodeBridge } from "@/components/code/bridge";
+import { createDevicesBridge } from "@/lib/devices/bridge";
 import { createWorkspaceBridge } from "@/components/workspace/bridge";
 import { api } from "@/lib/api";
 
@@ -64,11 +65,13 @@ function makeStore() {
     workspace: null as unknown as ReturnType<typeof createWorkspaceBridge>,
     browser: null as unknown as ReturnType<typeof createBrowserBridge>,
     code: null as unknown as ReturnType<typeof createCodeBridge>,
+    devices: null as unknown as ReturnType<typeof createDevicesBridge>,
   };
   const context = { api, enabled: () => true, changed: () => store.emit(), showTab: (id: string, tab: string) => store.showTab(id, tab) };
   store.workspace = createWorkspaceBridge({ ...context, viewing: () => false, toast: () => {} });
   store.browser = createBrowserBridge(context);
   store.code = createCodeBridge({ api, toast: () => {} });
+  store.devices = createDevicesBridge({ api, enabled: () => true, changed: () => store.emit(), serial: null });
   return store;
 }
 

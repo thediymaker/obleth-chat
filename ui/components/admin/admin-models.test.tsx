@@ -70,6 +70,7 @@ test("the Configure form saves the model's policy", () => {
     published: false,
     isDefault: false,
     worker: false,
+    actions: "auto",
     visibility: "groups",
     groupIds: ["g2"],
     defaults: { systemPrompt: "Be brief", reasoningEffort: "low", temperature: 0.2, topP: 1, maxTokens: 0 },

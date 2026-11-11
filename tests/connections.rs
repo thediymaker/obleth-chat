@@ -3342,6 +3342,17 @@ async fn a_decision_lets_a_change_the_person_asked_for_run_unasked(pool: PgPool)
             json!({"script":"echo hi","name":"hello","partition":"debug"}),
         )]);
     };
+    // Only a certified model gets the shortcut; a model nobody has certified asks.
+    let certify = |score: f64| {
+        call(
+            &f.app,
+            "PUT",
+            "/api/admin/model-certification/fixture-model",
+            json!({"score":score,"passed":1,"total":1,"suite":"cases.yaml"}),
+            &admin,
+        )
+    };
+    assert_eq!(certify(100.0).await.0, StatusCode::OK);
 
     // Asked for, within scope, adding only: the job is submitted with no card.
     submit("call_plain");
@@ -3439,6 +3450,93 @@ async fn a_decision_lets_a_change_the_person_asked_for_run_unasked(pool: PgPool)
         .await
         .unwrap()
         .unwrap();
+
+    // A provisional model asks for every change, whatever the judge would say; a
+    // blocked one is not offered the change tools at all.
+    assert_eq!(certify(80.0).await.0, StatusCode::OK);
+    submit("call_provisional");
+    let (provisional, stream) =
+        send(&f, &admin, "Please submit hello on the debug partition").await;
+    assert_eq!(pending(&pool).await, "call_provisional");
+    assert_eq!(judged(&f).len(), 2);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{provisional}/approvals"),
+        json!({"callId":"call_provisional","decision":"deny"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        "/api/admin/models/fixture-model",
+        json!({"name":"Fixture","actions":"blocked"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    submit("call_blocked");
+    let (_, stream) = send(&f, &admin, "Please submit hello on the debug partition").await;
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!text.contains("Submitted job 8"), "{text}");
+    let offered: Vec<String> = f
+        .gateway_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m.get("tools").is_some())
+        .unwrap()["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        offered.iter().any(|t| t == "sol__files_list"),
+        "{offered:?}"
+    );
+    assert!(
+        !offered
+            .iter()
+            .any(|t| t == "sol__submit" || t == "sol__files_write"),
+        "{offered:?}"
+    );
+    let prompt = f
+        .gateway_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m.get("tools").is_some())
+        .unwrap()["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        prompt.contains("You may only read through these services"),
+        "{prompt}"
+    );
+    // Back to certified for the rest.
+    assert_eq!(certify(100.0).await.0, StatusCode::OK);
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        "/api/admin/models/fixture-model",
+        json!({"name":"Fixture","actions":"auto"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
     // With the setting off, every change asks.
     sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")

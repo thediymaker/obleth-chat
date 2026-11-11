@@ -685,7 +685,8 @@ pub(crate) async fn launch_turn(
     // Connection tools go to every chat whose model may call tools.
     let toolset = match &s.connections {
         Some(c) if resolved.capabilities.supports_function_calling != Some(false) => {
-            Some(c.toolset(user.id, id).await).filter(|t| !t.is_empty())
+            let actions = models::actions_of(&s.store.pool, &resolved.model).await;
+            Some(c.toolset(user.id, id).await.with_actions(actions)).filter(|t| !t.is_empty())
         }
         _ => None,
     };

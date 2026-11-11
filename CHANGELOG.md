@@ -2,7 +2,7 @@
 
 Each release's section is also its GitHub Release notes.
 
-## Unreleased
+## v1.3.0
 
 **New**
 

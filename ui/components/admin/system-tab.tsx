@@ -444,6 +444,7 @@ export interface Decisions {
   checkReports?: boolean;
   pickSections?: boolean;
   checkMemories?: boolean;
+  checkActions?: boolean;
   gateway?: boolean;
 }
 export const decisionsUsage = (endpoint: string) =>
@@ -464,6 +465,7 @@ export function decisionsBody(form: FormData) {
     checkReports: on("decisions-check-reports"),
     pickSections: on("decisions-pick-sections"),
     checkMemories: on("decisions-check-memories"),
+    checkActions: on("decisions-check-actions"),
   };
   if (body.endpoint !== "custom") return body;
   const url = String(form.get("decisions-url") || "").trim();
@@ -596,6 +598,12 @@ export function DecisionsCard({ decisions: d, onSaved }: { decisions: Decisions;
           label="Check memories before they are kept"
           defaultChecked={!!d.checkMemories}
           description="When Memory reads a chat, ask whether each thing it would remember lasts beyond that chat, such as a person’s field, project or a way they always want answers, and keep only those. Off, Memory keeps what it picks."
+        />
+        <CheckField
+          id="decisions-check-actions"
+          label="Let decisions allow changes the person asked for"
+          defaultChecked={!!d.checkActions}
+          description="When a cluster tool would submit a job, write a new file or move one, ask whether the person asked for it in their own messages, whether it stays within that request, keeps existing data and is easy to undo, and run it without the Allow card only on a sure yes to all four. Changes that delete or replace something, and tools of other services, always ask. Off, every change asks."
         />
         <p className="text-sm text-muted-foreground" aria-live="polite">
           {result}

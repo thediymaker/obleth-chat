@@ -2801,48 +2801,41 @@ async fn run_generation(
                                 continue;
                             }
                         };
-                        entry["status"] = json!("awaiting");
-                        entry["detail"] = json!(connections::arguments_preview(&call.arguments));
-                        entry["change"] = review;
-                        record(&mut activity, &entry, false);
-                        emit(&mut tx, "tool", entry.clone());
-                        // Saved now so a reloaded page shows the question too.
-                        let _ = lifecycle::save_activity(
-                            &s.store.pool,
-                            user.id,
-                            id,
-                            generation_id,
-                            &activity,
-                        )
-                        .await;
-                        connections::ask(
-                            &s.store.pool,
-                            user.id,
-                            id,
-                            generation_id,
-                            &call.id,
-                            set.grant(index),
-                        )
-                        .await
-                        .map_err(|_| "The response could not ask for approval".to_string())?;
-                        let decision =
-                            connections::wait(&s.store.pool, generation_id, &call.id).await;
-                        entry["status"] = json!("running");
-                        // Answered: the full arguments are not kept with the reply.
-                        if let Some(entry) = entry.as_object_mut() {
-                            entry.remove("change");
+                        // A change that only adds something may be put to a decision
+                        // first; a sure yes to every question runs it without the card.
+                        let judged = match set.gate(index, &call.arguments) {
+                            connections::gate::Gate::Judge => match s.decisions.settings().await {
+                                Ok(settings) if settings.on() && settings.check_actions => Some(
+                                    connections::gate::judge(
+                                        decisions::Asker {
+                                            decisions: &s.decisions,
+                                            gateway: Some(&gateway),
+                                            user: &user,
+                                        },
+                                        &settings,
+                                        &set.label(index),
+                                        &review,
+                                        &connections::gate::person_messages(&payload["messages"]),
+                                    )
+                                    .await,
+                                ),
+                                _ => None,
+                            },
+                            connections::gate::Gate::Ask => None,
+                        };
+                        if let Some(judged) = &judged {
+                            entry["decision"] = judged.entry();
                         }
-                        if decision != connections::Decision::Allow {
-                            entry["status"] = json!("declined");
-                            entry["detail"] =
-                                json!(if decision == connections::Decision::Expired {
-                                    "No answer within 15 minutes"
-                                } else {
-                                    "Declined"
-                                });
+                        if judged.as_ref().is_some_and(|j| j.allowed) {
                             record(&mut activity, &entry, false);
-                            emit(&mut tx, "tool", entry);
-                            payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":"The person declined this tool call, so it did not run. Do not try it again unless they ask."}));
+                        } else {
+                            entry["status"] = json!("awaiting");
+                            entry["detail"] =
+                                json!(connections::arguments_preview(&call.arguments));
+                            entry["change"] = review;
+                            record(&mut activity, &entry, false);
+                            emit(&mut tx, "tool", entry.clone());
+                            // Saved now so a reloaded page shows the question too.
                             let _ = lifecycle::save_activity(
                                 &s.store.pool,
                                 user.id,
@@ -2851,18 +2844,55 @@ async fn run_generation(
                                 &activity,
                             )
                             .await;
-                            continue;
+                            connections::ask(
+                                &s.store.pool,
+                                user.id,
+                                id,
+                                generation_id,
+                                &call.id,
+                                set.grant(index),
+                            )
+                            .await
+                            .map_err(|_| "The response could not ask for approval".to_string())?;
+                            let decision =
+                                connections::wait(&s.store.pool, generation_id, &call.id).await;
+                            entry["status"] = json!("running");
+                            // Answered: the full arguments are not kept with the reply.
+                            if let Some(entry) = entry.as_object_mut() {
+                                entry.remove("change");
+                            }
+                            if decision != connections::Decision::Allow {
+                                entry["status"] = json!("declined");
+                                entry["detail"] =
+                                    json!(if decision == connections::Decision::Expired {
+                                        "No answer within 15 minutes"
+                                    } else {
+                                        "Declined"
+                                    });
+                                record(&mut activity, &entry, false);
+                                emit(&mut tx, "tool", entry);
+                                payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":"The person declined this tool call, so it did not run. Do not try it again unless they ask."}));
+                                let _ = lifecycle::save_activity(
+                                    &s.store.pool,
+                                    user.id,
+                                    id,
+                                    generation_id,
+                                    &activity,
+                                )
+                                .await;
+                                continue;
+                            }
+                            record(&mut activity, &entry, false);
+                            // A reloaded page stops showing the question.
+                            let _ = lifecycle::save_activity(
+                                &s.store.pool,
+                                user.id,
+                                id,
+                                generation_id,
+                                &activity,
+                            )
+                            .await;
                         }
-                        record(&mut activity, &entry, false);
-                        // A reloaded page stops showing the question.
-                        let _ = lifecycle::save_activity(
-                            &s.store.pool,
-                            user.id,
-                            id,
-                            generation_id,
-                            &activity,
-                        )
-                        .await;
                     }
                     if set.is_device(index) {
                         // The person's browser carries this out: the step carries

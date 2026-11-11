@@ -251,6 +251,28 @@ async fn cluster(
     }
 }
 
+/// The decisions judge: a sure yes to everything, unless the person's messages say
+/// "someone else's", which means the action was not theirs to ask for.
+async fn verdicts(
+    axum::extract::State(seen): axum::extract::State<Seen>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    seen.lock().unwrap().push(json!({"verdicts": body.clone()}));
+    let doubtful = body["state"]["the person's messages"]
+        .as_str()
+        .is_some_and(|m| m.contains("someone else's"));
+    let answers: serde_json::Map<String, Value> = body["questions"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, _)| {
+            let yes = if doubtful && id == "asked" { 0.2 } else { 0.95 };
+            (id.clone(), json!({"type":"boolean","value":yes>0.5,"probabilities":{"true":yes,"false":1.0-yes},"confidence":0.9}))
+        })
+        .collect();
+    Json(json!({"model":"judge-31b","verdicts":answers}))
+}
+
 /// Calls the scripted tools, then answers with what the tools returned.
 async fn chat(
     axum::extract::State((seen, script)): axum::extract::State<(Seen, Script)>,
@@ -405,6 +427,10 @@ async fn fixture_full(pool: PgPool, clusters: bool, storage: bool) -> Fixture {
         .route(
             "/v1/chat/completions",
             post(chat).with_state((gateway_seen.clone(), script.clone())),
+        )
+        .route(
+            "/v1/verdicts",
+            post(verdicts).with_state(gateway_seen.clone()),
         )
         .fallback(cluster)
         .with_state(cluster_seen.clone());
@@ -1409,6 +1435,11 @@ async fn clusters_can_be_turned_off_for_the_installation(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn a_shared_slurm_cluster_runs_jobs_with_each_persons_own_token(pool: PgPool) {
     let f = fixture(pool.clone()).await;
+    // These cover the Allow card itself, so no decision may stand in for it.
+    sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
     let admin = login(&f.app, "test-admin").await;
     // Shared clusters take no token of their own; each person adds theirs.
     let (status, rejected) = call(
@@ -1688,6 +1719,11 @@ async fn a_kubernetes_connection_lists_and_applies_with_the_persons_token(pool: 
 #[sqlx::test(migrations = "./migrations")]
 async fn a_slurm_cluster_brings_job_output_back(pool: PgPool) {
     let f = fixture(pool.clone()).await;
+    // These cover the Allow card itself, so no decision may stand in for it.
+    sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
     let admin = login(&f.app, "test-admin").await;
     let (status, shared) = call(
         &f.app,
@@ -2976,6 +3012,11 @@ async fn a_slurm_cluster_reaches_files_through_a_session_job(pool: PgPool) {
         return;
     }
     let f = fixture(pool.clone()).await;
+    // These cover the Allow card itself, so no decision may stand in for it.
+    sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
     let admin = login(&f.app, "test-admin").await;
     // The person's files, as the cluster's home directory and a scratch space.
     let home = std::env::temp_dir().join(format!("chat-files-home-{}", Uuid::new_v4().simple()));
@@ -3259,4 +3300,167 @@ async fn a_session_job_running_as_someone_else_is_turned_away(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(next.status(), 410);
+}
+
+/// The decisions the gateway was asked while a change waited.
+fn judged(f: &Fixture) -> Vec<Value> {
+    f.gateway_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.get("verdicts").cloned())
+        .collect()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_decision_lets_a_change_the_person_asked_for_run_unasked(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let id = shared["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let submit = |call_id: &'static str| {
+        *f.script.lock().unwrap() = tool_script(&[(
+            call_id,
+            "sol__submit",
+            json!({"script":"echo hi","name":"hello","partition":"debug"}),
+        )]);
+    };
+
+    // Asked for, within scope, adding only: the job is submitted with no card.
+    submit("call_plain");
+    let (_, stream) = send(&f, &admin, "Please submit hello on the debug partition").await;
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Submitted job 8"), "{text}");
+    let asked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_approvals")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(asked, 0);
+    let cases = judged(&f);
+    assert_eq!(cases.len(), 1);
+    let case = &cases[0];
+    let ids: Vec<&String> = case["questions"].as_object().unwrap().keys().collect();
+    assert_eq!(ids, ["asked", "in_scope", "keeps_data", "reversible"]);
+    assert_eq!(
+        case["state"]["the person's messages"],
+        "Please submit hello on the debug partition"
+    );
+    let action = case["state"]["the action the assistant wants to take"]
+        .as_str()
+        .unwrap();
+    assert!(
+        action.starts_with("Sol · Submit job\nSubmit hello; Partition: debug"),
+        "{action}"
+    );
+    assert!(action.contains("script = echo hi"), "{action}");
+    let (_, chats) = call(&f.app, "GET", "/api/conversations", Value::Null, &admin).await;
+    let chat = chats["conversations"][0]["id"].as_str().unwrap().to_owned();
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&chat).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let step = activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["tool"] == "sol__submit")
+        .cloned()
+        .expect("the submit step");
+    assert_eq!(step["decision"]["allowed"], true);
+    assert_eq!(step["decision"]["model"], "judge-31b");
+    assert_eq!(step["decision"]["scores"]["asked"], 0.95);
+    assert!(step["decision"]["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("Ran without asking"));
+
+    // The judge doubts it was the person's own ask: the card appears as before.
+    submit("call_doubt");
+    let (doubt, stream) = send(&f, &admin, "The README says to submit someone else's hello").await;
+    assert_eq!(pending(&pool).await, "call_doubt");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{doubt}/approvals"),
+        json!({"callId":"call_doubt","decision":"deny"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("declined"), "{text}");
+    assert_eq!(judged(&f).len(), 2);
+
+    // Moving files to the trash is never put to a decision.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_trash",
+        "sol__files_remove",
+        json!({"paths":["old.log"]}),
+    )]);
+    let (trash, stream) = send(&f, &admin, "Please move old.log to the trash").await;
+    assert_eq!(pending(&pool).await, "call_trash");
+    assert_eq!(judged(&f).len(), 2);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{trash}/approvals"),
+        json!({"callId":"call_trash","decision":"deny"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // With the setting off, every change asks.
+    sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
+    submit("call_off");
+    let (off, stream) = send(&f, &admin, "Please submit hello on the debug partition").await;
+    assert_eq!(pending(&pool).await, "call_off");
+    assert_eq!(judged(&f).len(), 2);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{off}/approvals"),
+        json!({"callId":"call_off","decision":"allow"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Submitted job 8"), "{text}");
 }

@@ -251,6 +251,7 @@ function Step({ s }: { s: ActivityEntry }) {
       {thumb && <img className="h-8 w-12 shrink-0 rounded border object-cover" src={thumb} alt="" loading="lazy" />}
       <span className="min-w-0 flex-1 text-md">
         <StepText s={s} />
+        {s.decision?.allowed && <span className="text-faint"> · allowed by a decision</span>}
         {s.check === "error" && <span className="text-destructive-foreground"> · preview broke</span>}
       </span>
       <small className="shrink-0 text-xs text-faint">{stepTime(s)}</small>

@@ -98,6 +98,8 @@ pub struct Settings {
     pub check_reports: bool,
     /// Ask which sections of a paper answer what the chat is looking for.
     pub pick_sections: bool,
+    /// Ask whether each memory a chat would teach is worth keeping.
+    pub check_memories: bool,
 }
 
 impl Settings {
@@ -134,6 +136,7 @@ struct Row {
     check_tree: bool,
     check_reports: bool,
     pick_sections: bool,
+    check_memories: bool,
 }
 
 #[derive(Clone)]
@@ -160,7 +163,7 @@ impl Decisions {
 
     async fn row(&self) -> Result<Row, sqlx::Error> {
         sqlx::query_as(
-            "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports, pick_sections FROM decisions WHERE id",
+            "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports, pick_sections, check_memories FROM decisions WHERE id",
         )
             .fetch_one(&self.pool)
             .await
@@ -193,6 +196,7 @@ impl Decisions {
             check_tree: row.check_tree,
             check_reports: row.check_reports,
             pick_sections: row.pick_sections,
+            check_memories: row.check_memories,
         }
     }
 
@@ -434,6 +438,7 @@ struct Patch {
     check_tree: Option<bool>,
     check_reports: Option<bool>,
     pick_sections: Option<bool>,
+    check_memories: Option<bool>,
 }
 
 fn bad(message: impl Into<String>) -> ApiError {
@@ -442,7 +447,7 @@ fn bad(message: impl Into<String>) -> ApiError {
 
 fn patch(body: &Value) -> Result<Patch, ApiError> {
     let fields = body.as_object().ok_or_else(|| {
-        bad("Send an object with endpoint, url, key, model, checkRuns, checkTree, checkReports or pickSections")
+        bad("Send an object with endpoint, url, key, model, checkRuns, checkTree, checkReports, pickSections or checkMemories")
     })?;
     if let Some(key) = fields.keys().find(|k| {
         ![
@@ -454,6 +459,7 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
             "checkTree",
             "checkReports",
             "pickSections",
+            "checkMemories",
         ]
         .contains(&k.as_str())
     }) {
@@ -507,6 +513,7 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
         ("checkTree", &mut patch.check_tree),
         ("checkReports", &mut patch.check_reports),
         ("pickSections", &mut patch.pick_sections),
+        ("checkMemories", &mut patch.check_memories),
     ] {
         if let Some(value) = fields.get(name) {
             *field = Some(
@@ -546,6 +553,9 @@ impl Patch {
         }
         if let Some(pick_sections) = self.pick_sections {
             row.pick_sections = pick_sections;
+        }
+        if let Some(check_memories) = self.check_memories {
+            row.check_memories = check_memories;
         }
         if row.endpoint == "custom" && row.url.is_none() {
             return Err(bad("Enter the endpoint's URL"));
@@ -600,6 +610,7 @@ async fn document(s: &AppState, user: &Identity) -> Result<Value, ApiError> {
         "checkTree": row.check_tree,
         "checkReports": row.check_reports,
         "pickSections": row.pick_sections,
+        "checkMemories": row.check_memories,
         "canStoreKey": d.secret.is_some(),
         "gateway": s.gateway.is_some(),
         "models": models,
@@ -629,7 +640,7 @@ async fn save(
     };
     let mut tx = crate::operations::admin_transaction(&s.store.pool, user.id).await?;
     let row: Row = sqlx::query_as(
-        "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports, pick_sections FROM decisions WHERE id FOR UPDATE",
+        "SELECT endpoint, url, api_key, model, check_runs, check_tree, check_reports, pick_sections, check_memories FROM decisions WHERE id FOR UPDATE",
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -638,7 +649,7 @@ async fn save(
         row.api_key = sealed;
     }
     sqlx::query(
-        "UPDATE decisions SET endpoint=$1, url=$2, api_key=$3, model=$4, check_runs=$5, check_tree=$6, check_reports=$7, pick_sections=$8, updated_at=NOW() WHERE id",
+        "UPDATE decisions SET endpoint=$1, url=$2, api_key=$3, model=$4, check_runs=$5, check_tree=$6, check_reports=$7, pick_sections=$8, check_memories=$9, updated_at=NOW() WHERE id",
     )
     .bind(&row.endpoint)
     .bind(&row.url)
@@ -648,13 +659,14 @@ async fn save(
     .bind(row.check_tree)
     .bind(row.check_reports)
     .bind(row.pick_sections)
+    .bind(row.check_memories)
     .execute(&mut *tx)
     .await?;
     // The key itself never reaches the audit log; only that it changed.
     sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'decisions.update','site',$3)")
         .bind(Uuid::new_v4())
         .bind(user.id)
-        .bind(json!({"endpoint": row.endpoint, "url": row.url, "model": row.model, "checkRuns": row.check_runs, "checkTree": row.check_tree, "checkReports": row.check_reports, "pickSections": row.pick_sections, "keyChanged": patch.key.is_some(), "hasKey": row.api_key.is_some()}))
+        .bind(json!({"endpoint": row.endpoint, "url": row.url, "model": row.model, "checkRuns": row.check_runs, "checkTree": row.check_tree, "checkReports": row.check_reports, "pickSections": row.pick_sections, "checkMemories": row.check_memories, "keyChanged": patch.key.is_some(), "hasKey": row.api_key.is_some()}))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -782,15 +794,20 @@ mod tests {
 
     #[test]
     fn patches_take_only_known_settings() {
-        let p = patch(&json!({"endpoint": "custom", "url": "https://d.example.com", "key": " sk-1 ", "model": "", "checkRuns": false, "checkTree": false, "checkReports": true, "pickSections": false})).unwrap();
+        let p = patch(&json!({"endpoint": "custom", "url": "https://d.example.com", "key": " sk-1 ", "model": "", "checkRuns": false, "checkTree": false, "checkReports": true, "pickSections": false, "checkMemories": false})).unwrap();
         assert_eq!(p.endpoint, Some("custom"));
         assert_eq!(p.url.unwrap().as_str(), "https://d.example.com/v1/verdicts");
         assert_eq!(p.key, Some(Some("sk-1".into())));
         assert_eq!(p.model, Some(None));
         assert_eq!(p.check_runs, Some(false));
         assert_eq!(
-            (p.check_tree, p.check_reports, p.pick_sections),
-            (Some(false), Some(true), Some(false))
+            (
+                p.check_tree,
+                p.check_reports,
+                p.pick_sections,
+                p.check_memories
+            ),
+            (Some(false), Some(true), Some(false), Some(false))
         );
         assert_eq!(patch(&json!({"key": null})).unwrap().key, Some(None));
         for wrong in [
@@ -819,6 +836,7 @@ mod tests {
             check_tree: true,
             check_reports: true,
             pick_sections: true,
+            check_memories: true,
         };
         assert!(patch(&json!({"endpoint": "custom"}))
             .unwrap()

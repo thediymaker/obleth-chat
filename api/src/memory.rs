@@ -9,6 +9,7 @@
 //! Temporary chats are never read and never given memories.
 use crate::{
     auth::{Identity, Role},
+    decisions::{self, Decisions},
     error::ApiError,
     gateway::{valid_model, Gateway},
     knowledge::Knowledge,
@@ -66,6 +67,13 @@ Each memory is about one to three topics: short names (one to four words) of a p
 Reply with JSON only:
 {"add": [{"text": "...", "kind": "about|work|preference|goal", "topics": [{"name": "...", "kind": "project|tool|field|course|topic"}]}], "update": [{"id": "m1", "text": "..."}], "forget": ["m2"]}
 kind: about = who they are; work = what they work on; preference = how they like answers; goal = what they want to achieve. Use empty lists when nothing changes; most messages change nothing."#;
+
+/// The decision each new or changed memory must pass: whether it is a lasting fact about
+/// the person or only a detail of the task at hand.
+const KEEP_QUESTION: &str = "An assistant proposes remembering this about the person, for all their future chats: \"{memory}\"\nJudging only from the person's messages, is it worth remembering in chats about other things, weeks from now?";
+const KEEP_YES: &str = "A lasting fact the messages state about the person: their role or field, an ongoing project, course or deadline, a tool or system they use regularly, a long-term goal, a way they say they always want answers, or something they asked to be remembered";
+const KEEP_NO: &str = "Only about the task in this chat (a file name, a setting, a number, a step, a request for one answer, what they are doing right now), or a guess the messages do not state";
+const KEEP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const TAG_PROMPT: &str = r#"You file a memory an AI assistant keeps about a person. Reply with JSON only: {"kind": "about|work|preference|goal", "topics": [{"name": "...", "kind": "project|tool|field|course|topic"}]}
 kind: about = who they are; work = what they work on; preference = how they like answers; goal = what they want to achieve. topics: one to three short names (one to four words) of the project, tool, field, course or general topic the memory is about. Reuse a topic name already in use when one fits."#;
@@ -423,11 +431,13 @@ async fn start(
     }
     let pool = pool.clone();
     let knowledge = s.knowledge.clone();
+    let decisions = s.decisions.clone();
     let user = user.clone();
     tokio::spawn(async move {
         let pass = Pass {
             pool: &pool,
             knowledge: knowledge.as_ref(),
+            decisions: &decisions,
             gateway: &gateway,
             model: &model,
             user: &user,
@@ -478,6 +488,7 @@ async fn settle(pool: &PgPool, id: Uuid, done: Result<(), Failure>) -> Result<()
 struct Pass<'a> {
     pool: &'a PgPool,
     knowledge: Option<&'a Knowledge>,
+    decisions: &'a Decisions,
     gateway: &'a Gateway,
     model: &'a str,
     user: &'a Identity,
@@ -593,6 +604,7 @@ impl Pass<'_> {
         let changes = changes(&response).ok_or_else(|| {
             Failure::Answer("the model's answer was not the JSON asked for".into())
         })?;
+        let changes = self.screen(&read, changes).await?;
         let items = self.apply(conversation, &known, changes).await?;
         if !items.is_empty() {
             let entry = json!({"id":"memory-learned","kind":"learned","status":"completed",
@@ -609,6 +621,63 @@ impl Pass<'_> {
         }
         self.read_through(conversation, through).await?;
         Ok(())
+    }
+
+    /// Keeps only the new and changed memories a decision says are worth keeping: a
+    /// lasting fact the person's messages state, not a detail of the task at hand. Every
+    /// change passes when decisions, or this check, are off. A question left unanswered
+    /// drops its change; no answer at all leaves the chat to be read again later.
+    async fn screen(&self, read: &[String], mut changes: Changes) -> Result<Changes, Failure> {
+        let settings = self.decisions.settings().await?;
+        if !settings.on() || !settings.check_memories {
+            return Ok(changes);
+        }
+        // Past these, `apply` takes nothing more.
+        changes.add.truncate(MAX_ADDS * 2);
+        changes.update.truncate(MAX_CHANGES);
+        let texts: Vec<&str> = changes
+            .add
+            .iter()
+            .map(|a| a.text.as_str())
+            .chain(changes.update.iter().map(|u| u.1.as_str()))
+            .collect();
+        if texts.is_empty() {
+            return Ok(changes);
+        }
+        let questions: serde_json::Map<String, Value> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let text: String = text.chars().take(MAX_CONTENT).collect();
+                (
+                    format!("keep_{i}"),
+                    json!({"type": "boolean",
+                        "instructions": KEEP_QUESTION.replace("{memory}", &text),
+                        "criteria": {"true": KEEP_YES, "false": KEEP_NO}}),
+                )
+            })
+            .collect();
+        let response = self
+            .decisions
+            .ask(
+                &settings,
+                Some(self.gateway),
+                self.user,
+                json!({"the person's messages": read.join("\n---\n")}),
+                Value::Object(questions),
+                KEEP_TIMEOUT,
+            )
+            .await
+            .map_err(|why| Failure::Answer(format!("no decision on what to keep: {why}")))?;
+        let keep: Vec<bool> = (0..texts.len())
+            .map(|i| decisions::yes_no(&response, &format!("keep_{i}")).is_ok_and(|v| v.yes > 0.5))
+            .collect();
+        let (adds, updates) = keep.split_at(changes.add.len());
+        let mut adds = adds.iter();
+        changes.add.retain(|_| *adds.next().unwrap_or(&false));
+        let mut updates = updates.iter();
+        changes.update.retain(|_| *updates.next().unwrap_or(&false));
+        Ok(changes)
     }
 
     async fn read_through(&self, conversation: Uuid, through: i32) -> Result<(), sqlx::Error> {
@@ -852,6 +921,8 @@ async fn link(
     memory: Uuid,
     topics: &[(String, String)],
 ) -> Result<(), sqlx::Error> {
+    // One transaction, so no one sees a new topic before the memory is linked to it.
+    let mut tx = pool.begin().await?;
     for (name, kind) in topics.iter().take(3) {
         let Some(name) = topic_name(name) else {
             continue;
@@ -869,7 +940,7 @@ async fn link(
         .bind(owner)
         .bind(&name)
         .bind(kind)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             "INSERT INTO memory_links (memory_id, topic_id)
@@ -879,10 +950,10 @@ async fn link(
         .bind(memory)
         .bind(owner)
         .bind(&name)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
-    Ok(())
+    tx.commit().await
 }
 
 /// One line of at most MAX_CONTENT characters, or None when empty.

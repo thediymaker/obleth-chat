@@ -8,6 +8,14 @@ Each release's section is also its GitHub Release notes.
 
 - **Download just the files you pick.** The workspace's Files tab has a tick box beside every file and folder. Tick what you want and choose Download: one file comes as itself, anything more as one zip that keeps each file at its place in the project. A ticked folder brings everything in it, without dependencies and build output. The download button in the bar above still takes the whole project. Over the API, `GET /api/conversations/{id}/workspace/download` takes repeated `path` parameters (up to 200, and 64 MB in all).
 
+**Changes**
+
+- **Memory keeps only what lasts.** Memory kept details of the task in front of it as facts about the person: a file name, a goal for one experiment, a preference stated for one deck. Every memory it would add or change is now put to a [decision](https://www.obleth.com/docs/run-chat/decisions) first, which asks whether it is a lasting fact the person's messages state, worth knowing in chats about other things weeks from now; only a yes over 50% is kept. On a set of 20 proposals, the gateway's verdicts model and gemma4-31b-it each dropped all 10 task details and kept 9 of 10 lasting facts. Administrators can turn it off with **Check memories before they are kept** in Admin › System › Decisions; with decisions off, Memory keeps what it picks, as before. Migration `072` adds the setting, on.
+
+**Fixes**
+
+- **A memory's new topic shows with the memory in it.** A topic was saved before the memory was linked to it, so the Memory page could briefly show a topic with no memories.
+
 **Security**
 
 - **The web interface is reached only at its own address.** Chat sends every request that none of its own routes answers to the interface server. A request path written as `//host/…` or `/\host/…` was resolved to that host instead, so Chat would fetch any address it could reach and return the answer from its own origin, cookies included. The address is now always the interface server's, only page loads (`GET` and `HEAD`) are passed on, the session cookie and other credentials stay in Chat, and the interface server cannot set cookies. Installs behind a proxy that rewrites such paths (Traefik does) were not reachable this way from outside.

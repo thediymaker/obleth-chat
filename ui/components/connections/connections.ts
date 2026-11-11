@@ -5,12 +5,12 @@
 // the list query, and the request bodies their dialogs send.
 
 import { useQuery } from "@tanstack/react-query";
-import { Box, Link2, Server } from "lucide-react";
+import { Box, Cpu, Link2, Server } from "lucide-react";
 import { api } from "@/lib/api";
 import { useCapabilities } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 
-export type ConnectionKind = "mcp" | "slurm" | "kubernetes";
+export type ConnectionKind = "mcp" | "slurm" | "kubernetes" | "device";
 export interface ConnectionTool {
   name: string;
   title?: string;
@@ -39,6 +39,11 @@ export interface Connection {
   checkedAt?: string;
   user?: string;
   namespace?: string;
+  /** A device: its transport and the USB ids and label the browser read off the port. */
+  transport?: string;
+  vendorId?: number | null;
+  productId?: number | null;
+  label?: string | null;
   tools: ConnectionTool[];
 }
 
@@ -58,10 +63,19 @@ export const KINDS: Record<ConnectionKind, { label: string; icon: typeof Link2; 
     urlHelp: "The API server address from your kubeconfig.",
     about: "Read and change resources with your own token, so the cluster’s RBAC decides what is allowed.",
   },
+  device: {
+    label: "Device",
+    icon: Cpu,
+    url: "",
+    urlHelp: "",
+    about: "A board or instrument plugged into your computer, reached through this browser: serial monitor, commands, identify and flash.",
+  },
 };
 export const kindOf = (c: { kind?: string } | null | undefined): ConnectionKind => (c?.kind && c.kind in KINDS ? (c.kind as ConnectionKind) : "mcp");
-export const native = (c: { kind?: string } | null | undefined) => kindOf(c) !== "mcp";
+export const native = (c: { kind?: string } | null | undefined) => kindOf(c) === "slurm" || kindOf(c) === "kubernetes";
+export const isDevice = (c: { kind?: string } | null | undefined) => kindOf(c) === "device";
 export const TOKEN_HELP: Record<ConnectionKind, string> = {
+  device: "",
   slurm: "On a login node run scontrol token lifespan=2592000 and paste the part after SLURM_JWT=. It acts as the Slurm user named above.",
   kubernetes: "For a service account run kubectl create token NAME -n NAMESPACE --duration=720h, or use the token from your kubeconfig.",
   mcp: "Your personal token or API key for this server. It is sent as a Bearer token.",

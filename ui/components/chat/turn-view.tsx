@@ -163,6 +163,46 @@ function Approval({ s }: { s: ActivityEntry }) {
   );
 }
 
+/**
+ * A device step this browser carries out: what it is doing, or the button that
+ * attaches the device when the call waits for it in this tab.
+ */
+function DeviceStep({ s }: { s: ActivityEntry }) {
+  const store = useChat();
+  const [, bump] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => store.devices.subscribe(() => bump((n) => n + 1)), [store]);
+  const waiting = s.id ? store.devices.waiting(s.id) : undefined;
+  const progress = s.id ? store.devices.progress(s.id) : "";
+  if (!store.devices.supported())
+    return <p className="mt-1.5 text-sm text-amber">This browser cannot reach devices. Open this chat in Chrome or Edge, with the device plugged in.</p>;
+  if (waiting)
+    return (
+      <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-amber/40 bg-amber/5 px-2.5 py-2 text-sm">
+        <span className="min-w-0 flex-1">{waiting.connection} is not attached in this browser tab. Plug it in and pick its port.</span>
+        <Button
+          size="xs"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError("");
+            try {
+              await store.devices.attach({ id: waiting.connectionId, name: waiting.connection });
+            } catch (e) {
+              setError((e as Error).message);
+            }
+            setBusy(false);
+          }}
+        >
+          Attach {waiting.connection}
+        </Button>
+        {error && <span className="basis-full text-destructive-foreground">{error}</span>}
+      </div>
+    );
+  return progress ? <p className="mt-1 text-sm text-muted-foreground">{progress}</p> : null;
+}
+
 /** The workers a delegate step sent: each one's progress, then its report. */
 function Agents({ s }: { s: ActivityEntry }) {
   const list: any[] = Array.isArray(s.agents) ? s.agents : [];
@@ -223,6 +263,13 @@ function Step({ s }: { s: ActivityEntry }) {
       <>
         <div className="flex items-center">{head}</div>
         {Array.isArray(s.agents) && s.agents.length ? <Agents s={s} /> : s.status === "error" && s.detail ? <Pre text={s.detail} /> : null}
+      </>
+    );
+  else if (s.service === "device" && s.status === "running")
+    body = (
+      <>
+        <div className="flex items-center">{head}</div>
+        <DeviceStep s={s} />
       </>
     );
   else if (s.status === "awaiting")

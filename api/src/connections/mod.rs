@@ -3,6 +3,7 @@
 //! shared Slurm or Kubernetes cluster, and a shared MCP server set to personal
 //! tokens, each person adds their own token, so calls run as them. Tools join every chat's tool loop, and a tool that may change something
 //! waits for the person's Allow or Deny.
+pub mod device;
 pub mod kubernetes;
 pub mod mcp;
 mod output;
@@ -76,6 +77,8 @@ pub struct Connections {
     private_allowed: bool,
     /// Whether Slurm and Kubernetes clusters are offered (OBLETH_CHAT_CONNECTIONS=all).
     clusters: bool,
+    /// Whether devices plugged into people's computers are offered (same setting).
+    devices: bool,
     /// Whether a chat may run its tools without asking (OBLETH_CHAT_AUTO_MODE).
     auto_mode: bool,
     /// The installation's object storage, where Slurm clusters can bring job output.
@@ -87,6 +90,9 @@ enum Kind {
     Mcp,
     Slurm,
     Kubernetes,
+    /// A board or instrument plugged into the person's computer, reached through
+    /// their browser.
+    Device,
 }
 impl Kind {
     fn parse(kind: &str) -> Option<Self> {
@@ -94,6 +100,7 @@ impl Kind {
             "mcp" => Some(Self::Mcp),
             "slurm" => Some(Self::Slurm),
             "kubernetes" => Some(Self::Kubernetes),
+            "device" => Some(Self::Device),
             _ => None,
         }
     }
@@ -102,7 +109,12 @@ impl Kind {
             Self::Mcp => "mcp",
             Self::Slurm => "slurm",
             Self::Kubernetes => "kubernetes",
+            Self::Device => "device",
         }
+    }
+    /// A Slurm or Kubernetes cluster: reached with a token, as the person.
+    fn cluster(self) -> bool {
+        matches!(self, Self::Slurm | Self::Kubernetes)
     }
 }
 
@@ -171,6 +183,7 @@ impl Row {
                 .collect(),
             Kind::Slurm => slurm::tools(self.returns_output()),
             Kind::Kubernetes => kubernetes::tools(),
+            Kind::Device => device::tools(),
         }
     }
 }
@@ -239,9 +252,28 @@ impl Connections {
             clients: mcp::Clients::new(private_allowed)?,
             private_allowed,
             clusters: true,
+            devices: true,
             auto_mode: true,
             objects: None,
         })
+    }
+
+    /// Which kinds the installation offers: a connection of a kind turned off is
+    /// hidden and unused.
+    fn offered(&self, kind: Kind) -> bool {
+        match kind {
+            Kind::Mcp => true,
+            Kind::Device => self.devices,
+            Kind::Slurm | Kind::Kubernetes => self.clusters,
+        }
+    }
+
+    pub fn devices(mut self, on: bool) -> Self {
+        self.devices = on;
+        self
+    }
+    pub fn devices_enabled(&self) -> bool {
+        self.devices
     }
 
     /// Re-encrypts tokens still sealed with the key derived from the gateway signing
@@ -414,7 +446,7 @@ impl Connections {
                     access.namespace,
                 ))
             }
-            Kind::Mcp => unreachable!("MCP connections have no native client"),
+            Kind::Mcp | Kind::Device => unreachable!("only clusters have a native client"),
         })
     }
 
@@ -499,10 +531,7 @@ impl Connections {
         .await?;
         // A shared connection an administrator switched off is hidden from everyone else,
         // and clusters are hidden while they are turned off for the installation.
-        rows.retain(|r| {
-            (r.enabled || !r.shared() || user.is_admin())
-                && (self.clusters || r.kind() == Kind::Mcp)
-        });
+        rows.retain(|r| (r.enabled || !r.shared() || user.is_admin()) && self.offered(r.kind()));
         Ok(rows)
     }
 
@@ -550,11 +579,14 @@ impl Connections {
                 store,
                 user,
             }),
+            pool: Some(self.pool.clone()),
+            user,
+            conversation,
+            generation: None,
         };
-        let clusters = self.clusters;
         for row in rows
             .into_iter()
-            .filter(|r| !r.opted_out && r.usable() && (clusters || r.kind() == Kind::Mcp))
+            .filter(|r| !r.opted_out && r.usable() && self.offered(r.kind()))
         {
             let Ok(url) = Url::parse(&row.url) else {
                 continue;
@@ -575,6 +607,7 @@ impl Connections {
                     },
                     String::new(),
                 ),
+                Kind::Device => (Backend::Device, device::about(&row.options)),
                 kind => {
                     let about = match kind {
                         Kind::Slurm => format!(
@@ -678,6 +711,8 @@ enum Backend {
     /// The client, and whether its jobs bring their output back.
     Slurm(slurm::Client, bool),
     Kubernetes(kubernetes::Client),
+    /// Carried out by the person's browser (device.rs).
+    Device,
 }
 struct Offered {
     exposed: String,
@@ -696,10 +731,36 @@ pub struct Toolset {
     tools: Vec<Offered>,
     /// Where job output from Slurm clusters comes back, when there is object storage.
     outputs: Option<output::Outputs>,
+    /// Where device calls are filed for the browser; none in unit tests.
+    pool: Option<PgPool>,
+    user: Uuid,
+    conversation: Uuid,
+    /// The response these tools run in, once it has started; device calls are
+    /// filed under it.
+    generation: Option<Uuid>,
 }
 impl Toolset {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+    /// The response the tools run in.
+    pub fn begin(&mut self, generation: Uuid) {
+        self.generation = Some(generation);
+    }
+    /// A tool the person's browser carries out, against a device at their computer.
+    pub fn is_device(&self, index: usize) -> bool {
+        matches!(
+            self.servers[self.tools[index].server].backend,
+            Backend::Device
+        )
+    }
+    /// What the browser is asked to do: the tool's own name and the arguments as
+    /// the model wrote them.
+    pub fn request(&self, index: usize, arguments: &str) -> Value {
+        let arguments = self
+            .arguments(index, arguments)
+            .unwrap_or_else(|_| json!({}));
+        json!({"tool":self.tools[index].tool.name,"arguments":arguments})
     }
     pub fn definitions(&self) -> Vec<Value> {
         self.tools
@@ -760,8 +821,9 @@ impl Toolset {
             Backend::Mcp { .. } => Kind::Mcp,
             Backend::Slurm(..) => Kind::Slurm,
             Backend::Kubernetes(_) => Kind::Kubernetes,
+            Backend::Device => Kind::Device,
         };
-        json!({"service":service.as_str(),"action":offered.tool.name,"readOnly":offered.tool.read_only})
+        json!({"service":service.as_str(),"action":offered.tool.name,"readOnly":offered.tool.read_only,"connectionId":self.servers[offered.server].id})
     }
     /// The connection and tool name an "Allow for this chat" grant covers.
     pub fn grant(&self, index: usize) -> (Uuid, &str) {
@@ -821,6 +883,7 @@ impl Toolset {
             Backend::Kubernetes(client) => {
                 kubernetes::changes(&offered.tool.name, &arguments, &client.namespace)?
             }
+            Backend::Device => device::changes(&offered.tool.name, &arguments)?,
         };
         let shown: Vec<Value> = arguments
             .as_object()
@@ -850,7 +913,9 @@ impl Toolset {
         Ok(json!({"items":items,"arguments":shown}))
     }
 
-    pub async fn call(&mut self, index: usize, arguments: &str) -> Outcome {
+    /// Runs one call. `call` is the model's id for it, which a device call is filed
+    /// under while the browser carries it out.
+    pub async fn call(&mut self, index: usize, call: &str, arguments: &str) -> Outcome {
         let arguments = match self.arguments(index, arguments) {
             Ok(arguments) => arguments,
             Err(error) => {
@@ -864,9 +929,27 @@ impl Toolset {
         let offered = &self.tools[index];
         let name = offered.tool.name.clone();
         let outputs = &self.outputs;
+        let (pool, user, conversation, generation) =
+            (&self.pool, self.user, self.conversation, self.generation);
         let server = &mut self.servers[offered.server];
         let connection = server.id;
         let result = match &mut server.backend {
+            Backend::Device => match (generation, pool) {
+                (Some(generation), Some(pool)) => {
+                    device::run(
+                        pool,
+                        user,
+                        conversation,
+                        generation,
+                        connection,
+                        call,
+                        &name,
+                        &arguments,
+                    )
+                    .await
+                }
+                _ => Err("Device tools run only inside a chat response".into()),
+            },
             Backend::Mcp {
                 url,
                 token,
@@ -1048,6 +1131,7 @@ pub async fn finish(pool: &PgPool, generation: Uuid) {
         .bind(generation)
         .execute(pool)
         .await;
+    device::finish(pool, generation).await;
 }
 
 /// A connection's address for someone who does not manage it: where it is, without
@@ -1107,6 +1191,8 @@ fn view(row: &Row, user: &Identity) -> Value {
         "returnOutput": row.returns_output(),
         "user": settings["user"], "namespace": settings["namespace"], "identity": settings["identity"],
         "serverName": row.server_name, "checkedAt": row.checked_at, "tools": tools,
+        "transport": row.options["transport"], "vendorId": row.options["vendorId"],
+        "productId": row.options["productId"], "label": row.options["label"],
     })
 }
 
@@ -1191,6 +1277,11 @@ pub fn router(state: AppState) -> Router {
             "/api/conversations/{id}/connections",
             get(chat_connections).patch(switch_chat_connection),
         )
+        .route("/api/conversations/{id}/device-calls", get(device::pending))
+        .route(
+            "/api/conversations/{id}/device-calls/{call}",
+            post(device::resolve),
+        )
         .with_state(state)
 }
 
@@ -1248,6 +1339,7 @@ fn output_possible(connections: &Connections, options: &Value) -> Result<(), Api
 fn clean_options(kind: Kind, options: &Value, personal: bool) -> Result<Value, ApiError> {
     let mut clean = json!({});
     match kind {
+        Kind::Device => return device::clean_options(options),
         Kind::Mcp => {
             if !personal && options["personalTokens"] == true {
                 clean["personalTokens"] = json!(true);
@@ -1329,16 +1421,20 @@ async fn create(
         return Err(ApiError::forbidden());
     }
     let kind = Kind::parse(body.kind.as_deref().unwrap_or("mcp")).ok_or_else(|| {
-        ApiError::bad("Choose an MCP server, a Slurm cluster or a Kubernetes cluster")
+        ApiError::bad("Choose an MCP server, a Slurm cluster, a Kubernetes cluster or a device")
     })?;
-    if kind != Kind::Mcp && !connections.clusters {
-        return Err(ApiError::bad(
-            "Clusters are turned off on this installation",
-        ));
+    if !connections.offered(kind) {
+        return Err(ApiError::bad(match kind {
+            Kind::Device => "Devices are turned off on this installation",
+            _ => "Clusters are turned off on this installation",
+        }));
     }
     let name = clean_name(&body.name)?;
     let token = clean_token(&body.token)?;
-    let native = kind != Kind::Mcp;
+    if kind == Kind::Device {
+        return create_device(&connections, &user, &name, body).await;
+    }
+    let native = kind.cluster();
     if native && body.shared && token.is_some() {
         return Err(ApiError::bad(
             "A shared cluster takes no token: each person adds their own",
@@ -1402,6 +1498,44 @@ async fn create(
     Ok(Json(view(&connections.find(&user, id).await?, &user)))
 }
 
+/// A device is the person's own, takes no token and no address, and is never checked:
+/// whether it is plugged in shows in the browser.
+async fn create_device(
+    connections: &Connections,
+    user: &Identity,
+    name: &str,
+    body: Create,
+) -> Result<Json<Value>, ApiError> {
+    if body.shared {
+        return Err(ApiError::bad("A device is your own: it cannot be shared"));
+    }
+    if !body.token.trim().is_empty() {
+        return Err(ApiError::bad("A device takes no token"));
+    }
+    let options = device::clean_options(&body.options)?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM connections WHERE owner_id IS NOT DISTINCT FROM $1",
+    )
+    .bind(user.id)
+    .fetch_one(&connections.pool)
+    .await?;
+    if count >= MAX_PER_OWNER {
+        return Err(ApiError::bad(format!(
+            "Up to {MAX_PER_OWNER} connections are allowed"
+        )));
+    }
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO connections(id,owner_id,name,url,token,confirm_actions,tools,server_name,checked_at,kind,options) VALUES($1,$2,$3,$4,NULL,$5,$6,$7,NOW(),$8,$9)")
+        .bind(id).bind(user.id).bind(name).bind(device::URL)
+        .bind(body.confirm_actions.unwrap_or(true))
+        .bind(Value::Array(device::tools().iter().map(mcp::Tool::to_json).collect()))
+        .bind(options["label"].as_str())
+        .bind(Kind::Device.as_str())
+        .bind(&options)
+        .execute(&connections.pool).await.map_err(duplicate)?;
+    Ok(Json(view(&connections.find(user, id).await?, user)))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Update {
@@ -1459,33 +1593,43 @@ async fn update(
             .transpose()?
             .unwrap_or(row.name.clone());
         let url = match &body.url {
+            Some(_) if kind == Kind::Device => {
+                return Err(ApiError::bad("A device has no address"));
+            }
             Some(raw) => mcp::check_url(raw, row.private_ok() || connections.private_allowed)
                 .map_err(ApiError::bad)?,
             None => Url::parse(&row.url).map_err(|_| ApiError::internal())?,
         };
         let token = match &body.token {
+            Some(_) if kind == Kind::Device => {
+                return Err(ApiError::bad("A device takes no token"));
+            }
             Some(raw) => clean_token(raw)?,
             None => row
                 .token
                 .as_deref()
                 .and_then(|t| connections.unseal(id.as_bytes(), t)),
         };
-        if kind != Kind::Mcp && row.shared() && token.is_some() {
+        if kind.cluster() && row.shared() && token.is_some() {
             return Err(ApiError::bad(
                 "A shared cluster takes no token: each person adds their own",
             ));
         }
-        if kind != Kind::Mcp && !row.shared() && token.is_none() {
+        if kind.cluster() && !row.shared() && token.is_none() {
             return Err(ApiError::bad("Enter your token for this cluster"));
         }
         let mut options = match &body.options {
             Some(options) => {
                 // Keep the saved CA and API version unless the edit names new ones
-                // ("" removes them).
+                // ("" removes them); a device keeps its USB ids.
                 let mut options = options.clone();
-                for key in ["ca", "apiVersion", "returnOutput"] {
+                let kept: &[&str] = match kind {
+                    Kind::Device => &["transport", "vendorId", "productId", "label"],
+                    _ => &["ca", "apiVersion", "returnOutput"],
+                };
+                for key in kept {
                     if options.get(key).is_none() {
-                        options[key] = row.options[key].clone();
+                        options[*key] = row.options[key].clone();
                     }
                 }
                 let options = clean_options(kind, &options, !row.shared())?;
@@ -1495,8 +1639,12 @@ async fn update(
             None => row.options.clone(),
         };
         let mut tools = row.tools.clone();
-        let mut server_name = row.server_name.clone();
-        let probed = url.as_str() != row.url || body.token.is_some() || body.options.is_some();
+        let mut server_name = match kind {
+            Kind::Device => options["label"].as_str().map(str::to_owned),
+            _ => row.server_name.clone(),
+        };
+        let probed = kind != Kind::Device
+            && (url.as_str() != row.url || body.token.is_some() || body.options.is_some());
         if probed {
             let checked = connections
                 .check(kind, &url, token.clone(), &options, row.private_ok())
@@ -1545,6 +1693,10 @@ async fn refresh(
     if !row.can_manage(&user) {
         return Err(ApiError::forbidden());
     }
+    // A device's tools are Chat's own: there is nothing to fetch.
+    if row.kind() == Kind::Device {
+        return Ok(Json(view(&row, &user)));
+    }
     let url = Url::parse(&row.url).map_err(|_| ApiError::internal())?;
     let token = match &row.token {
         Some(sealed) => Some(connections.unseal(id.as_bytes(), sealed).ok_or_else(|| {
@@ -1575,7 +1727,7 @@ async fn status(
 ) -> Result<Json<Value>, ApiError> {
     let (connections, user) = manager(&s, &headers, false).await?;
     let row = connections.find(&user, id).await?;
-    if row.kind() == Kind::Mcp {
+    if !row.kind().cluster() {
         return Err(ApiError::bad("Only clusters report a status"));
     }
     if !row.usable() {
@@ -1917,6 +2069,10 @@ mod tests {
             servers,
             tools,
             outputs: None,
+            pool: None,
+            user: Uuid::nil(),
+            conversation: Uuid::nil(),
+            generation: None,
         }
     }
 
@@ -2009,7 +2165,11 @@ mod tests {
         let mut set = clusters();
         let delete = set.find("lab__delete").unwrap();
         let outcome = set
-            .call(delete, r#"{"kind":"Pod","name":"web","force":true}"#)
+            .call(
+                delete,
+                "call_1",
+                r#"{"kind":"Pod","name":"web","force":true}"#,
+            )
             .await;
         assert!(!outcome.ok);
         assert!(

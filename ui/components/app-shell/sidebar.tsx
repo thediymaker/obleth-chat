@@ -28,7 +28,7 @@ export function sectionOf(path: string): string {
   const first = path.split("/")[1] ?? "";
   if (first === "" || first === "chat" || first === "history") return "chat";
   if (first === "knowledge" || first === "library") return "library";
-  if (first === "workspaces" || first === "clusters") return "compute";
+  if (first === "workspaces" || first === "clusters" || first === "devices") return "compute";
   return first;
 }
 
@@ -49,7 +49,7 @@ export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () 
     { id: "library", href: "/library", label: "Library", icon: Bookmark, on: !!features.knowledge },
     { id: "memory", href: "/memory", label: "Memory", icon: Brain, on: !!features.memory },
     { id: "batches", href: "/batches", label: "Batches", icon: Layers, on: !!features.batches },
-    { id: "compute", href: features.workspaces ? "/workspaces" : "/clusters", label: "Compute", icon: Server, on: !!features.workspaces || !!features.clusters },
+    { id: "compute", href: features.workspaces ? "/workspaces" : features.clusters ? "/clusters" : "/devices", label: "Compute", icon: Server, on: !!features.workspaces || !!features.clusters || !!features.devices },
     { id: "groups", href: "/groups", label: "Groups", icon: Users, on: true },
   ].filter((item) => item.on);
   const chatId = path.startsWith("/chat/") ? decodeURIComponent(path.split("/")[2] ?? "") : "";

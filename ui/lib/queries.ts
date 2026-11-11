@@ -35,6 +35,7 @@ export interface Capabilities {
     browser?: boolean;
     connections?: boolean;
     clusters?: boolean;
+    devices?: boolean;
     autoMode?: boolean;
     history?: boolean;
     [feature: string]: boolean | undefined;

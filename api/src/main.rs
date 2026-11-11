@@ -138,6 +138,7 @@ async fn main() -> Result<()> {
             config.connections_allow_private,
         )?
         .clusters(config.connections == ConnectionsMode::All)
+        .devices(config.connections == ConnectionsMode::All)
         .auto_mode(config.auto_mode)
         .objects(objects.clone());
         match connections.reseal().await {

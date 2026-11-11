@@ -322,7 +322,7 @@ async fn metrics_endpoint(
     ))
 }
 async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Value> {
-    let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":s.auth.password_sign_in(),"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"jobOutput":s.connections.as_ref().is_some_and(|c| c.clusters_enabled() && c.job_output_available()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
+    let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":s.auth.password_sign_in(),"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"devices":s.connections.as_ref().is_some_and(|c| c.devices_enabled()),"jobOutput":s.connections.as_ref().is_some_and(|c| c.clusters_enabled() && c.job_output_available()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
     value["features"]["memory"] = json!(memory::available(&s).await);
     value["features"]["batches"] = json!(s.gateway.is_some());
     let user = s.auth.require(&headers, false).await.ok();
@@ -1653,6 +1653,9 @@ async fn run_generation(
     let mut finish_reason: Option<String> = None;
     let mut first = true;
     let generation_id = turn.generation_id;
+    if let Some(set) = toolset.as_mut() {
+        set.begin(generation_id);
+    }
     let mut tx = Some(tx);
     // Where the chat's attached files are in its workspace, for the model.
     let uploads = match &workspace {
@@ -2835,9 +2838,26 @@ async fn run_generation(
                         )
                         .await;
                     }
+                    if set.is_device(index) {
+                        // The person's browser carries this out: the step carries
+                        // what to do, and is saved so a reloaded page sees it too.
+                        entry["request"] = set.request(index, &call.arguments);
+                        record(&mut activity, &entry, false);
+                        let _ = lifecycle::save_activity(
+                            &s.store.pool,
+                            user.id,
+                            id,
+                            generation_id,
+                            &activity,
+                        )
+                        .await;
+                    }
                     emit(&mut tx, "tool", entry.clone());
                     let began = Instant::now();
-                    let outcome = set.call(index, &call.arguments).await;
+                    let outcome = set.call(index, &call.id, &call.arguments).await;
+                    if let Some(entry) = entry.as_object_mut() {
+                        entry.remove("request");
+                    }
                     entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
                     entry["detail"] = json!(outcome.detail);
                     entry["durationMs"] = json!(began.elapsed().as_millis() as u64);

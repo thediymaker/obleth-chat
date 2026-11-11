@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.4.0
+
+**New**
+
+- **Devices: a board plugged into your computer, reached through your browser.** Under **Compute › Devices**, pick a serial port in the browser's own chooser and name it; it becomes a connection whose tools the model uses in chats. The tools are named by what they do over the port, never by a board: open and close the port, read what it printed (waiting for a marker if asked), send a line or hex bytes, reset or set DTR and RTS, identify the chip, write firmware from the chat's workspace at the offsets the model names, and erase the flash. Each call goes to the browser tab showing the chat, which carries it out over Web Serial and posts the result; the step shows what the tab is doing, or an **Attach** button when the device isn't attached in that tab. Sending, resetting, flashing and erasing wait for your **Allow** like any other change; the flash card lists every image and its offset. Identify, flash and erase support Espressif chips today through esptool-js, with other families as pluggable flashers; any serial device can be read, sent to and reset. The Devices page has a serial monitor per attached device. Chrome and Edge only (Web Serial); a device is yours alone and can't be shared. Migration `073` adds `device_calls`, and `OBLETH_CHAT_CONNECTIONS=mcp` turns devices off along with clusters. Over the API, device steps carry `connectionId` and `request`, `GET /api/conversations/{id}/device-calls` lists calls waiting for a browser and `POST /api/conversations/{id}/device-calls/{call}` answers one.
+
 ## v1.3.0
 
 **New**

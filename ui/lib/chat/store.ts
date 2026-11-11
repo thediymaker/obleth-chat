@@ -12,6 +12,7 @@ import { applyChatDraft, chatDraft } from "@/components/projects/chat-draft";
 import { readEvents as readEventsDefault } from "@/lib/api";
 import { createBrowserBridge, type BrowserBridge } from "@/components/browser/bridge";
 import { createCodeBridge, type CodeBridge } from "@/components/code/bridge";
+import { createDevicesBridge, type DevicesBridge } from "@/lib/devices/bridge";
 import { createWorkspaceBridge, type WorkspaceBridge } from "@/components/workspace/bridge";
 import { createAttachments, type Attachments } from "./attachments";
 import { EFFORTS } from "./composer";
@@ -193,6 +194,7 @@ export class ChatStore {
   workspace: WorkspaceBridge;
   browser: BrowserBridge;
   code: CodeBridge;
+  devices: DevicesBridge;
   follow: Follow | null = null;
   scroller: HTMLElement | null = null;
 
@@ -230,6 +232,7 @@ export class ChatStore {
     this.workspace = createWorkspaceBridge({ api, enabled: () => this.feature("workspaces"), changed: () => this.emit(), showTab });
     this.browser = createBrowserBridge({ api, enabled: () => this.feature("browser"), changed: () => this.emit(), showTab });
     this.code = createCodeBridge();
+    this.devices = createDevicesBridge({ api, enabled: () => this.feature("devices"), changed: () => this.emit() });
   }
 
   // ---- Subscription ----
@@ -292,6 +295,7 @@ export class ChatStore {
     this.attachments.clear();
     this.workspace.reset();
     this.browser.reset();
+    this.devices.reset();
     // What was set up for a chat not yet started, or typed and not sent, is this
     // person's: the next one to sign in on this page starts clean, with Auto off.
     resetToolsDraft();
@@ -772,6 +776,8 @@ export class ChatStore {
     if (this.conversationIdIs(c.id)) this.active = c;
   }
   private observeConversation(c: Conversation) {
+    // A device step saved mid-call is carried out by this tab (a reloaded page).
+    if (conversationBusy(c)) for (const m of c.messages) if (isPendingMessage(m) && Array.isArray(m.activity)) this.devices.sync(c.id, m.activity);
     if (conversationBusy(c) && !this.operations.has(c.id)) {
       this.operations.set(c.id, {
         key: c.id,
@@ -1248,6 +1254,7 @@ export class ChatStore {
         break;
     }
     this.browser.observe(event, c.id);
+    this.devices.observe(event, c.id);
     if (this.workspace.onEvent(event, assistant, c.id) && !op.terminal) assistant.status = "streaming";
   }
 

@@ -2543,3 +2543,204 @@ async fn pausing_ends_the_reply_with_where_the_work_stands(pool: PgPool) {
         .unwrap();
     assert_eq!(nudges, 0);
 }
+
+/// Waits for a device call the response sent to the browser.
+async fn device_call(f: &Fixture, id: &str, session: &(String, String)) -> Value {
+    for _ in 0..100 {
+        let (status, body) = call(
+            &f.app,
+            "GET",
+            &format!("/api/conversations/{id}/device-calls"),
+            Value::Null,
+            session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        if let Some(first) = body["calls"].as_array().and_then(|c| c.first()) {
+            return first.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no device call waited for the browser");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn device_tools_are_carried_out_by_the_persons_browser(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    // A device is the person's own, takes no address or token, and is never checked.
+    let (status, created) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Board","url":"","kind":"device","options":{"vendorId":0x303a,"productId":4097,"label":"USB JTAG/serial debug unit"}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["kind"], "device");
+    assert_eq!(created["vendorId"], 0x303a);
+    assert_eq!(created["label"], "USB JTAG/serial debug unit");
+    assert_eq!(created["serverName"], "USB JTAG/serial debug unit");
+    assert_eq!(created["hasToken"], false);
+    let tools: Vec<&str> = created["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tools,
+        ["status", "open", "close", "read", "write", "signals", "identify", "flash", "erase"]
+    );
+    let device = created["id"].as_str().unwrap().to_owned();
+    let (status, refused) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Shared board","url":"","kind":"device","shared":true}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    let (status, refused) = call(
+        &f.app,
+        "PATCH",
+        &format!("/api/connections/{device}"),
+        json!({"url":"https://example.com/mcp"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    // Renaming keeps the USB ids; a new label is kept too.
+    let (status, renamed) = call(
+        &f.app,
+        "PATCH",
+        &format!("/api/connections/{device}"),
+        json!({"name":"My board","options":{"label":"ESP32-S3"}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["name"], "My board");
+    assert_eq!(renamed["vendorId"], 0x303a);
+    assert_eq!(renamed["label"], "ESP32-S3");
+    let (status, refreshed) = call(
+        &f.app,
+        "POST",
+        &format!("/api/connections/{device}/refresh"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refreshed}");
+
+    // A read runs without asking; a write waits for Allow. Both are carried out by
+    // the browser, which posts each result.
+    *f.script.lock().unwrap() = tool_script(&[
+        ("call_read", "my_board__read", json!({"waitMs":10})),
+        ("call_write", "my_board__write", json!({"text":"AT"})),
+    ]);
+    let (id, stream) = send(&f, &admin, "Talk to the board").await;
+    let first = device_call(&f, &id, &admin).await;
+    assert_eq!(first["callId"], "call_read");
+    assert_eq!(first["tool"], "read");
+    assert_eq!(first["arguments"], json!({"waitMs":10}));
+    assert_eq!(first["connectionId"], device);
+    // The saved step carries the request, so a reloaded page can carry it out.
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(activity[0]["service"], "device");
+    assert_eq!(activity[0]["connection"], "My board");
+    assert_eq!(activity[0]["status"], "running");
+    assert_eq!(
+        activity[0]["request"],
+        json!({"tool":"read","arguments":{"waitMs":10}})
+    );
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/device-calls/call_read"),
+        json!({"ok":true,"output":"ready>\r\n","detail":"7 bytes"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/device-calls/call_read"),
+        json!({"ok":true,"output":"again"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    assert_eq!(pending(&pool).await, "call_write");
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(activity[0]["status"], "completed");
+    assert_eq!(activity[0]["detail"], "ready>\r\n");
+    assert!(activity[0].get("request").is_none());
+    assert_eq!(activity[1]["status"], "awaiting");
+    assert_eq!(activity[1]["change"]["items"][0]["verb"], "Send");
+    assert_eq!(activity[1]["change"]["items"][0]["what"], "AT");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/approvals"),
+        json!({"callId":"call_write","decision":"allow"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let second = device_call(&f, &id, &admin).await;
+    assert_eq!(second["callId"], "call_write");
+    assert_eq!(second["arguments"], json!({"text":"AT"}));
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/device-calls/call_write"),
+        json!({"ok":true,"output":"Sent 3 bytes"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("\"status\":\"completed\""), "{text}");
+    assert!(
+        text.contains(r#"Done: ready>\r\n | Sent 3 bytes"#),
+        "{text}"
+    );
+    // The model was told what the device is, under the connection's prefix.
+    let first = f.gateway_seen.lock().unwrap()[0].clone();
+    let names: Vec<&str> = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"my_board__flash"), "{names:?}");
+    assert!(first["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("My board, a device plugged into the person's computer (ESP32-S3), reached through their browser (tools named my_board__…)"));
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM device_calls")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}

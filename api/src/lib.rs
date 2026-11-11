@@ -481,20 +481,24 @@ async fn import(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<(StatusCode, Json<store::ImportSummary>), ApiError> {
-    let u = s.auth.require(&headers, true).await?;
+    let u = match s.auth.require(&headers, true).await {
+        Ok(u) => u,
+        Err(refused) => {
+            error::discard(body).await;
+            return Err(refused);
+        }
+    };
     // Waits its turn before reading the body, so waiting uploads hold no memory.
     let _turn = imports::RUNNING
         .acquire()
         .await
         .map_err(|_| ApiError::internal())?;
-    let body = axum::body::to_bytes(body, imports::MAX_IMPORT_BYTES)
-        .await
-        .map_err(|_| {
-            ApiError(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Choose an export of 200 MB or less".into(),
-            )
-        })?;
+    let body = error::upload(
+        body,
+        imports::MAX_IMPORT_BYTES,
+        "Choose an export of 200 MB or less",
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(s.store.import_upload(u.id, body).await?),
@@ -617,7 +621,7 @@ async fn send(
         .bind(user.id)
         .execute(&s.store.pool)
         .await;
-    let rx = launch_turn(s, gateway, user, Some(headers), id, launch).await?;
+    let rx = launch_turn(s, gateway, user, Started::Session(headers), id, launch).await?;
     let mut response = Sse::new(ReceiverStream::new(rx))
         .keep_alive(
             KeepAlive::new()
@@ -641,13 +645,23 @@ pub(crate) struct Launch {
     pub variant: Option<(Uuid, &'static str)>,
 }
 
-/// Starts a turn and its background worker. Without `headers` the turn runs for
-/// no browser session, as Auto mode's nudges do.
+/// What started a turn, which is checked again while the turn runs: ending the
+/// sign-in, or revoking the token, stops what it began.
+pub(crate) enum Started {
+    /// A person at a browser, by their request's headers.
+    Session(HeaderMap),
+    /// An API token, by its id.
+    Token(Uuid),
+    /// Chat itself, as Auto mode's nudges do: it runs for no session.
+    Alone,
+}
+
+/// Starts a turn and its background worker.
 pub(crate) async fn launch_turn(
     s: AppState,
     gateway: Gateway,
     user: Identity,
-    headers: Option<HeaderMap>,
+    starter: Started,
     id: Uuid,
     launch: Launch,
 ) -> Result<mpsc::Receiver<Result<Event, Infallible>>, ApiError> {
@@ -721,7 +735,7 @@ pub(crate) async fn launch_turn(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
         run_generation(
-            s, gateway, user, headers, id, resolved, turn, tx, permit, workspace, toolset,
+            s, gateway, user, starter, id, resolved, turn, tx, permit, workspace, toolset,
         )
         .await;
     });
@@ -838,6 +852,29 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// Gives each call an id no earlier call in the turn used. Calls read from the
+/// reply's text, and calls a model sends without an id, are numbered from zero in
+/// every step; the step's activity, its approval and its result are all found by
+/// the id, so a repeated one would let a later call pass for an earlier one.
+pub(crate) fn unique_call_ids(
+    calls: &mut [ToolCall],
+    used: &mut std::collections::HashSet<String>,
+    step: usize,
+) {
+    for (position, call) in calls.iter_mut().enumerate() {
+        if used.insert(call.id.clone()) {
+            continue;
+        }
+        let mut id = format!("call_s{step}_{position}");
+        let mut again = 0;
+        while !used.insert(id.clone()) {
+            again += 1;
+            id = format!("call_s{step}_{position}_{again}");
+        }
+        call.id = id;
+    }
+}
+
 /// Merges streamed tool-call fragments, which arrive keyed by index.
 /// The file a streaming write_file or edit_file call is producing: its path and the
 /// last lines typed so far.
@@ -935,7 +972,14 @@ pub(crate) fn accumulate_tool_calls(
 /// `<tool_call>{…}</tool_call>`, Mistral's `[TOOL_CALLS][…]` and Llama 3's
 /// `<|python_tag|>{…}`. They count only when every one names an offered tool;
 /// returns the text without them, and the calls.
+///
+/// A call inside a code block, a code span or a quoted line is something the
+/// model is showing, not doing: a reply that quotes a page or a file which
+/// holds such a call must not run it.
 pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String, Vec<ToolCall>)> {
+    // Follows the reply's own text, leaving out the calls taken from it: a call's
+    // arguments often hold fences and backticks of their own, as a file's content.
+    let mut shown = Shown::default();
     const MARKERS: [&str; 4] = [
         "<function=",
         "<tool_call>",
@@ -971,6 +1015,13 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
         .min_by_key(|(i, _)| *i)
     {
         let after = &rest[at + marker.len()..];
+        shown.read(&rest[..at]);
+        if shown.here() {
+            shown.read(marker);
+            kept.push_str(&rest[..at + marker.len()]);
+            rest = after;
+            continue;
+        }
         let parsed = match marker {
             "<function=" => after.find('>').and_then(|close| {
                 let name = after[..close].trim().to_owned();
@@ -1000,6 +1051,7 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
                 rest = tail;
             }
             None => {
+                shown.read(marker);
                 kept.push_str(&rest[..at + marker.len()]);
                 rest = after;
             }
@@ -1009,6 +1061,11 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
     if found.is_empty() {
         // Llama 4's pythonic form: [name(key="value", ...), ...]
         let (start, end, calls) = pythonic_calls(text, offered)?;
+        let mut before = Shown::default();
+        before.read(&text[..start]);
+        if before.here() {
+            return None;
+        }
         kept = format!("{}{}", &text[..start], &text[end..]);
         found = calls;
     }
@@ -1028,6 +1085,55 @@ pub(crate) fn text_tool_calls(text: &str, offered: &[String]) -> Option<(String,
         })
         .collect();
     Some((kept.trim().to_owned(), calls))
+}
+
+/// Whether a point in a reply is inside what Markdown shows as code or as a
+/// quotation: a fenced block (to the end of the text when the fence is left
+/// open), a line that starts with `>`, or a span between backticks on one line.
+/// Fed the reply's text in order, it answers for the point reached.
+#[derive(Default)]
+struct Shown {
+    fence: Option<&'static str>,
+    /// How the current line starts, past its indent: enough to tell a fence or a quote.
+    head: String,
+    /// Backticks on the current line so far.
+    ticks: usize,
+}
+
+impl Shown {
+    const FENCES: [&'static str; 2] = ["```", "~~~"];
+
+    fn read(&mut self, text: &str) {
+        for c in text.chars() {
+            match c {
+                '\n' => {
+                    let mark = Self::FENCES.into_iter().find(|m| self.head.starts_with(m));
+                    match (self.fence, mark) {
+                        (Some(open), Some(close)) if open == close => self.fence = None,
+                        (None, Some(open)) => self.fence = Some(open),
+                        _ => {}
+                    }
+                    self.head.clear();
+                    self.ticks = 0;
+                }
+                _ => {
+                    if c == '`' {
+                        self.ticks += 1;
+                    }
+                    if self.head.len() < 3 && !(self.head.is_empty() && c.is_whitespace()) {
+                        self.head.push(c);
+                    }
+                }
+            }
+        }
+    }
+
+    fn here(&self) -> bool {
+        self.fence.is_some()
+            || self.head.starts_with('>')
+            || Self::FENCES.iter().any(|m| self.head.starts_with(m))
+            || self.ticks % 2 == 1
+    }
 }
 
 /// Where the JSON object or array at the start of `s` ends, counting brackets
@@ -1446,7 +1552,7 @@ async fn run_generation(
     s: AppState,
     gateway: Gateway,
     user: Identity,
-    headers: Option<HeaderMap>,
+    starter: Started,
     id: Uuid,
     resolved: models::ResolvedRequest,
     turn: Turn,
@@ -1828,6 +1934,8 @@ async fn run_generation(
     }
     let work = async {
         let mut steps = 0;
+        // Every tool call id this turn has used, so no two calls share one.
+        let mut call_ids = std::collections::HashSet::new();
         let mut checkpoint = tokio::time::interval(Duration::from_millis(750));
         checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut saved_bytes = 0;
@@ -2272,6 +2380,7 @@ async fn run_generation(
                 }
                 break;
             }
+            unique_call_ids(&mut calls, &mut call_ids, steps);
             let text = content[step_start..].to_owned();
             let mut step = json!({
                 "role":"assistant",
@@ -2648,8 +2757,24 @@ async fn run_generation(
                         && !auto
                         && !connections::granted(&s.store.pool, id, set.grant(index)).await
                     {
+                        // What the card shows comes from the code that will carry the
+                        // call out; a call it would refuse is refused without asking.
+                        let review = match set.review(index, &call.arguments) {
+                            Ok(review) => review,
+                            Err(error) => {
+                                entry["status"] = json!("error");
+                                entry["detail"] = json!(error);
+                                record(&mut activity, &entry, false);
+                                emit(&mut tx, "tool", entry);
+                                payload["messages"].as_array_mut().unwrap().push(
+                                    json!({"role":"tool","tool_call_id":call.id,"content":error}),
+                                );
+                                continue;
+                            }
+                        };
                         entry["status"] = json!("awaiting");
                         entry["detail"] = json!(connections::arguments_preview(&call.arguments));
+                        entry["change"] = review;
                         record(&mut activity, &entry, false);
                         emit(&mut tx, "tool", entry.clone());
                         // Saved now so a reloaded page shows the question too.
@@ -2674,6 +2799,10 @@ async fn run_generation(
                         let decision =
                             connections::wait(&s.store.pool, generation_id, &call.id).await;
                         entry["status"] = json!("running");
+                        // Answered: the full arguments are not kept with the reply.
+                        if let Some(entry) = entry.as_object_mut() {
+                            entry.remove("change");
+                        }
                         if decision != connections::Decision::Allow {
                             entry["status"] = json!("declined");
                             entry["detail"] =
@@ -3028,13 +3157,30 @@ async fn run_generation(
             // A turn in Auto mode outlives the browser session that started it, so
             // research keeps going overnight; Stop or disabling the account ends it.
             let due = ticks.is_multiple_of(15) || recheck_session;
-            let attended = due && (!unattended || !auto_mode(s.clone()).await);
-            if let Some(headers) = headers.as_ref().filter(|_| attended) {
-                match s.auth.require(headers, false).await {
-                    Ok(_) => recheck_session = false,
-                    Err(e) if e.0 == StatusCode::INTERNAL_SERVER_ERROR => recheck_session = true,
-                    Err(_) => break "Sign-in session ended".into(),
+            let live = match &starter {
+                Started::Session(headers)
+                    if due && (!unattended || !auto_mode(s.clone()).await) =>
+                {
+                    Some((
+                        s.auth.require(headers, false).await.map(|_| ()),
+                        "Sign-in session ended",
+                    ))
                 }
+                // A token is revoked to stop what it can do, so that holds in
+                // Auto mode too.
+                Started::Token(token) if due => Some((
+                    s.auth.token_live(*token).await,
+                    "The API token that started this was revoked",
+                )),
+                _ => None,
+            };
+            match live {
+                Some((Ok(()), _)) => recheck_session = false,
+                Some((Err(e), _)) if e.0 == StatusCode::INTERNAL_SERVER_ERROR => {
+                    recheck_session = true
+                }
+                Some((Err(_), ended)) => break ended.into(),
+                None => {}
             }
             ticks += 1;
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -3070,6 +3216,9 @@ async fn run_generation(
     }
     if let Some(toolset) = toolset.take() {
         toolset.close();
+    }
+    // Browser steps ask for approval too, with or without a connection in the chat.
+    if tool_turn {
         connections::finish(&s.store.pool, generation_id).await;
     }
     // A tool turn the model stalls on pauses: what it did is kept and replayed, and
@@ -3296,6 +3445,32 @@ mod draft_tests {
     }
 
     #[test]
+    fn no_two_calls_in_a_turn_share_an_id() {
+        let call = |id: &str| ToolCall {
+            id: id.into(),
+            name: "t".into(),
+            arguments: "{}".into(),
+        };
+        let mut used = std::collections::HashSet::new();
+        let mut first = vec![call("text_call_0"), call("text_call_1")];
+        unique_call_ids(&mut first, &mut used, 1);
+        assert_eq!(first[0].id, "text_call_0");
+        assert_eq!(first[1].id, "text_call_1");
+        // The next step numbers its calls from zero again, and one repeats inside it.
+        let mut second = vec![call("text_call_0"), call("abc"), call("abc")];
+        unique_call_ids(&mut second, &mut used, 2);
+        assert_eq!(second[0].id, "call_s2_0");
+        assert_eq!(second[1].id, "abc");
+        assert_eq!(second[2].id, "call_s2_2");
+        // A model that happens to use the replacement's name still gets its own.
+        let mut third = vec![call("call_s3_0"), call("call_s3_0")];
+        unique_call_ids(&mut third, &mut used, 3);
+        assert_eq!(third[0].id, "call_s3_0");
+        assert_eq!(third[1].id, "call_s3_1");
+        assert_eq!(used.len(), 7);
+    }
+
+    #[test]
     fn tool_calls_written_as_text_run_when_they_name_offered_tools() {
         let offered = vec!["delegate".to_string(), "write_file".to_string()];
         let (text, calls) = text_tool_calls(
@@ -3319,6 +3494,32 @@ mod draft_tests {
         .unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].arguments, "{}");
+        // A call the model shows, in a code block, a code span or a quotation, is
+        // not one it makes: quoting a page that holds a call must not run it.
+        let call = r#"<function=write_file>{"path": "a.txt"}</function>"#;
+        for quoted in [
+            format!("The page says:\n```html\n{call}\n```\nI will not run that."),
+            format!("The page says:\n~~~\n{call}\n"),
+            format!("> {call}\n\nThat was in the file."),
+            format!("It contains `{call}` in a comment."),
+            "```\n[write_file(path=\"a\")]\n```".to_string(),
+        ] {
+            assert!(text_tool_calls(&quoted, &offered).is_none(), "{quoted}");
+        }
+        // What a call writes may hold fences of its own; the call after it still runs.
+        let (_, calls) = text_tool_calls(
+            "<function=write_file>{\"path\": \"README.md\", \"content\": \"Run:\n```bash\nnpm i\n\"}</function>\n<function=write_file>{\"path\": \"b.txt\"}</function>",
+            &offered,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        // One made after a code block still runs, and the block stays in the text.
+        let (text, calls) =
+            text_tool_calls(&format!("```\nx = 1\n```\nSaving it.\n{call}"), &offered).unwrap();
+        assert_eq!(
+            (text.as_str(), calls.len()),
+            ("```\nx = 1\n```\nSaving it.", 1)
+        );
         // An unknown tool, prose that mentions the syntax, or broken JSON stays text.
         assert!(text_tool_calls(r#"<function=rm_rf>{}</function>"#, &offered).is_none());
         assert!(text_tool_calls("Models write <function=name> tags.", &offered).is_none());

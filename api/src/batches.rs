@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
@@ -41,10 +41,20 @@ const MAX_PROMPT: usize = 50_000;
 const MAX_NAME: usize = 200;
 /// The JSON a browser may send to start a batch.
 const MAX_BODY: usize = 96 * 1024 * 1024;
+/// How long a browser has to send it.
+const BODY_SECONDS: u64 = 300;
+/// Spreadsheets being read at once: each is held whole while it is checked.
+static READING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 /// The input file sent to the gateway (its own limit is 200 MB by default).
 const MAX_FILE: usize = 190 * 1024 * 1024;
-/// What a results download may read from the gateway.
-const MAX_RESULTS: usize = 512 * 1024 * 1024;
+/// What a results download may read from the gateway, answers and errors together.
+/// The answers are held while the spreadsheet is written out, so this and
+/// DOWNLOADS bound what downloads take of the server's memory.
+const MAX_RESULTS: usize = 192 * 1024 * 1024;
+/// Results being put together at once.
+static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+/// How long a download waits for its turn before saying so.
+const DOWNLOAD_WAIT: Duration = Duration::from_secs(30);
 /// How long Chat keeps a batch's rows; the gateway keeps batches 30 days.
 const KEEP_DAYS: i32 = 35;
 /// Deadlines a person may choose.
@@ -56,9 +66,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
             "/api/batches",
-            get(list)
-                .post(create)
-                .layer(DefaultBodyLimit::max(MAX_BODY)),
+            // `create` reads its own body, after sign-in, up to MAX_BODY.
+            get(list).post(create),
         )
         .route("/api/batches/{id}", patch(update).delete(remove))
         .route("/api/batches/{id}/cancel", post(cancel))
@@ -344,12 +353,90 @@ struct NewBatch {
     #[serde(default)]
     system: String,
     template: String,
+    #[serde(deserialize_with = "capped::columns")]
     columns: Vec<String>,
+    #[serde(deserialize_with = "capped::rows")]
     rows: Vec<Vec<String>>,
     #[serde(default)]
     window: Option<String>,
     #[serde(default)]
     file_name: String,
+}
+
+/// Reads the spreadsheet no further than a batch may hold, so a body of millions
+/// of rows or cells is refused while it is parsed rather than after it is built.
+mod capped {
+    use super::{MAX_COLUMNS, MAX_ROWS};
+    use serde::de::{Deserialize, Deserializer, Error, SeqAccess, Visitor};
+    use std::fmt;
+
+    pub const TOO_MANY_ROWS: &str = "too many rows";
+    pub const TOO_MANY_COLUMNS: &str = "too many columns";
+
+    struct Cells;
+    impl<'de> Visitor<'de> for Cells {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a list of text cells")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(cell) = seq.next_element::<String>()? {
+                if out.len() >= MAX_COLUMNS {
+                    return Err(A::Error::custom(TOO_MANY_COLUMNS));
+                }
+                out.push(cell);
+            }
+            Ok(out)
+        }
+    }
+
+    struct Row(Vec<String>);
+    impl<'de> Deserialize<'de> for Row {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_seq(Cells).map(Row)
+        }
+    }
+
+    struct Rows;
+    impl<'de> Visitor<'de> for Rows {
+        type Value = Vec<Vec<String>>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a list of rows")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(Row(row)) = seq.next_element()? {
+                if out.len() >= MAX_ROWS {
+                    return Err(A::Error::custom(TOO_MANY_ROWS));
+                }
+                out.push(row);
+            }
+            Ok(out)
+        }
+    }
+
+    pub fn columns<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+        d.deserialize_seq(Cells)
+    }
+
+    pub fn rows<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Vec<String>>, D::Error> {
+        d.deserialize_seq(Rows)
+    }
+}
+
+/// The batch a browser sent, or why it cannot be one.
+fn parse(body: &[u8]) -> Result<NewBatch, ApiError> {
+    serde_json::from_slice(body).map_err(|error| {
+        let message = error.to_string();
+        if message.starts_with(capped::TOO_MANY_ROWS) {
+            ApiError::bad(format!("A batch can hold up to {MAX_ROWS} rows"))
+        } else if message.starts_with(capped::TOO_MANY_COLUMNS) {
+            ApiError::bad(format!("The spreadsheet needs 1 to {MAX_COLUMNS} columns"))
+        } else {
+            ApiError::bad("The batch could not be read")
+        }
+    })
 }
 
 /// `template` with each `{column}` replaced by that column's value in `row`.
@@ -545,21 +632,51 @@ fn gzip_rows(rows: &[Vec<String>]) -> Result<Vec<u8>, ApiError> {
 
 fn gunzip_rows(bytes: &[u8]) -> Option<Vec<Vec<String>>> {
     let mut text = Vec::new();
+    // What Chat stored, from a body of at most MAX_BODY.
     GzDecoder::new(bytes)
-        .take(1024 * 1024 * 1024)
+        .take(2 * MAX_BODY as u64)
         .read_to_end(&mut text)
         .ok()?;
     serde_json::from_slice(&text).ok()
 }
 
-/// Starts a batch from a spreadsheet's rows and a prompt.
+/// Starts a batch from a spreadsheet's rows and a prompt. The body is read only
+/// after sign-in is checked, since it may be up to 96 MB.
 async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut batch): Json<NewBatch>,
+    body: axum::body::Body,
 ) -> Result<Json<Value>, ApiError> {
-    let user = state.auth.require(&headers, true).await?;
+    let user = match state.auth.require(&headers, true).await {
+        Ok(user) => user,
+        Err(refused) => {
+            crate::error::discard(body).await;
+            return Err(refused);
+        }
+    };
     let gw = gateway(&state)?;
+    let mut batch = {
+        // Waits its turn before reading, so waiting spreadsheets hold no memory.
+        let _turn = READING.acquire().await.map_err(|_| ApiError::internal())?;
+        let body = tokio::time::timeout(
+            Duration::from_secs(BODY_SECONDS),
+            axum::body::to_bytes(body, MAX_BODY),
+        )
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::REQUEST_TIMEOUT,
+                "The upload took too long".into(),
+            )
+        })?
+        .map_err(|_| {
+            ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Choose a spreadsheet of 96 MB or less".into(),
+            )
+        })?;
+        parse(&body)?
+    };
     check(&mut batch)?;
     let (file, _sent) = input_file(&batch)?;
 
@@ -826,23 +943,116 @@ fn outcome_of(line: &Value) -> Outcome {
     }
 }
 
-fn parse_lines(bytes: &[u8], into: &mut HashMap<String, Outcome>) {
-    for line in bytes.split(|b| *b == b'\n') {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_slice::<Value>(line) {
-            if let Some(id) = v["custom_id"].as_str() {
-                into.insert(id.to_string(), outcome_of(&v));
-            }
+fn parse_line(line: &[u8], into: &mut HashMap<String, Outcome>) {
+    if line.iter().all(u8::is_ascii_whitespace) {
+        return;
+    }
+    if let Ok(v) = serde_json::from_slice::<Value>(line) {
+        if let Some(id) = v["custom_id"].as_str() {
+            into.insert(id.to_string(), outcome_of(&v));
         }
     }
 }
 
+/// Reads a results file a line at a time as it arrives, keeping each line's answer
+/// and not the file. `left` is what the download may still read.
+async fn read_outcomes(
+    response: reqwest::Response,
+    left: &mut usize,
+    into: &mut HashMap<String, Outcome>,
+) -> Result<(), ApiError> {
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut line: Vec<u8> = Vec::new();
+    while let Some(part) = stream.next().await {
+        let part = part.map_err(|_| crate::gateway::unavailable())?;
+        *left = left.checked_sub(part.len()).ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "The results are too large to put together here".into(),
+            )
+        })?;
+        let mut rest = &part[..];
+        while let Some(end) = rest.iter().position(|b| *b == b'\n') {
+            line.extend_from_slice(&rest[..end]);
+            parse_line(&line, into);
+            line.clear();
+            rest = &rest[end + 1..];
+        }
+        line.extend_from_slice(rest);
+    }
+    parse_line(&line, into);
+    Ok(())
+}
+
+/// A batch's results as a spreadsheet, written a few hundred rows at a time as the
+/// browser takes them, so the whole file is never held beside the answers it is
+/// made from. Each answer is let go once its row is written.
+struct Sheet {
+    columns: Vec<String>,
+    rows: std::vec::IntoIter<Vec<String>>,
+    row: usize,
+    outcomes: HashMap<String, Outcome>,
+    /// The rows of a batch Chat has no spreadsheet for, by their ids.
+    loose: std::vec::IntoIter<String>,
+    pending: &'static str,
+    started: bool,
+    _turn: tokio::sync::SemaphorePermit<'static>,
+}
+
+impl Iterator for Sheet {
+    type Item = String;
+    fn next(&mut self) -> Option<String> {
+        const ROWS: usize = 256;
+        let mut out = String::new();
+        if !self.started {
+            self.started = true;
+            // A UTF-8 byte order mark, so spreadsheet programs read accents and symbols.
+            out.push('\u{feff}');
+            let mut header: Vec<&str> = self.columns.iter().map(String::as_str).collect();
+            if header.is_empty() && self.rows.len() == 0 {
+                header.push("custom_id");
+            }
+            header.extend(["answer", "status", "error"]);
+            csv_row(header, &mut out);
+        }
+        for row in self.rows.by_ref().take(ROWS) {
+            let blank = row.iter().all(|c| c.trim().is_empty());
+            let o = self
+                .outcomes
+                .remove(&custom_id(self.row))
+                .unwrap_or(Outcome {
+                    status: if blank {
+                        "skipped (blank)"
+                    } else {
+                        self.pending
+                    },
+                    ..Outcome::default()
+                });
+            self.row += 1;
+            let mut fields: Vec<&str> = (0..self.columns.len())
+                .map(|c| row.get(c).map(String::as_str).unwrap_or(""))
+                .collect();
+            fields.extend([o.answer.as_str(), o.status, o.error.as_str()]);
+            csv_row(fields, &mut out);
+        }
+        for id in self.loose.by_ref().take(ROWS) {
+            if let Some(o) = self.outcomes.remove(&id) {
+                csv_row([id.as_str(), &o.answer, o.status, &o.error], &mut out);
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+}
+
 /// One CSV field, quoted when it needs to be. A cell that a spreadsheet would
-/// read as a formula is written as text.
+/// read as a formula is written as text. A leading `-` starts a formula too,
+/// but also a list item ("- first") and a negative number, which stay as they are.
 pub fn csv_field(value: &str, out: &mut String) {
-    let formula = value.starts_with(['=', '+', '@', '\t', '\r']);
+    let minus_formula = value.strip_prefix('-').is_some_and(|rest| {
+        !rest.is_empty() && !rest.starts_with(char::is_whitespace) && value.parse::<f64>().is_err()
+    });
+    let formula = minus_formula || value.starts_with(['=', '+', '@', '\t', '\r']);
     let quote = formula || value.contains([',', '"', '\n', '\r']);
     if quote {
         out.push('"');
@@ -912,7 +1122,18 @@ async fn results(
         .await?,
     )
     .await?;
+    // Two at a time: a download holds its batch's answers until it is written out.
+    let turn = tokio::time::timeout(DOWNLOAD_WAIT, DOWNLOADS.acquire())
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Other results are being put together. Try again in a moment.".into(),
+            )
+        })?
+        .map_err(|_| ApiError::internal())?;
     let mut outcomes = HashMap::new();
+    let mut left = MAX_RESULTS;
     for errors in [false, true] {
         let path = if errors {
             format!("v1/batches/{id}/results?errors=true")
@@ -927,7 +1148,7 @@ async fn results(
                 .timeout(Duration::from_secs(600)),
         )
         .await?;
-        parse_lines(&read_capped(response, MAX_RESULTS).await?, &mut outcomes);
+        read_outcomes(response, &mut left, &mut outcomes).await?;
     }
     let source: Option<(String, Value, Vec<u8>)> = sqlx::query_as(
         "SELECT name, columns, rows FROM batch_sources WHERE batch_id = $1 AND user_id = $2",
@@ -942,41 +1163,23 @@ async fn results(
     );
     let pending = if running { "waiting" } else { "not run" };
 
-    // A UTF-8 byte order mark, so spreadsheet programs read accents and symbols.
-    let mut out = String::from("\u{feff}");
-    let name = match source {
+    let (name, columns, rows, loose) = match source {
         Some((name, columns, rows)) => {
             let columns: Vec<String> = serde_json::from_value(columns).unwrap_or_default();
-            let rows = gunzip_rows(&rows).unwrap_or_default();
-            let mut header: Vec<&str> = columns.iter().map(String::as_str).collect();
-            header.extend(["answer", "status", "error"]);
-            csv_row(header, &mut out);
-            for (i, row) in rows.iter().enumerate() {
-                let blank = row.iter().all(|c| c.trim().is_empty());
-                let o = outcomes.get(&custom_id(i)).cloned().unwrap_or(Outcome {
-                    status: if blank { "skipped (blank)" } else { pending },
-                    ..Outcome::default()
-                });
-                let mut fields: Vec<&str> = (0..columns.len())
-                    .map(|c| row.get(c).map(String::as_str).unwrap_or(""))
-                    .collect();
-                fields.extend([o.answer.as_str(), o.status, o.error.as_str()]);
-                csv_row(fields, &mut out);
-            }
-            name
+            // Unpacked off the request threads: the rows can be most of 100 MB.
+            let rows = tokio::task::spawn_blocking(move || gunzip_rows(&rows).unwrap_or_default())
+                .await
+                .map_err(|_| ApiError::internal())?;
+            (name, columns, rows, vec![])
         }
         None => {
-            csv_row(["custom_id", "answer", "status", "error"], &mut out);
-            let mut ids: Vec<&String> = outcomes.keys().collect();
+            let mut ids: Vec<String> = outcomes.keys().cloned().collect();
             ids.sort_by_key(|k| (row_of(k).unwrap_or(usize::MAX), k.to_string()));
-            for k in ids {
-                let o = &outcomes[k];
-                csv_row([k.as_str(), &o.answer, o.status, &o.error], &mut out);
-            }
-            batch["metadata"]["name"]
+            let name = batch["metadata"]["name"]
                 .as_str()
                 .unwrap_or(id.as_str())
-                .to_string()
+                .to_string();
+            (name, vec![], vec![], ids)
         }
     };
     // A name the person gave it names the file too.
@@ -985,6 +1188,19 @@ async fn results(
         .remove(&id)
         .and_then(|l| l.name)
         .unwrap_or(name);
+    let sheet = Sheet {
+        columns,
+        rows: rows.into_iter(),
+        row: 0,
+        outcomes,
+        loose: loose.into_iter(),
+        pending,
+        started: false,
+        _turn: turn,
+    };
+    let body = axum::body::Body::from_stream(futures_util::stream::iter(
+        sheet.map(|part| Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(part))),
+    ));
     Ok((
         [
             (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
@@ -994,7 +1210,7 @@ async fn results(
             ),
             (header::CACHE_CONTROL, "no-store".to_string()),
         ],
-        out,
+        body,
     )
         .into_response())
 }
@@ -1005,6 +1221,86 @@ mod tests {
 
     fn cols(names: &[&'static str]) -> HashMap<&'static str, usize> {
         names.iter().enumerate().map(|(i, c)| (*c, i)).collect()
+    }
+
+    /// The results spreadsheet is written a few hundred rows at a time, and comes
+    /// out the same as if it had been written whole.
+    #[test]
+    fn results_are_written_in_parts_that_add_up() {
+        let mut outcomes = HashMap::new();
+        for line in [
+            r#"{"custom_id":"row-1","response":{"status_code":200,"body":{"choices":[{"message":{"content":"=1+1"}}]}}}"#,
+            r#"{"custom_id":"row-3","error":{"code":"batch_expired","message":"late"}}"#,
+            "   ",
+            "not json",
+        ] {
+            parse_line(line.as_bytes(), &mut outcomes);
+        }
+        assert_eq!(outcomes.len(), 2);
+        let mut rows: Vec<Vec<String>> = vec![
+            vec!["a".into(), "x,y".into()],
+            vec![" ".into(), "".into()],
+            vec!["c".into()],
+        ];
+        rows.extend((3..700).map(|i| vec![format!("r{i}"), String::new()]));
+        let sheet = |outcomes: HashMap<String, Outcome>,
+                     rows: Vec<Vec<String>>,
+                     loose: Vec<String>| Sheet {
+            columns: if rows.is_empty() {
+                vec![]
+            } else {
+                vec!["word".into(), "note".into()]
+            },
+            rows: rows.into_iter(),
+            row: 0,
+            outcomes,
+            loose: loose.into_iter(),
+            pending: "waiting",
+            started: false,
+            _turn: DOWNLOADS.try_acquire().unwrap(),
+        };
+        let parts: Vec<String> = sheet(outcomes.clone(), rows, vec![]).collect();
+        assert!(parts.len() >= 3, "{}", parts.len());
+        let whole = parts.concat();
+        let lines: Vec<&str> = whole.split("\r\n").collect();
+        assert_eq!(lines[0], "\u{feff}word,note,answer,status,error");
+        assert_eq!(lines[1], "a,\"x,y\",\"'=1+1\",done,");
+        assert_eq!(lines[2], " ,,,skipped (blank),");
+        assert_eq!(lines[3], "c,,,ran out of time,late");
+        assert_eq!(lines[4], "r3,,,waiting,");
+        assert_eq!(lines.len(), 702);
+        // A batch Chat has no spreadsheet for lists its rows by id.
+        let loose: String = sheet(outcomes, vec![], vec!["row-1".into(), "row-3".into()]).collect();
+        assert_eq!(
+            loose,
+            "\u{feff}custom_id,answer,status,error\r\nrow-1,\"'=1+1\",done,\r\nrow-3,,ran out of time,late\r\n"
+        );
+    }
+
+    #[test]
+    fn a_spreadsheet_is_refused_while_it_is_read() {
+        let body = |columns: &str, rows: &str| {
+            format!(
+                r#"{{"name":"n","model":"m","template":"{{t}}","columns":{columns},"rows":{rows}}}"#
+            )
+        };
+        let ok = parse(body(r#"["t"]"#, r#"[["a"],["b"]]"#).as_bytes())
+            .unwrap_or_else(|e| panic!("{}", e.1));
+        assert_eq!(ok.rows.len(), 2);
+
+        let many_rows = format!("[{}[]]", "[],".repeat(MAX_ROWS));
+        let error = parse(body(r#"["t"]"#, &many_rows).as_bytes())
+            .err()
+            .unwrap();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("rows"), "{}", error.1);
+
+        let wide = format!("[[{}\"x\"]]", "\"x\",".repeat(MAX_COLUMNS));
+        let error = parse(body(r#"["t"]"#, &wide).as_bytes()).err().unwrap();
+        assert!(error.1.contains("columns"), "{}", error.1);
+
+        let error = parse(b"{").err().unwrap();
+        assert_eq!(error.1, "The batch could not be read");
     }
 
     #[test]
@@ -1121,6 +1417,9 @@ mod tests {
             out,
             "plain,\"a,b\",\"say \"\"hi\"\"\",\"'=SUM(A1)\",- item\r\n"
         );
+        let mut out = String::new();
+        csv_row(["-2+3+cmd", "-SUM(A1)", "-5.2", "-", "-1e3"], &mut out);
+        assert_eq!(out, "\"'-2+3+cmd\",\"'-SUM(A1)\",-5.2,-,-1e3\r\n");
         assert_eq!(
             file_name_for("Gene notes / v2"),
             "Gene-notes---v2-results.csv"

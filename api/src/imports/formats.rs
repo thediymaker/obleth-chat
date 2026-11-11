@@ -1,14 +1,21 @@
 //! The export formats, read leniently: a field of an unexpected type is treated as
-//! missing rather than failing the whole file.
-use chrono::{DateTime, TimeZone, Utc};
-use serde::de::{Deserializer, MapAccess, Visitor};
-use serde::Deserialize;
-use serde_json::Value;
+//! missing rather than failing the whole file. Only the fields Chat uses are kept.
+//! The rest of a conversation is skipped as it is read, and what is kept is charged
+//! to the conversation's allowance (`budget`), so the memory a file takes follows
+//! its text and not its shape.
+use std::marker::PhantomData;
 
-use super::{Node, Raw, Role, Source};
+use chrono::{DateTime, TimeZone, Utc};
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
+use serde_json::Number;
+
+use super::{budget, Node, Raw, Role, Source};
 
 const IMAGE: &str = "[Image not imported]";
 const AUDIO: &str = "[Audio not imported]";
+const FAILED: &str = "The reply failed";
 
 /// One conversation from any supported app. The field that holds the messages
 /// tells the apps apart: ChatGPT's `mapping`, Open WebUI's `chat`, Claude's
@@ -50,7 +57,7 @@ pub(super) struct Record {
     #[serde(default)]
     chat: Option<WebUiChat>,
     #[serde(default)]
-    chat_messages: Option<Vec<ClaudeMessage>>,
+    chat_messages: Option<Listed<ClaudeMessage>>,
 }
 
 impl Record {
@@ -83,7 +90,7 @@ impl Record {
                     .map(|(k, m)| m.into_node(k, None))
                     .collect(),
                 // Early versions kept a plain list of messages.
-                _ => linear(chat.messages.unwrap_or_default(), |m, k, p| {
+                _ => linear(chat.messages.map(|l| l.0).unwrap_or_default(), |m, k, p| {
                     m.into_node(k, Some(p))
                 }),
             };
@@ -101,7 +108,7 @@ impl Record {
                 },
             ));
         }
-        let messages = self.chat_messages?;
+        let messages = self.chat_messages?.0;
         // Newer exports link each message to the one it answers; older ones are a list.
         let keys: std::collections::HashSet<&str> =
             messages.iter().filter_map(|m| m.uuid.as_deref()).collect();
@@ -170,7 +177,46 @@ struct GptMessage {
     #[serde(default, deserialize_with = "text")]
     recipient: Option<String>,
     #[serde(default)]
-    metadata: Option<Value>,
+    metadata: Loose<GptMeta>,
+}
+/// The parts of a message's metadata Chat reads. The rest, which for a reply that
+/// searched the web is most of the conversation, is skipped.
+#[derive(Default, Deserialize)]
+struct GptMeta {
+    #[serde(default, deserialize_with = "flag")]
+    is_visually_hidden_from_conversation: bool,
+    #[serde(default, deserialize_with = "flag")]
+    is_thinking_preamble_message: bool,
+    #[serde(default)]
+    aggregate_result: Loose<GptAggregate>,
+    #[serde(default)]
+    model_dil_v2: Loose<GptFallback>,
+    #[serde(default)]
+    attachments: Listed<Loose<GptAttachment>>,
+    #[serde(default, deserialize_with = "string")]
+    model_slug: Option<String>,
+}
+#[derive(Default, Deserialize)]
+struct GptAggregate {
+    #[serde(default)]
+    messages: Listed<Loose<GptAggregateMessage>>,
+}
+#[derive(Default, Deserialize)]
+struct GptAggregateMessage {
+    #[serde(default, deserialize_with = "string")]
+    message_type: Option<String>,
+}
+#[derive(Default, Deserialize)]
+struct GptFallback {
+    #[serde(default, rename = "fallbackMarkdown", deserialize_with = "string")]
+    markdown: Option<String>,
+}
+#[derive(Default, Deserialize)]
+struct GptAttachment {
+    #[serde(default, deserialize_with = "string")]
+    mime_type: Option<String>,
+    #[serde(default, deserialize_with = "string")]
+    name: Option<String>,
 }
 #[derive(Deserialize)]
 struct GptAuthor {
@@ -182,11 +228,25 @@ struct GptContent {
     #[serde(default, deserialize_with = "text")]
     content_type: Option<String>,
     #[serde(default)]
-    parts: Option<Vec<Value>>,
+    parts: Listed<GptPart>,
     #[serde(default, deserialize_with = "text")]
     text: Option<String>,
     #[serde(default)]
-    thoughts: Option<Vec<Value>>,
+    thoughts: Listed<Loose<GptThought>>,
+}
+/// Text, or an object naming what it stands for: an image, audio, a transcription.
+type GptPart = Any<GptPartFields, IgnoredAny>;
+#[derive(Deserialize)]
+struct GptPartFields {
+    #[serde(default, deserialize_with = "string")]
+    content_type: Option<String>,
+    #[serde(default, deserialize_with = "string")]
+    text: Option<String>,
+}
+#[derive(Default, Deserialize)]
+struct GptThought {
+    #[serde(default, deserialize_with = "string")]
+    content: Option<String>,
 }
 
 impl GptNode {
@@ -200,18 +260,13 @@ impl GptNode {
             return node;
         };
         node.created = m.create_time;
-        let meta = m.metadata.unwrap_or(Value::Null);
+        let meta = m.metadata.0;
         let role = m.author.and_then(|a| a.role).unwrap_or_default();
         let Some(content) = m.content else {
             return node;
         };
         let kind = content.content_type.as_deref().unwrap_or("text");
-        let hidden = [
-            "is_visually_hidden_from_conversation",
-            "is_thinking_preamble_message",
-        ]
-        .iter()
-        .any(|k| meta.get(k).and_then(Value::as_bool) == Some(true));
+        let hidden = meta.is_visually_hidden_from_conversation || meta.is_thinking_preamble_message;
         // Messages addressed to a tool (a search, code to run, an image request) are
         // steps, not part of the transcript.
         let to_tool = m.recipient.as_deref().is_some_and(|r| r != "all");
@@ -223,9 +278,9 @@ impl GptNode {
                 node.role = Some(Role::Assistant);
                 node.reasoning = content
                     .thoughts
-                    .unwrap_or_default()
+                    .0
                     .iter()
-                    .filter_map(|t| t.get("content").and_then(Value::as_str))
+                    .filter_map(|t| t.0.content.as_deref())
                     .filter(|t| !t.trim().is_empty())
                     .collect::<Vec<_>>()
                     .join("\n\n");
@@ -234,20 +289,18 @@ impl GptNode {
             ("tool", _) => {
                 let images = content
                     .parts
+                    .0
                     .iter()
-                    .flatten()
                     .filter(|p| part_type(p) == Some("image_asset_pointer"))
                     .count()
                     + meta
-                        .pointer("/aggregate_result/messages")
-                        .and_then(Value::as_array)
-                        .map_or(0, |list| {
-                            list.iter()
-                                .filter(|m| {
-                                    m.get("message_type").and_then(Value::as_str) == Some("image")
-                                })
-                                .count()
-                        });
+                        .aggregate_result
+                        .0
+                        .messages
+                        .0
+                        .iter()
+                        .filter(|m| m.0.message_type.as_deref() == Some("image"))
+                        .count();
                 if images > 0 {
                     node.role = Some(Role::Assistant);
                     node.content = vec![IMAGE; images].join("\n");
@@ -259,34 +312,24 @@ impl GptNode {
                 } else {
                     Role::Assistant
                 });
-                let fallback = meta
-                    .pointer("/model_dil_v2/fallbackMarkdown")
-                    .and_then(Value::as_str);
-                node.content = match (fallback, kind) {
-                    (Some(markdown), _) => markdown.to_owned(),
+                node.content = match (meta.model_dil_v2.0.markdown, kind) {
+                    (Some(markdown), _) => markdown,
                     (None, "code") => format!("```\n{}\n```", content.text.unwrap_or_default()),
-                    (None, _) => gpt_parts(content.parts.unwrap_or_default()),
+                    (None, _) => gpt_parts(content.parts.0),
                 };
                 if role == "user" {
-                    for file in meta
-                        .get("attachments")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                    {
+                    for file in &meta.attachments.0 {
                         let image = file
-                            .get("mime_type")
-                            .and_then(Value::as_str)
+                            .0
+                            .mime_type
+                            .as_deref()
                             .is_some_and(|t| t.starts_with("image/"));
                         if !image {
-                            super::join(&mut node.content, &file_line(file.get("name")));
+                            super::join(&mut node.content, &file_line(file.0.name.as_deref()));
                         }
                     }
                 }
-                node.model = meta
-                    .get("model_slug")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+                node.model = meta.model_slug;
             }
             // Browsing results, code output, memory and custom instructions.
             _ => {}
@@ -295,24 +338,26 @@ impl GptNode {
     }
 }
 
-fn part_type(part: &Value) -> Option<&str> {
-    part.get("content_type").and_then(Value::as_str)
+fn part_type(part: &GptPart) -> Option<&str> {
+    match part {
+        Any::Object(fields) => fields.content_type.as_deref(),
+        _ => None,
+    }
 }
 
-fn gpt_parts(parts: Vec<Value>) -> String {
+fn gpt_parts(parts: Vec<GptPart>) -> String {
     let spoken = parts
         .iter()
         .any(|p| part_type(p) == Some("audio_transcription"));
     let mut text = String::new();
     for part in parts {
         match part {
-            Value::String(s) => super::join(&mut text, &s),
-            p => match part_type(&p) {
+            Any::Text(s) => super::join(&mut text, &s),
+            Any::Object(p) => match p.content_type.as_deref() {
                 Some("image_asset_pointer") => super::join(&mut text, IMAGE),
-                Some("audio_transcription") => super::join(
-                    &mut text,
-                    p.get("text").and_then(Value::as_str).unwrap_or(""),
-                ),
+                Some("audio_transcription") => {
+                    super::join(&mut text, p.text.as_deref().unwrap_or(""))
+                }
                 Some("audio_asset_pointer" | "real_time_user_audio_video_asset_pointer")
                     if !spoken =>
                 {
@@ -320,13 +365,14 @@ fn gpt_parts(parts: Vec<Value>) -> String {
                 }
                 _ => {}
             },
+            _ => {}
         }
     }
     text
 }
 
-fn file_line(name: Option<&Value>) -> String {
-    match name.and_then(Value::as_str).map(str::trim) {
+fn file_line(name: Option<&str>) -> String {
+    match name.map(str::trim) {
         Some(name) if !name.is_empty() => {
             let name: String = name.chars().filter(|c| !c.is_control()).take(200).collect();
             format!("[File not imported: {name}]")
@@ -342,7 +388,7 @@ struct WebUiChat {
     #[serde(default)]
     history: Option<WebUiHistory>,
     #[serde(default)]
-    messages: Option<Vec<WebUiMessage>>,
+    messages: Option<Listed<WebUiMessage>>,
 }
 #[derive(Deserialize)]
 struct WebUiHistory {
@@ -357,16 +403,37 @@ struct WebUiMessage {
     parent_id: Option<String>,
     #[serde(default, deserialize_with = "text")]
     role: Option<String>,
+    /// Text, or a list of parts as the OpenAI message format allows.
     #[serde(default)]
-    content: Value,
+    content: Any<IgnoredAny, Loose<TextPart>>,
     #[serde(default, deserialize_with = "text")]
     model: Option<String>,
     #[serde(default, deserialize_with = "stamp")]
     timestamp: Option<DateTime<Utc>>,
+    /// Open WebUI keeps a document's whole text here; only what names it is read.
     #[serde(default)]
-    files: Option<Vec<Value>>,
+    files: Listed<Loose<WebUiFile>>,
     #[serde(default)]
-    error: Value,
+    error: Any<Failure, IgnoredAny>,
+}
+#[derive(Default, Deserialize)]
+struct TextPart {
+    #[serde(default, deserialize_with = "string")]
+    text: Option<String>,
+}
+#[derive(Default, Deserialize)]
+struct WebUiFile {
+    #[serde(default, rename = "type", deserialize_with = "string")]
+    kind: Option<String>,
+    #[serde(default, deserialize_with = "string")]
+    content_type: Option<String>,
+    #[serde(default, deserialize_with = "string")]
+    name: Option<String>,
+}
+#[derive(Deserialize)]
+struct Failure {
+    #[serde(default, deserialize_with = "string")]
+    content: Option<String>,
 }
 
 impl WebUiMessage {
@@ -376,39 +443,35 @@ impl WebUiMessage {
             Some("assistant") => Some(Role::Assistant),
             _ => None,
         };
-        let raw = match &self.content {
-            Value::String(s) => s.clone(),
-            // A list of parts, as the OpenAI message format allows.
-            Value::Array(parts) => parts
+        let raw = match self.content {
+            Any::Text(s) => s,
+            Any::List(parts) => parts
                 .iter()
-                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .filter_map(|p| p.0.text.as_deref())
                 .collect::<Vec<_>>()
                 .join("\n\n"),
             _ => String::new(),
         };
         let (mut content, reasoning) = details(&raw);
-        for file in self.files.iter().flatten() {
-            let image = file.get("type").and_then(Value::as_str) == Some("image")
+        for file in &self.files.0 {
+            let image = file.0.kind.as_deref() == Some("image")
                 || file
-                    .get("content_type")
-                    .and_then(Value::as_str)
+                    .0
+                    .content_type
+                    .as_deref()
                     .is_some_and(|t| t.starts_with("image/"));
             let line = if image {
                 IMAGE.to_owned()
             } else {
-                file_line(file.get("name"))
+                file_line(file.0.name.as_deref())
             };
             super::join(&mut content, &line);
         }
-        let error = match &self.error {
-            Value::Null | Value::Bool(false) => None,
-            Value::String(s) => Some(s.clone()),
-            e => Some(
-                e.get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("The reply failed")
-                    .to_owned(),
-            ),
+        let error = match self.error {
+            Any::Null | Any::Bool(false) => None,
+            Any::Text(s) => Some(s),
+            Any::Object(e) => Some(e.content.unwrap_or_else(|| FAILED.into())),
+            _ => Some(FAILED.into()),
         };
         Node {
             key,
@@ -501,13 +564,27 @@ struct ClaudeMessage {
     #[serde(default, deserialize_with = "text")]
     text: Option<String>,
     #[serde(default)]
-    content: Option<Vec<Value>>,
+    content: Listed<Loose<ClaudePart>>,
     #[serde(default, deserialize_with = "stamp")]
     created_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    attachments: Option<Vec<Value>>,
+    attachments: Listed<Loose<ClaudeFile>>,
     #[serde(default)]
-    files: Option<Vec<Value>>,
+    files: Listed<Loose<ClaudeFile>>,
+}
+#[derive(Default, Deserialize)]
+struct ClaudePart {
+    #[serde(default, rename = "type", deserialize_with = "string")]
+    kind: Option<String>,
+    #[serde(default, deserialize_with = "string")]
+    text: Option<String>,
+    #[serde(default, deserialize_with = "string")]
+    thinking: Option<String>,
+}
+#[derive(Default, Deserialize)]
+struct ClaudeFile {
+    #[serde(default, deserialize_with = "string")]
+    file_name: Option<String>,
 }
 
 impl ClaudeMessage {
@@ -520,25 +597,21 @@ impl ClaudeMessage {
         let mut content = String::new();
         let mut reasoning = String::new();
         // Structured parts when present; tool calls and their results are steps.
-        for part in self.content.iter().flatten() {
-            match part.get("type").and_then(Value::as_str) {
-                Some("text") => super::join(
-                    &mut content,
-                    part.get("text").and_then(Value::as_str).unwrap_or(""),
-                ),
-                Some("thinking") => super::join(
-                    &mut reasoning,
-                    part.get("thinking").and_then(Value::as_str).unwrap_or(""),
-                ),
+        for part in &self.content.0 {
+            match part.0.kind.as_deref() {
+                Some("text") => super::join(&mut content, part.0.text.as_deref().unwrap_or("")),
+                Some("thinking") => {
+                    super::join(&mut reasoning, part.0.thinking.as_deref().unwrap_or(""))
+                }
                 _ => {}
             }
         }
         if content.trim().is_empty() {
             content = self.text.unwrap_or_default();
         }
-        for file in self.attachments.iter().chain(&self.files).flatten() {
-            let name = file.get("file_name");
-            let image = name.and_then(Value::as_str).is_some_and(|n| {
+        for file in self.attachments.0.iter().chain(&self.files.0) {
+            let name = file.0.file_name.as_deref();
+            let image = name.is_some_and(|n| {
                 let n = n.to_ascii_lowercase();
                 [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"]
                     .iter()
@@ -578,6 +651,8 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Ordered<T> {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut entries = Vec::new();
                 while let Some(entry) = map.next_entry::<String, T>()? {
+                    budget::slot::<(String, T), A::Error>()?;
+                    budget::charge::<A::Error>(entry.0.len())?;
                     entries.push(entry);
                 }
                 Ok(Ordered(entries))
@@ -587,23 +662,127 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Ordered<T> {
     }
 }
 
+/// A JSON value as far as Chat looks at it: an object read as `O`, a list of `I`, or
+/// a plain value. `IgnoredAny` in either place skips that kind without keeping it.
+#[derive(Default)]
+enum Any<O, I> {
+    #[default]
+    Null,
+    Bool(bool),
+    Number(Number),
+    Text(String),
+    Object(O),
+    List(Vec<I>),
+}
+impl<'de, O: Deserialize<'de>, I: Deserialize<'de>> Deserialize<'de> for Any<O, I> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Kind<O, I>(PhantomData<(O, I)>);
+        impl<'de, O: Deserialize<'de>, I: Deserialize<'de>> Visitor<'de> for Kind<O, I> {
+            type Value = Any<O, I>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(Any::Null)
+            }
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(Any::Null)
+            }
+            fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+                d.deserialize_any(self)
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(Any::Bool(v))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(Any::Number(v.into()))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(Any::Number(v.into()))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+                Ok(Number::from_f64(v).map_or(Any::Null, Any::Number))
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                budget::charge::<E>(v.len())?;
+                Ok(Any::Text(v.to_owned()))
+            }
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                budget::charge::<E>(v.len())?;
+                Ok(Any::Text(v))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut list = Vec::new();
+                while let Some(item) = seq.next_element::<I>()? {
+                    budget::slot::<I, A::Error>()?;
+                    list.push(item);
+                }
+                Ok(Any::List(list))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                O::deserialize(MapAccessDeserializer::new(map)).map(Any::Object)
+            }
+        }
+        d.deserialize_any(Kind(PhantomData))
+    }
+}
+
+/// An object with the fields `T` names. Anything else in its place reads as empty.
+#[derive(Default)]
+struct Loose<T>(T);
+impl<'de, T: Deserialize<'de> + Default> Deserialize<'de> for Loose<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match Any::<T, IgnoredAny>::deserialize(d)? {
+            Any::Object(fields) => Self(fields),
+            _ => Self::default(),
+        })
+    }
+}
+
+/// A list. Anything else in its place reads as an empty one.
+pub(super) struct Listed<T>(pub Vec<T>);
+impl<T> Default for Listed<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Listed<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match Any::<IgnoredAny, T>::deserialize(d)? {
+            Any::List(items) => Self(items),
+            _ => Self::default(),
+        })
+    }
+}
+
+/// A value that is not an object or a list; those are skipped.
+type Plain = Any<IgnoredAny, IgnoredAny>;
+
+/// Text, or a number as text, as ids are written either way.
 fn text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    Ok(match Value::deserialize(d)? {
-        Value::String(s) => Some(s),
-        Value::Number(n) => Some(n.to_string()),
+    Ok(match Plain::deserialize(d)? {
+        Any::Text(s) => Some(s),
+        Any::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
+fn string<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match Plain::deserialize(d)? {
+        Any::Text(s) => Some(s),
         _ => None,
     })
 }
 
 fn flag<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
-    Ok(Value::deserialize(d)?.as_bool().unwrap_or(false))
+    Ok(matches!(Plain::deserialize(d)?, Any::Bool(true)))
 }
 
 /// Seconds, milliseconds or nanoseconds since 1970, or an RFC 3339 time.
 fn stamp<'de, D: Deserializer<'de>>(d: D) -> Result<Option<DateTime<Utc>>, D::Error> {
-    let time = match Value::deserialize(d)? {
-        Value::Number(n) => n.as_f64().and_then(epoch),
-        Value::String(s) => DateTime::parse_from_rfc3339(s.trim())
+    let time = match Plain::deserialize(d)? {
+        Any::Number(n) => n.as_f64().and_then(epoch),
+        Any::Text(s) => DateTime::parse_from_rfc3339(s.trim())
             .map(|t| t.with_timezone(&Utc))
             .ok()
             .or_else(|| s.trim().parse::<f64>().ok().and_then(epoch)),

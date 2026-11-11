@@ -29,6 +29,8 @@ jobs:
             echo "error: tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           fi
+      - name: installers name this version's images
+        run: sh scripts/check-versions.sh
 
   build:
     needs: verify

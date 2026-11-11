@@ -1,14 +1,23 @@
 //! Turns an uploaded file into pages of plain text, then into passages for search.
 //! PDFs go through poppler's `pdftotext` (and `pdftohtml` for their bookmarks) and Word,
 //! PowerPoint and Excel files through `unzip`, each in a short-lived process with a time
-//! limit, so a hostile file cannot hang Chat.
+//! limit, a memory limit and none of Chat's environment, so a hostile file cannot hang
+//! Chat or reach its secrets through a tool. What the tools write is then parsed here,
+//! off the async workers, in time and memory that follow the file's size whatever it
+//! holds.
 //!
 //! Each part of a file keeps the headings it sits under, its section: HTML headings,
 //! Markdown `#` lines, Word heading styles, PDF bookmarks, slides and sheets. A passage
 //! never spans two sections, so a citation names one.
 
 use anyhow::{bail, Context, Result};
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     io::AsyncReadExt,
     process::{Child, Command},
@@ -26,6 +35,23 @@ pub const MAX_CELLS: usize = 100_000;
 const MAX_COLUMNS: usize = 256;
 pub const MAX_SLIDES: usize = 1000;
 const MAX_SHEETS: usize = 100;
+/// Shared strings read from a workbook; cells that name a later one read as empty.
+const MAX_SHARED_STRINGS: usize = 1_000_000;
+/// Headings a document is split at. The text under later ones stays with the last.
+const MAX_SECTIONS: usize = 10_000;
+/// Bookmarks read from a PDF, and how deep they nest.
+const MAX_BOOKMARKS: usize = 10_000;
+const MAX_BOOKMARK_DEPTH: usize = 8;
+/// Longest heading kept, in bytes. A heading is repeated in the path of every section
+/// under it, so one of any length would be copied once for each.
+const MAX_HEADING: usize = 300;
+/// How far into a page a bookmark's title is looked for: more than a page of text holds.
+const TITLE_WINDOW: usize = 256 * 1024;
+/// Address space a tool may take, in KiB, well under what a server is given, so a file
+/// that makes a tool allocate without end stops the tool and not Chat.
+const TOOL_MEMORY_KIB: usize = 1024 * 1024;
+/// Longest the parts of one Office file may take to read, all together.
+const OFFICE_TIME: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -142,24 +168,31 @@ impl Tools {
     }
 }
 
+/// Parsing is CPU work on a file of someone else's making, so it runs off the async
+/// workers, where a slow one would hold up every request.
+async fn parsed<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .context("reading the file stopped part way")
+}
+
 pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracted> {
     match kind {
         Kind::Text => Ok(Extracted::Pages(vec![Page::whole(
             String::from_utf8_lossy(bytes).into_owned(),
         )])),
         Kind::Markdown => {
-            let text = String::from_utf8_lossy(bytes);
-            Ok(Extracted::Pages(Page::sections(
-                markdown_sections(&text).1,
-                || text.to_string(),
-            )))
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            let pages = parsed(move || {
+                let sections = markdown_sections(&text).1;
+                Page::sections(sections, || text)
+            });
+            Ok(Extracted::Pages(pages.await?))
         }
         Kind::Html => {
-            let html = String::from_utf8_lossy(bytes);
-            Ok(Extracted::Pages(Page::sections(
-                html_sections(&html).1,
-                || html_text(&html),
-            )))
+            let html = String::from_utf8_lossy(bytes).into_owned();
+            let pages = parsed(move || Page::sections(html_sections(&html).1, || html_text(&html)));
+            Ok(Extracted::Pages(pages.await?))
         }
         Kind::Docx => {
             let mut zip = Zip::new(&tools.unzip, bytes).await?;
@@ -169,10 +202,9 @@ pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracte
                 .context("this Word file could not be opened")?;
             // Heading styles are named in styles.xml; a file without one has no headings.
             let styles = zip.read("word/styles.xml").await.unwrap_or_default();
-            Ok(Extracted::Pages(Page::sections(
-                docx_sections(&xml, &styles).1,
-                || docx_text(&xml),
-            )))
+            let pages =
+                parsed(move || Page::sections(docx_sections(&xml, &styles).1, || docx_text(&xml)));
+            Ok(Extracted::Pages(pages.await?))
         }
         Kind::Pptx => {
             let mut zip = Zip::new(&tools.unzip, bytes).await?;
@@ -198,16 +230,17 @@ pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracte
             )
             .await
             .context("this PDF could not be read")?;
-            let text = String::from_utf8_lossy(&out);
-            // pdftotext ends every page with a form feed.
-            let mut pages: Vec<&str> = text.split('\u{c}').collect();
-            if pages.last().is_some_and(|p| p.trim().is_empty()) {
-                pages.pop();
-            }
-            let count = pages.len().max(1) as i32;
-            let letters = text.chars().filter(|c| c.is_alphanumeric()).count();
-            if letters < 40 * count as usize {
-                return Ok(Extracted::NeedsOcr { pages: count });
+            let (text, count, letters) = parsed(move || {
+                let text = String::from_utf8_lossy(&out).into_owned();
+                let count = pdf_page_texts(&text).len().max(1);
+                let letters = text.chars().filter(|c| c.is_alphanumeric()).count();
+                (text, count, letters)
+            })
+            .await?;
+            if letters < 40 * count {
+                return Ok(Extracted::NeedsOcr {
+                    pages: count as i32,
+                });
             }
             // Bookmarks are a bonus: a PDF without them, or a pdftohtml that fails, is
             // read without sections.
@@ -217,11 +250,25 @@ pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracte
                 bytes,
             )
             .await
-            .map(|xml| pdf_outline(&String::from_utf8_lossy(&xml)))
-            .unwrap_or_default();
-            Ok(Extracted::Pages(pdf_pages(&pages, &outline)))
+            .ok();
+            let pages = parsed(move || {
+                let outline = outline
+                    .map(|xml| pdf_outline(&String::from_utf8_lossy(&xml)))
+                    .unwrap_or_default();
+                pdf_pages(&pdf_page_texts(&text), &outline)
+            });
+            Ok(Extracted::Pages(pages.await?))
         }
     }
+}
+
+/// The text of each page: pdftotext ends every page with a form feed.
+fn pdf_page_texts(text: &str) -> Vec<&str> {
+    let mut pages: Vec<&str> = text.split('\u{c}').collect();
+    if pages.last().is_some_and(|p| p.trim().is_empty()) {
+        pages.pop();
+    }
+    pages
 }
 
 /// Runs a tool on the file, given as `{file}` in the arguments, and returns stdout.
@@ -232,12 +279,24 @@ async fn run(program: &str, args: &[&str], bytes: &[u8]) -> Result<Vec<u8>> {
 
 /// Runs a tool on a file already written out. Output is read as it comes and the tool
 /// is stopped once it passes `limit`, so a small file that expands enormously (a zip
-/// bomb) cannot exhaust memory.
+/// bomb) cannot exhaust memory. The tool gets a limit on its own memory, set by the
+/// shell that starts it, and a search path but nothing else of Chat's environment,
+/// which holds Chat's keys.
 async fn run_on(program: &str, args: &[&str], file: &TempFile, limit: usize) -> Result<Vec<u8>> {
     let path = file.0.to_string_lossy();
     let args: Vec<String> = args.iter().map(|a| a.replace("{file}", &path)).collect();
-    let child = Command::new(program)
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -v {TOOL_MEMORY_KIB} 2>/dev/null; exec \"$0\" \"$@\""
+        ))
+        .arg(program)
         .args(&args)
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -294,6 +353,10 @@ async fn output(program: &str, mut child: Child, limit: usize) -> Result<Vec<u8>
         out.extend_from_slice(&chunk[..n]);
     }
     let status = child.wait().await?;
+    // The shell that starts the tool answers 126 or 127 when it cannot.
+    if matches!(status.code(), Some(126 | 127)) {
+        bail!("{program} is not available");
+    }
     if !status.success() {
         bail!("{program} exited with {status}");
     }
@@ -302,11 +365,12 @@ async fn output(program: &str, mut child: Child, limit: usize) -> Result<Vec<u8>
 
 /// An Office file (a zip archive) whose parts are read one at a time with `unzip -p`.
 /// Every part read counts against one budget of MAX_OUTPUT, so many parts can't add up
-/// to more than one oversized part could.
+/// to more than one oversized part could, and all of them against one stretch of time.
 struct Zip<'a> {
     unzip: &'a str,
     file: TempFile,
     left: usize,
+    until: Instant,
 }
 
 impl<'a> Zip<'a> {
@@ -315,19 +379,24 @@ impl<'a> Zip<'a> {
             unzip,
             file: TempFile::new(bytes).await?,
             left: MAX_OUTPUT,
+            until: Instant::now() + OFFICE_TIME,
         })
     }
 
     async fn read(&mut self, part: &str) -> Result<String> {
-        // unzip reads its arguments as patterns: a part named by the file itself must
-        // be a plain path, or it could match every part at once.
+        // unzip reads its arguments as patterns and as options: a part named by the
+        // file itself must be a plain path, or it could match every part at once.
         if part.is_empty()
+            || part.starts_with('-')
             || part.split('/').any(|s| s.is_empty() || s == "..")
             || !part
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "/_-.".contains(c))
         {
             bail!("the file refers to a part named {part:?}");
+        }
+        if Instant::now() > self.until {
+            bail!("the file took too long to read");
         }
         let out = run_on(self.unzip, &["-p", "{file}", part], &self.file, self.left).await?;
         self.left -= out.len();
@@ -338,7 +407,6 @@ impl<'a> Zip<'a> {
 /// The relationships in an Office `.rels` part: each one's id, type and target.
 fn relationships(xml: &str) -> Vec<(String, String, String)> {
     elements(xml, "Relationship")
-        .into_iter()
         .filter_map(|e| {
             Some((
                 attribute(e.head, "Id")?.to_owned(),
@@ -347,6 +415,16 @@ fn relationships(xml: &str) -> Vec<(String, String, String)> {
             ))
         })
         .collect()
+}
+
+/// Each relationship's target by its id, so a file with many of both is read in one
+/// pass rather than one search for each.
+fn by_id(rels: &[(String, String, String)]) -> HashMap<&str, &str> {
+    let mut targets = HashMap::new();
+    for (id, _, target) in rels {
+        targets.entry(id.as_str()).or_insert(target.as_str());
+    }
+    targets
 }
 
 /// A relationship's target as a path in the archive, from the folder of the part that
@@ -383,27 +461,37 @@ async fn pptx_pages(zip: &mut Zip<'_>) -> Result<Vec<Page>> {
             .await
             .unwrap_or_default(),
     );
-    let slides: Vec<String> = elements(&presentation, "p:sldId")
-        .into_iter()
-        .filter_map(|e| attribute(e.head, "r:id"))
-        .filter_map(|id| rels.iter().find(|(rid, _, _)| rid == id))
-        .map(|(_, _, target)| resolve("ppt", target))
-        .collect();
+    let slides: Vec<String> = parsed(move || {
+        let targets = by_id(&rels);
+        elements(&presentation, "p:sldId")
+            .filter_map(|e| attribute(e.head, "r:id"))
+            .filter_map(|id| targets.get(id))
+            .map(|target| resolve("ppt", target))
+            .collect()
+    })
+    .await?;
     let mut pages = Vec::new();
     for (i, part) in slides.iter().take(MAX_SLIDES).enumerate() {
         let xml = zip.read(part).await?;
-        let (title, mut text) = slide_text(&xml);
         let (folder, rels) = rels_of(part);
-        let notes = relationships(&zip.read(&rels).await.unwrap_or_default())
+        let rels = zip.read(&rels).await.unwrap_or_default();
+        let notes = relationships(&rels)
             .into_iter()
             .find(|(_, kind, _)| kind.ends_with("/notesSlide"))
             .map(|(_, _, target)| resolve(&folder, &target));
-        if let Some(notes) = notes {
-            let notes = notes_text(&zip.read(&notes).await.unwrap_or_default());
+        let notes = match notes {
+            Some(notes) => zip.read(&notes).await.unwrap_or_default(),
+            None => String::new(),
+        };
+        let (title, text) = parsed(move || {
+            let (title, mut text) = slide_text(&xml);
+            let notes = notes_text(&notes);
             if !notes.is_empty() {
                 text.push_str(&format!("\n\nSpeaker notes:\n{notes}"));
             }
-        }
+            (title, text)
+        })
+        .await?;
         let n = i + 1;
         pages.push(Page {
             number: None,
@@ -430,7 +518,6 @@ async fn pptx_pages(zip: &mut Zip<'_>) -> Result<Vec<Page>> {
 /// the slide holds it, tables included.
 fn slide_text(xml: &str) -> (Option<String>, String) {
     let title = elements(xml, "p:sp")
-        .into_iter()
         .find(|shape| matches!(placeholder(shape.body), Some("title" | "ctrTitle")));
     let rest = match &title {
         Some(shape) => format!("{}{}", &xml[..shape.start], &xml[shape.end..]),
@@ -445,7 +532,6 @@ fn slide_text(xml: &str) -> (Option<String>, String) {
 /// The notes on a notes page: its body placeholder, without the slide picture or number.
 fn notes_text(xml: &str) -> String {
     elements(xml, "p:sp")
-        .into_iter()
         .filter(|shape| placeholder(shape.body) == Some("body"))
         .map(|shape| drawing_text(shape.body))
         .filter(|t| !t.is_empty())
@@ -455,7 +541,7 @@ fn notes_text(xml: &str) -> String {
 
 /// The type of the placeholder a shape fills, such as "title" or "body".
 fn placeholder(shape: &str) -> Option<&str> {
-    let ph = elements(shape, "p:ph").into_iter().next()?;
+    let ph = elements(shape, "p:ph").next()?;
     // A placeholder without a type is a body.
     Some(attribute(ph.head, "type").unwrap_or("body"))
 }
@@ -487,16 +573,19 @@ async fn xlsx_pages(zip: &mut Zip<'_>) -> Result<Vec<Page>> {
             .await
             .unwrap_or_default(),
     );
-    let strings = shared_strings(&zip.read("xl/sharedStrings.xml").await.unwrap_or_default());
-    let sheets: Vec<(String, String)> = elements(&workbook, "sheet")
-        .into_iter()
-        .filter_map(|e| {
-            let name = decode(attribute(e.head, "name")?);
-            let id = attribute(e.head, "r:id")?;
-            let (_, _, target) = rels.iter().find(|(rid, _, _)| rid == id)?;
-            Some((name, resolve("xl", target)))
-        })
-        .collect();
+    let strings = zip.read("xl/sharedStrings.xml").await.unwrap_or_default();
+    let strings = Arc::new(parsed(move || shared_strings(&strings)).await?);
+    let sheets: Vec<(String, String)> = parsed(move || {
+        let targets = by_id(&rels);
+        elements(&workbook, "sheet")
+            .filter_map(|e| {
+                let name = decode(attribute(e.head, "name")?);
+                let target = targets.get(attribute(e.head, "r:id")?)?;
+                Some((name, resolve("xl", target)))
+            })
+            .collect()
+    })
+    .await?;
     let mut left = MAX_CELLS;
     let mut pages: Vec<Page> = Vec::new();
     for (k, (name, part)) in sheets.iter().take(MAX_SHEETS).enumerate() {
@@ -511,10 +600,17 @@ async fn xlsx_pages(zip: &mut Zip<'_>) -> Result<Vec<Page>> {
             break;
         }
         let xml = zip.read(part).await?;
+        let strings = strings.clone();
+        let text;
+        (text, left) = parsed(move || {
+            let mut left = left;
+            (sheet_text(&xml, &strings, &mut left), left)
+        })
+        .await?;
         pages.push(Page {
             number: None,
             section: Some(format!("Sheet: {name}")),
-            text: sheet_text(&xml, &strings, &mut left),
+            text,
         });
     }
     Ok(pages)
@@ -523,7 +619,7 @@ async fn xlsx_pages(zip: &mut Zip<'_>) -> Result<Vec<Page>> {
 /// The workbook's shared strings, which cells refer to by index.
 fn shared_strings(xml: &str) -> Vec<String> {
     elements(xml, "si")
-        .into_iter()
+        .take(MAX_SHARED_STRINGS)
         // Phonetic guides (rPh) repeat the text in another script.
         .map(|e| decode(&strip_tags(&remove_blocks(e.body, "rph"))))
         .collect()
@@ -532,11 +628,11 @@ fn shared_strings(xml: &str) -> Vec<String> {
 /// A sheet's rows as comma-separated values, quoted where needed. Empty rows are left
 /// out. Counts the cells read against `left` and says where it stopped.
 fn sheet_text(xml: &str, strings: &[String], left: &mut usize) -> String {
-    let rows = elements(xml, "row");
+    let mut rows = elements(xml, "row");
     let mut lines = Vec::new();
-    for (k, row) in rows.iter().enumerate() {
+    while let Some(row) = rows.next() {
         if *left == 0 {
-            let more = match rows.len() - k {
+            let more = match 1 + rows.by_ref().count() {
                 1 => "1 more row is".to_owned(),
                 n => format!("{n} more rows are"),
             };
@@ -574,7 +670,7 @@ fn sheet_text(xml: &str, strings: &[String], left: &mut usize) -> String {
 fn cell_value(head: &str, body: &str, strings: &[String]) -> String {
     let value = || {
         elements(body, "v")
-            .first()
+            .next()
             .map(|v| decode(v.body))
             .unwrap_or_default()
     };
@@ -638,45 +734,64 @@ struct Element<'a> {
     body: &'a str,
 }
 
-/// Each `<tag …>` element in order. Elements of the same name must not nest, which
-/// holds for every element read with it.
-fn elements<'a>(xml: &'a str, tag: &str) -> Vec<Element<'a>> {
-    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
-    let mut out = Vec::new();
-    let mut at = 0;
-    while let Some(start) = xml[at..].find(&open).map(|i| at + i) {
-        let after = xml.as_bytes().get(start + open.len()).copied();
-        if !after.is_some_and(|c| c == b'>' || c == b'/' || c.is_ascii_whitespace()) {
-            at = start + open.len();
-            continue;
-        }
-        let Some(open_end) = tag_end(xml, start) else {
-            break;
-        };
-        let head = &xml[start..open_end];
-        if head.ends_with("/>") {
-            out.push(Element {
-                start,
-                end: open_end,
-                head,
-                body: "",
-            });
-            at = open_end;
-            continue;
-        }
-        let stop = xml[open_end..]
-            .find(&close)
-            .map_or(xml.len(), |i| open_end + i);
-        let end = (stop + close.len()).min(xml.len());
-        out.push(Element {
-            start,
-            end,
-            head,
-            body: &xml[open_end..stop],
-        });
-        at = end;
+/// Each `<tag …>` element in order, found as it is asked for: a part may hold
+/// millions. Elements of the same name must not nest, which holds for every element
+/// read with it.
+fn elements<'a>(xml: &'a str, tag: &str) -> Elements<'a> {
+    Elements {
+        xml,
+        open: format!("<{tag}"),
+        close: format!("</{tag}>"),
+        at: 0,
     }
-    out
+}
+
+struct Elements<'a> {
+    xml: &'a str,
+    open: String,
+    close: String,
+    at: usize,
+}
+
+impl<'a> Iterator for Elements<'a> {
+    type Item = Element<'a>;
+    fn next(&mut self) -> Option<Element<'a>> {
+        let xml = self.xml;
+        loop {
+            let start = self.at + xml.get(self.at..)?.find(&self.open)?;
+            let after = xml.as_bytes().get(start + self.open.len()).copied();
+            if !after.is_some_and(|c| c == b'>' || c == b'/' || c.is_ascii_whitespace()) {
+                self.at = start + self.open.len();
+                continue;
+            }
+            // A tag that never ends is the end of the part.
+            let Some(open_end) = tag_end(xml, start) else {
+                self.at = xml.len();
+                return None;
+            };
+            let head = &xml[start..open_end];
+            if head.ends_with("/>") {
+                self.at = open_end;
+                return Some(Element {
+                    start,
+                    end: open_end,
+                    head,
+                    body: "",
+                });
+            }
+            let stop = xml[open_end..]
+                .find(&self.close)
+                .map_or(xml.len(), |i| open_end + i);
+            let end = (stop + self.close.len()).min(xml.len());
+            self.at = end;
+            return Some(Element {
+                start,
+                end,
+                head,
+                body: &xml[open_end..stop],
+            });
+        }
+    }
 }
 
 /// The pages' text for a model to read whole, with a line in brackets wherever a page
@@ -778,7 +893,10 @@ struct Heading {
 /// Nests headings into sections. A document's title (a title style, or with
 /// `lone_title` its only level-1 heading) is kept apart, so it doesn't head every
 /// path; the text under it joins the text before the first heading. No text is dropped.
-fn nest(lead: String, heads: Vec<Heading>, lone_title: bool) -> (Option<String>, Vec<Section>) {
+fn nest(lead: String, mut heads: Vec<Heading>, lone_title: bool) -> (Option<String>, Vec<Section>) {
+    for head in &mut heads {
+        shorten(&mut head.title);
+    }
     let at_title = heads.iter().position(|h| h.level == 0).or_else(|| {
         match heads.iter().filter(|h| h.level == 1).count() {
             1 if lone_title => heads.iter().position(|h| h.level == 1),
@@ -822,6 +940,18 @@ fn nest(lead: String, heads: Vec<Heading>, lone_title: bool) -> (Option<String>,
     (title, sections)
 }
 
+/// Cuts a heading to MAX_HEADING.
+fn shorten(title: &mut String) {
+    if title.len() > MAX_HEADING {
+        let mut end = MAX_HEADING;
+        while !title.is_char_boundary(end) {
+            end -= 1;
+        }
+        title.truncate(end);
+        title.push('…');
+    }
+}
+
 /// An HTML document split at its h1 to h6 headings. Math keeps its TeX (`alttext`)
 /// rather than the text of its MathML, and table cells are separated with |.
 pub fn html_sections(html: &str) -> (Option<String>, Vec<Section>) {
@@ -835,31 +965,45 @@ pub fn html_sections(html: &str) -> (Option<String>, Vec<Section>) {
     let html = math_tex(&html);
     let lower = html.to_ascii_lowercase();
     // Each heading: where its tag opens, where it closes, its level and its text.
+    // The page is walked once. A heading tag is read to its end only once, and a level
+    // with no closing tag left is not looked for again, so a page of unclosed headings
+    // takes no longer than any other of its size.
     let mut found: Vec<(usize, usize, u8, String)> = Vec::new();
+    let mut unclosed = [false; 7];
     let mut at = 0;
     while let Some(start) = lower[at..].find("<h").map(|i| at + i) {
         let bytes = lower.as_bytes();
-        let level = bytes.get(start + 2).copied().filter(u8::is_ascii_digit);
-        let after = bytes.get(start + 3).copied();
-        let heading = level
+        let level = bytes
+            .get(start + 2)
+            .copied()
             .filter(|l| (b'1'..=b'6').contains(l))
-            .filter(|_| after.is_some_and(|c| c == b'>' || c.is_ascii_whitespace()))
-            .and_then(|l| {
-                let open = tag_end(&html, start)?;
-                let close = format!("</h{}>", l as char);
-                let end = lower[open..].find(&close).map(|i| open + i)?;
-                Some((open, end, end + close.len(), l - b'0'))
+            .filter(|l| !unclosed[usize::from(l - b'0')])
+            .filter(|_| {
+                let after = bytes.get(start + 3).copied();
+                after.is_some_and(|c| c == b'>' || c.is_ascii_whitespace())
             });
-        match heading {
-            Some((open, end, after, level)) => {
-                let title = one_line(&html_text(&html[open..end]));
-                if !title.is_empty() {
-                    found.push((start, after, level, title));
-                }
-                at = after;
+        let Some(level) = level else {
+            at = start + 2;
+            continue;
+        };
+        // A tag that never ends is the end of the page's tags.
+        let Some(open) = tag_end(&html, start) else {
+            break;
+        };
+        let close = format!("</h{}>", level as char);
+        let Some(end) = lower[open..].find(&close).map(|i| open + i) else {
+            unclosed[usize::from(level - b'0')] = true;
+            at = open;
+            continue;
+        };
+        let title = one_line(&html_text(&html[open..end]));
+        if !title.is_empty() {
+            found.push((start, end + close.len(), level - b'0', title));
+            if found.len() == MAX_SECTIONS {
+                break;
             }
-            None => at = start + 2,
         }
+        at = end + close.len();
     }
     let lead = section_text(&html[..found.first().map_or(html.len(), |h| h.0)]);
     let heads = found
@@ -886,6 +1030,7 @@ pub fn markdown_sections(text: &str) -> (Option<String>, Vec<Section>) {
             Some(_) => {}
             None if trimmed.starts_with("```") => fence = Some("```"),
             None if trimmed.starts_with("~~~") => fence = Some("~~~"),
+            None if heads.len() == MAX_SECTIONS => {}
             None => {
                 if let Some((level, title)) = atx_heading(line) {
                     heads.push(Heading {
@@ -969,7 +1114,8 @@ fn docx_sections(document: &str, styles: &str) -> (Option<String>, Vec<Section>)
         }
         let level = tag_value(paragraph, "<w:pStyle ")
             .and_then(|id| levels.get(id).copied())
-            .or_else(|| level_of("", tag_value(paragraph, "<w:outlineLvl ")));
+            .or_else(|| level_of("", tag_value(paragraph, "<w:outlineLvl ")))
+            .filter(|_| heads.len() < MAX_SECTIONS);
         match level {
             Some(level) => heads.push(Heading {
                 level,
@@ -1019,10 +1165,14 @@ fn pdf_outline(xml: &str) -> Vec<(usize, String, i32)> {
             let item = &rest[..close];
             let tag_end = item.find('>').map_or(item.len(), |e| e + 1);
             let tag = &item[..tag_end];
-            let title = one_line(&decode(&strip_tags(&item[tag_end..])));
+            let mut title = one_line(&decode(&strip_tags(&item[tag_end..])));
+            shorten(&mut title);
             if let Some(page) = attribute(tag, "page").and_then(|p| p.parse().ok()) {
                 if !title.is_empty() && depth > 0 {
                     items.push((depth, title, page));
+                    if items.len() == MAX_BOOKMARKS {
+                        break;
+                    }
                 }
             }
             rest = &rest[close + "</item>".len()..];
@@ -1037,9 +1187,14 @@ fn pdf_outline(xml: &str) -> Vec<(usize, String, i32)> {
 /// title isn't found there starts at the top of its page.
 fn pdf_pages(pages: &[&str], outline: &[(usize, String, i32)]) -> Vec<Page> {
     let mut stack: Vec<(usize, String)> = Vec::new();
-    let mut starts: Vec<(i32, String, String)> = Vec::new();
+    // Each page's bookmarks in order, as (title, path).
+    let mut starts: HashMap<i32, Vec<(&str, String)>> = HashMap::new();
     for (depth, title, page) in outline {
         while stack.last().is_some_and(|(d, _)| d >= depth) {
+            stack.pop();
+        }
+        // Past the deepest level kept, a bookmark takes the place of the one above it.
+        if stack.len() == MAX_BOOKMARK_DEPTH {
             stack.pop();
         }
         stack.push((*depth, title.clone()));
@@ -1048,15 +1203,21 @@ fn pdf_pages(pages: &[&str], outline: &[(usize, String, i32)]) -> Vec<Page> {
             .map(|(_, t)| t.as_str())
             .collect::<Vec<_>>()
             .join(" › ");
-        starts.push((*page, title.clone(), path));
+        starts.entry(*page).or_default().push((title, path));
     }
     let mut current: Option<String> = None;
     let mut out = Vec::new();
     for (i, text) in pages.iter().enumerate() {
         let number = i as i32 + 1;
         let mut cut = 0;
-        for (_, title, path) in starts.iter().filter(|(p, _, _)| *p == number) {
-            let at = find_loose(&text[cut..], title).map_or(cut, |at| cut + at);
+        let here = starts.get(&number).map_or(&[][..], Vec::as_slice);
+        // Lowercased once for every bookmark on the page; positions stay the same.
+        let lower = match here.is_empty() {
+            true => String::new(),
+            false => text.to_ascii_lowercase(),
+        };
+        for (title, path) in here {
+            let at = find_loose(&lower[cut..], title).map_or(cut, |at| cut + at);
             if at > cut || (at == 0 && cut == 0) {
                 out.push(Page {
                     number: Some(number),
@@ -1077,14 +1238,19 @@ fn pdf_pages(pages: &[&str], outline: &[(usize, String, i32)]) -> Vec<Page> {
     out
 }
 
-/// Where `title`'s words appear in `text` in order, with any spacing between them.
-fn find_loose(text: &str, title: &str) -> Option<usize> {
+/// Where `title`'s words appear in `lower`, text already in lower case, in order and
+/// with any spacing between them. Only the first TITLE_WINDOW bytes are searched.
+fn find_loose(lower: &str, title: &str) -> Option<usize> {
     let words: Vec<String> = title
         .split_whitespace()
         .map(str::to_ascii_lowercase)
         .collect();
     let first = words.first()?;
-    let lower = text.to_ascii_lowercase();
+    let mut window = lower.len().min(TITLE_WINDOW);
+    while !lower.is_char_boundary(window) {
+        window -= 1;
+    }
+    let lower = &lower[..window];
     lower
         .match_indices(first.as_str())
         .map(|(i, _)| i)
@@ -1147,6 +1313,8 @@ fn math_tex(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
     let mut at = 0;
+    // Once no closing tag is left, it is not looked for again.
+    let mut unclosed = false;
     while let Some(start) = lower[at..].find("<math").map(|i| at + i) {
         let Some(open) = tag_end(html, start) else {
             break;
@@ -1155,9 +1323,12 @@ fn math_tex(html: &str) -> String {
         if let Some(tex) = attribute(&html[start..open], "alttext") {
             out.push_str(&format!(" ${}$ ", tex.trim()));
         }
-        at = lower[open..]
-            .find("</math>")
-            .map_or(open, |i| open + i + "</math>".len());
+        let close = match unclosed {
+            true => None,
+            false => lower[open..].find("</math>"),
+        };
+        unclosed = close.is_none();
+        at = close.map_or(open, |i| open + i + "</math>".len());
     }
     out.push_str(&html[at..]);
     out
@@ -1591,6 +1762,28 @@ mod tests {
         assert_eq!(mime_for(Kind::Pdf), "application/pdf");
     }
 
+    /// A tool reads a file of someone else's making: it runs with a limit on its
+    /// memory and without Chat's environment, where Chat's keys are.
+    #[tokio::test]
+    async fn a_tool_runs_with_a_memory_limit_and_none_of_chats_environment() {
+        // Cargo gives a test this variable, as a deployment gives Chat its secrets.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let seen = run("sh", &["-c", "env; echo limit=$(ulimit -v)"], b"")
+            .await
+            .unwrap();
+        let seen = String::from_utf8_lossy(&seen);
+        assert!(seen.contains("PATH="), "{seen}");
+        assert!(!seen.contains("CARGO"), "{seen}");
+        if cfg!(target_os = "linux") {
+            assert!(seen.contains(&format!("limit={TOOL_MEMORY_KIB}")), "{seen}");
+        }
+        let missing = run("obleth-chat-no-such-tool", &[], b"").await.unwrap_err();
+        assert!(
+            format!("{missing:#}").contains("is not available"),
+            "{missing:#}"
+        );
+    }
+
     #[tokio::test]
     async fn a_tool_is_stopped_once_its_output_passes_the_cap() {
         let marker = std::env::temp_dir().join(format!("obleth-knowledge-{}", Uuid::new_v4()));
@@ -2019,7 +2212,14 @@ mod tests {
             return;
         }
         let mut zip = Zip::new(&tools.unzip, &pptx()).await.unwrap();
-        for part in ["ppt/slides/*", "ppt/../x.xml", "", "ppt/[a].xml"] {
+        for part in [
+            "ppt/slides/*",
+            "ppt/../x.xml",
+            "",
+            "ppt/[a].xml",
+            "-v",
+            "-x/a.xml",
+        ] {
             assert!(zip.read(part).await.is_err(), "{part}");
         }
         assert!(zip.read("ppt/presentation.xml").await.is_ok());
@@ -2071,6 +2271,118 @@ mod tests {
         assert!(
             a.ends_with(&b[..20.min(b.len())]) || a.contains(&b[..20]),
             "no overlap"
+        );
+    }
+
+    /// What reading takes follows the file's size, whatever it holds. Each of these
+    /// took minutes or more at this size when headings and math were looked for again
+    /// from every unclosed tag.
+    #[test]
+    fn hostile_markup_is_read_in_time_that_follows_its_size() {
+        let mib = 2 * 1024 * 1024;
+        let filled = |unit: &str| unit.repeat(mib / unit.len());
+        for (what, page) in [
+            ("headings never closed", filled("<h1>a ")),
+            ("heading tags never ended", filled("<h2 a=\">\" ")),
+            ("a heading tag inside itself", filled("<h3 ") + ">x"),
+            ("every level unclosed", filled("<h1><h2><h3><h4><h5><h6>")),
+            ("math never closed", filled("<math alttext=\"x\">")),
+            (
+                "closed headings after unclosed ones",
+                filled("<h1>a ") + &filled("<h2>b</h2>c "),
+            ),
+        ] {
+            let started = Instant::now();
+            let (_, sections) = html_sections(&page);
+            let took = started.elapsed();
+            assert!(took < Duration::from_secs(30), "{what}: {took:?}");
+            assert!(sections.len() <= MAX_SECTIONS + 1, "{what}");
+        }
+        // Workbook and slide parts: millions of empty elements, read without a list of them.
+        let started = Instant::now();
+        let mut left = MAX_CELLS;
+        let rows = "<row><c/><c t=\"s\"><v>0</v></c></row>".repeat(300_000);
+        let sheet = sheet_text(&rows, &["a".into()], &mut left);
+        assert_eq!(left, 0);
+        assert!(
+            sheet.contains("more rows are not included"),
+            "{}",
+            &sheet[sheet.len() - 120..]
+        );
+        assert_eq!(shared_strings(&filled("<si/>")).len(), mib / 5);
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_document_of_headings_keeps_its_text_in_bounded_sections() {
+        // More headings than Chat splits at: the text under later ones stays with the last.
+        let page: String = (0..MAX_SECTIONS + 500)
+            .map(|i| format!("<h2>Part {i}</h2><p>text {i}</p>"))
+            .collect();
+        let (_, sections) = html_sections(&page);
+        assert_eq!(sections.len(), MAX_SECTIONS);
+        let last = &sections.last().unwrap().text;
+        assert!(
+            last.contains(&format!("Part {}", MAX_SECTIONS + 499)),
+            "{}",
+            &last[last.len() - 80..]
+        );
+        assert!(last.contains(&format!("text {}", MAX_SECTIONS + 499)));
+        let text: String = (0..MAX_SECTIONS + 500)
+            .map(|i| format!("## Part {i}\n\ntext {i}\n\n"))
+            .collect();
+        let (_, sections) = markdown_sections(&text);
+        assert_eq!(sections.len(), MAX_SECTIONS);
+        assert!(sections
+            .last()
+            .unwrap()
+            .text
+            .contains(&format!("## Part {}", MAX_SECTIONS + 499)));
+
+        // A heading of any length is kept short, since every section under it repeats it.
+        let long = format!(
+            "<h1>Guide</h1><h2>{}</h2><h3>Detail</h3><p>body text</p>",
+            "wörd ".repeat(10_000)
+        );
+        let (_, sections) = html_sections(&long);
+        let path = &sections.last().unwrap().path;
+        assert_eq!(path.len(), 2);
+        assert!(
+            path[0].len() <= MAX_HEADING + 3 && path[0].ends_with('…'),
+            "{}",
+            path[0].len()
+        );
+        assert_eq!(path[1], "Detail");
+    }
+
+    #[test]
+    fn many_bookmarks_and_pages_are_read_in_one_pass() {
+        // More bookmarks than Chat reads, nested deeper than it keeps, on one long page.
+        let mut xml = String::from("<pdf2xml>");
+        for _ in 0..40 {
+            xml.push_str("<outline>");
+        }
+        for i in 0..MAX_BOOKMARKS + 100 {
+            xml.push_str(&format!("<item page=\"1\">Missing title {i}</item>"));
+        }
+        let outline = pdf_outline(&xml);
+        assert_eq!(outline.len(), MAX_BOOKMARKS);
+        let page = "plain words on a page without those titles. ".repeat(100_000);
+        let empty = vec![""; 200_000];
+        let mut pages = vec![page.as_str()];
+        pages.extend(empty);
+        let started = Instant::now();
+        let read = pdf_pages(&pages, &outline);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(read.len(), 1);
+        let section = read[0].section.as_deref().unwrap();
+        assert!(
+            section.matches(" › ").count() < MAX_BOOKMARK_DEPTH,
+            "{section}"
         );
     }
 }

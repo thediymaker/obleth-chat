@@ -54,7 +54,7 @@ pub fn tools() -> Vec<Tool> {
     vec![
         tool("overview", "Overview", "Who you are on the cluster, your namespace's quotas and pods, and what you are allowed to do there.", true, json!({"namespace":namespace}), &[]),
         tool("list", "List", "List resources of one kind with their status.", true, json!({"kind":kind,"namespace":namespace,"all_namespaces":{"type":"boolean"},"label_selector":{"type":"string"},"api_version":api_version}), &["kind"]),
-        tool("get", "Get", "One resource as JSON, without managed fields.", true, json!({"kind":kind,"name":{"type":"string"},"namespace":namespace,"api_version":api_version}), &["kind","name"]),
+        tool("get", "Get", "One resource as JSON, without managed fields. A Secret is shown with its keys but not its values.", true, json!({"kind":kind,"name":{"type":"string"},"namespace":namespace,"api_version":api_version}), &["kind","name"]),
         tool("logs", "Logs", "The latest log lines of a pod's container.", true, json!({"pod":{"type":"string"},"namespace":namespace,"container":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000},"previous":{"type":"boolean","description":"Logs of the previous, crashed container"}}), &["pod"]),
         tool("apply", "Apply", "Create or update resources with server-side apply. Give one manifest object, a list of them, or YAML text (documents separated by ---).", false, json!({"manifest":{"description":"Manifest object, array of objects, or YAML text"}}), &["manifest"]),
         tool("delete", "Delete", "Delete one resource.", false, json!({"kind":kind,"name":{"type":"string"},"namespace":namespace,"api_version":api_version}), &["kind","name"]),
@@ -110,7 +110,10 @@ impl Client {
         let url = self
             .base
             .join(path.trim_start_matches('/'))
-            .map_err(|_| "Invalid Kubernetes path".to_string())?;
+            .ok()
+            // Whatever the path was built from, it stays under the cluster's API.
+            .filter(|url| url.as_str().starts_with(self.base.as_str()) && url.fragment().is_none())
+            .ok_or_else(|| "Invalid Kubernetes path".to_string())?;
         let mut request = self
             .http
             .request(method, url)
@@ -230,6 +233,9 @@ impl Client {
         if let Some(found) = self.discovered.get(group_version) {
             return found.clone();
         }
+        if !valid_api_version(group_version) {
+            return vec![];
+        }
         let path = if group_version == "v1" {
             "api/v1".to_string()
         } else {
@@ -268,6 +274,11 @@ impl Client {
         let wanted = kind.trim().to_ascii_lowercase();
         if wanted.is_empty() {
             return Err("Name a kind, such as pods".into());
+        }
+        if let Some(v) = api_version.filter(|v| !valid_api_version(v.trim())) {
+            return Err(format!(
+                "{v} is not an API version: use a form like v1 or apps/v1"
+            ));
         }
         let mut candidates: Vec<String> = match api_version {
             Some(v) => vec![v.trim().to_owned()],
@@ -319,13 +330,15 @@ impl Client {
         ))
     }
 
-    fn namespace_of(&self, args: &Value) -> String {
-        args["namespace"]
+    /// The namespace a call names, or the connection's own. It goes into the
+    /// request path, so it must be a namespace name and nothing more.
+    fn namespace_of(&self, args: &Value) -> Result<String, String> {
+        let ns = args["namespace"]
             .as_str()
             .filter(|n| !n.trim().is_empty())
             .unwrap_or(&self.namespace)
-            .trim()
-            .to_owned()
+            .trim();
+        namespace(ns).map(str::to_owned)
     }
 
     fn collection(r: &Resource, namespace: Option<&str>) -> String {
@@ -349,7 +362,7 @@ impl Client {
     }
 
     async fn overview(&mut self, args: &Value) -> Result<String, String> {
-        let ns = self.namespace_of(args);
+        let ns = self.namespace_of(args)?;
         let who = self.check().await?;
         let mut out = vec![format!("You are {who} on this cluster. Namespace: {ns}.")];
         if let Ok((_, quotas)) = self
@@ -446,7 +459,7 @@ impl Client {
             )
             .await?;
         let all = args["all_namespaces"].as_bool() == Some(true);
-        let ns = self.namespace_of(args);
+        let ns = self.namespace_of(args)?;
         let mut path = format!(
             "{}?limit=500",
             Self::collection(&r, (!all).then_some(ns.as_str()))
@@ -486,11 +499,8 @@ impl Client {
                 args["api_version"].as_str(),
             )
             .await?;
-        let name = args["name"]
-            .as_str()
-            .filter(|n| !n.is_empty())
-            .ok_or("name is required")?;
-        let ns = self.namespace_of(args);
+        let name = object_name(args["name"].as_str().ok_or("name is required")?)?;
+        let ns = self.namespace_of(args)?;
         let (_, mut object) = self
             .json(
                 reqwest::Method::GET,
@@ -504,15 +514,13 @@ impl Client {
                 notes.remove("kubectl.kubernetes.io/last-applied-configuration");
             }
         }
+        hide_secret_values(&mut object);
         Ok(serde_json::to_string_pretty(&object).unwrap_or_default())
     }
 
     async fn logs(&mut self, args: &Value) -> Result<String, String> {
-        let pod = args["pod"]
-            .as_str()
-            .filter(|p| !p.is_empty())
-            .ok_or("pod is required")?;
-        let ns = self.namespace_of(args);
+        let pod = object_name(args["pod"].as_str().ok_or("pod is required")?)?;
+        let ns = self.namespace_of(args)?;
         let tail = args["tail_lines"].as_u64().unwrap_or(200).clamp(1, 2000);
         let mut path = format!(
             "api/v1/namespaces/{ns}/pods/{}/log?tailLines={tail}",
@@ -538,14 +546,11 @@ impl Client {
         let mut out = vec![];
         for (head, body) in documents {
             let r = self.resolve(&head.kind, Some(&head.api_version)).await?;
-            let ns = head
-                .namespace
-                .clone()
-                .unwrap_or_else(|| self.namespace.clone());
+            let ns = namespace(head.namespace.as_deref().unwrap_or(&self.namespace))?.to_owned();
             let path = format!(
                 "{}/{}?fieldManager=obleth-chat&force=true",
                 Self::collection(&r, Some(&ns)),
-                urlencode(&head.name)
+                urlencode(object_name(&head.name)?)
             );
             let (status, _) = self
                 .send(reqwest::Method::PATCH, &path, Some(Body::Apply(body)))
@@ -577,11 +582,8 @@ impl Client {
                 args["api_version"].as_str(),
             )
             .await?;
-        let name = args["name"]
-            .as_str()
-            .filter(|n| !n.is_empty())
-            .ok_or("name is required")?;
-        let ns = self.namespace_of(args);
+        let name = object_name(args["name"].as_str().ok_or("name is required")?)?;
+        let ns = self.namespace_of(args)?;
         self.send(
             reqwest::Method::DELETE,
             &format!("{}/{}", Self::collection(&r, Some(&ns)), urlencode(name)),
@@ -605,7 +607,7 @@ impl Client {
     /// page. A section the account may not read is {"error": ...}.
     pub async fn status(&self) -> Result<Value, String> {
         let identity = self.check().await?;
-        let ns = self.namespace.clone();
+        let ns = namespace(&self.namespace)?.to_owned();
         let get = |path: String| async move {
             self.json(reqwest::Method::GET, &path, None)
                 .await
@@ -767,6 +769,69 @@ fn quantity(value: &Value) -> Option<f64> {
     number.parse::<f64>().ok().map(|n| n * factor)
 }
 
+/// A namespace name as the API server accepts one (an RFC 1123 label). Tool
+/// arguments come from the model, and a namespace is written into the request
+/// path as it is: `x/pods/y/proxy`, `../nodes/n/proxy#` or `default?watch=1`
+/// would each address something other than the namespace's own resources.
+fn namespace(ns: &str) -> Result<&str, String> {
+    let label = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let bytes = ns.as_bytes();
+    let valid = (1..=63).contains(&bytes.len())
+        && label(bytes[0])
+        && label(bytes[bytes.len() - 1])
+        && bytes.iter().all(|c| label(*c) || *c == b'-');
+    if valid {
+        Ok(ns)
+    } else {
+        Err(format!("{ns:?} is not a namespace name"))
+    }
+}
+
+/// A resource name that is exactly one path segment, by the API server's own
+/// rule for names in a path: not `.` or `..` (which a URL resolves to the
+/// collection or its parent, so "delete one" would delete them all), and no
+/// `/` or `%` (which reach a subresource such as `proxy` or `log`).
+fn object_name(name: &str) -> Result<&str, String> {
+    let valid = !name.is_empty()
+        && name.len() <= 253
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_graphic() && !matches!(c, '/' | '%' | '\\' | '?' | '#'));
+    if valid {
+        Ok(name)
+    } else {
+        Err(format!("{name:?} is not a resource name"))
+    }
+}
+
+/// `v1`, or a group and a version such as `apps/v1`.
+fn valid_api_version(group_version: &str) -> bool {
+    let version = |v: &str| {
+        v.len() <= 63
+            && v.starts_with('v')
+            && v.len() > 1
+            && v.bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    };
+    match group_version.split_once('/') {
+        None => version(group_version),
+        Some((group, v)) => {
+            version(v)
+                && (1..=253).contains(&group.len())
+                && group.split('.').all(|part| {
+                    !part.is_empty()
+                        && !part.starts_with('-')
+                        && !part.ends_with('-')
+                        && part
+                            .bytes()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+                })
+        }
+    }
+}
+
 fn urlencode(text: &str) -> String {
     url::form_urlencoded::byte_serialize(text.as_bytes()).collect()
 }
@@ -917,6 +982,59 @@ fn row(
     )
 }
 
+/// A Secret is shown with its keys and the size of each value, as `kubectl describe`
+/// shows one. Reading needs no approval, and what a tool returns goes to the model
+/// and into the chat, so the values themselves stay on the cluster.
+fn hide_secret_values(object: &mut Value) {
+    if object["kind"].as_str() != Some("Secret") {
+        return;
+    }
+    for field in ["data", "stringData"] {
+        let Some(values) = object.get_mut(field).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for value in values.values_mut() {
+            let bytes = value.as_str().map_or(0, |v| match field {
+                // Base64: four characters for every three bytes.
+                "data" => v.trim_end_matches('=').len() * 3 / 4,
+                _ => v.len(),
+            });
+            *value = json!(format!("(hidden, {bytes} bytes)"));
+        }
+    }
+}
+
+/// What a change does, for the person asked to allow it: each resource applied or
+/// deleted and where. Read with the same functions that carry the change out, so the
+/// card and the request cannot disagree, and a change that would be refused is refused
+/// before anyone is asked.
+pub fn changes(tool: &str, args: &Value, home: &str) -> Result<Vec<Value>, String> {
+    match tool {
+        "apply" => documents(&args["manifest"])?
+            .into_iter()
+            .map(|(head, _)| {
+                let ns = namespace(head.namespace.as_deref().unwrap_or(home))?;
+                let name = object_name(&head.name)?;
+                Ok(json!({"verb":"Apply","what":format!("{}/{name}", head.kind),"where":ns,"facts":[["API version", head.api_version]]}))
+            })
+            .collect(),
+        "delete" => {
+            let kind = args["kind"].as_str().map(str::trim).filter(|k| !k.is_empty());
+            let kind = kind.ok_or("kind is required")?;
+            let name = object_name(args["name"].as_str().ok_or("name is required")?)?;
+            let ns = args["namespace"].as_str().filter(|n| !n.trim().is_empty());
+            let ns = namespace(ns.unwrap_or(home).trim())?;
+            let facts: Vec<Value> = args["api_version"]
+                .as_str()
+                .map(|v| json!(["API version", v]))
+                .into_iter()
+                .collect();
+            Ok(vec![json!({"verb":"Delete","what":format!("{kind}/{name}"),"where":ns,"facts":facts})])
+        }
+        _ => Ok(vec![]),
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct Head {
     api_version: String,
@@ -1031,6 +1149,108 @@ fn head_of_yaml(doc: &str) -> Result<Head, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_is_shown_without_its_values() {
+        let mut secret = json!({"kind":"Secret","metadata":{"name":"db"},"type":"Opaque",
+            "data":{"password":"aHVudGVyMg==","empty":""},"stringData":{"note":"plain"}});
+        hide_secret_values(&mut secret);
+        let text = secret.to_string();
+        assert!(
+            !text.contains("aHVudGVyMg") && !text.contains("plain"),
+            "{text}"
+        );
+        assert_eq!(secret["data"]["password"], "(hidden, 7 bytes)");
+        assert_eq!(secret["data"]["empty"], "(hidden, 0 bytes)");
+        assert_eq!(secret["stringData"]["note"], "(hidden, 5 bytes)");
+        assert_eq!(secret["metadata"]["name"], "db");
+        // Anything else is shown as it is.
+        let mut config = json!({"kind":"ConfigMap","data":{"a":"b"}});
+        hide_secret_values(&mut config);
+        assert_eq!(config["data"]["a"], "b");
+    }
+
+    #[test]
+    fn only_names_go_into_a_request_path() {
+        for ns in ["default", "team-a", "a", "ns-1"] {
+            assert!(namespace(ns).is_ok(), "{ns}");
+        }
+        for ns in [
+            "",
+            "x/pods/y/proxy",
+            "x/pods/y:8080/proxy/admin#",
+            "../nodes/n1/proxy/pods#",
+            "../../../metrics#",
+            "default?watch=1",
+            "Default",
+            "-a",
+            "a-",
+            "a.b",
+            "a b",
+            &"a".repeat(64),
+        ] {
+            assert!(namespace(ns).is_err(), "{ns}");
+        }
+        for name in ["web", "web-1", "system:node", "my.config", "a_b"] {
+            assert!(object_name(name).is_ok(), "{name}");
+        }
+        for name in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "web/proxy",
+            "web%2Fproxy",
+            "web?x=1",
+            "web#",
+            "a b",
+            "a\\b",
+            "web\n",
+        ] {
+            assert!(object_name(name).is_err(), "{name:?}");
+        }
+        for v in [
+            "v1",
+            "v1beta1",
+            "apps/v1",
+            "batch.volcano.sh/v1alpha1",
+            "x-k8s.io/v2",
+        ] {
+            assert!(valid_api_version(v), "{v}");
+        }
+        for v in [
+            "",
+            "apps",
+            "apps/",
+            "/v1",
+            "../api/v1/namespaces/x/pods/y/proxy/z#",
+            "x/../../healthz",
+            "//evil.example/v1",
+            "https://evil.example/v1",
+            "apps/v1/extra",
+            "apps/v1?x",
+            "Apps/v1",
+        ] {
+            assert!(!valid_api_version(v), "{v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_stays_under_the_cluster_address() {
+        let client = Client::new(
+            reqwest::Client::new(),
+            Url::parse("http://127.0.0.1:9/k8s/clusters/c-1").unwrap(),
+            "token".into(),
+            "default".into(),
+        );
+        for path in ["../../v3/users", "/../../../v3/users", "api/v1/pods#x"] {
+            let error = client
+                .send(reqwest::Method::GET, path, None)
+                .await
+                .unwrap_err();
+            assert_eq!(error, "Invalid Kubernetes path", "{path}");
+        }
+    }
 
     #[test]
     fn quantities_read_every_unit() {

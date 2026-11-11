@@ -125,7 +125,9 @@ const PLAIN = new Set(["", "text", "txt", "plain", "plaintext", "output", "conso
 /** The highlight.js language for a fence's language hint, or '' for none. */
 export const languageOf = (hint: unknown): string => {
   const name = String(hint || "").toLowerCase();
-  return PLAIN.has(name) ? "" : GRAMMARS[name] || ALIASES[name] || name;
+  if (PLAIN.has(name)) return "";
+  // Own entries only: "constructor" is a name a fence can carry, and not a language.
+  return (Object.hasOwn(GRAMMARS, name) && GRAMMARS[name]) || (Object.hasOwn(ALIASES, name) && ALIASES[name]) || name;
 };
 /** Highlighted HTML for code, or null when the highlighter or the language isn't loaded. */
 export function highlight(code: string, language: string): string | null {
@@ -206,11 +208,33 @@ function table(source: string, separator: string): Drawing {
     html: `<div class="table-scroll" tabindex="0" role="region" aria-label="Table"><table><thead><tr>${Array.from({ length: width }, (_, c) => cell("th", head[c], c)).join("")}</tr></thead><tbody>${shown.map((r) => `<tr>${Array.from({ length: width }, (_, c) => cell("td", r[c], c)).join("")}</tr>`).join("")}</tbody></table></div>${note}`,
   };
 }
+/**
+ * Where the opening <svg tag starts when the text is an SVG: after an XML declaration,
+ * comments and a doctype, and nothing else. -1 otherwise. Comments are skipped one at
+ * a time, since a pattern that repeats over them takes time that doubles with each
+ * comment when the text turns out not to be an SVG.
+ */
+function svgStart(svg: string): number {
+  let at = /^<\?xml[^>]*>\s*/i.exec(svg)?.[0].length ?? 0;
+  while (svg.startsWith("<!--", at)) {
+    const end = svg.indexOf("-->", at + 4);
+    if (end < 0) return -1;
+    at = end + 3;
+    while (/\s/.test(svg.charAt(at))) at++;
+  }
+  at += /^<!DOCTYPE[^>]*>\s*/i.exec(svg.slice(at))?.[0].length ?? 0;
+  return /^<svg[\s>]/i.test(svg.slice(at, at + 5)) ? at : -1;
+}
 /** An SVG as an image, so its scripts never run and it loads nothing; null if it isn't one. */
 export function svgImage(source: string): string | null {
   const svg = source.trim();
-  if (svg.length > 200_000 || !/^(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*(<!DOCTYPE[^>]*>\s*)?<svg[\s>]/i.test(svg)) return null;
-  const named = /<svg[^>]*\sxmlns\s*=/i.test(svg) ? svg : svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  if (svg.length > 200_000) return null;
+  const start = svgStart(svg);
+  if (start < 0) return null;
+  // The namespace is looked for in the opening tag alone.
+  const close = svg.indexOf(">", start);
+  const tag = svg.slice(start, close < 0 ? svg.length : close);
+  const named = /\sxmlns\s*=/i.test(tag) ? svg : `${svg.slice(0, start)}<svg xmlns="http://www.w3.org/2000/svg"${svg.slice(start + 4)}`;
   return `<img src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(named)}" alt="Drawing">`;
 }
 const keyOf = (kind: string, source: string) => `${kind}\n${["mermaid", "smiles"].includes(kind) ? theme() : ""}\n${source}`;

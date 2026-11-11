@@ -166,7 +166,16 @@ pub async fn tick(s: &AppState) -> Result<(), sqlx::Error> {
                 .unwrap_or_default(),
             variant: None,
         };
-        match launch_turn(s.clone(), gateway.clone(), user, None, id, launch).await {
+        match launch_turn(
+            s.clone(),
+            gateway.clone(),
+            user,
+            crate::Started::Alone,
+            id,
+            launch,
+        )
+        .await
+        {
             Ok(_) => {
                 tracing::info!(conversation = %id, nudge = count, "auto mode nudged a stopped turn")
             }

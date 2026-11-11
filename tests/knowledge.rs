@@ -1892,14 +1892,24 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
     sqlx::query("UPDATE messages SET content = content || $2 WHERE conversation_id = $1 AND role = 'assistant'")
         .bind(conversation).bind(format!("\n\n![chart](/api/images/{image})")).execute(&pool).await.unwrap();
     let activity = json!([{"kind":"tool","title":"Read the plan"}]);
+    // What Chat recalled and learned about Ana while answering is hers alone.
+    let own_activity = json!([
+        {"kind":"recalled","summary":"Remembered 1 thing","items":[{"id":"m1","text":"Ana is leaving the team in March","pinned":false}]},
+        {"kind":"tool","title":"Read the plan"},
+        {"kind":"learned","items":[{"id":"m2","text":"Ana prefers small refactors","change":"added"}]},
+    ]);
     sqlx::query(
         "UPDATE messages SET activity = $2 WHERE conversation_id = $1 AND role = 'assistant'",
     )
     .bind(conversation)
-    .bind(&activity)
+    .bind(&own_activity)
     .execute(&pool)
     .await
     .unwrap();
+    // An image from a reply Ana regenerated away: still the chat's, in no message.
+    let dropped = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO generated_images (id, owner_id, conversation_id, mime_type, size, data) VALUES ($1,$2,$3,'image/png',4,'\\x89504e47')")
+        .bind(dropped).bind(ana_uuid).bind(conversation).execute(&pool).await.unwrap();
     // Ana's own view keeps her instructions, on the chat and on the reply.
     let (_, own) = call(
         &f.app,
@@ -1961,6 +1971,18 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
     assert_eq!(reply["settings"]["model"], "fixture-model");
     assert_eq!(reply["settings"]["temperature"], 0.3);
     assert_eq!(reply["activity"], activity);
+    assert!(!seen.to_string().contains("leaving the team"), "{seen}");
+    assert!(!seen.to_string().contains("small refactors"), "{seen}");
+    // Ana still sees her own.
+    let (_, own) = call(
+        &f.app,
+        "GET",
+        &format!("/api/conversations/{id}"),
+        Value::Null,
+        &ana,
+    )
+    .await;
+    assert_eq!(own["conversation"]["messages"][1]["activity"], own_activity);
     let messages = seen["conversation"]["messages"].as_array().unwrap();
     assert_eq!(messages[0]["content"], "Plan the refactor");
     let link = messages[0]["attachments"][0]["url"]
@@ -2063,6 +2085,16 @@ async fn a_shared_chat_is_read_only_live_and_forkable(pool: PgPool) {
     );
     let text = copied[1]["content"].as_str().unwrap();
     assert!(!text.contains(&image.to_string()), "{text}");
+    assert!(!mine.to_string().contains("leaving the team"), "{mine}");
+    // Only the image the shared reply shows came along.
+    let images: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generated_images WHERE conversation_id = $1::uuid",
+    )
+    .bind(&copy)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(images, 1);
     let own_image = text
         .split("/api/images/")
         .nth(1)

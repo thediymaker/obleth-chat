@@ -82,6 +82,33 @@ const done = (content: string): Message[] => [
   { id: "a1", role: "assistant", content, status: "completed" },
 ];
 
+describe("when the session ends", () => {
+  it("drops what was set up for a new chat and typed into Steer", async () => {
+    const { startAutoDraft } = await import("@/components/connections/chat-tools");
+    const { chatDraft } = await import("@/components/projects/chat-draft");
+    const { steerDraft } = await import("./steer-draft");
+    const { store } = setup({});
+    startAutoDraft();
+    chatDraft.setProject("p1");
+    chatDraft.setCollections(["c1"]);
+    steerDraft.text = "use the other cluster";
+    store.dispose();
+    // The next person on this page starts a chat with Auto off and nothing picked.
+    expect(chatDraft.get()).toEqual({ project: null, collections: [] });
+    expect(steerDraft.text).toBe("");
+    const applied: unknown[] = [];
+    const { applyToolsDraft } = await import("@/components/connections/chat-tools");
+    const { api } = await import("@/lib/api");
+    const request = vi.spyOn(api, "request").mockImplementation(async (...args: unknown[]) => {
+      applied.push(args);
+      return {} as never;
+    });
+    await applyToolsDraft("c9");
+    request.mockRestore();
+    expect(JSON.stringify(applied)).not.toContain('"auto":true');
+  });
+});
+
 describe("sending from the home screen", () => {
   it("creates the chat, streams the reply and settles on the saved one", async () => {
     const { store, calls, go, chats, stream } = setup({

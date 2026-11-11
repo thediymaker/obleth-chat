@@ -473,7 +473,16 @@ async fn begin(
         variant: None,
     };
     // Nothing reads the live stream; the reply is saved as it is written.
-    launch_turn(s.clone(), gateway, user.clone(), None, id, launch).await?;
+    // The turn is the token's: it ends if the token is revoked while it runs.
+    launch_turn(
+        s.clone(),
+        gateway,
+        user.clone(),
+        crate::Started::Token(token.id),
+        id,
+        launch,
+    )
+    .await?;
     Ok(())
 }
 

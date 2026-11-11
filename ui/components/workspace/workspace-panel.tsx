@@ -7,14 +7,15 @@
 // another of these tabs shows.
 
 import { ArrowLeft, Clock, Download, ExternalLink, File, Folder, Info, Maximize2, Orbit, RefreshCw, Terminal as TerminalIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Pill } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useChat } from "@/components/chat/chat-provider";
 import { useCapabilities } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import type { Space, WorkspaceBridge } from "./bridge";
-import { csvFile, csvTable, diskUsage, downloadUrl, formatBytes, htmlFile, previewReload, statusLabel, statusTone, treeItem } from "./model";
+import { PICKED_URL_LIMIT, csvFile, csvTable, diskUsage, downloadUrl, formatBytes, htmlFile, pickedAbove, pickedPaths, previewReload, statusLabel, statusTone, treeItem } from "./model";
 import { PaneLoading, PaneNote } from "./pane-note";
 import { WorkspaceTerminal } from "./terminal";
 
@@ -228,9 +229,15 @@ function FileView({ id, space, bridge }: { id: string; space: Space; bridge: Wor
 
 function Files({ id, space, bridge }: { id: string; space: Space; bridge: WorkspaceBridge }) {
   const running = space.workspace?.status === "running";
+  // The files and folders ticked for a download of just those. A ticked folder
+  // brings everything in it, so its rows show ticked and cannot be changed alone.
+  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
     if (space.files == null && !space.loadingFiles && running && !space.file) void bridge.loadFiles(id);
   }, [space.files, space.loadingFiles, running, space.file, bridge, id]);
+  // A refreshed list may no longer hold what was ticked.
+  const listed = useMemo(() => new Set((space.files || []).map((e) => e.path)), [space.files]);
+  const asking = useMemo(() => pickedPaths(new Set([...picked].filter((p) => listed.has(p)))), [picked, listed]);
   if (space.file) return <FileView id={id} space={space} bridge={bridge} />;
   if (!running)
     return (
@@ -245,27 +252,64 @@ function Files({ id, space, bridge }: { id: string; space: Space; bridge: Worksp
         {space.filesError || "Files the assistant creates appear here."}
       </PaneNote>
     );
+  const pick = (path: string, on: boolean) =>
+    setPicked((old) => {
+      const next = new Set(old);
+      if (on) next.add(path);
+      else next.delete(path);
+      return next;
+    });
+  const top = space.files.filter((e) => !e.path.includes("/")).map((e) => e.path);
+  const all = top.length > 0 && top.every((p) => picked.has(p));
+  const href = downloadUrl(id, asking);
+  const tooMany = href.length > PICKED_URL_LIMIT;
   return (
-    <ul className="min-h-0 flex-1 overflow-auto py-1 text-md" aria-label="Files">
-      {space.files.map((e) => {
-        const { depth, name } = treeItem(e);
-        const pad = { paddingLeft: `${0.75 + depth * 1}rem` };
-        return e.type === "directory" ? (
-          <li key={e.path} className="flex items-center gap-2 py-1 pr-3 text-text-2" style={pad}>
-            <Folder className="size-3.5 shrink-0 text-muted-foreground" />
-            <span className="truncate">{name}</span>
-          </li>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b px-3 text-sm">
+        <Checkbox aria-label="Select everything" checked={all} onCheckedChange={(on) => setPicked(on === true ? new Set(top) : new Set())} />
+        {asking.length === 0 ? (
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">Tick files or folders to download just those.</span>
         ) : (
-          <li key={e.path}>
-            <button type="button" className="flex w-full items-center gap-2 py-1 pr-3 text-left hover:bg-accent" style={pad} onClick={() => bridge.showFile(id, e.path)}>
-              <File className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate">{name}</span>
-              <small className="shrink-0 text-xs text-faint">{formatBytes(e.size)}</small>
-            </button>
-          </li>
-        );
-      })}
-    </ul>
+          <>
+            <span className="min-w-0 flex-1 truncate text-text-2">{tooMany ? "Too many picked one by one. Tick their folders instead." : `${asking.length} picked`}</span>
+            {!tooMany && (
+              <Button asChild variant="outline" size="xs">
+                <a href={href} download aria-label="Download what is picked" title={asking.length === 1 ? "Download it: a file as itself, a folder as a .zip" : "Download them as one .zip"}>
+                  <Download /> Download
+                </a>
+              </Button>
+            )}
+            <Button variant="ghost" size="xs" onClick={() => setPicked(new Set())}>
+              Clear
+            </Button>
+          </>
+        )}
+      </div>
+      <ul className="min-h-0 flex-1 overflow-auto py-1 text-md" aria-label="Files">
+        {space.files.map((e) => {
+          const { depth, name } = treeItem(e);
+          const pad = { paddingLeft: `${0.75 + depth * 1}rem` };
+          const within = pickedAbove(picked, e.path);
+          const box = <Checkbox aria-label={`Select ${e.path}`} checked={within || picked.has(e.path)} disabled={within} onCheckedChange={(on) => pick(e.path, on === true)} />;
+          return e.type === "directory" ? (
+            <li key={e.path} className="flex items-center gap-2 py-1 pr-3 text-text-2" style={pad}>
+              {box}
+              <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate">{name}</span>
+            </li>
+          ) : (
+            <li key={e.path} className="flex items-center gap-2 pr-3 hover:bg-accent" style={pad}>
+              {box}
+              <button type="button" className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left" onClick={() => bridge.showFile(id, e.path)}>
+                <File className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+                <small className="shrink-0 text-xs text-faint">{formatBytes(e.size)}</small>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

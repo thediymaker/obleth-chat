@@ -39,6 +39,53 @@ describe("the workspace panel", () => {
     expect(await screen.findByText("data.csv")).toBeInTheDocument();
   });
 
+  it("downloads just the files and folders that are ticked", async () => {
+    mockApi(
+      (path) =>
+        path.endsWith("/workspace/files")
+          ? {
+              entries: [
+                { path: "notes & plan.md", type: "file", size: 10 },
+                { path: "src", type: "directory" },
+                { path: "src/app.py", type: "file", size: 20 },
+                { path: "src/lib", type: "directory" },
+                { path: "src/lib/util.py", type: "file", size: 30 },
+              ],
+            }
+          : { workspace: { status: "running", previewPort: null }, diskLimit: 10 * 2 ** 30 },
+      { workspaces: true, previews: true },
+    );
+    renderPage(<WorkspacePanel conversationId="c1" tab="files" />);
+    await screen.findByText("app.py");
+    // Nothing ticked: only the whole project can be downloaded.
+    expect(screen.queryByRole("link", { name: "Download what is picked" })).toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select src/app.py" }));
+    const one = screen.getByRole("link", { name: "Download what is picked" });
+    expect(one).toHaveAttribute("href", "/api/conversations/c1/workspace/download?path=src%2Fapp.py");
+    expect(screen.getByText("1 picked")).toBeInTheDocument();
+    // A folder brings what is in it, so only the folder is asked for.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select src" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select notes & plan.md" }));
+    expect(screen.getByRole("link", { name: "Download what is picked" })).toHaveAttribute(
+      "href",
+      "/api/conversations/c1/workspace/download?path=notes%20%26%20plan.md&path=src",
+    );
+    expect(screen.getByText("2 picked")).toBeInTheDocument();
+    const inside = screen.getByRole("checkbox", { name: "Select src/lib/util.py" });
+    expect(inside).toBeChecked();
+    expect(inside).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.queryByRole("link", { name: "Download what is picked" })).toBeNull();
+    // Everything: the top of the tree, which is the whole of it.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select everything" }));
+    expect(screen.getByRole("link", { name: "Download what is picked" })).toHaveAttribute(
+      "href",
+      "/api/conversations/c1/workspace/download?path=notes%20%26%20plan.md&path=src",
+    );
+    // The whole project is still one click away.
+    expect(screen.getByRole("link", { name: "Download project" })).toHaveAttribute("href", "/api/conversations/c1/workspace/download");
+  });
+
   it("offers to wake an asleep workspace", async () => {
     const calls = mockApi((_path, options) => ({ workspace: { status: options.method === "POST" ? "starting" : "stopped" } }), { workspaces: true, previews: true });
     renderPage(<WorkspacePanel conversationId="c1" tab="preview" />);

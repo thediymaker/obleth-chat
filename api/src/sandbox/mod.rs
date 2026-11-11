@@ -1404,18 +1404,32 @@ async fn file(
     ))
 }
 
-/// The project as a zip, without dependencies or build output. A GET never wakes an
+/// The project as a zip, without dependencies or build output; or, with `path`
+/// parameters, only those files and folders: one file comes as itself, anything
+/// more as a zip that keeps each at its place in the project. A GET never wakes an
 /// asleep workspace; opening the workspace does.
 async fn download(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> Result<Response, ApiError> {
     let (sandboxes, user) = manager(&s, &headers, false).await?;
     let sandbox = sandboxes
         .get(user.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    let picked: Vec<String> =
+        url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes())
+            .filter(|(key, value)| key == "path" && !value.trim().is_empty())
+            .map(|(_, value)| value.into_owned())
+            .collect();
+    if picked.len() > tools::ARCHIVE_PICKS {
+        return Err(ApiError::bad(format!(
+            "Pick up to {} files and folders at a time; a folder counts as one.",
+            tools::ARCHIVE_PICKS
+        )));
+    }
     let not_running = |status: &str| {
         let message = match status {
             "starting" => "The workspace is starting. Download the project once it runs.",
@@ -1430,23 +1444,76 @@ async fn download(
     if !sandboxes.confirm_pod(&sandbox).await? {
         return Err(not_running("stopped"));
     }
+    let attachment = |name: String, kind: &str, body: Vec<u8>| {
+        (
+            [
+                (header::CONTENT_TYPE, kind.to_owned()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{name}\""),
+                ),
+                (header::CACHE_CONTROL, "no-store".to_owned()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+            ],
+            body,
+        )
+            .into_response()
+    };
+    // One file comes as itself. A folder is not a file to read, and is zipped below.
+    if let [one] = picked.as_slice() {
+        if let Ok((bytes, truncated)) =
+            tools::read_bytes(&sandboxes, &sandbox, one, tools::ARCHIVE_LIMIT).await
+        {
+            if truncated {
+                return Err(ApiError(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "This file is larger than 64 MB. Use the terminal to move it.".into(),
+                ));
+            }
+            return Ok(attachment(
+                file_name(one),
+                "application/octet-stream",
+                bytes,
+            ));
+        }
+    }
     let title: String = sqlx::query_scalar("SELECT title FROM conversations WHERE id=$1")
         .bind(id)
         .fetch_one(&sandboxes.inner.pool)
         .await?;
-    let archive = tools::archive(&sandboxes, &sandbox)
+    let archive = tools::archive(&sandboxes, &sandbox, &picked)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
-    let disposition = format!("attachment; filename=\"{}.zip\"", file_stem(&title));
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/zip".to_owned()),
-            (header::CONTENT_DISPOSITION, disposition),
-            (header::CACHE_CONTROL, "no-store".to_owned()),
-        ],
-        archive,
-    )
-        .into_response())
+        .map_err(|e| {
+            let status = match e.contains("any more") {
+                true => StatusCode::NOT_FOUND,
+                false if e.contains("larger than") => StatusCode::PAYLOAD_TOO_LARGE,
+                false => StatusCode::BAD_GATEWAY,
+            };
+            ApiError(status, e)
+        })?;
+    let name = match picked.is_empty() {
+        true => format!("{}.zip", file_stem(&title)),
+        false => format!("{}-files.zip", file_stem(&title)),
+    };
+    Ok(attachment(name, "application/zip", archive))
+}
+
+/// A safe download name from a file's path: its last part, with anything a header
+/// or a file system might trip on replaced.
+fn file_name(path: &str) -> String {
+    let last = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let name: String = last
+        .chars()
+        .map(|c| match c {
+            c if c.is_ascii_alphanumeric() || "._- ()+".contains(c) => c,
+            _ => '_',
+        })
+        .take(120)
+        .collect();
+    match name.trim_matches([' ', '.']).is_empty() {
+        true => "file".into(),
+        false => name,
+    }
 }
 
 /// Puts the project back as it was at one of its checkpoints. Not while a reply works
@@ -1679,6 +1746,16 @@ mod tests {
         let mut leaving = pod.clone();
         leaving["metadata"]["deletionTimestamp"] = json!("2026-01-01T00:00:00Z");
         assert!(!serves(&leaving, slug, "10.0.0.7"));
+    }
+
+    #[test]
+    fn a_picked_files_name_is_safe() {
+        assert_eq!(file_name("src/app (v2).py"), "app (v2).py");
+        assert_eq!(file_name("notes/résumé\".txt"), "r_sum__.txt");
+        assert_eq!(file_name("a/b/"), "b");
+        assert_eq!(file_name("../.."), "file");
+        assert_eq!(file_name(""), "file");
+        assert!(file_name(&"x".repeat(500)).len() == 120);
     }
 
     #[test]

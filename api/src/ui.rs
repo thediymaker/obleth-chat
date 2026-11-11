@@ -6,7 +6,7 @@
 use axum::{
     body::Body,
     extract::Request,
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     Router,
 };
@@ -29,6 +29,10 @@ const HOP_BY_HOP: [&str; 8] = [
     "transfer-encoding",
     "upgrade",
 ];
+
+/// What signs a person in to Chat. The interface server draws pages and never
+/// needs these, so none of them leaves Chat.
+const CREDENTIALS: [&str; 3] = ["cookie", "authorization", "x-csrf-token"];
 
 #[derive(Clone)]
 pub struct Ui {
@@ -76,16 +80,23 @@ impl Ui {
     }
 
     async fn forward(&self, request: Request) -> Response {
-        let (parts, body) = request.into_parts();
-        let path = parts
-            .uri
-            .path_and_query()
-            .map(|p| p.as_str())
-            .unwrap_or("/");
-        let Ok(url) = self.base.join(path) else {
+        let (parts, _) = request.into_parts();
+        // Pages and their assets are read, never written: the interface server has
+        // no forms or actions of its own, so nothing else is passed on.
+        if !matches!(parts.method, Method::GET | Method::HEAD) {
+            return (
+                StatusCode::METHOD_NOT_ALLOWED,
+                [(header::ALLOW, "GET, HEAD")],
+            )
+                .into_response();
+        }
+        let Some(url) = target(&self.base, &parts.uri) else {
             return StatusCode::BAD_REQUEST.into_response();
         };
         let mut headers = forwardable(&parts.headers);
+        for name in CREDENTIALS {
+            headers.remove(name);
+        }
         headers.remove(PREVIEW_HEADER);
         if let Some(previews) = &self.previews {
             headers.insert(PREVIEW_HEADER, previews.clone());
@@ -96,29 +107,24 @@ impl Ui {
         headers.remove(header::HOST);
         // Page loads have no body, so one that fails on the way out is sent again,
         // as while the interface server restarts.
-        let upstream = if matches!(parts.method, Method::GET | Method::HEAD) {
-            let send = || {
-                self.client
-                    .request(parts.method.clone(), url.clone())
-                    .headers(headers.clone())
-                    .send()
-            };
-            match send().await {
-                Err(error) if error.is_connect() || error.is_request() => send().await,
-                result => result,
-            }
-        } else {
+        let send = || {
             self.client
-                .request(parts.method, url)
-                .headers(headers)
-                .body(reqwest::Body::wrap_stream(body.into_data_stream()))
+                .request(parts.method.clone(), url.clone())
+                .headers(headers.clone())
                 .send()
-                .await
+        };
+        let upstream = match send().await {
+            Err(error) if error.is_connect() || error.is_request() => send().await,
+            result => result,
         };
         let upstream = match upstream {
             Ok(response) => response,
             Err(error) => {
-                tracing::warn!(error = ?error, "the web interface did not answer");
+                // Without the address: a page's path can hold a one-time link.
+                tracing::warn!(
+                    error = %error.without_url(),
+                    "the web interface did not answer"
+                );
                 return (
                     StatusCode::BAD_GATEWAY,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -130,11 +136,35 @@ impl Ui {
         let mut response = Response::builder().status(upstream.status());
         if let Some(out) = response.headers_mut() {
             *out = forwardable(upstream.headers());
+            // Only Chat signs people in, so only Chat sets cookies on its origin.
+            out.remove(header::SET_COOKIE);
         }
         response
             .body(Body::from_stream(upstream.bytes_stream()))
             .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
     }
+}
+
+/// Where on the interface server a request goes: the server's own address with the
+/// request's path and query, or None for a path that could name another host. The
+/// path is set on a copy of the address rather than resolved against it, because a
+/// path such as `//host/x` or `/\host/x` resolves to that host.
+fn target(base: &Url, uri: &Uri) -> Option<Url> {
+    let path = uri.path();
+    if !path.starts_with('/') || path.starts_with("//") || path.contains('\\') {
+        return None;
+    }
+    let mut url = base.clone();
+    url.set_path(path);
+    url.set_query(uri.query());
+    let same = url.scheme() == base.scheme()
+        && url.host() == base.host()
+        && url.port_or_known_default() == base.port_or_known_default()
+        && url.username().is_empty()
+        && url.password().is_none()
+        // Dot segments are resolved by now; what is left must still be one path.
+        && !url.path().starts_with("//");
+    same.then_some(url)
 }
 
 /// The site's `site.config.js` and `assets/`, which installs replace with their own.
@@ -170,6 +200,75 @@ fn forwardable(headers: &HeaderMap) -> HeaderMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn base() -> Url {
+        Url::parse("http://obleth-chat-ui:3000").unwrap()
+    }
+
+    fn to(target_of: &str) -> Option<String> {
+        let uri: Uri = target_of.parse().ok()?;
+        target(&base(), &uri).map(String::from)
+    }
+
+    #[test]
+    fn a_page_goes_to_the_interface_server() {
+        assert_eq!(to("/").as_deref(), Some("http://obleth-chat-ui:3000/"));
+        assert_eq!(
+            to("/chat/abc?tab=files&q=a//b").as_deref(),
+            Some("http://obleth-chat-ui:3000/chat/abc?tab=files&q=a//b")
+        );
+        assert_eq!(
+            to("/_next/static/chunks/a%2Fb.js").as_deref(),
+            Some("http://obleth-chat-ui:3000/_next/static/chunks/a%2Fb.js")
+        );
+        // Encoded slashes and an `@` stay part of the path.
+        assert_eq!(
+            to("/%2F%2Fevil.example/x").as_deref(),
+            Some("http://obleth-chat-ui:3000/%2F%2Fevil.example/x")
+        );
+        assert_eq!(
+            to("/@evil.example/x").as_deref(),
+            Some("http://obleth-chat-ui:3000/@evil.example/x")
+        );
+    }
+
+    #[test]
+    fn no_path_names_another_host() {
+        for path in [
+            "//evil.example/x",
+            "//evil.example:8080/x?y=1",
+            "//127.0.0.1:8085/metrics",
+            "//2130706433/x",
+            "//[::1]:8085/metrics",
+            "//user:pass@evil.example/x",
+            "///evil.example/x",
+            "/\\evil.example/x",
+            "/\\\\evil.example/x",
+            "/\\/evil.example/x",
+            "/a/\\evil.example",
+            // The absolute form a client may send, with the same path inside.
+            "http://chat.example//evil.example/x",
+            // Dot segments that leave a double slash at the front.
+            "/.//evil.example/x",
+            "/x/..//evil.example/x",
+            "/..//evil.example",
+        ] {
+            assert_eq!(to(path), None, "{path}");
+        }
+        // Whatever the path, the address stays the interface server's.
+        for path in [
+            "/a/.//evil.example/x",
+            "/?//evil.example",
+            "/http://evil.example/x",
+            "http://evil.example/x",
+        ] {
+            let url = to(path).unwrap_or_else(|| panic!("{path}"));
+            assert!(
+                url.starts_with("http://obleth-chat-ui:3000/"),
+                "{path}: {url}"
+            );
+        }
+    }
 
     #[test]
     fn hop_by_hop_headers_stay_behind() {

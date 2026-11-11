@@ -443,6 +443,7 @@ export interface Decisions {
   checkTree?: boolean;
   checkReports?: boolean;
   pickSections?: boolean;
+  checkMemories?: boolean;
   gateway?: boolean;
 }
 export const decisionsUsage = (endpoint: string) =>
@@ -462,6 +463,7 @@ export function decisionsBody(form: FormData) {
     checkTree: on("decisions-check-tree"),
     checkReports: on("decisions-check-reports"),
     pickSections: on("decisions-pick-sections"),
+    checkMemories: on("decisions-check-memories"),
   };
   if (body.endpoint !== "custom") return body;
   const url = String(form.get("decisions-url") || "").trim();
@@ -588,6 +590,12 @@ export function DecisionsCard({ decisions: d, onSaved }: { decisions: Decisions;
           label="Pick sections of papers"
           defaultChecked={!!d.pickSections}
           description="When research reads a paper, ask which of its sections answer what the chat is looking for, and return those. Off, the chat gets the outline and chooses itself."
+        />
+        <CheckField
+          id="decisions-check-memories"
+          label="Check memories before they are kept"
+          defaultChecked={!!d.checkMemories}
+          description="When Memory reads a chat, ask whether each thing it would remember lasts beyond that chat, such as a person’s field, project or a way they always want answers, and keep only those. Off, Memory keeps what it picks."
         />
         <p className="text-sm text-muted-foreground" aria-live="polite">
           {result}

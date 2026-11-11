@@ -2,6 +2,45 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**New**
+
+- **Download just the files you pick.** The workspace's Files tab has a tick box beside every file and folder. Tick what you want and choose Download: one file comes as itself, anything more as one zip that keeps each file at its place in the project. A ticked folder brings everything in it, without dependencies and build output. The download button in the bar above still takes the whole project. Over the API, `GET /api/conversations/{id}/workspace/download` takes repeated `path` parameters (up to 200, and 64 MB in all).
+
+**Changes**
+
+- **Memory keeps only what lasts.** Memory kept details of the task in front of it as facts about the person: a file name, a goal for one experiment, a preference stated for one deck. Every memory it would add or change is now put to a [decision](https://www.obleth.com/docs/run-chat/decisions) first, which asks whether it is a lasting fact the person's messages state, worth knowing in chats about other things weeks from now; only a yes over 50% is kept. On a set of 20 proposals, the gateway's verdicts model and gemma4-31b-it each dropped all 10 task details and kept 9 of 10 lasting facts. Administrators can turn it off with **Check memories before they are kept** in Admin › System › Decisions; with decisions off, Memory keeps what it picks, as before. Migration `072` adds the setting, on.
+
+**Fixes**
+
+- **A memory's new topic shows with the memory in it.** A topic was saved before the memory was linked to it, so the Memory page could briefly show a topic with no memories.
+
+**Security**
+
+- **The web interface is reached only at its own address.** Chat sends every request that none of its own routes answers to the interface server. A request path written as `//host/…` or `/\host/…` was resolved to that host instead, so Chat would fetch any address it could reach and return the answer from its own origin, cookies included. The address is now always the interface server's, only page loads (`GET` and `HEAD`) are passed on, the session cookie and other credentials stay in Chat, and the interface server cannot set cookies. Installs behind a proxy that rewrites such paths (Traefik does) were not reachable this way from outside.
+- **Large uploads are read after sign-in.** Starting a batch and adding a file to a knowledge collection read their bodies (up to 96 MB and 50 MB) before checking who was asking, so anyone who could reach Chat could fill its memory. Both now check sign-in first, a batch's rows and columns are counted while the spreadsheet is read instead of after, two spreadsheets are read at a time, and an upload has five minutes to arrive.
+- **An approval covers one tool call.** With models whose tool calls Chat reads from the reply's text, or that send calls without ids, a later call in the same turn could reuse an earlier call's id and run on its Allow (or be refused on its Deny) without a card. Every call in a turn now has its own id, each question starts unanswered, and an answer is used up when it is read.
+- **Shared chats keep the owner's memories private.** What Chat recalled or learned about the owner while answering was part of each reply's activity, which a shared chat showed and a fork copied. Viewers and forks no longer get those entries. A fork also copies only the generated images the shared replies show, not ones from replies the owner regenerated or branched away from.
+- **Kubernetes tools take names, not paths.** A namespace, resource name or API version went into the request path as the model wrote it, so one containing `/`, `..`, `?` or `#` addressed something else on the cluster's API, such as a pod's proxy or a whole collection, and the read tools ask for no approval. Each is now checked to be a name of its kind, and no request leaves the cluster address the connection was saved with.
+- **An approval card shows what will run.** The card for a Kubernetes or Slurm change was worked out in the browser from the text of the call's arguments, with the text itself folded away and cut at 2 KB. A crafted call could make the two differ: a script line that looked like a field ended the script shown, a manifest after `--- # comment` was applied but not listed, and an extra argument could supply the name a delete appeared to target. The summary now comes from the server, from the same reading of the arguments that carries the call out, and every argument is shown in full and in view, for other services' tools too. A call whose arguments are too long to show whole (384 KB) is refused, and Chat's own tools that change something refuse arguments they do not name.
+- **Importing chat history stays within memory.** A small export file could ask for many times its size once parsed, or inflate from a zip, and one upload could take the server down. Each conversation is now held to an allowance as it is read (64 MiB for its bytes and what is kept of them), fields Chat does not use are skipped instead of kept, and an import keeps at most 256 MiB of text (was 768). The file with the conversation that goes over is refused with a message saying so. An upload that stops arriving is dropped after 30 seconds, so it no longer holds the one import that runs at a time.
+- **Reading documents takes time and memory that follow their size.** A web page of unclosed headings or math took time that grew with the square of its length (minutes for a megabyte) on the threads that answer requests, and a workbook or deck of empty elements took most of a gigabyte. Pages are now read in one pass, elements are read as they are needed, a document is split at up to 10,000 headings and reads up to 10,000 PDF bookmarks, and all of it runs off the request threads. `pdftotext`, `pdftohtml` and `unzip` run with a 1 GiB memory limit and without Chat's environment, which holds its keys.
+- **Batch results are written out as they are read.** Downloading a batch's results held the gateway's output file, every answer and the finished spreadsheet in memory at once, up to 512 MB a file, for as many downloads as were asked for. Answers are now read a line at a time and the spreadsheet is sent a few hundred rows at a time, two downloads run at once, and a download reads at most 192 MB of results.
+- **A tool call the model only shows is not run.** For models whose tool calls Chat reads from the reply's text, a call inside a code block, a code span or a quoted line ran like any other, so a reply that quoted a page or file holding one ran it. Those are now left as text. A call's own arguments may still hold code blocks.
+- **Revoking an API token stops the reply it started.** A reply started over MCP kept running, tools included, after its token was revoked. It now ends within 15 seconds.
+- **Kubernetes `get` shows a Secret without its values:** its keys and the size of each, as `kubectl describe` does. Reading needs no approval and goes to the model, so the values stay on the cluster.
+- **A shared connection's address is shown without its path** to people who do not manage it, since the path or query of an MCP server's address often carries its key. The audit log records the address without its query.
+- **Drafts end with the session.** What was set up for a chat not yet started (Auto mode, connections switched off, a project, collections) and text typed into Steer stayed in the page after sign-out, for the next person to sign in on it.
+- **Knowledge uploads wait for room.** A file's name, type and the person's remaining storage are checked before it is read, and uploads share the memory budget attachments already use, so many large uploads at once wait their turn.
+- **Drawings and code blocks cannot hang the page.** Telling whether an `svg` block is a drawing took time that doubled with each comment it opened with, so about 300 characters in any message, a shared chat's included, froze the tab of whoever opened it. It is now one pass. A code block labelled `constructor` or the like is shown as plain code.
+- **Batch results:** a cell starting with `-` that a spreadsheet would read as a formula is written as text. List items (`- first`) and negative numbers are unchanged.
+- **TLS trust store.** `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.11, which stop trusting two intermediate certificates whose keys are public.
+
+**Deployment**
+
+- **New installs get the current release.** `deploy/compose.yaml` and `deploy/k8s.yaml`, which `setup.sh` applies as they are, still named the 1.0.0 images, so a fresh install ran 1.0.0 whatever was checked out. They now name this version, and CI and the release workflow fail when they do not (`scripts/check-versions.sh`).
+
 ## v1.2.2
 
 **Fixes**

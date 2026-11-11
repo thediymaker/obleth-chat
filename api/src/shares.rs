@@ -136,7 +136,7 @@ async fn set_sharing(
 /// The chat as a viewer reads it. Its own settings stay out, each reply shows only
 /// its shareable settings (never the owner's instructions), and images and
 /// attachments point at the shared routes. Tool activity stays: it is part of
-/// the conversation.
+/// the conversation. What Chat recalled or learned about the owner does not.
 async fn read(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -161,6 +161,9 @@ async fn read(
         }
         if let Some(settings) = m.get_mut("settings").filter(|s| !s.is_null()) {
             *settings = crate::store::shareable_settings(settings);
+        }
+        if let Some(activity) = m.get_mut("activity").filter(|a| a.is_array()) {
+            *activity = crate::store::shareable_activity(activity);
         }
         for a in m["attachments"].as_array_mut().into_iter().flatten() {
             if let Some(file) = a["id"].as_str().map(str::to_owned) {

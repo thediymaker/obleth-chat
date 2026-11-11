@@ -920,7 +920,8 @@ pub async fn ask(
     } else {
         format!("{}{host}", tools::GRANT_PREFIX)
     };
-    sqlx::query("INSERT INTO tool_approvals(generation_id,call_id,conversation_id,owner_id,tool_name) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
+    // A new question is always undecided, whatever an earlier call with this id got.
+    sqlx::query("INSERT INTO tool_approvals(generation_id,call_id,conversation_id,owner_id,tool_name) VALUES($1,$2,$3,$4,$5) ON CONFLICT (generation_id,call_id) DO UPDATE SET decision=NULL, connection_id=NULL, tool_name=EXCLUDED.tool_name, created_at=NOW()")
         .bind(generation)
         .bind(call)
         .bind(conversation)

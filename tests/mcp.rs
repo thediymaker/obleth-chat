@@ -558,3 +558,63 @@ async fn signing_out_a_device_ends_the_tokens_made_on_it(pool: PgPool) {
     assert_eq!(ping(taken).await, StatusCode::UNAUTHORIZED);
     assert_eq!(ping(kept).await, StatusCode::OK);
 }
+
+/// A token is revoked to stop what it can do, and that includes the reply it
+/// started a moment ago: the turn checks its token while it runs.
+#[sqlx::test(migrator = "obleth_chat::MIGRATOR")]
+async fn revoking_a_token_stops_the_turn_it_started(pool: PgPool) {
+    let app = fixture(pool.clone()).await;
+    let (cookie, csrf) = login(&app).await;
+    let (status, created) =
+        create_token(&app, &cookie, &csrf, json!({"name":"Agent","days":7})).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let token = created["token"].as_str().unwrap().to_owned();
+    let token_id = created["apiToken"]["id"].as_str().unwrap().to_owned();
+    let chat = tool(
+        &app,
+        &token,
+        "start_chat",
+        json!({"message":"take your time","model":"fixture-model"}),
+    )
+    .await
+    .unwrap();
+    let id = chat["id"].as_str().unwrap().to_owned();
+    let (status, _, _) = send(
+        &app,
+        browser(
+            "DELETE",
+            &format!("/api/auth/tokens/{token_id}"),
+            json!({}),
+            &cookie,
+            &csrf,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // The model would answer after 30 seconds; the turn ends well before, saying why.
+    let began = std::time::Instant::now();
+    let reason = loop {
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status, error_message FROM messages WHERE conversation_id=$1::uuid AND role='assistant'",
+        )
+        .bind(&id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        match row {
+            Some((status, error)) if status != "streaming" && status != "pending" => {
+                break (status, error.unwrap_or_default())
+            }
+            _ => {}
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(25),
+            "the turn kept running"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert!(
+        reason.1.contains("token that started this was revoked"),
+        "{reason:?}"
+    );
+}

@@ -106,7 +106,8 @@ async fn completions(State(seen): State<Seen>, Json(body): Json<Value>) -> Json<
             json!({"add":[
                 {"text":"You are a PhD student in hydrology","kind":"about","topics":[{"name":"Hydrology","kind":"field"}]},
                 {"text":"You train flood models with PyTorch","kind":"work","topics":[{"name":"PyTorch","kind":"tool"},{"name":"Flood forecasting","kind":"project"}]},
-                {"text":"you are a phd student in HYDROLOGY.","kind":"about","topics":[]}
+                {"text":"you are a phd student in HYDROLOGY.","kind":"about","topics":[]},
+                {"text":"You are using a file named floods.nc","kind":"work","topics":[]}
             ],"update":[],"forget":[]})
         )
     } else if input.contains("switched") {
@@ -125,7 +126,37 @@ async fn completions(State(seen): State<Seen>, Json(body): Json<Value>) -> Json<
     Json(json!({"choices":[{"message":{"role":"assistant","content":content}}]}))
 }
 
+/// A decisions service: a memory naming a file is a detail of the task, anything else
+/// lasts; a chat that mentions an outage gets no answer.
+async fn verdicts(State(asked): State<Seen>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+    asked.lock().unwrap().push(body.clone());
+    if body["state"].to_string().contains("outage") {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "busy"}})),
+        );
+    }
+    let verdicts: serde_json::Map<String, Value> = body["questions"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(id, q)| {
+            let yes = if q["instructions"].as_str().unwrap().contains("file named") { 0.02 } else { 0.97 };
+            (id.clone(), json!({"type":"boolean","value":yes > 0.5,"probabilities":{"true":yes,"false":1.0 - yes},"confidence":0.9}))
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(json!({"model":"judge","verdicts":verdicts})),
+    )
+}
+
 async fn fixture(pool: &PgPool) -> (AppState, Router, Seen) {
+    fixture_asked(pool).await.0
+}
+
+async fn fixture_asked(pool: &PgPool) -> ((AppState, Router, Seen), Seen) {
+    let asked: Seen = Arc::default();
     let seen: Seen = Arc::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -134,7 +165,8 @@ async fn fixture(pool: &PgPool) -> (AppState, Router, Seen) {
         .route(
             "/v1/chat/completions",
             post(completions).with_state(seen.clone()),
-        );
+        )
+        .route("/v1/verdicts", post(verdicts).with_state(asked.clone()));
     tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
     let pem = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)
         .unwrap()
@@ -173,7 +205,7 @@ async fn fixture(pool: &PgPool) -> (AppState, Router, Seen) {
         "fixture-embed".into(),
         1024 * 1024,
     ));
-    (state.clone(), memory::router(state), seen)
+    ((state.clone(), memory::router(state), seen), asked)
 }
 
 async fn call(
@@ -276,7 +308,7 @@ async fn contents(pool: &PgPool, owner: Uuid) -> Vec<String> {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn replies_teach_memories_linked_to_topics(pool: PgPool) {
-    let (state, _, seen) = fixture(&pool).await;
+    let ((state, _, seen), judged) = fixture_asked(&pool).await;
     let person = session(&pool, "user").await;
     let user = identity(&person);
     let (id, reply) = chat(
@@ -291,7 +323,7 @@ async fn replies_teach_memories_linked_to_topics(pool: PgPool) {
     enable(&pool).await;
     assert!(memory::after_reply(&state, &user, id, reply).await);
     settled(&pool, id).await;
-    // The repeat, written differently, is kept once.
+    // The repeat, written differently, is kept once; the file name was decided not to last.
     assert_eq!(
         contents(&pool, person.id).await,
         vec![
@@ -352,6 +384,56 @@ async fn replies_teach_memories_linked_to_topics(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(through, 1);
+    // Each memory was asked about once, beside the person's words.
+    let judged = judged.lock().unwrap().clone();
+    assert_eq!(judged.len(), 1);
+    assert_eq!(judged[0]["questions"].as_object().unwrap().len(), 4);
+    assert!(judged[0]["state"]
+        .to_string()
+        .contains("PhD student in hydrology"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn without_the_memory_check_what_the_model_picks_is_kept(pool: PgPool) {
+    let ((state, _, _), asked) = fixture_asked(&pool).await;
+    enable(&pool).await;
+    sqlx::query("UPDATE decisions SET check_memories = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let person = session(&pool, "user").await;
+    let (id, reply) = chat(&pool, person.id, &["I study hydrology"], false).await;
+    assert!(memory::after_reply(&state, &identity(&person), id, reply).await);
+    settled(&pool, id).await;
+    assert!(contents(&pool, person.id)
+        .await
+        .contains(&"You are using a file named floods.nc".to_owned()));
+    assert!(asked.lock().unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn without_a_decision_nothing_is_kept_and_the_chat_is_read_later(pool: PgPool) {
+    let (state, _, _) = fixture(&pool).await;
+    enable(&pool).await;
+    let person = session(&pool, "user").await;
+    let (id, reply) = chat(
+        &pool,
+        person.id,
+        &["I study hydrology; the cluster had an outage"],
+        false,
+    )
+    .await;
+    assert!(memory::after_reply(&state, &identity(&person), id, reply).await);
+    settled(&pool, id).await;
+    assert!(contents(&pool, person.id).await.is_empty());
+    let (through, failed): (i32, bool) = sqlx::query_as(
+        "SELECT read_through, failed_at IS NOT NULL FROM memory_reads WHERE conversation_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((through, failed), (-1, true));
 }
 
 #[sqlx::test(migrations = "./migrations")]

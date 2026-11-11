@@ -79,19 +79,25 @@ test("cluster work goes through its own stages, not the cluster's name", () => {
   expect(workOf({ role: "assistant", content: "", activity: job }).rows.map((r) => r.phase)).toEqual(["Inspect", "Submit", "Watch"]);
 });
 
-test("a change waiting for approval says what it does", () => {
-  const yaml = "manifest:\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello\n  namespace: default\nspec:\n  replicas: 1\n  template:\n    spec:\n      containers:\n      - name: web\n        image: nginx:1.27\n        ports:\n        - containerPort: 80\n---\nkind: Service\nmetadata:\n  name: hello\nspec:\n  ports:\n  - port: 80";
-  const applied = changeOf({ service: "kubernetes", action: "apply", detail: yaml })!;
-  expect(applied.items.map((i) => [i.what, i.where])).toEqual([["Deployment/hello", "default"], ["Service/hello", undefined]]);
-  expect(applied.items[0]!.facts).toEqual([["Image", "nginx:1.27"], ["Replicas", "1"], ["Port", "80"]]);
-  expect(applied.text!.startsWith("apiVersion")).toBe(true);
-  const json = changeOf({ service: "kubernetes", action: "apply", detail: 'manifest: {"kind":"ConfigMap","metadata":{"name":"cfg","namespace":"lab"}}' })!;
-  expect(json.items.map((i) => [i.what, i.where])).toEqual([["ConfigMap/cfg", "lab"]]);
-  const job = changeOf({ service: "slurm", action: "submit", detail: "cpus: 2\nmemory_mb: 4096\nname: heat-bench\npartition: long\nscript:\n#!/bin/bash\nsrun ./heat\ntime_limit_minutes: 90" })!;
-  expect(job.items[0]!.what).toBe("heat-bench");
-  expect(job.items[0]!.facts).toEqual([["Partition", "long"], ["Time limit", "1 h 30 min"], ["CPUs", "2"], ["Memory", "4 GB"]]);
-  expect(job.text).toBe("#!/bin/bash\nsrun ./heat");
-  expect(changeOf({ service: "mcp", action: "send", detail: "to: x" })).toBe(null);
+test("a call waiting for approval shows what the server read, and reads nothing from the text itself", () => {
+  const change = {
+    items: [{ verb: "Apply", what: "Deployment/hello", where: "default", facts: [["API version", "apps/v1"]] }, { verb: "Apply", what: "Service/hello", where: "lab", facts: [] }],
+    arguments: [{ name: "manifest", text: "kind: Deployment\n---\nkind: Service" }],
+  };
+  const applied = changeOf({ service: "kubernetes", action: "apply", change })!;
+  expect(applied.items.map((i) => [i.verb, i.what, i.where])).toEqual([["Apply", "Deployment/hello", "default"], ["Apply", "Service/hello", "lab"]]);
+  expect(applied.items[0]!.facts).toEqual([["API version", "apps/v1"]]);
+  expect(applied.arguments).toEqual(change.arguments);
+  // Text that looks like fields is only text: a script line or a second argument
+  // cannot change what the card says the call does.
+  const script = "#!/bin/bash\nname: harmless\ntime_limit_minutes: 5\nrm -rf ~";
+  const job = changeOf({ service: "slurm", action: "submit", detail: `script:\n${script}`, change: { items: [{ verb: "Submit", what: "chat-job", facts: [["Partition", "default"]] }], arguments: [{ name: "script", text: script }] } })!;
+  expect(job.items).toEqual([{ verb: "Submit", what: "chat-job", where: undefined, facts: [["Partition", "default"]] }]);
+  expect(job.arguments[0]!.text).toBe(script);
+  // A step that came without the server's reading has no summary at all.
+  expect(changeOf({ service: "kubernetes", action: "delete", detail: "kind: Pod\nname: p" })).toBe(null);
+  expect(changeOf({ service: "mcp", action: "send", change: { items: [], arguments: [{ name: "to", text: "x" }] } })).toEqual({ items: [], arguments: [{ name: "to", text: "x" }] });
+  expect(changeOf({ change: { items: "no", arguments: [null, 3, { name: 4 }] } })).toEqual({ items: [], arguments: [{ name: "", text: "" }] });
 });
 
 test("the Steer example fits the work, most specific first", () => {
@@ -121,7 +127,7 @@ test("the live card says what it is doing now and where it is in its stages", ()
   expect(s.pane).toMatchObject({ kind: "draft", label: "styles.css", note: "12 lines so far" });
   expect(s.rail.map((r) => [r.phase, r.status])).toEqual([["Explore", "done"], ["Build", "now"], ["Run", "next"]]);
   expect(s.recent.filter(Boolean).length).toBe(2);
-  const asking: Message = { ...live, _draft: null, activity: [{ id: "k", tool: "lab__apply", service: "kubernetes", action: "apply", readOnly: false, connection: "Lab", status: "awaiting", detail: 'manifest: {"kind":"Pod","metadata":{"name":"p"}}' }] };
+  const asking: Message = { ...live, _draft: null, activity: [{ id: "k", tool: "lab__apply", service: "kubernetes", action: "apply", readOnly: false, connection: "Lab", status: "awaiting", detail: 'manifest: {"kind":"Pod","metadata":{"name":"p"}}', change: { items: [{ verb: "Apply", what: "Pod/p", where: "lab", facts: [] }], arguments: [] } }] };
   const ask = runState(asking, workOf(asking));
   expect(ask.headline).toBe("Waiting for you: apply Pod/p");
   expect(ask.rail.find((r) => r.status === "ask")?.phase).toBe("Approve");

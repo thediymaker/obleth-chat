@@ -147,6 +147,7 @@ async fn administrators_point_decisions_at_another_endpoint_with_a_sealed_key(po
     assert_eq!(saved["checkTree"], true);
     assert_eq!(saved["checkReports"], true);
     assert_eq!(saved["pickSections"], true);
+    assert_eq!(saved["checkMemories"], true);
     assert_eq!(saved["hasKey"], false);
     assert_eq!(saved["canStoreKey"], true);
     assert_eq!(saved["gateway"], false);

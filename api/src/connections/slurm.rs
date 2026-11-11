@@ -38,7 +38,7 @@ fn tool(
 
 /// The cluster's tools. `output` adds Job output, for clusters that bring job output
 /// back to Chat.
-pub fn tools(output: bool) -> Vec<Tool> {
+pub fn tools(output: bool, files: bool) -> Vec<Tool> {
     let mut tools = vec![
         tool("cluster", "Cluster", "The Slurm cluster's partitions: idle nodes, CPUs and GPUs, time limits, and the queue's size. Name a partition to also list its nodes.", true, json!({"partition":{"type":"string","description":"Also list this partition's nodes, one line each"}}), &[]),
         tool("jobs", "Jobs", "Your running and pending Slurm jobs; with finished_days, also the ones that ended in the last days, newest first, with their exit codes. For one job, use Job details.", true, json!({"state":{"type":"string","enum":["RUNNING","PENDING"],"description":"Only jobs in this state"},"finished_days":{"type":"integer","minimum":1,"maximum":FINISHED_DAYS_MAX,"description":"Also list jobs that ended in this many past days"}}), &[]),
@@ -59,6 +59,9 @@ pub fn tools(output: bool) -> Vec<Tool> {
     ];
     if output {
         tools.push(tool("output", "Job output", "The end of what a job you submitted from this chat printed (its output file, up to the last 1 MiB), once the job has ended. Use it instead of guessing from the state or exit code.", true, json!({"job_id":{"type":"integer"}}), &["job_id"]));
+    }
+    if files {
+        tools.extend(super::files::tools());
     }
     tools
 }
@@ -465,8 +468,7 @@ impl Client {
             "submit" => self.submit(args, None).await.map(|(t, _)| (true, t)),
             "cancel" => {
                 let id = job_id(args)?;
-                self.call_api(reqwest::Method::DELETE, &format!("job/{id}"), None)
-                    .await?;
+                self.cancel(id).await?;
                 Ok((true, format!("Asked Slurm to cancel job {id}.")))
             }
             other => Err(format!("There is no Slurm tool named {other}")),
@@ -857,6 +859,27 @@ impl Client {
             }
             _ => script,
         };
+        let (id, warnings) = self.submit_job(script, job.clone()).await?;
+        let text = format!(
+            "Submitted job {id} as {} in {}.{}",
+            self.user,
+            job["current_working_directory"].as_str().unwrap_or(""),
+            if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" Warnings: {}", warnings.join("; "))
+            }
+        );
+        Ok((text, id))
+    }
+
+    /// Submits a batch script with the job's settings, as the person: the job id and
+    /// Slurm's warnings.
+    pub async fn submit_job(
+        &mut self,
+        script: String,
+        job: Value,
+    ) -> Result<(i64, Vec<String>), String> {
         let result = self
             .call_api(
                 reqwest::Method::POST,
@@ -872,17 +895,18 @@ impl Client {
             .map(|w| text(&w["description"]))
             .filter(|w| !w.is_empty())
             .collect();
-        let text = format!(
-            "Submitted job {id} as {} in {}.{}",
-            self.user,
-            job["current_working_directory"].as_str().unwrap_or(""),
-            if warnings.is_empty() {
-                String::new()
-            } else {
-                format!(" Warnings: {}", warnings.join("; "))
-            }
-        );
-        Ok((text, id))
+        Ok((id, warnings))
+    }
+
+    pub async fn cancel(&mut self, id: i64) -> Result<(), String> {
+        self.call_api(reqwest::Method::DELETE, &format!("job/{id}"), None)
+            .await
+            .map(|_| ())
+    }
+
+    /// The Slurm user the client acts as.
+    pub fn user(&self) -> &str {
+        &self.user
     }
 }
 
@@ -1147,6 +1171,7 @@ pub fn changes(tool: &str, args: &Value) -> Result<Vec<Value>, String> {
         "cancel" => Ok(vec![
             json!({"verb":"Cancel","what":format!("job {}", job_id(args)?),"facts":[]}),
         ]),
+        name if name.starts_with("files_") => super::files::changes(name, args),
         _ => Ok(vec![]),
     }
 }
@@ -1206,10 +1231,16 @@ mod tests {
         );
         assert_eq!(job_id(&json!({"job_id":"42"})), Ok(42));
         assert!(job_id(&json!({"job_id":-1})).is_err());
-        assert_eq!(tools(false).iter().filter(|t| !t.read_only).count(), 2);
+        assert_eq!(
+            tools(false, false).iter().filter(|t| !t.read_only).count(),
+            2
+        );
         // Job output only reads.
-        assert_eq!(tools(true).len(), tools(false).len() + 1);
-        assert_eq!(tools(true).iter().filter(|t| !t.read_only).count(), 2);
+        assert_eq!(tools(true, false).len(), tools(false, false).len() + 1);
+        assert_eq!(
+            tools(true, false).iter().filter(|t| !t.read_only).count(),
+            2
+        );
     }
 
     #[test]

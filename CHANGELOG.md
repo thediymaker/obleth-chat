@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.5.0
+
+**New**
+
+- **Files on a Slurm cluster.** With **Reach files on the cluster** ticked on a Slurm connection, the model can list, find, read, search and measure each person's own files there, write files, move them, and move them to a trash directory, as that person and nowhere else. The first call in a while starts a small job as the person through slurmrestd with their own token; the job connects out to Chat, carries out the chat's file operations one at a time under the directories the cluster allows (`~` by default; `~,/scratch/$USER` for a scratch space), and exits once idle for an hour or at its time limit. Nothing on the cluster listens, no shared account reads anyone's files, and a job whose account is not the person's ends the session. Writes, moves and trashing wait for **Allow** like any other change, with the path and size on the card; the trash is `~/.chat-trash/<date>` on the cluster, where files keep their paths and can be moved back. The connection takes the partition and QoS for the session job (a small one that starts within seconds), the session length in hours, and the directories the model may reach. The compute nodes need `python3` and must reach Chat's address (`OBLETH_CHAT_ORIGIN`). Migration `075` adds `cluster_sessions` and `cluster_calls`. Over the API, the session job uses `POST /api/cluster-sessions/hello`, `GET /api/cluster-sessions/next`, `POST /api/cluster-sessions/calls/{id}` and `POST /api/cluster-sessions/bye` with its own session token.
+
 ## v1.4.0
 
 **New**

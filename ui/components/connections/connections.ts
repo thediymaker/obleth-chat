@@ -36,6 +36,12 @@ export interface Connection {
   serverName?: string;
   apiVersion?: string;
   returnOutput?: boolean;
+  /** A Slurm cluster set to reach the person's files through a session job, and how. */
+  files?: boolean;
+  filesPartition?: string | null;
+  filesQos?: string | null;
+  filesHours?: number | null;
+  filesRoots?: string | null;
   checkedAt?: string;
   user?: string;
   namespace?: string;
@@ -121,13 +127,33 @@ export function connectionBody(form: FormData, c: Connection | null, kind: Conne
     if (!shared && kind === "kubernetes") options.namespace = text(form, "connection-namespace");
     if (kind === "slurm") options.apiVersion = text(form, "connection-api-version");
     if (kind === "slurm" && jobOutput) options.returnOutput = checked(form, "connection-return-output");
+    if (kind === "slurm") {
+      options.files = checked(form, "connection-files");
+      if (options.files) {
+        options.filesPartition = text(form, "connection-files-partition");
+        options.filesQos = text(form, "connection-files-qos");
+        const hours = text(form, "connection-files-hours");
+        if (hours) options.filesHours = Number(hours);
+        options.filesRoots = text(form, "connection-files-roots");
+      }
+    }
+    const filesChanged =
+      kind === "slurm" &&
+      !!c &&
+      (options.files !== !!c.files ||
+        (!!options.files &&
+          (options.filesPartition !== (c.filesPartition || "") ||
+            options.filesQos !== (c.filesQos || "") ||
+            (options.filesHours ?? 8) !== (c.filesHours ?? 8) ||
+            options.filesRoots !== (c.filesRoots || ""))));
     const changed =
       !c ||
       "ca" in options ||
       (options.user ?? c.user) !== c.user ||
       (options.namespace ?? c.namespace) !== c.namespace ||
       (kind === "slurm" && options.apiVersion !== (c.apiVersion || "")) ||
-      ("returnOutput" in options && options.returnOutput !== !!c.returnOutput);
+      ("returnOutput" in options && options.returnOutput !== !!c.returnOutput) ||
+      filesChanged;
     if (changed) body.options = options;
   }
   return body;

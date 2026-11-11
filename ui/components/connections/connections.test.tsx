@@ -40,14 +40,25 @@ test("a new shared server can ask each person for their own token", () => {
 
 test("a shared cluster takes no token, and a personal one sends its user only when it changed", () => {
   const shared = connectionBody(form({ "connection-name": "HPC", "connection-url": "https://s", "connection-token": "x", "connection-shared": "on", "connection-api-version": "" }), null, "slurm", { admin: true, jobOutput: true });
-  expect(shared).toEqual({ name: "HPC", url: "https://s", confirmActions: false, kind: "slurm", shared: true, options: { apiVersion: "", returnOutput: false } });
+  expect(shared).toEqual({ name: "HPC", url: "https://s", confirmActions: false, kind: "slurm", shared: true, options: { apiVersion: "", returnOutput: false, files: false } });
   const c = server({ kind: "slurm", user: "jdoe", apiVersion: "" });
   expect(connectionBody(form({ "connection-name": "HPC", "connection-url": "https://s", "connection-user": "jdoe", "connection-api-version": "" }), c, "slurm", { admin: false, jobOutput: false })).toEqual({
     name: "HPC",
     url: "https://s",
     confirmActions: false,
   });
-  expect(connectionBody(form({ "connection-name": "HPC", "connection-url": "https://s", "connection-user": "ana", "connection-api-version": "" }), c, "slurm", { admin: false, jobOutput: false }).options).toEqual({ user: "ana", apiVersion: "" });
+  expect(connectionBody(form({ "connection-name": "HPC", "connection-url": "https://s", "connection-user": "ana", "connection-api-version": "" }), c, "slurm", { admin: false, jobOutput: false }).options).toEqual({ user: "ana", apiVersion: "", files: false });
+});
+
+test("a cluster set to reach files sends the session job's settings, and only when they changed", () => {
+  const fields = { "connection-name": "HPC", "connection-url": "https://s", "connection-api-version": "", "connection-files": "on", "connection-files-partition": "htc", "connection-files-qos": "", "connection-files-hours": "4", "connection-files-roots": "~,/scratch/$USER" };
+  const made = connectionBody(form({ ...fields, "connection-shared": "on" }), null, "slurm", { admin: true, jobOutput: false });
+  expect(made.options).toEqual({ apiVersion: "", files: true, filesPartition: "htc", filesQos: "", filesHours: 4, filesRoots: "~,/scratch/$USER" });
+  const c = server({ kind: "slurm", shared: true, apiVersion: "", files: true, filesPartition: "htc", filesHours: 4, filesRoots: "~,/scratch/$USER" });
+  expect(connectionBody(form(fields), c, "slurm", { admin: true, jobOutput: false }).options).toBeUndefined();
+  expect(connectionBody(form({ ...fields, "connection-files-hours": "" }), c, "slurm", { admin: true, jobOutput: false }).options).toEqual({ apiVersion: "", files: true, filesPartition: "htc", filesQos: "", filesRoots: "~,/scratch/$USER" });
+  const off = connectionBody(form({ "connection-name": "HPC", "connection-url": "https://s", "connection-api-version": "" }), c, "slurm", { admin: true, jobOutput: false });
+  expect(off.options).toEqual({ apiVersion: "", files: false });
 });
 
 test("MCP servers lists yours and shared ones, and turns one off", async () => {

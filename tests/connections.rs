@@ -341,6 +341,8 @@ async fn get_object(State(o): State<Objects>, Path(key): Path<String>) -> Respon
 
 struct Fixture {
     app: Router,
+    /// Where the app itself listens, for a cluster's file session job to reach.
+    app_url: String,
     /// Object storage, where jobs bring their output back.
     objects: Objects,
     state: AppState,
@@ -434,11 +436,16 @@ async fn fixture_full(pool: PgPool, clusters: bool, storage: bool) -> Fixture {
     .unwrap();
     let mut state = AppState::new(auth, pool.clone(), Some(gateway), 4);
     state.followups_enabled = false;
+    // The app also listens, as it does in service, so a file session job (a real
+    // python3 process in the test) can reach it.
+    let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app_url = format!("http://{}", app_listener.local_addr().unwrap());
     // The mock listens on loopback, so private addresses are allowed here.
     state.connections = Some(
         Connections::new(pool, pem.as_bytes(), true)
             .unwrap()
             .clusters(clusters)
+            .origin(Some(app_url.parse().unwrap()))
             .objects(storage.then(|| {
                 ObjectStore::new(
                     format!("http://{address}").parse().unwrap(),
@@ -449,9 +456,13 @@ async fn fixture_full(pool: PgPool, clusters: bool, storage: bool) -> Fixture {
                 )
             })),
     );
+    let app = router(state.clone(), "branding".into());
+    let served = app.clone();
+    tokio::spawn(async move { axum::serve(app_listener, served).await.unwrap() });
     Fixture {
         objects,
-        app: router(state.clone(), "branding".into()),
+        app,
+        app_url,
         state,
         mcp_url: format!("http://{address}/mcp"),
         cluster_url: format!("http://{address}"),
@@ -2932,4 +2943,320 @@ async fn secrets_are_named_to_the_model_and_opened_only_by_the_owners_browser(po
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The session job's batch script and environment, from what slurmrestd received.
+fn session_job(f: &Fixture, index: usize) -> (String, Vec<(String, String)>, Value) {
+    let submitted = cluster_requests(f, "POST", "/slurm/v0.0.45/job/submit");
+    let body: Value = serde_json::from_str(submitted[index]["body"].as_str().unwrap()).unwrap();
+    let env: Vec<(String, String)> = body["job"]["environment"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let (k, v) = e.as_str().unwrap().split_once('=').unwrap();
+            (k.to_owned(), v.to_owned())
+        })
+        .collect();
+    (
+        body["script"].as_str().unwrap().to_owned(),
+        env,
+        body["job"].clone(),
+    )
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_slurm_cluster_reaches_files_through_a_session_job(pool: PgPool) {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("python3 is not installed; skipping");
+        return;
+    }
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    // The person's files, as the cluster's home directory and a scratch space.
+    let home = std::env::temp_dir().join(format!("chat-files-home-{}", Uuid::new_v4().simple()));
+    let scratch =
+        std::env::temp_dir().join(format!("chat-files-scratch-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(home.join("project")).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::write(
+        home.join("project/run.sh"),
+        "#!/bin/bash\nsrun python train.py\n",
+    )
+    .unwrap();
+    std::fs::write(scratch.join("out.log"), "step 1\nerror: out of memory\n").unwrap();
+    let roots = format!("~,{}", scratch.display());
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true,"filesPartition":"htc","filesHours":4,"filesRoots":roots}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    assert_eq!(shared["files"], true);
+    assert_eq!(shared["filesPartition"], "htc");
+    assert_eq!(shared["filesRoots"], roots);
+    let tools: Vec<&str> = shared["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        tools.contains(&"files_list") && tools.contains(&"files_remove"),
+        "{tools:?}"
+    );
+    let id = shared["id"].as_str().unwrap().to_owned();
+    // The job runs as whoever runs this test, and must say so.
+    let me = std::env::var("USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| {
+            String::from_utf8(
+                std::process::Command::new("id")
+                    .arg("-un")
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_owned()
+        });
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":me}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The first files call starts the session job: a small job as the person, whose
+    // script carries the agent and whose environment carries the session token.
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_list", "sol__files_list", json!({"path":"project"}))]);
+    let (_, stream) = send(&f, &admin, "What is in my project directory?").await;
+    for _ in 0..100 {
+        if !cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (script, env, job) = session_job(&f, 0);
+    assert!(script.starts_with("#!/bin/bash\n"), "{script}");
+    assert!(
+        script.contains("exec python3 - <<'OBLETH_CHAT_AGENT_"),
+        "{script}"
+    );
+    assert_eq!(job["name"], "chat-files");
+    assert_eq!(job["partition"], "htc");
+    assert_eq!(job["time_limit"]["number"], 240);
+    assert_eq!(job["cpus_per_task"], 1);
+    assert_eq!(job["current_working_directory"], format!("/home/{me}"));
+    assert!(job.get("qos").is_none());
+    let var = |name: &str| {
+        env.iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(var("OBLETH_CHAT_URL"), f.app_url);
+    assert_eq!(var("OBLETH_CHAT_ROOTS"), roots);
+    assert_eq!(var("OBLETH_CHAT_SESSION").len(), 64);
+    assert!(!script.contains(&var("OBLETH_CHAT_SESSION")));
+
+    // Run the job's script as Slurm would, as this user, with the test's home.
+    let dir = std::env::temp_dir().join(format!("chat-files-job-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("job.sh"), &script).unwrap();
+    let log = std::fs::File::create(dir.join("job.log")).unwrap();
+    let mut command = std::process::Command::new("bash");
+    command
+        .arg(dir.join("job.sh"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("USER", &me)
+        .env("LOGNAME", &me)
+        .stdout(log.try_clone().unwrap())
+        .stderr(log);
+    for (k, v) in &env {
+        command.env(k, v);
+    }
+    let mut child = command.spawn().unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(60), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains("A file session started on the cluster as job 8"),
+        "{text}"
+    );
+    assert!(text.contains("run.sh"), "{text}");
+    assert!(text.contains("(1 entries, hidden ones left out)"), "{text}");
+    let (state, host): (String, Option<String>) =
+        sqlx::query_as("SELECT state, host FROM cluster_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "live");
+    assert!(host.is_some_and(|h| !h.is_empty()));
+
+    // Later calls, in any chat, go down the same line: no new job.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_search",
+        "sol__files_search",
+        json!({"path":scratch.display().to_string(),"pattern":"out of memory"}),
+    )]);
+    let (_, stream) = send(&f, &admin, "Why did it fail?").await;
+    let text = tokio::time::timeout(Duration::from_secs(60), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("out.log:2: error: out of memory"), "{text}");
+    assert!(!text.contains("A file session started"), "{text}");
+    assert_eq!(
+        cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit").len(),
+        1
+    );
+
+    // Outside the roots is refused on the cluster, in words the model can act on.
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_etc", "sol__files_list", json!({"path":"/etc"}))]);
+    let (_, stream) = send(&f, &admin, "List /etc").await;
+    let text = tokio::time::timeout(Duration::from_secs(60), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("outside what Chat may reach here"), "{text}");
+
+    // A write waits for Allow, then lands as the person.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_write",
+        "sol__files_write",
+        json!({"path":"project/notes.md","content":"The run ran out of memory.\n"}),
+    )]);
+    let (chat, stream) = send(&f, &admin, "Write that down").await;
+    assert_eq!(pending(&pool).await, "call_write");
+    assert!(!home.join("project/notes.md").exists());
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{chat}/approvals"),
+        json!({"callId":"call_write","decision":"allow"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(60), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Wrote "), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(home.join("project/notes.md")).unwrap(),
+        "The run ran out of memory.\n"
+    );
+
+    // Removing the person's credential ends the session; the job learns it at its
+    // next poll and exits.
+    let (status, _) = call(
+        &f.app,
+        "DELETE",
+        &format!("/api/connections/{id}/credential"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let exit = tokio::task::spawn_blocking(move || child.wait().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        exit.success(),
+        "{}",
+        std::fs::read_to_string(dir.join("job.log")).unwrap()
+    );
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM cluster_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ended");
+    assert_eq!(error.as_deref(), Some("The file session was ended"));
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&scratch).ok();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_session_job_running_as_someone_else_is_turned_away(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let connection = Uuid::parse_str(shared["id"].as_str().unwrap()).unwrap();
+    let user: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username='test-admin'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // A session as Chat records one, for a job whose token is this.
+    let token = "ab".repeat(32);
+    let hash = <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()).to_vec();
+    sqlx::query("INSERT INTO cluster_sessions(id,connection_id,user_id,job_id,token_hash,state,username,ends_at) VALUES($1,$2,$3,8,$4,'starting','alice',NOW()+INTERVAL '1 hour')")
+        .bind(Uuid::new_v4()).bind(connection).bind(user).bind(&hash)
+        .execute(&pool).await.unwrap();
+    let client = reqwest::Client::new();
+    let hello = |who: &str, token: &str| {
+        client
+            .post(format!("{}/api/cluster-sessions/hello", f.app_url))
+            .bearer_auth(token)
+            .json(&json!({"username":who,"host":"n1","version":1}))
+            .send()
+    };
+    // No token, or a wrong one, is no session.
+    assert_eq!(
+        hello("alice", "cd".repeat(32).as_str())
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(hello("alice", "short").await.unwrap().status(), 401);
+    // The right token from the wrong account ends the session.
+    let turned = hello("mallory", &token).await.unwrap();
+    assert_eq!(turned.status(), 409);
+    assert!(turned
+        .text()
+        .await
+        .unwrap()
+        .contains("ran as mallory, not alice"));
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM cluster_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ended");
+    assert!(error.unwrap().contains("belongs to another account"));
+    let next = client
+        .get(format!("{}/api/cluster-sessions/next", f.app_url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(next.status(), 410);
 }

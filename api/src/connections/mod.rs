@@ -4,6 +4,7 @@
 //! tokens, each person adds their own token, so calls run as them. Tools join every chat's tool loop, and a tool that may change something
 //! waits for the person's Allow or Deny.
 pub mod device;
+pub mod files;
 pub mod kubernetes;
 pub mod mcp;
 mod output;
@@ -84,6 +85,8 @@ pub struct Connections {
     auto_mode: bool,
     /// The installation's object storage, where Slurm clusters can bring job output.
     objects: Option<crate::knowledge::ObjectStore>,
+    /// Chat's own address, which a cluster's file session job connects to.
+    origin: Option<Url>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -157,6 +160,12 @@ impl Row {
     fn returns_output(&self) -> bool {
         self.kind() == Kind::Slurm && self.options["returnOutput"] == true
     }
+    /// A Slurm cluster set to reach the person's files, and how.
+    fn files(&self) -> Option<files::Options> {
+        (self.kind() == Kind::Slurm)
+            .then(|| files::options(&self.options))
+            .flatten()
+    }
     /// A shared cluster, or a shared MCP server set to personal tokens, runs with
     /// each person's own token rather than one for everyone.
     fn personal_tokens(&self) -> bool {
@@ -182,7 +191,7 @@ impl Row {
                 .flatten()
                 .filter_map(mcp::Tool::from_json)
                 .collect(),
-            Kind::Slurm => slurm::tools(self.returns_output()),
+            Kind::Slurm => slurm::tools(self.returns_output(), self.files().is_some()),
             Kind::Kubernetes => kubernetes::tools(),
             Kind::Device => device::tools(),
         }
@@ -256,6 +265,7 @@ impl Connections {
             devices: true,
             auto_mode: true,
             objects: None,
+            origin: None,
         })
     }
 
@@ -275,6 +285,12 @@ impl Connections {
     }
     pub fn devices_enabled(&self) -> bool {
         self.devices
+    }
+    /// Chat's own address, as the cluster's compute nodes reach it; without it,
+    /// clusters cannot reach files.
+    pub fn origin(mut self, origin: Option<Url>) -> Self {
+        self.origin = origin;
+        self
     }
 
     /// Re-encrypts tokens still sealed with the key derived from the gateway signing
@@ -581,6 +597,11 @@ impl Connections {
                 store,
                 user,
             }),
+            files: self.origin.clone().map(|origin| files::Files {
+                pool: self.pool.clone(),
+                user,
+                origin,
+            }),
             pool: Some(self.pool.clone()),
             user,
             conversation,
@@ -612,10 +633,17 @@ impl Connections {
                 Kind::Device => (Backend::Device, device::about(&row.options)),
                 kind => {
                     let about = match kind {
-                        Kind::Slurm => format!(
-                            "a Slurm cluster where you act as user {}",
-                            settings["user"].as_str().unwrap_or("")
-                        ),
+                        Kind::Slurm => {
+                            let mut about = format!(
+                                "a Slurm cluster where you act as user {}",
+                                settings["user"].as_str().unwrap_or("")
+                            );
+                            if let Some(options) = row.files() {
+                                about.push_str(", ");
+                                about.push_str(&files::about(&options));
+                            }
+                            about
+                        }
                         _ => format!(
                             "a Kubernetes cluster where you act as {}, default namespace {}",
                             settings["identity"].as_str().unwrap_or("yourself"),
@@ -623,7 +651,9 @@ impl Connections {
                         ),
                     };
                     match self.cluster_client(&row, &url, token.unwrap_or_default()) {
-                        Ok(Native::Slurm(c)) => (Backend::Slurm(c, row.returns_output()), about),
+                        Ok(Native::Slurm(c)) => {
+                            (Backend::Slurm(c, row.returns_output(), row.files()), about)
+                        }
                         Ok(Native::Kubernetes(c)) => (Backend::Kubernetes(c), about),
                         Err(error) => {
                             tracing::warn!(connection=%row.id, "connection unusable: {error}");
@@ -710,8 +740,9 @@ enum Backend {
         client: reqwest::Client,
         session: Option<mcp::Session>,
     },
-    /// The client, and whether its jobs bring their output back.
-    Slurm(slurm::Client, bool),
+    /// The client, whether its jobs bring their output back, and how it reaches
+    /// files, when it does.
+    Slurm(slurm::Client, bool, Option<files::Options>),
     Kubernetes(kubernetes::Client),
     /// Carried out by the person's browser (device.rs).
     Device,
@@ -735,6 +766,9 @@ pub struct Toolset {
     secrets: Vec<String>,
     /// Where job output from Slurm clusters comes back, when there is object storage.
     outputs: Option<output::Outputs>,
+    /// Where file sessions on Slurm clusters are started and their calls filed, when
+    /// Chat knows its own address.
+    files: Option<files::Files>,
     /// Where device calls are filed for the browser; none in unit tests.
     pool: Option<PgPool>,
     user: Uuid,
@@ -945,6 +979,7 @@ impl Toolset {
         let offered = &self.tools[index];
         let name = offered.tool.name.clone();
         let outputs = &self.outputs;
+        let files = &self.files;
         let (pool, user, conversation, generation) =
             (&self.pool, self.user, self.conversation, self.generation);
         let server = &mut self.servers[offered.server];
@@ -996,7 +1031,22 @@ impl Toolset {
                 }
                 result.map(|value| mcp::result_text(&value))
             }
-            Backend::Slurm(client, returns) => match (name.as_str(), *returns, outputs) {
+            Backend::Slurm(client, returns, reach) => match (name.as_str(), *returns, outputs) {
+                (name, _, _) if name.starts_with("files_") => {
+                    match (reach, files, generation) {
+                        (Some(options), Some(files), Some(generation)) => {
+                            files
+                                .run(client, connection, options, generation, name, &arguments)
+                                .await
+                        }
+                        (None, _, _) => Err("This cluster is not set to reach files".into()),
+                        (_, None, _) => Err(
+                            "This installation has no address of its own for a cluster to reach (OBLETH_CHAT_ORIGIN)"
+                                .into(),
+                        ),
+                        (_, _, None) => Err("Files tools run only inside a chat response".into()),
+                    }
+                }
                 ("submit", true, Some(outputs)) => {
                     outputs.submit(client, connection, &arguments).await
                 }
@@ -1205,6 +1255,9 @@ fn view(row: &Row, user: &Identity) -> Value {
         "confirmActions": row.confirm_actions, "hasToken": row.token.is_some(),
         "hasCa": row.options["ca"].is_string(), "apiVersion": row.options["apiVersion"],
         "returnOutput": row.returns_output(),
+        "files": row.files().is_some(), "filesPartition": row.options["filesPartition"],
+        "filesQos": row.options["filesQos"], "filesHours": row.options["filesHours"],
+        "filesRoots": row.options["filesRoots"],
         "user": settings["user"], "namespace": settings["namespace"], "identity": settings["identity"],
         "serverName": row.server_name, "checkedAt": row.checked_at, "tools": tools,
         "transport": row.options["transport"], "vendorId": row.options["vendorId"],
@@ -1300,6 +1353,16 @@ pub fn router(state: AppState) -> Router {
             "/api/conversations/{id}/device-calls/{call}",
             post(device::resolve),
         )
+        // A cluster's file session job, with its session token rather than a sign-in.
+        .route("/api/cluster-sessions/hello", post(files::hello))
+        .route("/api/cluster-sessions/next", get(files::next))
+        .route(
+            "/api/cluster-sessions/calls/{call}",
+            post(files::resolve).layer(axum::extract::DefaultBodyLimit::max(
+                files::RESULT_LIMIT + 64 * 1024,
+            )),
+        )
+        .route("/api/cluster-sessions/bye", post(files::bye))
         .with_state(state)
 }
 
@@ -1391,6 +1454,7 @@ fn clean_options(kind: Kind, options: &Value, personal: bool) -> Result<Value, A
             if options["returnOutput"] == true {
                 clean["returnOutput"] = json!(true);
             }
+            files::clean(options, &mut clean)?;
             if let Some(version) = options["apiVersion"]
                 .as_str()
                 .map(str::trim)
@@ -1884,6 +1948,7 @@ async fn remove_credential(
         .bind(user.id)
         .execute(&connections.pool)
         .await?;
+    files::end_sessions(&connections.pool, id, user.id).await;
     Ok(Json(view(&connections.find(&user, id).await?, &user)))
 }
 
@@ -2056,6 +2121,7 @@ mod tests {
                 Backend::Slurm(
                     slurm::Client::new(http.clone(), url.clone(), "ada".into(), "t".into(), None),
                     false,
+                    Some(files::options(&json!({"files":true})).unwrap()),
                 ),
             ),
             server(
@@ -2069,7 +2135,7 @@ mod tests {
             ),
         ];
         let mut tools = vec![];
-        let offered = [kubernetes::tools(), slurm::tools(false)];
+        let offered = [kubernetes::tools(), slurm::tools(false, true)];
         for (server, list) in offered.into_iter().enumerate() {
             for tool in list {
                 tools.push(Offered {
@@ -2095,6 +2161,7 @@ mod tests {
             tools,
             secrets: vec![],
             outputs: None,
+            files: None,
             pool: None,
             user: Uuid::nil(),
             conversation: Uuid::nil(),

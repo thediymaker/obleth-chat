@@ -19,7 +19,7 @@ import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useCapabilities } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { type ClusterStatus, type KubernetesStatus, type SlurmStatus, blocked, gib, number, quotaMeters, quotaName, tone } from "./model";
+import { type ClusterStatus, type FileSession, type KubernetesStatus, type SlurmStatus, blocked, gib, number, quotaMeters, quotaName, tone } from "./model";
 
 type Cluster = Connection & { needsCredential?: boolean };
 const isCluster = (c: Connection) => c.kind === "slurm" || c.kind === "kubernetes";
@@ -85,7 +85,34 @@ function Part({ title, count, children }: { title: string; count?: number; child
 
 const Sub = ({ children }: { children: React.ReactNode }) => <small className="block text-xs text-muted-foreground">{children}</small>;
 
-function Slurm({ s }: { s: SlurmStatus }) {
+/** The person's file session on the cluster: what runs it, and a way to end it. */
+function FileSessionPart({ session, onEnd }: { session: FileSession | null; onEnd: () => void }) {
+  return (
+    <Part title="File session">
+      {session ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm">
+            {session.state === "live" ? (
+              <>
+                Job {session.jobId ?? "?"} on {session.host || "the cluster"}, last call {session.lastSeenAt ? when(session.lastSeenAt) : "just now"}.
+              </>
+            ) : (
+              <>Job {session.jobId ?? "?"} is starting.</>
+            )}{" "}
+            It ends after an hour without a call{session.endsAt ? `, or at ${when(session.endsAt)}` : ""}.
+          </p>
+          <Button size="sm" variant="outline" onClick={onEnd}>
+            End session
+          </Button>
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">None running. One starts as a job of yours when a chat first needs your files, and ends after an hour without a call.</p>
+      )}
+    </Part>
+  );
+}
+
+function Slurm({ s, session, onEnd }: { s: SlurmStatus; session?: FileSession | null; onEnd?: () => void }) {
   const t = s.totals || {};
   const parts = s.partitions || [];
   const jobs = s.jobs || [];
@@ -124,6 +151,7 @@ function Slurm({ s }: { s: SlurmStatus }) {
           empty="No running or pending jobs of yours."
         />
       </Part>
+      {session !== undefined && onEnd && <FileSessionPart session={session} onEnd={onEnd} />}
       <Part title="Recent jobs" count={recent.length}>
         <Table
           heads={["Job", "State", "Partition", "Ran", "Ended", "Exit code"]}
@@ -244,7 +272,20 @@ function ClusterCard({ c, s, loading, onRefresh, manager }: { c: Cluster; s?: Cl
         <span>{s.error}</span>
       </div>
     );
-  else if (s?.state === "connected" && s.status) body = c.kind === "slurm" ? <Slurm s={s.status} /> : <Kubernetes k={s.status} />;
+  else if (s?.state === "connected" && s.status)
+    body =
+      c.kind === "slurm" ? (
+        <Slurm
+          s={s.status}
+          session={c.files ? (s.fileSession ?? null) : undefined}
+          onEnd={async () => {
+            await api.request(`/api/connections/${encodeURIComponent(c.id)}/file-session`, { method: "DELETE" });
+            onRefresh();
+          }}
+        />
+      ) : (
+        <Kubernetes k={s.status} />
+      );
   else body = <Loading label="Checking the cluster…" />;
   return (
     <article className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 rounded-lg border bg-card p-4">

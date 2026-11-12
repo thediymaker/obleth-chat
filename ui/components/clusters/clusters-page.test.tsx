@@ -11,11 +11,12 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: vi.fn() }
 vi.mock("sonner", () => ({ toast: vi.fn() }));
 vi.mock("@/components/app-shell/chrome", () => ({ usePageChrome: () => {} }));
 
-const slurm = { id: "s1", kind: "slurm", name: "Sol", url: "https://sol:6820", shared: true, enabled: true, active: true, canManage: true, confirmActions: true, credential: { user: "ana" }, tools: [] };
+const slurm = { id: "s1", kind: "slurm", name: "Sol", url: "https://sol:6820", shared: true, enabled: true, active: true, canManage: true, confirmActions: true, credential: { user: "ana" }, files: true, tools: [] };
 const k8s = { id: "k1", kind: "kubernetes", name: "Lab k8s", url: "https://k8s:6443", shared: true, enabled: true, active: false, needsCredential: true, confirmActions: true, tools: [] };
 const slurmStatus = {
   state: "connected",
   checkedAt: new Date().toISOString(),
+  fileSession: { state: "live", jobId: 4471233, host: "c001", lastSeenAt: new Date().toISOString(), endsAt: new Date(Date.now() + 3600_000).toISOString() },
   status: {
     user: "ana",
     totals: { cpus: 100, allocCpus: 40, gpus: 8, allocGpus: 2, memoryMb: 409600, allocMemoryMb: 102400, nodes: 4, idleNodes: 1 },
@@ -47,6 +48,11 @@ describe("Compute › Clusters", () => {
     expect(screen.getByRole("button", { name: "Add your token" })).toBeInTheDocument();
     // A cluster without a token is not asked for its status.
     expect(calls.some((c) => c.path === "/api/connections/k1/status")).toBe(false);
+    // The person's file session, and a way to end it.
+    expect(screen.getByText("File session")).toBeInTheDocument();
+    expect(screen.getByText(/Job 4471233 on c001, last call/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "End session" }));
+    await waitFor(() => expect(calls.some((c) => c.path === "/api/connections/s1/file-session" && c.method === "DELETE")).toBe(true));
   });
 
   it("asks in a new chat about a cluster", async () => {

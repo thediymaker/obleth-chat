@@ -13,6 +13,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -699,6 +700,33 @@ pub async fn bye(
         .execute(&s.store.pool)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The person's open session on a cluster, for the Clusters page: its state, job,
+/// node and times; None when there is none.
+pub async fn current(pool: &PgPool, connection: Uuid, user: Uuid) -> Option<Value> {
+    #[derive(sqlx::FromRow)]
+    struct Current {
+        state: String,
+        job_id: Option<i64>,
+        host: Option<String>,
+        created_at: DateTime<Utc>,
+        started_at: Option<DateTime<Utc>>,
+        last_seen_at: Option<DateTime<Utc>>,
+        ends_at: DateTime<Utc>,
+    }
+    let row: Current = sqlx::query_as(
+        "SELECT state, job_id, host, created_at, started_at, last_seen_at, ends_at FROM cluster_sessions WHERE connection_id=$1 AND user_id=$2 AND state<>'ended'",
+    )
+    .bind(connection)
+    .bind(user)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(
+        json!({"state":row.state,"jobId":row.job_id,"host":row.host,"createdAt":row.created_at,"startedAt":row.started_at,"lastSeenAt":row.last_seen_at,"endsAt":row.ends_at}),
+    )
 }
 
 /// Ends a person's sessions on a cluster, as when their credential is removed. A

@@ -1,8 +1,8 @@
 # Certification
 
-106 cases over the ways a model works inside Chat: answering, formatting, asking with
+112 cases over the ways a model works inside Chat: answering, formatting, asking with
 the question card, offering and using a workspace, research, app and project offers,
-knowledge, the browser, Kubernetes and Slurm connections, worker agents, and
+knowledge, the browser, Kubernetes and Slurm connections, files on a Slurm cluster, worker agents, and
 several turns. Each case runs as a real chat through Chat's MCP endpoint, so a model
 sees the same prompts and tools people get. `cases.yaml` explains the checks.
 
@@ -20,8 +20,13 @@ everyday wording, and holds back when no tool or offer fits. Run it with
    - a Kubernetes connection whose default namespace holds Deployment `reef-api`
      (2 replicas, healthy) and Deployment `reef-worker` (1 replica, crash-looping
      because `REEF_DB_URL` is not set), with **Ask before changes** on.
-   - a Slurm connection for an account with some job history. The submit and
-     cancel cases stop at the approval, so nothing runs.
+   - a Slurm connection for an account with some job history, set to **Reach files
+     on the cluster** with the account's home among the directories. The submit and
+     cancel cases stop at the approval, so nothing runs; the files cases read, and
+     their writes and removals stop at the approval too.
+   - in that account's home on the cluster, `certify-lab/` copied from
+     `fixtures/cluster-home/certify-lab/` (run.sh, NOTES.md with instructions the
+     model must not follow, and runs/ with out.log and two checkpoint files).
 4. A personal API token with write scope: **Settings › Personal › API tokens**.
 
 ## Run

@@ -3208,17 +3208,44 @@ async fn a_slurm_cluster_reaches_files_through_a_session_job(pool: PgPool) {
         "The run ran out of memory.\n"
     );
 
-    // Removing the person's credential ends the session; the job learns it at its
-    // next poll and exits.
-    let (status, _) = call(
+    // The Clusters page sees the session; ending it there cancels the job, and the
+    // job learns it at its next poll and exits.
+    let (status, seen) = call(
         &f.app,
-        "DELETE",
-        &format!("/api/connections/{id}/credential"),
+        "GET",
+        &format!("/api/connections/{id}/status"),
         Value::Null,
         &admin,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["fileSession"]["state"], "live");
+    assert_eq!(seen["fileSession"]["jobId"], 8);
+    assert!(seen["fileSession"]["host"]
+        .as_str()
+        .is_some_and(|h| !h.is_empty()));
+    let (status, _) = call(
+        &f.app,
+        "DELETE",
+        &format!("/api/connections/{id}/file-session"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        cluster_requests(&f, "DELETE", "/slurm/v0.0.45/job/8").len(),
+        1
+    );
+    let (_, seen) = call(
+        &f.app,
+        "GET",
+        &format!("/api/connections/{id}/status"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert!(seen["fileSession"].is_null(), "{seen}");
     let exit = tokio::task::spawn_blocking(move || child.wait().unwrap())
         .await
         .unwrap();
@@ -3234,6 +3261,16 @@ async fn a_slurm_cluster_reaches_files_through_a_session_job(pool: PgPool) {
             .unwrap();
     assert_eq!(state, "ended");
     assert_eq!(error.as_deref(), Some("The file session was ended"));
+    // Removing the credential ends a session too (nothing to end here).
+    let (status, _) = call(
+        &f.app,
+        "DELETE",
+        &format!("/api/connections/{id}/credential"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&scratch).ok();
     std::fs::remove_dir_all(&dir).ok();

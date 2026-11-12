@@ -1383,6 +1383,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/connections/{id}/refresh", post(refresh))
         .route("/api/connections/{id}/status", get(status))
         .route(
+            "/api/connections/{id}/file-session",
+            axum::routing::delete(end_file_session),
+        )
+        .route(
             "/api/connections/{id}/credential",
             put(save_credential).delete(remove_credential),
         )
@@ -1879,10 +1883,42 @@ async fn status(
     };
     Ok(Json(match result {
         Ok(status) => {
-            json!({"state":"connected","status":status,"checkedAt":chrono::Utc::now()})
+            let mut answer =
+                json!({"state":"connected","status":status,"checkedAt":chrono::Utc::now()});
+            if row.files().is_some() {
+                answer["fileSession"] = files::current(&connections.pool, id, user.id)
+                    .await
+                    .unwrap_or(Value::Null);
+            }
+            answer
         }
         Err(error) => json!({"state":"error","error":error}),
     }))
+}
+
+/// Ends the person's file session on a cluster: the job is cancelled when the token
+/// still works, and told to leave at its next poll otherwise.
+async fn end_file_session(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (connections, user) = manager(&s, &headers, true).await?;
+    let row = connections.find(&user, id).await?;
+    let job = files::current(&connections.pool, id, user.id)
+        .await
+        .and_then(|session| session["jobId"].as_i64());
+    files::end_sessions(&connections.pool, id, user.id).await;
+    if let (Some(job), Ok(url), Some(token)) = (
+        job,
+        Url::parse(&row.url),
+        connections.token_for(&row, user.id),
+    ) {
+        if let Ok(Native::Slurm(mut client)) = connections.cluster_client(&row, &url, token) {
+            let _ = client.cancel(job).await;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn remove(

@@ -142,6 +142,7 @@ async fn main() -> Result<()> {
         .auto_mode(config.auto_mode)
         .objects(objects.clone())
         .origin(url::Url::parse(state.auth.origin()).ok());
+        tokio::spawn(connections.wakeups_worker(state.shutdown.clone()));
         match connections.reseal().await {
             Ok(0) => {}
             Ok(moved) => tracing::info!(moved, "connection tokens moved to the secret key"),

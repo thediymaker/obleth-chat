@@ -461,7 +461,8 @@ def serve():
     if not url or not token:
         log("OBLETH_CHAT_URL and OBLETH_CHAT_SESSION are needed")
         return 2
-    idle = float(os.environ.get("OBLETH_CHAT_IDLE", "3600"))
+    idle = float(os.environ.get("OBLETH_CHAT_IDLE", "1200"))
+    poll = 50.0
     chat = Chat(url, token)
 
     def ended(signum, frame):
@@ -480,7 +481,9 @@ def serve():
         log("Chat refused the session (HTTP %d): %s" % (status, body.decode("utf-8", "replace")[:300]))
         return EXIT_SERVER if status >= 500 else EXIT_REFUSED
     try:
-        idle = float(json.loads(body.decode("utf-8")).get("idle", idle))
+        settings = json.loads(body.decode("utf-8"))
+        idle = float(settings.get("idle", idle))
+        poll = float(settings.get("poll", poll))
     except (ValueError, AttributeError):
         pass
     last = time.time()
@@ -490,7 +493,8 @@ def serve():
             chat.bye("idle for %d minutes" % (idle // 60))
             return 0
         try:
-            status, body = chat.request("GET", "/api/cluster-sessions/next")
+            # Chat holds the request until a call comes or its wait is over.
+            status, body = chat.request("GET", "/api/cluster-sessions/next", timeout=poll + 20)
             failures = 0
         except (urllib.error.URLError, OSError, socket.timeout) as error:
             failures += 1

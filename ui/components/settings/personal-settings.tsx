@@ -28,6 +28,7 @@ export interface Preferences extends Generation {
   density?: "comfortable" | "compact";
   focus?: boolean;
   context?: boolean;
+  modelSuggestions?: boolean;
   favorites?: string[];
   agentInstructions?: string | null;
 }
@@ -101,7 +102,7 @@ export function PersonalSettings() {
   });
   const defaults = useSubmit((form) => save({ defaultModel: String(form.get("default-model")), ...readGeneration(form, "default") }));
   const appearance = useSubmit((form) =>
-    save({ density: form.get("appearance-compact") === "on" ? "compact" : "comfortable", focus: form.get("appearance-focus") === "on", context: form.get("appearance-context") === "on" }),
+    save({ density: form.get("appearance-compact") === "on" ? "compact" : "comfortable", focus: form.get("appearance-focus") === "on", context: form.get("appearance-context") === "on", modelSuggestions: form.get("appearance-suggestions") === "on" }),
   );
   const favorites = useSubmit((form) => save({ favorites: models.filter((m) => m.id !== "auto" && form.get(`favorite-${m.id}`) === "on").map((m) => m.id) }));
 
@@ -218,10 +219,11 @@ export function PersonalSettings() {
               <Note>Saved in this browser. System follows your device.</Note>
             </div>
             <Note>Layout preferences are saved to your account across devices.</Note>
-            <form key={`${p.density}-${p.focus}-${p.context}`} onSubmit={appearance.onSubmit} className="grid gap-3">
+            <form key={`${p.density}-${p.focus}-${p.context}-${p.modelSuggestions}`} onSubmit={appearance.onSubmit} className="grid gap-3">
               <CheckField id="appearance-compact" label="Compact spacing" defaultChecked={p.density === "compact"} description="Fit more messages on screen." />
               <CheckField id="appearance-focus" label="Focus mode" defaultChecked={!!p.focus} description="Collapse the main navigation." />
               <CheckField id="appearance-context" label="Conversation context" defaultChecked={p.context !== false} description="Show model and generation details." />
+              <CheckField id="appearance-suggestions" label="Suggest a better suited model" defaultChecked={p.modelSuggestions !== false} description="When a chat on a model not certified for changes starts work on a cluster or in a workspace, offer a certified model once." />
               <FormError message={appearance.error} />
               <FormActions>
                 <Button type="submit" disabled={appearance.busy}>

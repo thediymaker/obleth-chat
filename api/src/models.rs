@@ -678,6 +678,10 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/model-certification/{*id}",
             put(save_certification).delete(clear_certification),
         )
+        .route(
+            "/api/conversations/{id}/suggestion",
+            axum::routing::post(answer_suggestion),
+        )
         .route("/api/admin/model-short-list", put(save_short_list))
         .route(
             "/api/preferences",
@@ -1006,6 +1010,9 @@ pub struct Preferences {
     pub favorites: Vec<String>,
     /// How the workspace agent works; None uses Chat's default instructions.
     pub agent_instructions: Option<String>,
+    /// Offer a certified model when a chat on one that is not starts tool work.
+    #[serde(default = "yes")]
+    pub model_suggestions: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -1021,8 +1028,96 @@ impl Default for Preferences {
             context: true,
             favorites: vec![],
             agent_instructions: None,
+            model_suggestions: true,
         }
     }
+}
+
+/// The certified model to offer a chat that started tool work on `current`, which
+/// is not certified: the best score among the models the person can use that take
+/// tools, or None when there is no such model.
+pub async fn suggest(
+    pool: &PgPool,
+    gateway: &Gateway,
+    user: &Identity,
+    current: &str,
+) -> Option<ModelView> {
+    let models = effective_catalog(pool, gateway, user, false).await.ok()?;
+    models
+        .into_iter()
+        .filter(|m| {
+            m.available
+                && m.id != "auto"
+                && m.id != current
+                && m.effective_actions == Actions::Certified
+                && m.metadata.supports_function_calling != Some(false)
+        })
+        .max_by(|a, b| {
+            let score = |m: &ModelView| {
+                m.certification
+                    .as_ref()
+                    .and_then(|c| c["score"].as_f64())
+                    .unwrap_or(0.0)
+            };
+            score(a)
+                .partial_cmp(&score(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.order.cmp(&a.order))
+        })
+}
+
+/// Records that a chat was offered a model, once per chat; false when it already was.
+pub async fn record_suggestion(
+    pool: &PgPool,
+    conversation: Uuid,
+    user: Uuid,
+    model: &str,
+    suggested: &str,
+) -> bool {
+    sqlx::query("INSERT INTO model_suggestions(conversation_id,user_id,model,suggested) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        .bind(conversation)
+        .bind(user)
+        .bind(model)
+        .bind(suggested)
+        .execute(pool)
+        .await
+        .is_ok_and(|r| r.rows_affected() == 1)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestionAnswer {
+    outcome: String,
+}
+
+/// What the person did with the offer: switched, kept their model, or asked for no
+/// more offers (which turns the preference off).
+async fn answer_suggestion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation): Path<Uuid>,
+    Json(body): Json<SuggestionAnswer>,
+) -> Result<StatusCode, ApiError> {
+    let user = state.auth.require(&headers, true).await?;
+    if !["switched", "kept", "never"].contains(&body.outcome.as_str()) {
+        return Err(ApiError::bad("outcome is switched, kept or never"));
+    }
+    let done = sqlx::query("UPDATE model_suggestions SET outcome=$3, answered_at=NOW() WHERE conversation_id=$1 AND user_id=$2")
+        .bind(conversation)
+        .bind(user.id)
+        .bind(&body.outcome)
+        .execute(&state.store.pool)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
+    if body.outcome == "never" {
+        sqlx::query("INSERT INTO user_preferences(user_id,preferences) VALUES($1,'{\"modelSuggestions\":false}') ON CONFLICT (user_id) DO UPDATE SET preferences=user_preferences.preferences || '{\"modelSuggestions\":false}', updated_at=NOW()")
+            .bind(user.id)
+            .execute(&state.store.pool)
+            .await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The person's own workspace agent instructions, when they replaced the default.

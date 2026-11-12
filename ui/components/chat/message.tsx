@@ -28,7 +28,7 @@ import { SavedNotes } from "@/components/library/saved-notes";
 import { MemoryCards } from "@/components/memory/memory-cards";
 import { useChatProjectId } from "@/components/projects/chat-project";
 import { codeTitle, Markdown } from "./markdown-view";
-import { AppOffer, ProjectOffer, QuestionCard, ResearchOffer, WorkspaceOffer } from "./question-cards";
+import { AppOffer, ModelOffer, ProjectOffer, QuestionCard, ResearchOffer, WorkspaceOffer } from "./question-cards";
 import { SteerForm, TurnAfter, TurnBefore } from "./turn-view";
 
 function IconButton({ label, onClick, children, pressed, disabled, ...rest }: { label: string; onClick: () => void; children: React.ReactNode; pressed?: boolean; disabled?: boolean; [key: string]: unknown }) {
@@ -429,6 +429,7 @@ export const MessageView = memo(
               <ResearchOffer m={m} index={index} />
               <AppOffer m={m} index={index} />
               <ProjectOffer m={m} index={index} />
+              <ModelOffer m={m} index={index} />
               <BrowserCard m={m} index={index} isLast={isLast} streaming={store.streaming} />
               <DeviceCard m={m} index={index} isLast={isLast} streaming={store.streaming} />
             </>

@@ -683,10 +683,10 @@ pub(crate) async fn launch_turn(
         _ => None,
     };
     // Connection tools go to every chat whose model may call tools.
+    let model_actions = models::actions_of(&s.store.pool, &resolved.model).await;
     let toolset = match &s.connections {
         Some(c) if resolved.capabilities.supports_function_calling != Some(false) => {
-            let actions = models::actions_of(&s.store.pool, &resolved.model).await;
-            Some(c.toolset(user.id, id).await.with_actions(actions)).filter(|t| !t.is_empty())
+            Some(c.toolset(user.id, id).await.with_actions(model_actions)).filter(|t| !t.is_empty())
         }
         _ => None,
     };
@@ -1964,6 +1964,9 @@ async fn run_generation(
         // `auto` for a stronger model.
         let mut watch = LoopWatch::default();
         let mut loops = 0u32;
+        // A chat on a model not certified for changes is offered a certified one when
+        // it first reaches for a cluster or workspace tool, once per chat.
+        let mut model_offered = false;
         let mut escalate: Option<&'static str> = None;
         // The note the model paused with; the reply ends after that round.
         let mut paused: Option<(pause::Note, bool)> = None;
@@ -2421,6 +2424,39 @@ async fn run_generation(
                     && !(browsing.is_some() && browser::tools::is_tool(&c.name))
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
             });
+            if !model_offered
+                && (workspace_call
+                    || calls
+                        .iter()
+                        .any(|c| toolset.as_ref().and_then(|t| t.find(&c.name)).is_some()))
+            {
+                model_offered = true;
+                let current = served.as_deref().unwrap_or(&resolved.model).to_owned();
+                if models::actions_of(&s.store.pool, &resolved.model).await
+                    != models::Actions::Certified
+                    && models::preferences(&s.store.pool, user.id)
+                        .await
+                        .model_suggestions
+                {
+                    if let Some(better) =
+                        models::suggest(&s.store.pool, &gateway, &user, &current).await
+                    {
+                        if models::record_suggestion(
+                            &s.store.pool,
+                            id,
+                            user.id,
+                            &current,
+                            &better.id,
+                        )
+                        .await
+                        {
+                            let entry = json!({"id":"model-suggestion","kind":"model","status":"asked","summary":"Suggested a better suited model","model":current,"suggested":better.id,"name":better.name,"score":better.certification.as_ref().and_then(|c| c["score"].as_f64())});
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry);
+                        }
+                    }
+                }
+            }
             let mut running = None;
             if let Some((sandbox, sandboxes)) = workspace.as_ref().filter(|_| workspace_call) {
                 // The first workspace tool of a turn may need to start or wake the pod.

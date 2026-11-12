@@ -51,7 +51,7 @@ test("personal settings save defaults, appearance and favorites to the account",
   await waitFor(() => expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ defaultModel: "glm", systemPrompt: "", reasoningEffort: "medium", temperature: 0.3, topP: 1, maxTokens: 0 }));
   await userEvent.click(screen.getByRole("checkbox", { name: "Compact spacing" }));
   await userEvent.click(screen.getByRole("button", { name: "Save appearance" }));
-  await waitFor(() => expect(calls.filter((c) => c.method === "PATCH").at(-1)?.body).toEqual({ density: "compact", focus: false, context: true }));
+  await waitFor(() => expect(calls.filter((c) => c.method === "PATCH").at(-1)?.body).toEqual({ density: "compact", focus: false, context: true, modelSuggestions: true }));
   expect(screen.getByRole("checkbox", { name: "Gemma" })).toBeChecked();
   await userEvent.click(screen.getByRole("checkbox", { name: /^GLM/ }));
   await userEvent.click(screen.getByRole("button", { name: "Save favorites" }));

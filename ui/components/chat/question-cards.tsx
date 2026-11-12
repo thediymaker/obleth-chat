@@ -6,7 +6,7 @@
 // to make an app (suggest_app) and to start a project for the chat (suggest_project).
 // Only the newest reply's card can be answered.
 
-import { Box, Check, CircleHelp, FlaskConical, Folder, Terminal } from "lucide-react";
+import { Box, Check, CircleHelp, FlaskConical, Folder, Sparkles, Terminal } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { researchAllowed, startResearch } from "@/components/research/start";
@@ -45,6 +45,7 @@ const offerOf = (m?: Message) => activityOf(m).find((e) => e.kind === "workspace
 const suggestionOf = (m?: Message) => activityOf(m).find((e) => e.kind === "research");
 const appOf = (m?: Message) => activityOf(m).find((e) => e.kind === "app");
 const projectOf = (m?: Message) => activityOf(m).find((e) => e.kind === "project");
+const modelOf = (m?: Message) => activityOf(m).find((e) => e.kind === "model");
 const keyOf = (m: Message, index: number) => m.id || `message-${index}`;
 const answered = (form: Form, i: number) => form.picks[i]!.size > 0 || !!form.other[i]!.trim();
 
@@ -313,6 +314,74 @@ export function WorkspaceOffer({ m, index }: { m: Message; index: number }) {
       }
     >
       <p>{entry.reason || "A project folder for this chat in your own Linux container, where the model can write files, run code and show a live preview."}</p>
+    </Offer>
+  );
+}
+
+/** The offer of a certified model when a chat on one that is not starts tool work. */
+export function ModelOffer({ m, index }: { m: Message; index: number }) {
+  const store = useChat();
+  const entry = modelOf(m);
+  const key = `${keyOf(m, index)}-model`;
+  const [offer, setOffer] = useOffer(store, key);
+  if (!entry) return null;
+  const id = store.active?.id;
+  const name = String(entry.name || entry.suggested || "");
+  const answer = (outcome: "switched" | "kept" | "never") => {
+    if (id) store.answerSuggestion(id, outcome);
+  };
+  if (offer === "done")
+    return (
+      <Closed icon={Sparkles}>
+        <p>
+          <strong className="font-medium">Model</strong> Switched to {name} for this chat.
+        </p>
+      </Closed>
+    );
+  const isLast = index === (store.active?.messages?.length || 0) - 1;
+  if (!isLast || store.streaming || offer === "dismissed" || offer === "never")
+    return (
+      <Closed icon={Sparkles}>
+        <p>
+          <strong className="font-medium">Model</strong> {name} is better suited to this kind of work.
+        </p>
+        {offer === "never" && <p className="text-faint">No more suggestions. Turn them back on under Settings › Appearance.</p>}
+      </Closed>
+    );
+  return (
+    <Offer
+      icon={Sparkles}
+      label="Switch model"
+      title="A better suited model"
+      busy={false}
+      busyLabel=""
+      acceptLabel={`Switch to ${name}`}
+      onDismiss={() => {
+        setOffer("dismissed");
+        answer("kept");
+      }}
+      onAccept={() => {
+        store.useModel(String(entry.suggested));
+        setOffer("done");
+        answer("switched");
+      }}
+    >
+      <p>
+        This model is not as well suited to work like this. {name} did better in Chat’s certification
+        {typeof entry.score === "number" ? ` (${entry.score}%)` : ""}. Switching keeps this chat and changes the model from the next message.
+      </p>
+      <p>
+        <button
+          type="button"
+          className="text-faint underline-offset-2 hover:underline"
+          onClick={() => {
+            setOffer("never");
+            answer("never");
+          }}
+        >
+          Don’t suggest models again
+        </button>
+      </p>
     </Offer>
   );
 }

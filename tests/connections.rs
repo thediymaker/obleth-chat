@@ -422,7 +422,9 @@ async fn fixture_full(pool: PgPool, clusters: bool, storage: bool) -> Fixture {
         .route("/mcp", post(mcp).with_state(mcp_seen.clone()))
         .route(
             "/v1/models",
-            get(|| async { Json(json!({"data":[{"id":"fixture-model"}]})) }),
+            get(|| async {
+                Json(json!({"data":[{"id":"fixture-model"},{"id":"fixture-better"}]}))
+            }),
         )
         .route(
             "/v1/chat/completions",
@@ -3452,13 +3454,60 @@ async fn a_decision_lets_a_change_the_person_asked_for_run_unasked(pool: PgPool)
         .unwrap();
 
     // A provisional model asks for every change, whatever the judge would say; a
-    // blocked one is not offered the change tools at all.
+    // blocked one is not offered the change tools at all. A chat on a provisional
+    // model that reaches for a cluster tool is offered a certified one, once.
     assert_eq!(certify(80.0).await.0, StatusCode::OK);
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        "/api/admin/model-certification/fixture-better",
+        json!({"score":100,"passed":1,"total":1,"suite":"cases.yaml"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     submit("call_provisional");
     let (provisional, stream) =
         send(&f, &admin, "Please submit hello on the debug partition").await;
     assert_eq!(pending(&pool).await, "call_provisional");
     assert_eq!(judged(&f).len(), 2);
+    let offered_model: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&provisional).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let offer = offered_model
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "model")
+        .cloned()
+        .expect("a model offer");
+    assert_eq!(offer["model"], "fixture-model");
+    assert_eq!(offer["suggested"], "fixture-better");
+    assert_eq!(offer["score"], 100.0);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{provisional}/suggestion"),
+        json!({"outcome":"never"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, prefs) = call(&f.app, "GET", "/api/preferences", Value::Null, &admin).await;
+    assert_eq!(prefs["preferences"]["modelSuggestions"], false);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{provisional}/suggestion"),
+        json!({"outcome":"maybe"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = call(
         &f.app,
         "POST",
@@ -3472,6 +3521,40 @@ async fn a_decision_lets_a_change_the_person_asked_for_run_unasked(pool: PgPool)
         .await
         .unwrap()
         .unwrap();
+    // With suggestions off, the next such chat gets no offer.
+    submit("call_quiet");
+    let (quiet, stream) = send(&f, &admin, "Please submit hello on the debug partition").await;
+    assert_eq!(pending(&pool).await, "call_quiet");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{quiet}/approvals"),
+        json!({"callId":"call_quiet","decision":"deny"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let quiet_activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&quiet).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!quiet_activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "model"));
+    let shown: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_suggestions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(shown, 1);
     let (status, _) = call(
         &f.app,
         "PUT",

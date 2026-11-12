@@ -423,6 +423,16 @@ export class ChatStore {
     this.emit();
     if (this.preferences?.defaultModel !== this.model) await this.perform(() => this.savePreference({ defaultModel: this.model }));
   }
+  /** Uses a model from the next message on, for this chat only. */
+  useModel(id: string) {
+    this.model = id;
+    this.resetGeneration();
+    this.emit();
+  }
+  /** What the person did with a better-suited model card; "never" turns the cards off. */
+  answerSuggestion(id: string, outcome: "switched" | "kept" | "never") {
+    this.options.api.request(`/api/conversations/${id}/suggestion`, { method: "POST", body: { outcome } }).catch(() => {});
+  }
   /** Moves the effort slider; a chat keeps its effort, saved once the slider settles. */
   setEffort(effort: string) {
     this.reasoningEffort = EFFORTS.includes(effort as never) ? effort : "none";

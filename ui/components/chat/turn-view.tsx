@@ -527,6 +527,13 @@ function Asked({ name, text }: { name: string; text: string }) {
   );
 }
 
+/** Why a change waits, in the words that fit where it runs. */
+export function changeNote(service?: string): string {
+  if (service === "device") return "It changes the device, so it waits for you. Your browser sends it.";
+  if (service === "slurm" || service === "kubernetes") return "It changes the cluster, so it waits for you. It runs as your own account.";
+  return "It changes something outside Chat, so it waits for you. It runs as your own account.";
+}
+
 /**
  * A call waiting for approval: what it does, as the server read it, and every argument
  * in full and in view. Nothing the call carries is folded away or cut short, so what
@@ -541,7 +548,7 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
       <div>
         <strong className="block text-md font-semibold">{head}</strong>
         {s.readOnly === false && (
-          <span className="text-sm text-muted-foreground">It changes {s.service === "mcp" || !s.service ? "something outside Chat" : "the cluster"}, so it waits for you. It runs as your own account.</span>
+          <span className="text-sm text-muted-foreground">{changeNote(s.service)}</span>
         )}
       </div>
       {change && change.items.length > 0 && (

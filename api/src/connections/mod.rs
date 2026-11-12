@@ -121,6 +121,23 @@ impl Kind {
     fn cluster(self) -> bool {
         matches!(self, Self::Slurm | Self::Kubernetes)
     }
+    /// What the model is told a connection of this kind is.
+    fn phrase(self) -> &'static str {
+        match self {
+            Self::Mcp => "an MCP server",
+            Self::Slurm => "a Slurm cluster",
+            Self::Kubernetes => "a Kubernetes cluster",
+            Self::Device => "a device at the person's computer",
+        }
+    }
+    /// The page where the person adds, turns on, or brings a token for one.
+    fn page(self) -> &'static str {
+        match self {
+            Self::Mcp => "Settings › MCP servers",
+            Self::Slurm | Self::Kubernetes => "Compute › Clusters",
+            Self::Device => "Compute › Devices",
+        }
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -573,17 +590,37 @@ impl Connections {
         }
     }
 
-    /// The tools this person can use in this conversation now.
+    /// The tools this person can use in this conversation now, and the connections
+    /// they have that this conversation cannot use yet.
     pub async fn toolset(&self, user: Uuid, conversation: Uuid) -> Toolset {
-        let rows: Vec<Row> = match sqlx::query_as(&format!(
-            "{SELECT} AND c.enabled AND (c.kind<>'mcp' OR jsonb_array_length(c.tools)>0) AND NOT EXISTS(SELECT 1 FROM conversation_connections_off f WHERE f.conversation_id=$2 AND f.connection_id=c.id) ORDER BY c.owner_id IS NULL, c.created_at"
+        let rows: Vec<(Row, bool)> = match sqlx::query_as::<_, Row>(&format!(
+            "{SELECT} AND c.enabled AND (c.kind<>'mcp' OR jsonb_array_length(c.tools)>0) ORDER BY c.owner_id IS NULL, c.created_at"
         ))
         .bind(user)
-        .bind(conversation)
         .fetch_all(&self.pool)
         .await
         {
-            Ok(rows) => rows,
+            // Which are off in this chat. Without that answer nothing is offered, as
+            // when the connections themselves cannot be read.
+            Ok(rows) => match sqlx::query_scalar::<_, Uuid>(
+                "SELECT connection_id FROM conversation_connections_off WHERE conversation_id=$1",
+            )
+            .bind(conversation)
+            .fetch_all(&self.pool)
+            .await
+            {
+                Ok(off) => rows
+                    .into_iter()
+                    .map(|r| {
+                        let here = !off.contains(&r.id);
+                        (r, here)
+                    })
+                    .collect(),
+                Err(error) => {
+                    tracing::warn!("could not load the chat's connection switches: {error}");
+                    vec![]
+                }
+            },
             Err(error) => {
                 tracing::warn!("could not load connections: {error}");
                 vec![]
@@ -592,6 +629,12 @@ impl Connections {
         let mut set = Toolset {
             servers: vec![],
             tools: vec![],
+            unready: vec![],
+            adds: if self.clusters {
+                "the person adds a cluster under Compute › Clusters and other services under Settings › MCP servers"
+            } else {
+                "the person adds a service under Settings › MCP servers"
+            },
             secrets: vault::names(&self.pool, user).await,
             outputs: self.objects.clone().map(|store| output::Outputs {
                 pool: self.pool.clone(),
@@ -609,10 +652,31 @@ impl Connections {
             conversation,
             generation: None,
         };
-        for row in rows
-            .into_iter()
-            .filter(|r| !r.opted_out && r.usable() && self.offered(r.kind()))
-        {
+        for (row, here) in rows.into_iter().filter(|(r, _)| self.offered(r.kind())) {
+            // Named to the model with what is missing, so it can say so rather
+            // than reach for another service in its place.
+            // In the order the person fixes them: Tools in this chat lists only
+            // connections that are on and have their token.
+            let missing = if row.opted_out {
+                Some(format!(
+                    "the person turned it off, under {}",
+                    row.kind().page()
+                ))
+            } else if !row.usable() {
+                Some(format!(
+                    "shared with everyone, but the person has not added their own token yet, under {}",
+                    row.kind().page()
+                ))
+            } else if !here {
+                Some("turned off for this chat, under Tools in this chat".to_owned())
+            } else {
+                None
+            };
+            if let Some(missing) = missing {
+                set.unready
+                    .push(format!("{} ({}): {missing}", row.name, row.kind().phrase()));
+                continue;
+            }
             let Ok(url) = Url::parse(&row.url) else {
                 continue;
             };
@@ -764,6 +828,10 @@ pub struct Outcome {
 pub struct Toolset {
     servers: Vec<Server>,
     tools: Vec<Offered>,
+    /// The person's connections this chat cannot use yet, each with what is missing.
+    unready: Vec<String>,
+    /// Where the person adds a cluster or a service, for the model to point to.
+    adds: &'static str,
     /// The names of the person's secrets, which a device's login may name.
     secrets: Vec<String>,
     /// Where job output from Slurm clusters comes back, when there is object storage.
@@ -870,7 +938,37 @@ impl Toolset {
                 self.secrets.join(", ")
             ));
         }
+        prompt.push(' ');
+        prompt.push_str(&self.reach());
         prompt
+    }
+    /// What lies outside these tools: the person's connections this chat cannot use
+    /// yet, and that nothing here stands in for a system that is not connected.
+    fn reach(&self) -> String {
+        let mut reach = String::new();
+        if !self.unready.is_empty() {
+            reach.push_str(&format!(
+                "These connections are set up but you cannot use them in this chat yet: {}. When the person asks you to work with one of them and none of your tools covers it, say what is missing and where they fix it. ",
+                self.unready.join("; ")
+            ));
+        }
+        reach.push_str(&format!(
+            "Never use one service as a stand-in for another on a guess: when the person asks you to act on or look something up in a cluster, computer or service and none of your tools covers it, tell them Chat is not connected to it ({}).",
+            self.adds
+        ));
+        if self
+            .servers
+            .iter()
+            .any(|s| matches!(s.backend, Backend::Device))
+        {
+            reach.push_str(" A device is a board or instrument plugged into the person's computer, never a cluster or a remote server; what the person asks you to run on the device runs there, even when it reaches the network.");
+        }
+        reach
+    }
+    /// The same, for a chat with no tools to offer: something to say only when the
+    /// person has connections this chat cannot use yet.
+    pub fn unready_prompt(&self) -> Option<String> {
+        (!self.unready.is_empty()).then(|| self.reach())
     }
     pub fn find(&self, name: &str) -> Option<usize> {
         self.tools.iter().position(|t| t.exposed == name)
@@ -2239,6 +2337,8 @@ mod tests {
         Toolset {
             servers,
             tools,
+            unready: vec![],
+            adds: "the person adds a cluster under Compute › Clusters",
             secrets: vec![],
             outputs: None,
             files: None,

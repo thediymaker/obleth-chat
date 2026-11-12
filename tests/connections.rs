@@ -3682,3 +3682,81 @@ async fn a_decision_lets_a_change_the_person_asked_for_run_unasked(pool: PgPool)
         .unwrap();
     assert!(text.contains("Submitted job 8"), "{text}");
 }
+
+/// Asked about a shared cluster the person has no token for, the model has no tools
+/// for it but is told it exists and what is missing; with a board attached, it is
+/// also told the board is never the cluster, so it does not reach for the board.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_cluster_the_person_cannot_use_yet_is_named_with_what_is_missing(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let system = |i: usize| -> (String, Vec<String>) {
+        let body = f.gateway_seen.lock().unwrap()[i].clone();
+        let tools = body["tools"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .map(|t| t["function"]["name"].as_str().unwrap_or("").to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        (
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+            tools,
+        )
+    };
+    let missing = "Sol (a Slurm cluster): shared with everyone, but the person has not added their own token yet, under Compute › Clusters";
+
+    // No tools to offer, yet the model learns why Sol is not one of them.
+    let (_, stream) = send(&f, &admin, "How much space am I using on Sol?").await;
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let (prompt, tools) = system(0);
+    assert!(prompt.contains(missing), "{prompt}");
+    assert!(
+        prompt.contains("Never use one service as a stand-in for another on a guess"),
+        "{prompt}"
+    );
+    assert!(!tools.iter().any(|t| t.starts_with("sol__")), "{tools:?}");
+
+    // With a board attached, its tools are offered for the board alone.
+    let (status, created) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"USB 1d6b:0104","url":"","kind":"device","options":{"vendorId":0x1d6b,"productId":0x0104}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let before = f.gateway_seen.lock().unwrap().len();
+    let (_, stream) = send(&f, &admin, "How much space am I using on Sol?").await;
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let (prompt, tools) = system(before);
+    assert!(
+        tools.iter().any(|t| t == "usb_1d6b_0104__read"),
+        "{tools:?}"
+    );
+    assert!(prompt.contains(missing), "{prompt}");
+    assert!(
+        prompt.contains("A device is a board or instrument plugged into the person's computer, never a cluster or a remote server"),
+        "{prompt}"
+    );
+}

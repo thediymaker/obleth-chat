@@ -684,11 +684,18 @@ pub(crate) async fn launch_turn(
     };
     // Connection tools go to every chat whose model may call tools.
     let model_actions = models::actions_of(&s.store.pool, &resolved.model).await;
-    let toolset = match &s.connections {
+    // Without any tool to offer, the model is still told about connections the person
+    // has that this chat cannot use yet, so it can say what is missing.
+    let (toolset, unready) = match &s.connections {
         Some(c) if resolved.capabilities.supports_function_calling != Some(false) => {
-            Some(c.toolset(user.id, id).await.with_actions(model_actions)).filter(|t| !t.is_empty())
+            let set = c.toolset(user.id, id).await.with_actions(model_actions);
+            if set.is_empty() {
+                (None, set.unready_prompt())
+            } else {
+                (Some(set), None)
+            }
         }
-        _ => None,
+        _ => (None, None),
     };
     let permit = s.slots.clone().try_acquire_owned().map_err(|_| {
         ApiError(
@@ -736,7 +743,7 @@ pub(crate) async fn launch_turn(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
         run_generation(
-            s, gateway, user, starter, id, resolved, turn, tx, permit, workspace, toolset,
+            s, gateway, user, starter, id, resolved, turn, tx, permit, workspace, toolset, unready,
         )
         .await;
     });
@@ -1561,6 +1568,7 @@ async fn run_generation(
     permit: tokio::sync::OwnedSemaphorePermit,
     workspace: Option<sandbox::Sandbox>,
     mut toolset: Option<connections::Toolset>,
+    unready: Option<String>,
 ) {
     let workspace_turn = workspace.is_some();
     // The chat's project: instructions, and collections and saved items it also searches.
@@ -1747,6 +1755,9 @@ async fn run_generation(
     );
     if let Some(toolset) = &toolset {
         preamble.push(toolset.prompt());
+    }
+    if let Some(unready) = unready {
+        preamble.push(unready);
     }
     if !workers.is_empty() {
         preamble.push(agents::PROMPT.into());

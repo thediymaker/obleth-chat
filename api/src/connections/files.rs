@@ -35,8 +35,9 @@ const JOB_CHECK: Duration = Duration::from_secs(5);
 /// The session job's name, which a look-up checks so an old job that once had the
 /// same id is not taken for it.
 const JOB_NAME: &str = "chat-files";
-/// A live session not heard from for this long is taken as gone.
-const STALE_SECONDS: f64 = 120.0;
+/// A live session not heard from for this long is taken as gone: longer than any
+/// one operation may take, since a job busy with one does not poll.
+const STALE_SECONDS: f64 = 300.0;
 /// How long the job's poll for work waits before answering "nothing yet".
 const POLL_WAIT: Duration = Duration::from_secs(50);
 /// How long a wait goes without a wakeup before it looks for itself.
@@ -208,7 +209,7 @@ pub fn tools() -> Vec<Tool> {
             "name": {"type":"string","description":"Only files whose names match this shell pattern, such as *.out"},
             "limit": {"type":"integer","minimum":1,"maximum":200}
         }), &["pattern"]),
-        tool("files_usage", "Disk usage", "What each entry of a directory holds in files, largest first, with the total, for finding what takes the space; within 120 seconds.", true, json!({
+        tool("files_usage", "Disk usage", "What each entry of a directory holds on disk, largest first, with the total, for finding what takes the space. A large tree takes a while (up to 120 seconds); measure a subdirectory for a quicker answer.", true, json!({
             "path": path("Directory to measure; defaults to the home directory")
         }), &[]),
         tool("files_write", "Write file", "Writes text to a file, creating directories on the way. An existing file is replaced only with overwrite.", false, json!({
@@ -1094,6 +1095,10 @@ mod tests {
     /// Runs one operation of the agent as the command line does, under temporary
     /// roots, and returns its exit status and output.
     fn agent(roots: &str, op: &str, args: Value) -> (bool, String) {
+        agent_with(roots, op, args, &[])
+    }
+
+    fn agent_with(roots: &str, op: &str, args: Value, env: &[(&str, &str)]) -> (bool, String) {
         let dir = std::env::temp_dir().join(format!("chat-agent-{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("agent.py");
@@ -1106,6 +1111,7 @@ mod tests {
             .arg("--args")
             .arg(args.to_string())
             .env("OBLETH_CHAT_ROOTS", roots)
+            .envs(env.iter().copied())
             .output()
             .unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -1425,6 +1431,19 @@ mod tests {
         let (ok, out) = agent(&roots, "usage", json!({"path": project.to_string_lossy()}));
         assert!(ok, "{out}");
         assert!(out.lines().nth(1).unwrap().ends_with("  runs/"), "{out}");
+        // Without du, the walk measures the same tree, in file bytes.
+        let (ok, walked) = agent_with(
+            &roots,
+            "usage",
+            json!({"path": project.to_string_lossy()}),
+            &[("OBLETH_CHAT_NO_DU", "1")],
+        );
+        assert!(ok, "{walked}");
+        assert!(walked.contains(" in files:"), "{walked}");
+        assert!(
+            walked.lines().nth(1).unwrap().ends_with("  runs/"),
+            "{walked}"
+        );
 
         // Outside the roots, or missing, is refused in words.
         let (ok, out) = agent(&roots, "list", json!({"path": "/etc"}));

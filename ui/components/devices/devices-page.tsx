@@ -8,7 +8,7 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { Cpu, KeyRound, Plus, Unplug, Usb } from "lucide-react";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
@@ -18,6 +18,7 @@ import { CheckField, FormActions, FormDialog, FormError, Note, Pill, SelectField
 import { saveSecret, secretsKey, useSecrets } from "@/components/settings/secrets-page";
 import { Button } from "@/components/ui/button";
 import { ComputeOff, ComputeTabs } from "@/components/workspace/compute";
+import { SerialTerminal } from "./serial-terminal";
 import { api } from "@/lib/api";
 import { withFlasher } from "@/lib/devices/flashers";
 import { portLabel, suggestName } from "@/lib/devices/known";
@@ -159,13 +160,8 @@ function Monitor({ id }: { id: string }) {
   const [baud, setBaud] = useState(DEFAULT_BAUD);
   const [line, setLine] = useState("");
   const [error, setError] = useState("");
-  const pre = useRef<HTMLPreElement>(null);
-  const text = a?.device.recent() ?? "";
-  useEffect(() => {
-    const el = pre.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [text]);
   if (!a) return null;
+  const printed = a.device.recent() !== "";
   const status = a.device.status();
   const act = async (work: () => Promise<unknown>) => {
     setError("");
@@ -203,9 +199,10 @@ function Monitor({ id }: { id: string }) {
         {a.device.busy && <Pill tone="amber">Flashing</Pill>}
         {a.device.lastError && <span className="text-xs text-destructive-foreground">{a.device.lastError}</span>}
       </div>
-      <pre ref={pre} className="max-h-64 min-h-24 overflow-auto rounded-md bg-code px-3 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-text-2" aria-label="Device output">
-        {text || (status.open ? "Waiting for output…" : "Open the port to see what the device prints.")}
-      </pre>
+      <div className="relative">
+        <SerialTerminal device={a.device} />
+        {!printed && <p className="pointer-events-none absolute inset-x-3 top-2 font-mono text-[12px] text-muted-foreground">{status.open ? "Waiting for output…" : "Open the port to see what the device prints."}</p>}
+      </div>
       <form
         className="flex gap-2"
         onSubmit={(e) => {

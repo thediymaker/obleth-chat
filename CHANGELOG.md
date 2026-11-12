@@ -2,6 +2,13 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Fixes**
+
+- **A device's serial monitor is a terminal.** A board's console that printed colours or redrew a status line in place, such as apt's progress, showed stray codes (`[33m`, `[0m`) and piled every redraw onto one line. The monitor now draws the output in a terminal, as a console would, and keys typed into it go to the device as they are, Ctrl+C and arrows included. **Send a line** stays for line-at-a-time firmware.
+- **The model reads a console as plain text.** The device's **Read output** tool returned the same codes and every redraw of a progress line. It now returns each line as it last stood, without colour or cursor codes; a code split across two reads waits for the rest, and a wait for text such as a coloured prompt matches.
+
 ## v1.5.1
 
 **Fixes**

@@ -99,14 +99,14 @@ function FileSessionPart({ session, onEnd }: { session: FileSession | null; onEn
             ) : (
               <>Job {session.jobId ?? "?"} is starting.</>
             )}{" "}
-            It ends after an hour without a call{session.endsAt ? `, or at ${when(session.endsAt)}` : ""}.
+            It ends after 20 minutes without a call{session.endsAt ? `, or at ${when(session.endsAt)}` : ""}.
           </p>
           <Button size="sm" variant="outline" onClick={onEnd}>
             End session
           </Button>
         </div>
       ) : (
-        <p className="text-sm text-muted-foreground">None running. One starts as a job of yours when a chat first needs your files, and ends after an hour without a call.</p>
+        <p className="text-sm text-muted-foreground">None running. One starts as a job of yours when a chat first needs your files, and ends after 20 minutes without a call.</p>
       )}
     </Part>
   );

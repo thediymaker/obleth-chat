@@ -201,7 +201,7 @@ function ConnectionDialog({ connection: c, kind, onClose, onSaved }: { connectio
             label="Reach files on the cluster"
             checked={files}
             onCheckedChange={setFiles}
-            description="The model can list, read, search, write and tidy each person’s own files through a small job Chat starts as them when a chat first needs it. The job connects out to Chat and stays for later calls until it has been idle for an hour. The compute nodes need python3 and must be able to reach Chat’s address."
+            description="The model can list, read, search, write and tidy each person’s own files through a small job Chat starts as them when a chat first needs it. The job connects out to Chat and stays for later calls until it has been idle for 20 minutes. The compute nodes need python3 and must be able to reach Chat’s address."
           />
         )}
         {kind === "slurm" && files && (
@@ -224,7 +224,7 @@ function ConnectionDialog({ connection: c, kind, onClose, onSaved }: { connectio
               max={168}
               placeholder="8"
               defaultValue={c?.filesHours ?? ""}
-              help="The job’s time limit. It exits sooner once idle for an hour; the next call starts a new one."
+              help="The job’s time limit. It exits sooner once idle for 20 minutes; the next call starts a new one."
             />
             <TextField
               id="connection-files-roots"

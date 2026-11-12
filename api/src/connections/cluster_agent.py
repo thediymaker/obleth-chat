@@ -20,6 +20,7 @@ import shutil
 import signal
 import socket
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -291,6 +292,44 @@ def op_usage(args):
     path = resolve(args.get("path", "~"))
     if not os.path.isdir(path):
         return "%s is a file of %s" % (path, human(os.path.getsize(path)))
+    sizes, cut, how = usage_with_du(path)
+    if sizes is None:
+        sizes, cut, how = usage_by_walking(path)
+    sizes.sort(reverse=True)
+    total = sum(s for s, _ in sizes)
+    lines = ["%s holds %s %s%s:" % (path, human(total), how, " (counting stopped at its %d s limit, so this is a lower bound)" % USAGE_SECONDS if cut else "")]
+    for size, name in sizes[:USAGE_LIMIT]:
+        lines.append("%10s  %s" % (human(size), name))
+    if len(sizes) > USAGE_LIMIT:
+        lines.append("… and %d smaller entries" % (len(sizes) - USAGE_LIMIT))
+    return "\n".join(lines)
+
+
+def usage_with_du(path):
+    """Each child's size on disk from du, which walks a tree several times faster
+    than Python can; None when du is missing or cannot finish in time."""
+    if os.environ.get("OBLETH_CHAT_NO_DU"):
+        return None, False, ""
+    try:
+        done = subprocess.run(
+            ["du", "--block-size=1", "--max-depth=1", "--one-file-system", "--", path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=USAGE_SECONDS, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, False, ""
+    if done.returncode not in (0, 1):
+        return None, False, ""
+    sizes = []
+    for line in done.stdout.decode("utf-8", "replace").splitlines():
+        size, _, child = line.partition("\t")
+        if child == path or not size.isdigit():
+            continue
+        name = os.path.basename(child)
+        sizes.append((int(size), name + ("/" if os.path.isdir(os.path.join(path, name)) else "")))
+    return sizes, False, "on disk"
+
+
+def usage_by_walking(path):
     deadline = time.time() + USAGE_SECONDS
     sizes = []
     with os.scandir(path) as it:
@@ -304,7 +343,9 @@ def op_usage(args):
         size = st.st_size
         if child.is_dir(follow_symlinks=False):
             for root, dirs, files in walk(child.path, deadline):
-                for item in files:
+                for n, item in enumerate(files):
+                    if n % 200 == 0 and time.time() > deadline:
+                        break
                     try:
                         size += os.lstat(os.path.join(root, item)).st_size
                     except OSError:
@@ -312,14 +353,9 @@ def op_usage(args):
             if time.time() > deadline:
                 cut = True
         sizes.append((size, child.name + ("/" if child.is_dir(follow_symlinks=False) else "")))
-    sizes.sort(reverse=True)
-    total = sum(s for s, _ in sizes)
-    lines = ["%s holds %s in files%s:" % (path, human(total), " (counting stopped at its %d s limit, so this is a lower bound)" % USAGE_SECONDS if cut else "")]
-    for size, name in sizes[:USAGE_LIMIT]:
-        lines.append("%10s  %s" % (human(size), name))
-    if len(sizes) > USAGE_LIMIT:
-        lines.append("… and %d smaller entries" % (len(sizes) - USAGE_LIMIT))
-    return "\n".join(lines)
+        if cut:
+            break
+    return sizes, cut, "in files"
 
 
 def op_write(args):
@@ -461,7 +497,8 @@ def serve():
     if not url or not token:
         log("OBLETH_CHAT_URL and OBLETH_CHAT_SESSION are needed")
         return 2
-    idle = float(os.environ.get("OBLETH_CHAT_IDLE", "3600"))
+    idle = float(os.environ.get("OBLETH_CHAT_IDLE", "1200"))
+    poll = 50.0
     chat = Chat(url, token)
 
     def ended(signum, frame):
@@ -480,7 +517,9 @@ def serve():
         log("Chat refused the session (HTTP %d): %s" % (status, body.decode("utf-8", "replace")[:300]))
         return EXIT_SERVER if status >= 500 else EXIT_REFUSED
     try:
-        idle = float(json.loads(body.decode("utf-8")).get("idle", idle))
+        settings = json.loads(body.decode("utf-8"))
+        idle = float(settings.get("idle", idle))
+        poll = float(settings.get("poll", poll))
     except (ValueError, AttributeError):
         pass
     last = time.time()
@@ -490,7 +529,8 @@ def serve():
             chat.bye("idle for %d minutes" % (idle // 60))
             return 0
         try:
-            status, body = chat.request("GET", "/api/cluster-sessions/next")
+            # Chat holds the request until a call comes or its wait is over.
+            status, body = chat.request("GET", "/api/cluster-sessions/next", timeout=poll + 20)
             failures = 0
         except (urllib.error.URLError, OSError, socket.timeout) as error:
             failures += 1

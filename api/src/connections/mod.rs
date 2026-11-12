@@ -11,6 +11,7 @@ pub mod mcp;
 mod output;
 pub mod slurm;
 pub mod vault;
+pub mod wakeups;
 
 use crate::{
     auth::Identity,
@@ -88,6 +89,8 @@ pub struct Connections {
     objects: Option<crate::knowledge::ObjectStore>,
     /// Chat's own address, which a cluster's file session job connects to.
     origin: Option<Url>,
+    /// Wakes file session waits across replicas.
+    wakeups: wakeups::Wakeups,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -284,7 +287,19 @@ impl Connections {
             auto_mode: true,
             objects: None,
             origin: None,
+            wakeups: wakeups::Wakeups::default(),
         })
+    }
+    /// The wakeups this replica's file session waits use.
+    pub fn wakeups(&self) -> wakeups::Wakeups {
+        self.wakeups.clone()
+    }
+    /// Delivers other replicas' wakeups here until shutdown.
+    pub fn wakeups_worker(
+        &self,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.wakeups.clone().listen(self.pool.clone(), shutdown)
     }
 
     /// Which kinds the installation offers: a connection of a kind turned off is
@@ -645,6 +660,7 @@ impl Connections {
                 pool: self.pool.clone(),
                 user,
                 origin,
+                wakeups: self.wakeups.clone(),
             }),
             actions: crate::models::Actions::Certified,
             pool: Some(self.pool.clone()),
@@ -2006,7 +2022,7 @@ async fn end_file_session(
     let job = files::current(&connections.pool, id, user.id)
         .await
         .and_then(|session| session["jobId"].as_i64());
-    files::end_sessions(&connections.pool, id, user.id).await;
+    files::end_sessions(&connections.pool, &connections.wakeups, id, user.id).await;
     if let (Some(job), Ok(url), Some(token)) = (
         job,
         Url::parse(&row.url),
@@ -2126,7 +2142,7 @@ async fn remove_credential(
         .bind(user.id)
         .execute(&connections.pool)
         .await?;
-    files::end_sessions(&connections.pool, id, user.id).await;
+    files::end_sessions(&connections.pool, &connections.wakeups, id, user.id).await;
     Ok(Json(view(&connections.find(&user, id).await?, &user)))
 }
 

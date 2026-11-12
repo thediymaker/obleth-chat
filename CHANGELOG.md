@@ -2,6 +2,13 @@
 
 Each release's section is also its GitHub Release notes.
 
+## v1.5.1
+
+**Fixes**
+
+- **A file session waits on a notification, not on the database.** Every waiting call and every session job polled the database on a short timer, so a thousand idle sessions would have cost the database a steady stream of queries. The job now holds one request to Chat at a time, up to 50 seconds, and Chat wakes it through a Postgres notification (`LISTEN`/`NOTIFY` on `obleth_chat_wakeups`) the moment a call is filed; a result, a session's end and a change of the cluster's directories wake their waiters at once on every replica. An idle session costs no queries, and a thousand of them cost about twenty requests a second. A session now ends after 20 idle minutes instead of an hour. Chat's database connection must allow `LISTEN`, so it cannot run through a transaction-pooling proxy.
+- **Disk usage on a cluster is measured with `du`.** Summing a large directory file by file in Python took half a minute for a terabyte and looked like a stalled chat. Where `du` exists the agent uses it (a 1.4 TB scratch tree takes a few seconds) and walks the tree itself otherwise, checking its time limit as it goes; the tool tells the model a large tree takes a while and a subdirectory answers faster. A session busy with one long operation does not poll meanwhile, so a new call during it no longer takes the session for gone after two minutes and starts a second job: the threshold is five minutes, longer than any one operation may run.
+
 ## v1.5.0
 
 **New**

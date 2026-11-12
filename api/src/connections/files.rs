@@ -6,7 +6,7 @@
 //! job's hello must name that same user. The job runs `cluster_agent.py`, shipped
 //! inside the batch script; each operation is a row in `cluster_calls` that the job
 //! claims, carries out and answers.
-use super::{mcp::Tool, slurm};
+use super::{mcp::Tool, slurm, wakeups::Wakeups, Connections};
 use crate::error::ApiError;
 use axum::{
     extract::{Path, State},
@@ -35,14 +35,17 @@ const JOB_CHECK: Duration = Duration::from_secs(5);
 /// The session job's name, which a look-up checks so an old job that once had the
 /// same id is not taken for it.
 const JOB_NAME: &str = "chat-files";
-/// A live session not heard from for this long is taken as gone.
-const STALE_SECONDS: f64 = 120.0;
+/// A live session not heard from for this long is taken as gone: longer than any
+/// one operation may take, since a job busy with one does not poll.
+const STALE_SECONDS: f64 = 300.0;
 /// How long the job's poll for work waits before answering "nothing yet".
-const POLL_WAIT: Duration = Duration::from_secs(25);
+const POLL_WAIT: Duration = Duration::from_secs(50);
+/// How long a wait goes without a wakeup before it looks for itself.
+const FALLBACK: Duration = Duration::from_secs(5);
 /// The longest result the job may post; the model reads the first 48 KB.
 pub const RESULT_LIMIT: usize = 320 * 1024;
 /// The job exits after this long without a call.
-const IDLE_SECONDS: i64 = 3600;
+const IDLE_SECONDS: i64 = 20 * 60;
 const DEFAULT_HOURS: i64 = 8;
 const MAX_HOURS: i64 = 24 * 7;
 const DEFAULT_ROOTS: &str = "~";
@@ -206,7 +209,7 @@ pub fn tools() -> Vec<Tool> {
             "name": {"type":"string","description":"Only files whose names match this shell pattern, such as *.out"},
             "limit": {"type":"integer","minimum":1,"maximum":200}
         }), &["pattern"]),
-        tool("files_usage", "Disk usage", "What each entry of a directory holds in files, largest first, with the total, for finding what takes the space; within 120 seconds.", true, json!({
+        tool("files_usage", "Disk usage", "What each entry of a directory holds on disk, largest first, with the total, for finding what takes the space. A large tree takes a while (up to 120 seconds); measure a subdirectory for a quicker answer.", true, json!({
             "path": path("Directory to measure; defaults to the home directory")
         }), &[]),
         tool("files_write", "Write file", "Writes text to a file, creating directories on the way. An existing file is replaced only with overwrite.", false, json!({
@@ -310,6 +313,16 @@ pub(super) struct Files {
     pub user: Uuid,
     /// Chat's own address, which the job connects to.
     pub origin: Url,
+    pub wakeups: Wakeups,
+}
+
+/// What a job waits on: its session's next call.
+fn session_key(session: Uuid) -> String {
+    format!("session:{session}")
+}
+/// What a chat waits on: a call's result.
+fn call_key(call: Uuid) -> String {
+    format!("call:{call}")
 }
 
 /// A call's answer so far, with its session's state and error.
@@ -343,6 +356,9 @@ impl Files {
             .bind(id).bind(session.id).bind(generation).bind(op).bind(arguments)
             .execute(&self.pool).await
             .map_err(|e| format!("The call could not be sent to the cluster: {e}"))?;
+        self.wakeups
+            .send(&self.pool, &session_key(session.id))
+            .await;
         let wait = if session.state == "live" {
             CALL_WAIT
         } else {
@@ -409,7 +425,8 @@ impl Files {
                 Ok(None) => break Some(Err("The call was dropped".into())),
                 Err(_) => {}
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            self.wakeups.wait(&call_key(id), left.min(FALLBACK)).await;
         };
         let _ = sqlx::query("DELETE FROM cluster_calls WHERE id=$1")
             .bind(id)
@@ -437,6 +454,10 @@ impl Files {
                 };
                 let _ = sqlx::query("UPDATE cluster_sessions SET state='ended', error=$2 WHERE id=$1 AND state<>'ended'")
                     .bind(session.id).bind(&why).execute(&self.pool).await;
+                // A job still polling learns it at once.
+                self.wakeups
+                    .send(&self.pool, &session_key(session.id))
+                    .await;
                 Err(why)
             }
         }
@@ -470,16 +491,19 @@ impl Files {
         // A running job keeps the directories it was started with: once the cluster's
         // setting changes, its session ends (the job stops at its next poll) and a
         // new one starts with the directories set now.
-        sqlx::query(
+        let changed: Vec<Uuid> = sqlx::query_scalar(
             "UPDATE cluster_sessions SET state='ended', error='The directories Chat may reach on this cluster changed, so a new file session starts' \
-             WHERE connection_id=$1 AND user_id=$2 AND state<>'ended' AND roots IS DISTINCT FROM $3",
+             WHERE connection_id=$1 AND user_id=$2 AND state<>'ended' AND roots IS DISTINCT FROM $3 RETURNING id",
         )
         .bind(connection)
         .bind(self.user)
         .bind(&options.roots)
-        .execute(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(database)?;
+        for session in changed {
+            self.wakeups.send(&self.pool, &session_key(session)).await;
+        }
         let open = || async {
             sqlx::query_as::<_, Open>(
                 "SELECT id, state, job_id FROM cluster_sessions WHERE connection_id=$1 AND user_id=$2 AND state<>'ended'",
@@ -690,7 +714,7 @@ pub fn session_script() -> String {
     format!(
         r#"#!/bin/bash
 # Chat's file session: carries out one chat's file operations as you, from this node,
-# until it has been idle for an hour. It connects out to Chat; nothing listens here.
+# until it has been idle for 20 minutes. It connects out to Chat; nothing listens here.
 if ! command -v python3 >/dev/null 2>&1; then
   curl -s --connect-timeout 10 -m 30 -X POST -H "Authorization: Bearer $OBLETH_CHAT_SESSION" -H 'Content-Type: application/json' \
     -d "{{\"reason\":\"python3 is not installed on $(hostname -s), so the file session cannot run there\"}}" "$OBLETH_CHAT_URL/api/cluster-sessions/bye" >/dev/null 2>&1
@@ -793,8 +817,25 @@ pub async fn next(
         .bind(session.id)
         .execute(&s.store.pool)
         .await?;
+    let wakeups = s.connections.as_ref().map(Connections::wakeups);
     let deadline = tokio::time::Instant::now() + POLL_WAIT;
+    let mut first = true;
     loop {
+        // Woken, or looking by itself: a session ended meanwhile sends the job away.
+        if !first {
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT state FROM cluster_sessions WHERE id=$1")
+                    .bind(session.id)
+                    .fetch_optional(&s.store.pool)
+                    .await?;
+            if state.as_deref() != Some("live") {
+                return Err(ApiError(
+                    StatusCode::GONE,
+                    "This file session has ended".into(),
+                ));
+            }
+        }
+        first = false;
         let claimed: Option<(Uuid, String, Value)> = sqlx::query_as(
             "UPDATE cluster_calls SET claimed_at=NOW() WHERE id=(SELECT id FROM cluster_calls WHERE session_id=$1 AND ok IS NULL AND claimed_at IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id, op, arguments",
         )
@@ -804,10 +845,18 @@ pub async fn next(
         if let Some((id, op, arguments)) = claimed {
             return Ok(Json(json!({"id":id,"op":op,"arguments":arguments})).into_response());
         }
-        if tokio::time::Instant::now() >= deadline || s.shutdown.is_cancelled() {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() || s.shutdown.is_cancelled() {
             return Ok(StatusCode::NO_CONTENT.into_response());
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        match &wakeups {
+            Some(wakeups) => {
+                wakeups
+                    .wait(&session_key(session.id), left.min(FALLBACK))
+                    .await;
+            }
+            None => tokio::time::sleep(left.min(FALLBACK)).await,
+        }
     }
 }
 
@@ -846,6 +895,9 @@ pub async fn resolve(
         .bind(session.id)
         .execute(&s.store.pool)
         .await;
+    if let Some(wakeups) = s.connections.as_ref().map(Connections::wakeups) {
+        wakeups.send(&s.store.pool, &call_key(call)).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -903,12 +955,16 @@ pub async fn current(pool: &PgPool, connection: Uuid, user: Uuid) -> Option<Valu
 
 /// Ends a person's sessions on a cluster, as when their credential is removed. A
 /// job still running learns it at its next poll and exits.
-pub async fn end_sessions(pool: &PgPool, connection: Uuid, user: Uuid) {
-    let _ = sqlx::query("UPDATE cluster_sessions SET state='ended', error='The file session was ended' WHERE connection_id=$1 AND user_id=$2 AND state<>'ended'")
+pub async fn end_sessions(pool: &PgPool, wakeups: &Wakeups, connection: Uuid, user: Uuid) {
+    let ended: Vec<Uuid> = sqlx::query_scalar("UPDATE cluster_sessions SET state='ended', error='The file session was ended' WHERE connection_id=$1 AND user_id=$2 AND state<>'ended' RETURNING id")
         .bind(connection)
         .bind(user)
-        .execute(pool)
-        .await;
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    for session in ended {
+        wakeups.send(pool, &session_key(session)).await;
+    }
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -1039,6 +1095,10 @@ mod tests {
     /// Runs one operation of the agent as the command line does, under temporary
     /// roots, and returns its exit status and output.
     fn agent(roots: &str, op: &str, args: Value) -> (bool, String) {
+        agent_with(roots, op, args, &[])
+    }
+
+    fn agent_with(roots: &str, op: &str, args: Value, env: &[(&str, &str)]) -> (bool, String) {
         let dir = std::env::temp_dir().join(format!("chat-agent-{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("agent.py");
@@ -1051,6 +1111,7 @@ mod tests {
             .arg("--args")
             .arg(args.to_string())
             .env("OBLETH_CHAT_ROOTS", roots)
+            .envs(env.iter().copied())
             .output()
             .unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -1370,6 +1431,19 @@ mod tests {
         let (ok, out) = agent(&roots, "usage", json!({"path": project.to_string_lossy()}));
         assert!(ok, "{out}");
         assert!(out.lines().nth(1).unwrap().ends_with("  runs/"), "{out}");
+        // Without du, the walk measures the same tree, in file bytes.
+        let (ok, walked) = agent_with(
+            &roots,
+            "usage",
+            json!({"path": project.to_string_lossy()}),
+            &[("OBLETH_CHAT_NO_DU", "1")],
+        );
+        assert!(ok, "{walked}");
+        assert!(walked.contains(" in files:"), "{walked}");
+        assert!(
+            walked.lines().nth(1).unwrap().ends_with("  runs/"),
+            "{walked}"
+        );
 
         // Outside the roots, or missing, is refused in words.
         let (ok, out) = agent(&roots, "list", json!({"path": "/etc"}));

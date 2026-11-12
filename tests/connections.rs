@@ -3902,3 +3902,26 @@ async fn changing_the_directories_starts_a_new_file_session(pool: PgPool) {
             .unwrap();
     assert_eq!(roots.as_deref(), Some(UNRESOLVED_ROOT));
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_wakeup_sent_on_one_replica_wakes_a_wait_on_another(pool: PgPool) {
+    use obleth_chat::connections::wakeups::Wakeups;
+    let here = Wakeups::default();
+    let there = Wakeups::default();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    tokio::spawn(there.clone().listen(pool.clone(), shutdown.clone()));
+    // The listener needs a moment to connect and subscribe.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let waiting = tokio::spawn({
+        let there = there.clone();
+        async move { there.wait("call:x", Duration::from_secs(10)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let began = std::time::Instant::now();
+    here.send(&pool, "call:x").await;
+    assert!(waiting.await.unwrap());
+    assert!(began.elapsed() < Duration::from_secs(2));
+    // A wait with nothing coming ends by itself.
+    assert!(!there.wait("call:y", Duration::from_millis(100)).await);
+    shutdown.cancel();
+}

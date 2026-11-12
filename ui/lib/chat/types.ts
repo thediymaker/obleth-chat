@@ -138,6 +138,7 @@ export interface Preferences {
   density?: string;
   context?: boolean;
   focus?: boolean;
+  modelSuggestions?: boolean;
   systemPrompt?: string;
   temperature?: number;
   topP?: number;

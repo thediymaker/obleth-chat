@@ -138,8 +138,10 @@ async fn main() -> Result<()> {
             config.connections_allow_private,
         )?
         .clusters(config.connections == ConnectionsMode::All)
+        .devices(config.connections == ConnectionsMode::All)
         .auto_mode(config.auto_mode)
-        .objects(objects.clone());
+        .objects(objects.clone())
+        .origin(url::Url::parse(state.auth.origin()).ok());
         match connections.reseal().await {
             Ok(0) => {}
             Ok(moved) => tracing::info!(moved, "connection tokens moved to the secret key"),

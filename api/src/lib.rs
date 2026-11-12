@@ -322,7 +322,7 @@ async fn metrics_endpoint(
     ))
 }
 async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Value> {
-    let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":s.auth.password_sign_in(),"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"jobOutput":s.connections.as_ref().is_some_and(|c| c.clusters_enabled() && c.job_output_available()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
+    let mut value = json!({"application":"obleth-chat","mode":"connected","liveExecution":s.sandboxes.is_some(),"integrations":{"gateway":{"configured":s.gateway.is_some()},"oidc":{"configured":s.auth.oidc_enabled()},"rag":{"configured":s.knowledge.is_some()},"kubernetes":{"configured":s.sandboxes.is_some()},"slurm":{"configured":false}},"features":{"localAuth":s.auth.password_sign_in(),"durableConversations":true,"streaming":s.gateway.is_some(),"metrics":true,"modelAccess":true,"history":true,"savedPreferences":true,"workspaces":false,"connections":s.connections.is_some(),"clusters":s.connections.as_ref().is_some_and(|c| c.clusters_enabled()),"devices":s.connections.as_ref().is_some_and(|c| c.devices_enabled()),"jobOutput":s.connections.as_ref().is_some_and(|c| c.clusters_enabled() && c.job_output_available()),"autoMode":s.connections.as_ref().is_some_and(|c| c.auto_mode_allowed()),"knowledge":s.knowledge.is_some() && s.gateway.is_some()}});
     value["features"]["memory"] = json!(memory::available(&s).await);
     value["features"]["batches"] = json!(s.gateway.is_some());
     let user = s.auth.require(&headers, false).await.ok();
@@ -683,11 +683,19 @@ pub(crate) async fn launch_turn(
         _ => None,
     };
     // Connection tools go to every chat whose model may call tools.
-    let toolset = match &s.connections {
+    let model_actions = models::actions_of(&s.store.pool, &resolved.model).await;
+    // Without any tool to offer, the model is still told about connections the person
+    // has that this chat cannot use yet, so it can say what is missing.
+    let (toolset, unready) = match &s.connections {
         Some(c) if resolved.capabilities.supports_function_calling != Some(false) => {
-            Some(c.toolset(user.id, id).await).filter(|t| !t.is_empty())
+            let set = c.toolset(user.id, id).await.with_actions(model_actions);
+            if set.is_empty() {
+                (None, set.unready_prompt())
+            } else {
+                (Some(set), None)
+            }
         }
-        _ => None,
+        _ => (None, None),
     };
     let permit = s.slots.clone().try_acquire_owned().map_err(|_| {
         ApiError(
@@ -735,7 +743,7 @@ pub(crate) async fn launch_turn(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
         run_generation(
-            s, gateway, user, starter, id, resolved, turn, tx, permit, workspace, toolset,
+            s, gateway, user, starter, id, resolved, turn, tx, permit, workspace, toolset, unready,
         )
         .await;
     });
@@ -1560,6 +1568,7 @@ async fn run_generation(
     permit: tokio::sync::OwnedSemaphorePermit,
     workspace: Option<sandbox::Sandbox>,
     mut toolset: Option<connections::Toolset>,
+    unready: Option<String>,
 ) {
     let workspace_turn = workspace.is_some();
     // The chat's project: instructions, and collections and saved items it also searches.
@@ -1653,6 +1662,9 @@ async fn run_generation(
     let mut finish_reason: Option<String> = None;
     let mut first = true;
     let generation_id = turn.generation_id;
+    if let Some(set) = toolset.as_mut() {
+        set.begin(generation_id);
+    }
     let mut tx = Some(tx);
     // Where the chat's attached files are in its workspace, for the model.
     let uploads = match &workspace {
@@ -1743,6 +1755,9 @@ async fn run_generation(
     );
     if let Some(toolset) = &toolset {
         preamble.push(toolset.prompt());
+    }
+    if let Some(unready) = unready {
+        preamble.push(unready);
     }
     if !workers.is_empty() {
         preamble.push(agents::PROMPT.into());
@@ -1903,6 +1918,12 @@ async fn run_generation(
     if offers_browser {
         tools.push(browser::tools::request_definition());
     }
+    // Where devices are offered, the model can ask for one plugged into the
+    // person's computer.
+    let offers_device = asks && s.connections.as_ref().is_some_and(|c| c.devices_enabled());
+    if offers_device {
+        tools.push(connections::device::request_definition());
+    }
     // Long work can be paused at the person's request, with a note to carry on from.
     let offers_pause = workspace.is_some()
         || research_tools
@@ -1954,6 +1975,9 @@ async fn run_generation(
         // `auto` for a stronger model.
         let mut watch = LoopWatch::default();
         let mut loops = 0u32;
+        // A chat on a model not certified for changes is offered a certified one when
+        // it first reaches for a cluster or workspace tool, once per chat.
+        let mut model_offered = false;
         let mut escalate: Option<&'static str> = None;
         // The note the model paused with; the reply ends after that round.
         let mut paused: Option<(pause::Note, bool)> = None;
@@ -2406,10 +2430,44 @@ async fn run_generation(
                     && c.name != questions::PROJECT_TOOL
                     && c.name != browser::tools::HANDOFF
                     && c.name != browser::tools::REQUEST
+                    && c.name != connections::device::REQUEST
                     && c.name != agents::TOOL
                     && !(browsing.is_some() && browser::tools::is_tool(&c.name))
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
             });
+            if !model_offered
+                && (workspace_call
+                    || calls
+                        .iter()
+                        .any(|c| toolset.as_ref().and_then(|t| t.find(&c.name)).is_some()))
+            {
+                model_offered = true;
+                let current = served.as_deref().unwrap_or(&resolved.model).to_owned();
+                if models::actions_of(&s.store.pool, &resolved.model).await
+                    != models::Actions::Certified
+                    && models::preferences(&s.store.pool, user.id)
+                        .await
+                        .model_suggestions
+                {
+                    if let Some(better) =
+                        models::suggest(&s.store.pool, &gateway, &user, &current).await
+                    {
+                        if models::record_suggestion(
+                            &s.store.pool,
+                            id,
+                            user.id,
+                            &current,
+                            &better.id,
+                        )
+                        .await
+                        {
+                            let entry = json!({"id":"model-suggestion","kind":"model","status":"asked","summary":"Suggested a better suited model","model":current,"suggested":better.id,"name":better.name,"score":better.certification.as_ref().and_then(|c| c["score"].as_f64())});
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry);
+                        }
+                    }
+                }
+            }
             let mut running = None;
             if let Some((sandbox, sandboxes)) = workspace.as_ref().filter(|_| workspace_call) {
                 // The first workspace tool of a turn may need to start or wake the pod.
@@ -2541,6 +2599,25 @@ async fn run_generation(
                         }
                         Some(Err(problem)) => problem,
                         None => format!("There is no tool named {}.", call.name),
+                    };
+                    payload["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call.id,"content":output}));
+                    continue;
+                }
+                if call.name == connections::device::REQUEST {
+                    let output = if offers_device && !asked {
+                        asked = true;
+                        let entry = connections::device::card_entry(&call.id, &call.arguments);
+                        record(&mut activity, &entry, true);
+                        emit(&mut tx, "tool", entry);
+                        connections::device::REQUEST_SHOWN.to_string()
+                    } else if asked {
+                        "Ask for one thing at a time: your reply already ends with a question."
+                            .to_string()
+                    } else {
+                        format!("There is no tool named {}.", call.name)
                     };
                     payload["messages"]
                         .as_array_mut()
@@ -2772,48 +2849,41 @@ async fn run_generation(
                                 continue;
                             }
                         };
-                        entry["status"] = json!("awaiting");
-                        entry["detail"] = json!(connections::arguments_preview(&call.arguments));
-                        entry["change"] = review;
-                        record(&mut activity, &entry, false);
-                        emit(&mut tx, "tool", entry.clone());
-                        // Saved now so a reloaded page shows the question too.
-                        let _ = lifecycle::save_activity(
-                            &s.store.pool,
-                            user.id,
-                            id,
-                            generation_id,
-                            &activity,
-                        )
-                        .await;
-                        connections::ask(
-                            &s.store.pool,
-                            user.id,
-                            id,
-                            generation_id,
-                            &call.id,
-                            set.grant(index),
-                        )
-                        .await
-                        .map_err(|_| "The response could not ask for approval".to_string())?;
-                        let decision =
-                            connections::wait(&s.store.pool, generation_id, &call.id).await;
-                        entry["status"] = json!("running");
-                        // Answered: the full arguments are not kept with the reply.
-                        if let Some(entry) = entry.as_object_mut() {
-                            entry.remove("change");
+                        // A change that only adds something may be put to a decision
+                        // first; a sure yes to every question runs it without the card.
+                        let judged = match set.gate(index, &call.arguments) {
+                            connections::gate::Gate::Judge => match s.decisions.settings().await {
+                                Ok(settings) if settings.on() && settings.check_actions => Some(
+                                    connections::gate::judge(
+                                        decisions::Asker {
+                                            decisions: &s.decisions,
+                                            gateway: Some(&gateway),
+                                            user: &user,
+                                        },
+                                        &settings,
+                                        &set.label(index),
+                                        &review,
+                                        &connections::gate::person_messages(&payload["messages"]),
+                                    )
+                                    .await,
+                                ),
+                                _ => None,
+                            },
+                            connections::gate::Gate::Ask => None,
+                        };
+                        if let Some(judged) = &judged {
+                            entry["decision"] = judged.entry();
                         }
-                        if decision != connections::Decision::Allow {
-                            entry["status"] = json!("declined");
-                            entry["detail"] =
-                                json!(if decision == connections::Decision::Expired {
-                                    "No answer within 15 minutes"
-                                } else {
-                                    "Declined"
-                                });
+                        if judged.as_ref().is_some_and(|j| j.allowed) {
                             record(&mut activity, &entry, false);
-                            emit(&mut tx, "tool", entry);
-                            payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":"The person declined this tool call, so it did not run. Do not try it again unless they ask."}));
+                        } else {
+                            entry["status"] = json!("awaiting");
+                            entry["detail"] =
+                                json!(connections::arguments_preview(&call.arguments));
+                            entry["change"] = review;
+                            record(&mut activity, &entry, false);
+                            emit(&mut tx, "tool", entry.clone());
+                            // Saved now so a reloaded page shows the question too.
                             let _ = lifecycle::save_activity(
                                 &s.store.pool,
                                 user.id,
@@ -2822,10 +2892,61 @@ async fn run_generation(
                                 &activity,
                             )
                             .await;
-                            continue;
+                            connections::ask(
+                                &s.store.pool,
+                                user.id,
+                                id,
+                                generation_id,
+                                &call.id,
+                                set.grant(index),
+                            )
+                            .await
+                            .map_err(|_| "The response could not ask for approval".to_string())?;
+                            let decision =
+                                connections::wait(&s.store.pool, generation_id, &call.id).await;
+                            entry["status"] = json!("running");
+                            // Answered: the full arguments are not kept with the reply.
+                            if let Some(entry) = entry.as_object_mut() {
+                                entry.remove("change");
+                            }
+                            if decision != connections::Decision::Allow {
+                                entry["status"] = json!("declined");
+                                entry["detail"] =
+                                    json!(if decision == connections::Decision::Expired {
+                                        "No answer within 15 minutes"
+                                    } else {
+                                        "Declined"
+                                    });
+                                record(&mut activity, &entry, false);
+                                emit(&mut tx, "tool", entry);
+                                payload["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":call.id,"content":"The person declined this tool call, so it did not run. Do not try it again unless they ask."}));
+                                let _ = lifecycle::save_activity(
+                                    &s.store.pool,
+                                    user.id,
+                                    id,
+                                    generation_id,
+                                    &activity,
+                                )
+                                .await;
+                                continue;
+                            }
+                            record(&mut activity, &entry, false);
+                            // A reloaded page stops showing the question.
+                            let _ = lifecycle::save_activity(
+                                &s.store.pool,
+                                user.id,
+                                id,
+                                generation_id,
+                                &activity,
+                            )
+                            .await;
                         }
+                    }
+                    if set.is_device(index) {
+                        // The person's browser carries this out: the step carries
+                        // what to do, and is saved so a reloaded page sees it too.
+                        entry["request"] = set.request(index, &call.arguments);
                         record(&mut activity, &entry, false);
-                        // A reloaded page stops showing the question.
                         let _ = lifecycle::save_activity(
                             &s.store.pool,
                             user.id,
@@ -2837,7 +2958,10 @@ async fn run_generation(
                     }
                     emit(&mut tx, "tool", entry.clone());
                     let began = Instant::now();
-                    let outcome = set.call(index, &call.arguments).await;
+                    let outcome = set.call(index, &call.id, &call.arguments).await;
+                    if let Some(entry) = entry.as_object_mut() {
+                        entry.remove("request");
+                    }
                     entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
                     entry["detail"] = json!(outcome.detail);
                     entry["durationMs"] = json!(began.elapsed().as_millis() as u64);

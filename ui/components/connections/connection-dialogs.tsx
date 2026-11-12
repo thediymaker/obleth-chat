@@ -135,6 +135,7 @@ export type ConnectionManager = ReturnType<typeof useConnectionManager>;
 function ConnectionDialog({ connection: c, kind, onClose, onSaved }: { connection: Connection | null; kind: ConnectionKind; onClose: () => void; onSaved: (item: Connection, created: boolean) => void }) {
   const { isAdmin } = useSession();
   const jobOutput = !!useCapabilities().data?.features?.jobOutput;
+  const [files, setFiles] = useState(!!c?.files);
   const [sharedNew, setSharedNew] = useState(false);
   const k = KINDS[kind];
   const cluster = kind !== "mcp";
@@ -193,6 +194,48 @@ function ConnectionDialog({ connection: c, kind, onClose, onSaved }: { connectio
             defaultChecked={!!c?.returnOutput}
             description="Each job submitted from Chat sends the last 1 MiB of its output to Chat’s file storage when it ends, so the model can read it. The compute nodes must be able to reach that storage."
           />
+        )}
+        {kind === "slurm" && (
+          <CheckField
+            id="connection-files"
+            label="Reach files on the cluster"
+            checked={files}
+            onCheckedChange={setFiles}
+            description="The model can list, read, search, write and tidy each person’s own files through a small job Chat starts as them when a chat first needs it. The job connects out to Chat and stays for later calls until it has been idle for an hour. The compute nodes need python3 and must be able to reach Chat’s address."
+          />
+        )}
+        {kind === "slurm" && files && (
+          <div className="grid gap-4 border-l-2 pl-4">
+            <TextField
+              id="connection-files-partition"
+              label="Partition for the session job"
+              maxLength={63}
+              autoComplete="off"
+              placeholder="Cluster default"
+              defaultValue={c?.filesPartition || ""}
+              help="A small partition that starts a 1-CPU, 1 GB job within seconds makes the first call quick."
+            />
+            <TextField id="connection-files-qos" label="QoS for the session job" maxLength={63} autoComplete="off" placeholder="None" defaultValue={c?.filesQos || ""} />
+            <TextField
+              id="connection-files-hours"
+              label="Session length, hours"
+              type="number"
+              min={1}
+              max={168}
+              placeholder="8"
+              defaultValue={c?.filesHours ?? ""}
+              help="The job’s time limit. It exits sooner once idle for an hour; the next call starts a new one."
+            />
+            <TextField
+              id="connection-files-roots"
+              label="Directories the model may reach"
+              maxLength={1024}
+              autoComplete="off"
+              placeholder="~"
+              defaultValue={c?.filesRoots || ""}
+              help="Absolute paths or ~, separated by commas; $USER stands for the person’s Slurm user, such as ~,/scratch/$USER. Everything else on the cluster is refused."
+            />
+          </div>
         )}
         {kind === "kubernetes" && (
           <>
@@ -393,6 +436,7 @@ export function ConnectionRow({ c, manager }: { c: Connection; manager: Connecti
     who,
     c.apiVersion && `REST API ${c.apiVersion}`,
     c.returnOutput && "job output comes back",
+    c.files && "files reachable",
     changes ? `${changes} can make changes` : "all read-only",
     c.checkedAt && `checked ${when(c.checkedAt)}`,
   ]

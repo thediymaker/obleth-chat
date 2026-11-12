@@ -803,3 +803,150 @@ async fn administrators_pick_a_short_list_that_the_catalog_marks(pool: PgPool) {
             .unwrap();
     assert_eq!(audits, 2);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn certification_decides_how_far_a_model_is_trusted_with_changes(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = session(&pool, Role::Admin).await;
+    let alpha = |catalog: &Value| {
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "alpha")
+            .cloned()
+            .unwrap()
+    };
+    // Nothing known yet: provisional, every change asks.
+    let (_, catalog) = call(&f.app, &admin, "GET", "/api/admin/models", Value::Null).await;
+    assert_eq!(alpha(&catalog)["actions"], "auto");
+    assert_eq!(alpha(&catalog)["effectiveActions"], "provisional");
+    assert!(alpha(&catalog)["certification"].is_null());
+
+    // A published score of 90% or more makes it certified.
+    let (status, saved) = call(
+        &f.app,
+        &admin,
+        "PUT",
+        "/api/admin/model-certification/alpha",
+        json!({"score":95.3,"passed":101,"total":106,"suite":"cases.yaml","at":"2026-11-06T15:50:00Z"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["effectiveActions"], "certified");
+    let (_, catalog) = call(&f.app, &admin, "GET", "/api/admin/models", Value::Null).await;
+    let model = alpha(&catalog);
+    assert_eq!(model["effectiveActions"], "certified");
+    assert_eq!(model["certification"]["score"], 95.3);
+    assert_eq!(model["certification"]["passed"], 101);
+    assert_eq!(model["certification"]["suite"], "cases.yaml");
+    assert!(model["certification"]["at"]
+        .as_str()
+        .unwrap()
+        .starts_with("2026-11-06T15:50:00"));
+    // Everyone's catalog says nothing about it.
+    let bob = session(&pool, Role::User).await;
+    let (_, catalog) = call(&f.app, &bob, "GET", "/api/models", Value::Null).await;
+    assert_eq!(alpha(&catalog)["effectiveActions"], "certified");
+
+    // Below the mark: provisional. Set by hand, the setting wins.
+    let (status, _) = call(
+        &f.app,
+        &admin,
+        "PUT",
+        "/api/admin/model-certification/alpha",
+        json!({"score":71.4,"passed":76,"total":106,"suite":"cases.yaml"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, catalog) = call(&f.app, &admin, "GET", "/api/admin/models", Value::Null).await;
+    assert_eq!(alpha(&catalog)["effectiveActions"], "provisional");
+    profile(&f, &admin, "alpha", json!({"actions":"blocked"})).await;
+    let (_, catalog) = call(&f.app, &admin, "GET", "/api/admin/models", Value::Null).await;
+    assert_eq!(alpha(&catalog)["actions"], "blocked");
+    assert_eq!(alpha(&catalog)["effectiveActions"], "blocked");
+    assert_eq!(alpha(&catalog)["certification"]["score"], 71.4);
+    profile(&f, &admin, "alpha", json!({"actions":"Certified "})).await;
+    let (_, catalog) = call(&f.app, &admin, "GET", "/api/admin/models", Value::Null).await;
+    assert_eq!(alpha(&catalog)["effectiveActions"], "certified");
+
+    // What is refused.
+    for (bad, expected) in [
+        (
+            json!({"score":101,"passed":1,"total":1,"suite":"cases.yaml"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"score":50,"passed":2,"total":1,"suite":"cases.yaml"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"score":50,"passed":0,"total":0,"suite":"cases.yaml"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"score":50,"passed":1,"total":2,"suite":""}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"score":50,"passed":1,"total":2,"suite":"cases.yaml","at":"yesterday"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"score":50,"passed":1,"total":2,"suite":"cases.yaml","extra":1}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let (status, _) = call(
+            &f.app,
+            &admin,
+            "PUT",
+            "/api/admin/model-certification/alpha",
+            bad.clone(),
+        )
+        .await;
+        assert_eq!(status, expected, "{bad}");
+    }
+    let (status, _) = call(
+        &f.app,
+        &admin,
+        "PUT",
+        "/api/admin/models/alpha",
+        json!({"name":"Alpha","actions":"sometimes"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(
+        &f.app,
+        &bob,
+        "PUT",
+        "/api/admin/model-certification/alpha",
+        json!({"score":100,"passed":1,"total":1,"suite":"cases.yaml"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Clearing the score leaves the setting; back on auto, it is provisional again.
+    let (status, _) = call(
+        &f.app,
+        &admin,
+        "DELETE",
+        "/api/admin/model-certification/alpha",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &f.app,
+        &admin,
+        "DELETE",
+        "/api/admin/model-certification/alpha",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    profile(&f, &admin, "alpha", json!({"actions":"auto"})).await;
+    let (_, catalog) = call(&f.app, &admin, "GET", "/api/admin/models", Value::Null).await;
+    assert!(alpha(&catalog)["certification"].is_null());
+    assert_eq!(alpha(&catalog)["effectiveActions"], "provisional");
+}

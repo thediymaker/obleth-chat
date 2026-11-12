@@ -38,7 +38,7 @@ fn tool(
 
 /// The cluster's tools. `output` adds Job output, for clusters that bring job output
 /// back to Chat.
-pub fn tools(output: bool) -> Vec<Tool> {
+pub fn tools(output: bool, files: bool) -> Vec<Tool> {
     let mut tools = vec![
         tool("cluster", "Cluster", "The Slurm cluster's partitions: idle nodes, CPUs and GPUs, time limits, and the queue's size. Name a partition to also list its nodes.", true, json!({"partition":{"type":"string","description":"Also list this partition's nodes, one line each"}}), &[]),
         tool("jobs", "Jobs", "Your running and pending Slurm jobs; with finished_days, also the ones that ended in the last days, newest first, with their exit codes. For one job, use Job details.", true, json!({"state":{"type":"string","enum":["RUNNING","PENDING"],"description":"Only jobs in this state"},"finished_days":{"type":"integer","minimum":1,"maximum":FINISHED_DAYS_MAX,"description":"Also list jobs that ended in this many past days"}}), &[]),
@@ -60,7 +60,64 @@ pub fn tools(output: bool) -> Vec<Tool> {
     if output {
         tools.push(tool("output", "Job output", "The end of what a job you submitted from this chat printed (its output file, up to the last 1 MiB), once the job has ended. Use it instead of guessing from the state or exit code.", true, json!({"job_id":{"type":"integer"}}), &["job_id"]));
     }
+    if files {
+        tools.extend(super::files::tools());
+    }
     tools
+}
+
+/// Where one job stands: its state, why it waits, the node it ran on and how it exited.
+#[derive(Debug, Clone, Default)]
+pub struct Standing {
+    pub name: String,
+    pub state: String,
+    pub reason: String,
+    pub node: String,
+    pub exit: Option<i64>,
+    pub signal: Option<i64>,
+    /// When it was submitted, in seconds since the epoch: a job id can come back
+    /// once Slurm's ids wrap, and accounting keeps the old job under it.
+    pub submitted: Option<i64>,
+}
+impl Standing {
+    /// Held for a reason waiting will not clear: the job asks for more than its
+    /// partition, QoS or account allows, or for something that does not exist.
+    pub fn held_for_good(&self) -> bool {
+        self.state.contains("PENDING")
+            && (self.reason.starts_with("Invalid")
+                || matches!(
+                    self.reason.as_str(),
+                    "PartitionTimeLimit"
+                        | "PartitionNodeLimit"
+                        | "PartitionConfig"
+                        | "AccountNotAllowed"
+                        | "QOSNotAllowed"
+                        | "BadConstraints"
+                        | "QOSMaxWallDurationPerJobLimit"
+                        | "AssocMaxWallDurationPerJobLimit"
+                        | "QOSMaxCpuPerJobLimit"
+                        | "QOSMaxNodePerJobLimit"
+                        | "QOSMaxMemoryPerJob"
+                        | "QOSMinCpuNotSatisfied"
+                ))
+    }
+    /// Waiting for a node or running: still on its way to answering.
+    pub fn active(&self) -> bool {
+        self.state.split(',').any(|s| {
+            matches!(
+                s.trim(),
+                "PENDING"
+                    | "RUNNING"
+                    | "CONFIGURING"
+                    | "COMPLETING"
+                    | "REQUEUED"
+                    | "RESIZING"
+                    | "SUSPENDED"
+                    | "STAGE_OUT"
+                    | "SIGNALING"
+            )
+        }) || self.state.is_empty()
+    }
 }
 
 pub struct Client {
@@ -465,8 +522,7 @@ impl Client {
             "submit" => self.submit(args, None).await.map(|(t, _)| (true, t)),
             "cancel" => {
                 let id = job_id(args)?;
-                self.call_api(reqwest::Method::DELETE, &format!("job/{id}"), None)
-                    .await?;
+                self.cancel(id).await?;
                 Ok((true, format!("Asked Slurm to cancel job {id}.")))
             }
             other => Err(format!("There is no Slurm tool named {other}")),
@@ -786,6 +842,35 @@ impl Client {
         data["jobs"].as_array()?.first().cloned()
     }
 
+    /// Where a job stands, from the scheduler or, once it forgets the job, accounting.
+    pub async fn standing(&mut self, id: i64) -> Option<Standing> {
+        if let Ok(data) = self
+            .call_api(reqwest::Method::GET, &format!("job/{id}"), None)
+            .await
+        {
+            if let Some(j) = data["jobs"].as_array().and_then(|a| a.first()) {
+                return Some(Standing {
+                    name: text(&j["name"]),
+                    state: text(&j["job_state"]),
+                    reason: text(&j["state_reason"]),
+                    node: text(&j["nodes"]),
+                    exit: num(&j["exit_code"]["return_code"]),
+                    signal: num(&j["exit_code"]["signal"]["id"]),
+                    submitted: num(&j["submit_time"]),
+                });
+            }
+        }
+        self.accounted(id).await.map(|j| Standing {
+            name: text(&j["name"]),
+            state: text(&j["state"]["current"]),
+            reason: text(&j["state"]["reason"]),
+            node: text(&j["nodes"]),
+            exit: num(&j["exit_code"]["return_code"]),
+            signal: num(&j["exit_code"]["signal"]["id"]),
+            submitted: num(&j["time"]["submission"]),
+        })
+    }
+
     /// The job's state, such as RUNNING or COMPLETED, from the scheduler or accounting.
     pub async fn state_of(&mut self, id: i64) -> Option<String> {
         if let Ok(data) = self
@@ -857,6 +942,27 @@ impl Client {
             }
             _ => script,
         };
+        let (id, warnings) = self.submit_job(script, job.clone()).await?;
+        let text = format!(
+            "Submitted job {id} as {} in {}.{}",
+            self.user,
+            job["current_working_directory"].as_str().unwrap_or(""),
+            if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" Warnings: {}", warnings.join("; "))
+            }
+        );
+        Ok((text, id))
+    }
+
+    /// Submits a batch script with the job's settings, as the person: the job id and
+    /// Slurm's warnings.
+    pub async fn submit_job(
+        &mut self,
+        script: String,
+        job: Value,
+    ) -> Result<(i64, Vec<String>), String> {
         let result = self
             .call_api(
                 reqwest::Method::POST,
@@ -872,17 +978,18 @@ impl Client {
             .map(|w| text(&w["description"]))
             .filter(|w| !w.is_empty())
             .collect();
-        let text = format!(
-            "Submitted job {id} as {} in {}.{}",
-            self.user,
-            job["current_working_directory"].as_str().unwrap_or(""),
-            if warnings.is_empty() {
-                String::new()
-            } else {
-                format!(" Warnings: {}", warnings.join("; "))
-            }
-        );
-        Ok((text, id))
+        Ok((id, warnings))
+    }
+
+    pub async fn cancel(&mut self, id: i64) -> Result<(), String> {
+        self.call_api(reqwest::Method::DELETE, &format!("job/{id}"), None)
+            .await
+            .map(|_| ())
+    }
+
+    /// The Slurm user the client acts as.
+    pub fn user(&self) -> &str {
+        &self.user
     }
 }
 
@@ -1147,6 +1254,7 @@ pub fn changes(tool: &str, args: &Value) -> Result<Vec<Value>, String> {
         "cancel" => Ok(vec![
             json!({"verb":"Cancel","what":format!("job {}", job_id(args)?),"facts":[]}),
         ]),
+        name if name.starts_with("files_") => super::files::changes(name, args),
         _ => Ok(vec![]),
     }
 }
@@ -1206,10 +1314,16 @@ mod tests {
         );
         assert_eq!(job_id(&json!({"job_id":"42"})), Ok(42));
         assert!(job_id(&json!({"job_id":-1})).is_err());
-        assert_eq!(tools(false).iter().filter(|t| !t.read_only).count(), 2);
+        assert_eq!(
+            tools(false, false).iter().filter(|t| !t.read_only).count(),
+            2
+        );
         // Job output only reads.
-        assert_eq!(tools(true).len(), tools(false).len() + 1);
-        assert_eq!(tools(true).iter().filter(|t| !t.read_only).count(), 2);
+        assert_eq!(tools(true, false).len(), tools(false, false).len() + 1);
+        assert_eq!(
+            tools(true, false).iter().filter(|t| !t.read_only).count(),
+            2
+        );
     }
 
     #[test]

@@ -29,12 +29,23 @@ export interface AdminModel {
   published?: boolean;
   isDefault?: boolean;
   worker?: boolean;
+  /** How far the model is trusted with changes through connections, and what certification found. */
+  actions?: "auto" | "certified" | "provisional" | "blocked";
+  effectiveActions?: "certified" | "provisional" | "blocked";
+  certification?: { score?: number; passed?: number; total?: number; suite?: string; at?: string } | null;
   available?: boolean;
   shortList?: boolean;
   visibility?: "all" | "admins" | "groups";
   groupIds?: string[];
   defaults?: Generation;
   allowedOverrides?: string[];
+}
+/** What certification found for a model, in a line. */
+export function certificationNote(m: AdminModel) {
+  const c = m.certification;
+  if (!c || typeof c.score !== "number") return "Not certified yet. Run evals/certify and publish.py to record a score; 90% or more counts as certified.";
+  const when = c.at ? new Date(c.at).toLocaleDateString() : "";
+  return `Certified ${c.score}% (${c.passed ?? "?"} of ${c.total ?? "?"} cases${c.suite ? `, ${c.suite}` : ""}${when ? `, ${when}` : ""}).`;
 }
 export const GENERATION = [
   ["systemPrompt", "System instructions"],
@@ -77,6 +88,7 @@ export function modelBody(form: FormData, groups: AdminGroup[]) {
     published: on("model-published"),
     isDefault: on("model-default"),
     worker: on("model-worker"),
+    actions: text("model-actions") || "auto",
     visibility: text("model-visibility"),
     groupIds: groups.filter((g) => on(`model-group-${g.id}`)).map((g) => g.id),
     defaults: readGeneration(form, "model"),
@@ -240,6 +252,7 @@ function ShortListDialog({ models, onClose, onSaved }: { models: AdminModel[]; o
 
 function ModelDialog({ model: m, groups, onClose, onSaved }: { model: AdminModel; groups: AdminGroup[]; onClose: () => void; onSaved: () => Promise<void> }) {
   const [visibility, setVisibility] = useState(m.visibility || "all");
+  const [actions, setActions] = useState(m.actions || "auto");
   const { busy, error, onSubmit } = useSubmit(async (form) => {
     await api.request(`/api/admin/models/${encodeURIComponent(m.id)}`, { method: "PUT", body: modelBody(form, groups) });
     await onSaved();
@@ -267,6 +280,19 @@ function ModelDialog({ model: m, groups, onClose, onSaved }: { model: AdminModel
             description="Other models can hand tasks to this one, several at once, to explore a workspace and report back. Choose fast, efficient models."
           />
         </div>
+        <SelectField
+          id="model-actions"
+          label="Changes through connections"
+          value={actions}
+          onChange={(e) => setActions(e.target.value as typeof actions)}
+          options={[
+            ["auto", `Decide from certification${m.certification ? ` (now ${m.effectiveActions})` : " (none yet, so provisional)"}`],
+            ["certified", "Certified: a change may run on a decision’s say-so"],
+            ["provisional", "Provisional: every change asks"],
+            ["blocked", "Blocked: reads only"],
+          ]}
+        />
+        <Note>{certificationNote(m)}</Note>
         <SelectField
           id="model-visibility"
           label="Visible to"

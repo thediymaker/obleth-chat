@@ -192,6 +192,17 @@ async fn cluster(
                 {"name":"n3","state":["IDLE"],"cpus":16,"alloc_cpus":0,"real_memory":32000,"alloc_memory":0,"partitions":["hidden"]}
             ]})).into_response(),
             ("POST", "slurm", "job/submit") => Json(json!({"job_id":8,"errors":[]})).into_response(),
+            // A file session job whose node cannot look up Chat's address: it ends at
+            // once with the agent's exit code for that. Marked by its roots, so other
+            // tests sharing this fake see no such job.
+            ("GET", "slurm", "job/8")
+                if seen.lock().unwrap().iter().any(|r| {
+                    r["path"] == "/slurm/v0.0.45/job/submit"
+                        && r["body"].as_str().unwrap_or("").contains(UNRESOLVED_ROOT)
+                }) =>
+            {
+                Json(json!({"jobs":[{"job_id":8,"name":"chat-files","job_state":["FAILED"],"state_reason":"NonZeroExitCode","nodes":"n1","exit_code":{"status":["ERROR"],"return_code":{"set":true,"infinite":false,"number":3},"signal":{"id":{"set":false,"infinite":false,"number":0},"name":""}}}]})).into_response()
+            }
             _ => missing(),
         };
     }
@@ -249,6 +260,28 @@ async fn cluster(
         }
         _ => missing(),
     }
+}
+
+/// The decisions judge: a sure yes to everything, unless the person's messages say
+/// "someone else's", which means the action was not theirs to ask for.
+async fn verdicts(
+    axum::extract::State(seen): axum::extract::State<Seen>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    seen.lock().unwrap().push(json!({"verdicts": body.clone()}));
+    let doubtful = body["state"]["the person's messages"]
+        .as_str()
+        .is_some_and(|m| m.contains("someone else's"));
+    let answers: serde_json::Map<String, Value> = body["questions"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, _)| {
+            let yes = if doubtful && id == "asked" { 0.2 } else { 0.95 };
+            (id.clone(), json!({"type":"boolean","value":yes>0.5,"probabilities":{"true":yes,"false":1.0-yes},"confidence":0.9}))
+        })
+        .collect();
+    Json(json!({"model":"judge-31b","verdicts":answers}))
 }
 
 /// Calls the scripted tools, then answers with what the tools returned.
@@ -341,6 +374,8 @@ async fn get_object(State(o): State<Objects>, Path(key): Path<String>) -> Respon
 
 struct Fixture {
     app: Router,
+    /// Where the app itself listens, for a cluster's file session job to reach.
+    app_url: String,
     /// Object storage, where jobs bring their output back.
     objects: Objects,
     state: AppState,
@@ -398,11 +433,17 @@ async fn fixture_full(pool: PgPool, clusters: bool, storage: bool) -> Fixture {
         .route("/mcp", post(mcp).with_state(mcp_seen.clone()))
         .route(
             "/v1/models",
-            get(|| async { Json(json!({"data":[{"id":"fixture-model"}]})) }),
+            get(|| async {
+                Json(json!({"data":[{"id":"fixture-model"},{"id":"fixture-better"}]}))
+            }),
         )
         .route(
             "/v1/chat/completions",
             post(chat).with_state((gateway_seen.clone(), script.clone())),
+        )
+        .route(
+            "/v1/verdicts",
+            post(verdicts).with_state(gateway_seen.clone()),
         )
         .fallback(cluster)
         .with_state(cluster_seen.clone());
@@ -434,11 +475,16 @@ async fn fixture_full(pool: PgPool, clusters: bool, storage: bool) -> Fixture {
     .unwrap();
     let mut state = AppState::new(auth, pool.clone(), Some(gateway), 4);
     state.followups_enabled = false;
+    // The app also listens, as it does in service, so a file session job (a real
+    // python3 process in the test) can reach it.
+    let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app_url = format!("http://{}", app_listener.local_addr().unwrap());
     // The mock listens on loopback, so private addresses are allowed here.
     state.connections = Some(
         Connections::new(pool, pem.as_bytes(), true)
             .unwrap()
             .clusters(clusters)
+            .origin(Some(app_url.parse().unwrap()))
             .objects(storage.then(|| {
                 ObjectStore::new(
                     format!("http://{address}").parse().unwrap(),
@@ -449,9 +495,13 @@ async fn fixture_full(pool: PgPool, clusters: bool, storage: bool) -> Fixture {
                 )
             })),
     );
+    let app = router(state.clone(), "branding".into());
+    let served = app.clone();
+    tokio::spawn(async move { axum::serve(app_listener, served).await.unwrap() });
     Fixture {
         objects,
-        app: router(state.clone(), "branding".into()),
+        app,
+        app_url,
         state,
         mcp_url: format!("http://{address}/mcp"),
         cluster_url: format!("http://{address}"),
@@ -1398,6 +1448,11 @@ async fn clusters_can_be_turned_off_for_the_installation(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn a_shared_slurm_cluster_runs_jobs_with_each_persons_own_token(pool: PgPool) {
     let f = fixture(pool.clone()).await;
+    // These cover the Allow card itself, so no decision may stand in for it.
+    sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
     let admin = login(&f.app, "test-admin").await;
     // Shared clusters take no token of their own; each person adds theirs.
     let (status, rejected) = call(
@@ -1677,6 +1732,11 @@ async fn a_kubernetes_connection_lists_and_applies_with_the_persons_token(pool: 
 #[sqlx::test(migrations = "./migrations")]
 async fn a_slurm_cluster_brings_job_output_back(pool: PgPool) {
     let f = fixture(pool.clone()).await;
+    // These cover the Allow card itself, so no decision may stand in for it.
+    sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
     let admin = login(&f.app, "test-admin").await;
     let (status, shared) = call(
         &f.app,
@@ -2542,4 +2602,1303 @@ async fn pausing_ends_the_reply_with_where_the_work_stands(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(nudges, 0);
+}
+
+/// Waits for a device call the response sent to the browser.
+async fn device_call(f: &Fixture, id: &str, session: &(String, String)) -> Value {
+    for _ in 0..100 {
+        let (status, body) = call(
+            &f.app,
+            "GET",
+            &format!("/api/conversations/{id}/device-calls"),
+            Value::Null,
+            session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        if let Some(first) = body["calls"].as_array().and_then(|c| c.first()) {
+            return first.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no device call waited for the browser");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn device_tools_are_carried_out_by_the_persons_browser(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    // A device is the person's own, takes no address or token, and is never checked.
+    let (status, created) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Board","url":"","kind":"device","options":{"vendorId":0x303a,"productId":4097,"label":"USB JTAG/serial debug unit"}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["kind"], "device");
+    assert_eq!(created["vendorId"], 0x303a);
+    assert_eq!(created["label"], "USB JTAG/serial debug unit");
+    assert_eq!(created["serverName"], "USB JTAG/serial debug unit");
+    assert_eq!(created["hasToken"], false);
+    let tools: Vec<&str> = created["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            "status", "open", "close", "read", "write", "signals", "login", "identify", "flash",
+            "erase"
+        ]
+    );
+    let device = created["id"].as_str().unwrap().to_owned();
+    let (status, refused) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Shared board","url":"","kind":"device","shared":true}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    let (status, refused) = call(
+        &f.app,
+        "PATCH",
+        &format!("/api/connections/{device}"),
+        json!({"url":"https://example.com/mcp"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    // Renaming keeps the USB ids; a new label is kept too.
+    let (status, renamed) = call(
+        &f.app,
+        "PATCH",
+        &format!("/api/connections/{device}"),
+        json!({"name":"My board","options":{"label":"ESP32-S3"}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["name"], "My board");
+    assert_eq!(renamed["vendorId"], 0x303a);
+    assert_eq!(renamed["label"], "ESP32-S3");
+    let (status, refreshed) = call(
+        &f.app,
+        "POST",
+        &format!("/api/connections/{device}/refresh"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refreshed}");
+
+    // A read runs without asking; a write waits for Allow. Both are carried out by
+    // the browser, which posts each result.
+    *f.script.lock().unwrap() = tool_script(&[
+        ("call_read", "my_board__read", json!({"waitMs":10})),
+        ("call_write", "my_board__write", json!({"text":"AT"})),
+    ]);
+    let (id, stream) = send(&f, &admin, "Talk to the board").await;
+    let first = device_call(&f, &id, &admin).await;
+    assert_eq!(first["callId"], "call_read");
+    assert_eq!(first["tool"], "read");
+    assert_eq!(first["arguments"], json!({"waitMs":10}));
+    assert_eq!(first["connectionId"], device);
+    // The saved step carries the request, so a reloaded page can carry it out.
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(activity[0]["service"], "device");
+    assert_eq!(activity[0]["connection"], "My board");
+    assert_eq!(activity[0]["status"], "running");
+    assert_eq!(
+        activity[0]["request"],
+        json!({"tool":"read","arguments":{"waitMs":10}})
+    );
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/device-calls/call_read"),
+        json!({"ok":true,"output":"ready>\r\n","detail":"7 bytes"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/device-calls/call_read"),
+        json!({"ok":true,"output":"again"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    assert_eq!(pending(&pool).await, "call_write");
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(activity[0]["status"], "completed");
+    assert_eq!(activity[0]["detail"], "ready>\r\n");
+    assert!(activity[0].get("request").is_none());
+    assert_eq!(activity[1]["status"], "awaiting");
+    assert_eq!(activity[1]["change"]["items"][0]["verb"], "Send");
+    assert_eq!(activity[1]["change"]["items"][0]["what"], "AT");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/approvals"),
+        json!({"callId":"call_write","decision":"allow"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let second = device_call(&f, &id, &admin).await;
+    assert_eq!(second["callId"], "call_write");
+    assert_eq!(second["arguments"], json!({"text":"AT"}));
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/device-calls/call_write"),
+        json!({"ok":true,"output":"Sent 3 bytes"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("\"status\":\"completed\""), "{text}");
+    assert!(
+        text.contains(r#"Done: ready>\r\n | Sent 3 bytes"#),
+        "{text}"
+    );
+    // The model was told what the device is, under the connection's prefix.
+    let first = f.gateway_seen.lock().unwrap()[0].clone();
+    let names: Vec<&str> = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"my_board__flash"), "{names:?}");
+    let prompt = first["messages"][0]["content"].as_str().unwrap();
+    assert!(prompt.contains("My board, a device plugged into the person's computer (ESP32-S3), reached through their browser; no console sign-in is saved"), "{prompt}");
+    assert!(prompt.contains("(tools named my_board__…)"), "{prompt}");
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM device_calls")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_model_can_ask_for_a_device_at_the_persons_computer(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_ask",
+        "request_device",
+        json!({"reason":"To read what the BeagleBone prints.","name":"BeagleBone"}),
+    )]);
+    // The auto model is one that calls tools; with no connections, only the offer
+    // tools are on.
+    let (status, chat) = call(
+        &f.app,
+        "POST",
+        "/api/conversations",
+        json!({"title":"Board","model":"auto"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{chat}");
+    let id = chat["conversation"]["id"].as_str().unwrap().to_owned();
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            json!({"content":"Connect to my BeagleBone","model":"auto"}),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let stream = tokio::spawn(async move {
+        String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap()
+    });
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("\"kind\":\"device-request\""), "{text}");
+    assert!(
+        text.contains("To read what the BeagleBone prints."),
+        "{text}"
+    );
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(activity[0]["kind"], "device-request");
+    assert_eq!(activity[0]["name"], "BeagleBone");
+    // The model was told the person sees the button, and had the tool offered.
+    let seen = f.gateway_seen.lock().unwrap().clone();
+    let names: Vec<&str> = seen[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"request_device"), "{names:?}");
+    // The card ends the reply: the model is not called again until the person answers.
+    assert_eq!(seen.len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn secrets_are_named_to_the_model_and_opened_only_by_the_owners_browser(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, refused) = call(
+        &f.app,
+        "PUT",
+        "/api/secrets/has%20space",
+        json!({"value":"x"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    let (status, saved) = call(
+        &f.app,
+        "PUT",
+        "/api/secrets/bb-pass",
+        json!({"value":"temppwd","note":"BeagleBone console"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["name"], "bb-pass");
+    assert_eq!(saved["note"], "BeagleBone console");
+    assert!(saved.get("value").is_none());
+    let (status, listed) = call(&f.app, "GET", "/api/secrets", Value::Null, &admin).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["secrets"][0]["name"], "bb-pass");
+    assert!(!listed.to_string().contains("temppwd"));
+    // Only the note changes when no value is sent; the value opens for the owner.
+    let (status, noted) = call(
+        &f.app,
+        "PUT",
+        "/api/secrets/bb-pass",
+        json!({"note":"console"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{noted}");
+    let (status, value) = call(
+        &f.app,
+        "GET",
+        "/api/secrets/bb-pass/value",
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value, json!({"name":"bb-pass","value":"temppwd"}));
+    // A device set to sign in with it: the model is told the user and the secret's
+    // name, and the names of the secrets, never a value.
+    let (status, created) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"Beagle","url":"","kind":"device","options":{"vendorId":0x1d6b,"user":"debian","secret":"bb-pass"}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["user"], "debian");
+    assert_eq!(created["secret"], "bb-pass");
+    *f.script.lock().unwrap() = tool_script(&[("call_l", "beagle__login", json!({}))]);
+    let (id, stream) = send(&f, &admin, "Sign in to the board").await;
+    let first = device_call(&f, &id, &admin).await;
+    assert_eq!(first["tool"], "login");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{id}/device-calls/call_l"),
+        json!({"ok":true,"output":"Signed in as debian."}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Done: Signed in as debian."), "{text}");
+    let seen = f.gateway_seen.lock().unwrap().clone();
+    let prompt = seen[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        prompt.contains("user debian, password in the secret bb-pass"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("saved secrets named bb-pass"), "{prompt}");
+    assert!(!seen.iter().any(|r| r.to_string().contains("temppwd")));
+    let (status, _) = call(
+        &f.app,
+        "DELETE",
+        "/api/secrets/bb-pass",
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &f.app,
+        "GET",
+        "/api/secrets/bb-pass/value",
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The roots that mark a file session job whose node cannot look up Chat's address.
+const UNRESOLVED_ROOT: &str = "/marks-a-node-without-dns";
+
+/// The session job's batch script and environment, from what slurmrestd received.
+fn session_job(f: &Fixture, index: usize) -> (String, Vec<(String, String)>, Value) {
+    let submitted = cluster_requests(f, "POST", "/slurm/v0.0.45/job/submit");
+    let body: Value = serde_json::from_str(submitted[index]["body"].as_str().unwrap()).unwrap();
+    let env: Vec<(String, String)> = body["job"]["environment"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let (k, v) = e.as_str().unwrap().split_once('=').unwrap();
+            (k.to_owned(), v.to_owned())
+        })
+        .collect();
+    (
+        body["script"].as_str().unwrap().to_owned(),
+        env,
+        body["job"].clone(),
+    )
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_slurm_cluster_reaches_files_through_a_session_job(pool: PgPool) {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("python3 is not installed; skipping");
+        return;
+    }
+    let f = fixture(pool.clone()).await;
+    // These cover the Allow card itself, so no decision may stand in for it.
+    sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let admin = login(&f.app, "test-admin").await;
+    // The person's files, as the cluster's home directory and a scratch space.
+    let home = std::env::temp_dir().join(format!("chat-files-home-{}", Uuid::new_v4().simple()));
+    let scratch =
+        std::env::temp_dir().join(format!("chat-files-scratch-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(home.join("project")).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::write(
+        home.join("project/run.sh"),
+        "#!/bin/bash\nsrun python train.py\n",
+    )
+    .unwrap();
+    std::fs::write(scratch.join("out.log"), "step 1\nerror: out of memory\n").unwrap();
+    let roots = format!("~,{}", scratch.display());
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true,"filesPartition":"htc","filesHours":4,"filesRoots":roots}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    assert_eq!(shared["files"], true);
+    assert_eq!(shared["filesPartition"], "htc");
+    assert_eq!(shared["filesRoots"], roots);
+    let tools: Vec<&str> = shared["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        tools.contains(&"files_list") && tools.contains(&"files_remove"),
+        "{tools:?}"
+    );
+    let id = shared["id"].as_str().unwrap().to_owned();
+    // The job runs as whoever runs this test, and must say so.
+    let me = std::env::var("USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| {
+            String::from_utf8(
+                std::process::Command::new("id")
+                    .arg("-un")
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_owned()
+        });
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":me}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The first files call starts the session job: a small job as the person, whose
+    // script carries the agent and whose environment carries the session token.
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_list", "sol__files_list", json!({"path":"project"}))]);
+    let (_, stream) = send(&f, &admin, "What is in my project directory?").await;
+    for _ in 0..100 {
+        if !cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (script, env, job) = session_job(&f, 0);
+    assert!(script.starts_with("#!/bin/bash\n"), "{script}");
+    assert!(
+        script.contains("exec python3 - <<'OBLETH_CHAT_AGENT_"),
+        "{script}"
+    );
+    assert_eq!(job["name"], "chat-files");
+    assert_eq!(job["partition"], "htc");
+    assert_eq!(job["time_limit"]["number"], 240);
+    assert_eq!(job["cpus_per_task"], 1);
+    assert_eq!(job["current_working_directory"], format!("/home/{me}"));
+    assert!(job.get("qos").is_none());
+    let var = |name: &str| {
+        env.iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(var("OBLETH_CHAT_URL"), f.app_url);
+    assert_eq!(var("OBLETH_CHAT_ROOTS"), roots);
+    assert_eq!(var("OBLETH_CHAT_SESSION").len(), 64);
+    assert!(!script.contains(&var("OBLETH_CHAT_SESSION")));
+
+    // Run the job's script as Slurm would, as this user, with the test's home.
+    let dir = std::env::temp_dir().join(format!("chat-files-job-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("job.sh"), &script).unwrap();
+    let log = std::fs::File::create(dir.join("job.log")).unwrap();
+    let mut command = std::process::Command::new("bash");
+    command
+        .arg(dir.join("job.sh"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("USER", &me)
+        .env("LOGNAME", &me)
+        .stdout(log.try_clone().unwrap())
+        .stderr(log);
+    for (k, v) in &env {
+        command.env(k, v);
+    }
+    let mut child = command.spawn().unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(60), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains("A file session started on the cluster as job 8"),
+        "{text}"
+    );
+    assert!(text.contains("run.sh"), "{text}");
+    assert!(text.contains("(1 entries, hidden ones left out)"), "{text}");
+    let (state, host): (String, Option<String>) =
+        sqlx::query_as("SELECT state, host FROM cluster_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "live");
+    assert!(host.is_some_and(|h| !h.is_empty()));
+
+    // Later calls, in any chat, go down the same line: no new job.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_search",
+        "sol__files_search",
+        json!({"path":scratch.display().to_string(),"pattern":"out of memory"}),
+    )]);
+    let (_, stream) = send(&f, &admin, "Why did it fail?").await;
+    let text = tokio::time::timeout(Duration::from_secs(60), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("out.log:2: error: out of memory"), "{text}");
+    assert!(!text.contains("A file session started"), "{text}");
+    assert_eq!(
+        cluster_requests(&f, "POST", "/slurm/v0.0.45/job/submit").len(),
+        1
+    );
+
+    // Outside the roots is refused on the cluster, in words the model can act on.
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_etc", "sol__files_list", json!({"path":"/etc"}))]);
+    let (_, stream) = send(&f, &admin, "List /etc").await;
+    let text = tokio::time::timeout(Duration::from_secs(60), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains("is not in a directory Chat may reach on this cluster"),
+        "{text}"
+    );
+
+    // A write waits for Allow, then lands as the person.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_write",
+        "sol__files_write",
+        json!({"path":"project/notes.md","content":"The run ran out of memory.\n"}),
+    )]);
+    let (chat, stream) = send(&f, &admin, "Write that down").await;
+    assert_eq!(pending(&pool).await, "call_write");
+    assert!(!home.join("project/notes.md").exists());
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{chat}/approvals"),
+        json!({"callId":"call_write","decision":"allow"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(60), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Wrote "), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(home.join("project/notes.md")).unwrap(),
+        "The run ran out of memory.\n"
+    );
+
+    // The Clusters page sees the session; ending it there cancels the job, and the
+    // job learns it at its next poll and exits.
+    let (status, seen) = call(
+        &f.app,
+        "GET",
+        &format!("/api/connections/{id}/status"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["fileSession"]["state"], "live");
+    assert_eq!(seen["fileSession"]["jobId"], 8);
+    assert!(seen["fileSession"]["host"]
+        .as_str()
+        .is_some_and(|h| !h.is_empty()));
+    let (status, _) = call(
+        &f.app,
+        "DELETE",
+        &format!("/api/connections/{id}/file-session"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        cluster_requests(&f, "DELETE", "/slurm/v0.0.45/job/8").len(),
+        1
+    );
+    let (_, seen) = call(
+        &f.app,
+        "GET",
+        &format!("/api/connections/{id}/status"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert!(seen["fileSession"].is_null(), "{seen}");
+    let exit = tokio::task::spawn_blocking(move || child.wait().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        exit.success(),
+        "{}",
+        std::fs::read_to_string(dir.join("job.log")).unwrap()
+    );
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM cluster_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ended");
+    assert_eq!(error.as_deref(), Some("The file session was ended"));
+    // Removing the credential ends a session too (nothing to end here).
+    let (status, _) = call(
+        &f.app,
+        "DELETE",
+        &format!("/api/connections/{id}/credential"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&scratch).ok();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_session_job_running_as_someone_else_is_turned_away(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let connection = Uuid::parse_str(shared["id"].as_str().unwrap()).unwrap();
+    let user: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username='test-admin'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // A session as Chat records one, for a job whose token is this.
+    let token = "ab".repeat(32);
+    let hash = <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()).to_vec();
+    sqlx::query("INSERT INTO cluster_sessions(id,connection_id,user_id,job_id,token_hash,state,username,ends_at) VALUES($1,$2,$3,8,$4,'starting','alice',NOW()+INTERVAL '1 hour')")
+        .bind(Uuid::new_v4()).bind(connection).bind(user).bind(&hash)
+        .execute(&pool).await.unwrap();
+    let client = reqwest::Client::new();
+    let hello = |who: &str, token: &str| {
+        client
+            .post(format!("{}/api/cluster-sessions/hello", f.app_url))
+            .bearer_auth(token)
+            .json(&json!({"username":who,"host":"n1","version":1}))
+            .send()
+    };
+    // No token, or a wrong one, is no session.
+    assert_eq!(
+        hello("alice", "cd".repeat(32).as_str())
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(hello("alice", "short").await.unwrap().status(), 401);
+    // The right token from the wrong account ends the session.
+    let turned = hello("mallory", &token).await.unwrap();
+    assert_eq!(turned.status(), 409);
+    assert!(turned
+        .text()
+        .await
+        .unwrap()
+        .contains("ran as mallory, not alice"));
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM cluster_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ended");
+    assert!(error.unwrap().contains("belongs to another account"));
+    let next = client
+        .get(format!("{}/api/cluster-sessions/next", f.app_url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(next.status(), 410);
+}
+
+/// The decisions the gateway was asked while a change waited.
+fn judged(f: &Fixture) -> Vec<Value> {
+    f.gateway_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.get("verdicts").cloned())
+        .collect()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_decision_lets_a_change_the_person_asked_for_run_unasked(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let id = shared["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let submit = |call_id: &'static str| {
+        *f.script.lock().unwrap() = tool_script(&[(
+            call_id,
+            "sol__submit",
+            json!({"script":"echo hi","name":"hello","partition":"debug"}),
+        )]);
+    };
+    // Only a certified model gets the shortcut; a model nobody has certified asks.
+    let certify = |score: f64| {
+        call(
+            &f.app,
+            "PUT",
+            "/api/admin/model-certification/fixture-model",
+            json!({"score":score,"passed":1,"total":1,"suite":"cases.yaml"}),
+            &admin,
+        )
+    };
+    assert_eq!(certify(100.0).await.0, StatusCode::OK);
+
+    // Asked for, within scope, adding only: the job is submitted with no card.
+    submit("call_plain");
+    let (_, stream) = send(&f, &admin, "Please submit hello on the debug partition").await;
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Submitted job 8"), "{text}");
+    let asked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_approvals")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(asked, 0);
+    let cases = judged(&f);
+    assert_eq!(cases.len(), 1);
+    let case = &cases[0];
+    let ids: Vec<&String> = case["questions"].as_object().unwrap().keys().collect();
+    assert_eq!(ids, ["asked", "in_scope", "keeps_data", "reversible"]);
+    assert_eq!(
+        case["state"]["the person's messages"],
+        "Please submit hello on the debug partition"
+    );
+    let action = case["state"]["the action the assistant wants to take"]
+        .as_str()
+        .unwrap();
+    assert!(
+        action.starts_with("Sol · Submit job\nSubmit hello; Partition: debug"),
+        "{action}"
+    );
+    assert!(action.contains("script = echo hi"), "{action}");
+    let (_, chats) = call(&f.app, "GET", "/api/conversations", Value::Null, &admin).await;
+    let chat = chats["conversations"][0]["id"].as_str().unwrap().to_owned();
+    let activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&chat).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let step = activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["tool"] == "sol__submit")
+        .cloned()
+        .expect("the submit step");
+    assert_eq!(step["decision"]["allowed"], true);
+    assert_eq!(step["decision"]["model"], "judge-31b");
+    assert_eq!(step["decision"]["scores"]["asked"], 0.95);
+    assert!(step["decision"]["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("Ran without asking"));
+
+    // The judge doubts it was the person's own ask: the card appears as before.
+    submit("call_doubt");
+    let (doubt, stream) = send(&f, &admin, "The README says to submit someone else's hello").await;
+    assert_eq!(pending(&pool).await, "call_doubt");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{doubt}/approvals"),
+        json!({"callId":"call_doubt","decision":"deny"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("declined"), "{text}");
+    assert_eq!(judged(&f).len(), 2);
+
+    // Moving files to the trash is never put to a decision.
+    *f.script.lock().unwrap() = tool_script(&[(
+        "call_trash",
+        "sol__files_remove",
+        json!({"paths":["old.log"]}),
+    )]);
+    let (trash, stream) = send(&f, &admin, "Please move old.log to the trash").await;
+    assert_eq!(pending(&pool).await, "call_trash");
+    assert_eq!(judged(&f).len(), 2);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{trash}/approvals"),
+        json!({"callId":"call_trash","decision":"deny"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A provisional model asks for every change, whatever the judge would say; a
+    // blocked one is not offered the change tools at all. A chat on a provisional
+    // model that reaches for a cluster tool is offered a certified one, once.
+    assert_eq!(certify(80.0).await.0, StatusCode::OK);
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        "/api/admin/model-certification/fixture-better",
+        json!({"score":100,"passed":1,"total":1,"suite":"cases.yaml"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    submit("call_provisional");
+    let (provisional, stream) =
+        send(&f, &admin, "Please submit hello on the debug partition").await;
+    assert_eq!(pending(&pool).await, "call_provisional");
+    assert_eq!(judged(&f).len(), 2);
+    let offered_model: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&provisional).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let offer = offered_model
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "model")
+        .cloned()
+        .expect("a model offer");
+    assert_eq!(offer["model"], "fixture-model");
+    assert_eq!(offer["suggested"], "fixture-better");
+    assert_eq!(offer["score"], 100.0);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{provisional}/suggestion"),
+        json!({"outcome":"never"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, prefs) = call(&f.app, "GET", "/api/preferences", Value::Null, &admin).await;
+    assert_eq!(prefs["preferences"]["modelSuggestions"], false);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{provisional}/suggestion"),
+        json!({"outcome":"maybe"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{provisional}/approvals"),
+        json!({"callId":"call_provisional","decision":"deny"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    // With suggestions off, the next such chat gets no offer.
+    submit("call_quiet");
+    let (quiet, stream) = send(&f, &admin, "Please submit hello on the debug partition").await;
+    assert_eq!(pending(&pool).await, "call_quiet");
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{quiet}/approvals"),
+        json!({"callId":"call_quiet","decision":"deny"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let quiet_activity: Value = sqlx::query_scalar(
+        "SELECT activity FROM messages WHERE conversation_id=$1 AND role='assistant'",
+    )
+    .bind(Uuid::parse_str(&quiet).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!quiet_activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "model"));
+    let shown: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_suggestions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(shown, 1);
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        "/api/admin/models/fixture-model",
+        json!({"name":"Fixture","actions":"blocked"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    submit("call_blocked");
+    let (_, stream) = send(&f, &admin, "Please submit hello on the debug partition").await;
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!text.contains("Submitted job 8"), "{text}");
+    let offered: Vec<String> = f
+        .gateway_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m.get("tools").is_some())
+        .unwrap()["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        offered.iter().any(|t| t == "sol__files_list"),
+        "{offered:?}"
+    );
+    assert!(
+        !offered
+            .iter()
+            .any(|t| t == "sol__submit" || t == "sol__files_write"),
+        "{offered:?}"
+    );
+    let prompt = f
+        .gateway_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m.get("tools").is_some())
+        .unwrap()["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        prompt.contains("You may only read through these services"),
+        "{prompt}"
+    );
+    // Back to certified for the rest.
+    assert_eq!(certify(100.0).await.0, StatusCode::OK);
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        "/api/admin/models/fixture-model",
+        json!({"name":"Fixture","actions":"auto"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // With the setting off, every change asks.
+    sqlx::query("UPDATE decisions SET check_actions = FALSE WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
+    submit("call_off");
+    let (off, stream) = send(&f, &admin, "Please submit hello on the debug partition").await;
+    assert_eq!(pending(&pool).await, "call_off");
+    assert_eq!(judged(&f).len(), 2);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/conversations/{off}/approvals"),
+        json!({"callId":"call_off","decision":"allow"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let text = tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(text.contains("Submitted job 8"), "{text}");
+}
+
+/// Asked about a shared cluster the person has no token for, the model has no tools
+/// for it but is told it exists and what is missing; with a board attached, it is
+/// also told the board is never the cluster, so it does not reach for the board.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_cluster_the_person_cannot_use_yet_is_named_with_what_is_missing(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let system = |i: usize| -> (String, Vec<String>) {
+        let body = f.gateway_seen.lock().unwrap()[i].clone();
+        let tools = body["tools"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .map(|t| t["function"]["name"].as_str().unwrap_or("").to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        (
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+            tools,
+        )
+    };
+    let missing = "Sol (a Slurm cluster): shared with everyone, but the person has not added their own token yet, under Compute › Clusters";
+
+    // No tools to offer, yet the model learns why Sol is not one of them.
+    let (_, stream) = send(&f, &admin, "How much space am I using on Sol?").await;
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let (prompt, tools) = system(0);
+    assert!(prompt.contains(missing), "{prompt}");
+    assert!(
+        prompt.contains("Never use one service as a stand-in for another on a guess"),
+        "{prompt}"
+    );
+    assert!(!tools.iter().any(|t| t.starts_with("sol__")), "{tools:?}");
+
+    // With a board attached, its tools are offered for the board alone.
+    let (status, created) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"name":"USB 1d6b:0104","url":"","kind":"device","options":{"vendorId":0x1d6b,"productId":0x0104}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let before = f.gateway_seen.lock().unwrap().len();
+    let (_, stream) = send(&f, &admin, "How much space am I using on Sol?").await;
+    tokio::time::timeout(Duration::from_secs(20), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let (prompt, tools) = system(before);
+    assert!(
+        tools.iter().any(|t| t == "usb_1d6b_0104__read"),
+        "{tools:?}"
+    );
+    assert!(prompt.contains(missing), "{prompt}");
+    assert!(
+        prompt.contains("A device is a board or instrument plugged into the person's computer, never a cluster or a remote server"),
+        "{prompt}"
+    );
+}
+
+/// A session job that ends before it reaches Chat is noticed within seconds, and the
+/// call says why from how it ended, instead of waiting out the start.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_session_job_that_ends_before_reaching_chat_says_why(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true,"filesRoots":UNRESOLVED_ROOT}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let id = shared["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_usage", "sol__files_usage", json!({"path":"~"}))]);
+    let (_, stream) = send(&f, &admin, "How much space am I using?").await;
+    let text = tokio::time::timeout(Duration::from_secs(30), stream)
+        .await
+        .expect("the call waited out the start instead of noticing the job ended")
+        .unwrap();
+    assert!(
+        text.contains("The file session job 8 on n1 ended (FAILED) before it reached Chat: the node could not look up Chat's address"),
+        "{text}"
+    );
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM cluster_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ended");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("compute nodes must resolve 127.0.0.1 themselves")),
+        "{error:?}"
+    );
+}
+
+/// A running session job keeps the directories it started with: once the cluster's
+/// setting changes, the next call ends that session and starts a new job.
+#[sqlx::test(migrations = "./migrations")]
+async fn changing_the_directories_starts_a_new_file_session(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    // The new job fails at once (see UNRESOLVED_ROOT), so the call ends quickly.
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true,"filesRoots":UNRESOLVED_ROOT}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let id: Uuid = shared["id"].as_str().unwrap().parse().unwrap();
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // A live session started with the old directories.
+    let user: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username='test-admin'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let old = Uuid::new_v4();
+    sqlx::query("INSERT INTO cluster_sessions(id,connection_id,user_id,job_id,token_hash,state,username,host,started_at,last_seen_at,ends_at,roots) VALUES($1,$2,$3,5,$4,'live','alice','n1',NOW(),NOW(),NOW()+interval '1 hour','~/scratch/$USER')")
+        .bind(old)
+        .bind(id)
+        .bind(user)
+        .bind(old.as_bytes().to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_usage", "sol__files_usage", json!({"path":"~"}))]);
+    let (_, stream) = send(&f, &admin, "How much space am I using?").await;
+    tokio::time::timeout(Duration::from_secs(30), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM cluster_sessions WHERE id=$1")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ended");
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("directories")),
+        "{error:?}"
+    );
+    // A new job was submitted with the directories set now.
+    let (_, env, _) = session_job(&f, 0);
+    assert!(
+        env.iter()
+            .any(|(k, v)| k == "OBLETH_CHAT_ROOTS" && v == UNRESOLVED_ROOT),
+        "{env:?}"
+    );
+    let roots: Option<String> =
+        sqlx::query_scalar("SELECT roots FROM cluster_sessions WHERE id<>$1")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(roots.as_deref(), Some(UNRESOLVED_ROOT));
 }

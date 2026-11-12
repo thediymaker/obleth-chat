@@ -105,7 +105,9 @@ export const startAutoDraft = () => setDraft({ auto: true });
 /** The dialog that switches each connection, and Auto mode, for this chat. */
 export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | null; open: boolean; onOpenChange: (open: boolean) => void }) {
   const queries = useQueryClient();
-  const clusters = !!useCapabilities().data?.features?.clusters;
+  const features = useCapabilities().data?.features;
+  const clusters = !!features?.clusters;
+  const devices = !!features?.devices;
   const { list, auto, autoAllowed } = useChatTools(chatId);
   const patch = (fn: (old: { list: ChatTool[]; auto: boolean }) => { list: ChatTool[]; auto: boolean }) =>
     queries.setQueryData<{ list: ChatTool[]; auto: boolean }>(chatToolsKey(chatId), (old) => (old ? fn(old) : old));
@@ -136,7 +138,7 @@ export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | 
     }
   }
   return (
-    <FormDialog open={open} onOpenChange={onOpenChange} title="Tools in this chat" description="The model can use the clusters and MCP servers that are on. Changes apply from the next message.">
+    <FormDialog open={open} onOpenChange={onOpenChange} title="Tools in this chat" description="The model can use the clusters, devices and MCP servers that are on. Changes apply from the next message.">
       {autoAllowed && (
         <div className="flex items-center gap-3 rounded-md border p-3">
           <Zap className="size-4 shrink-0 text-amber" />
@@ -170,6 +172,11 @@ export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | 
             <Link href="/clusters">Clusters</Link>
           </Button>
         )}
+        {devices && (
+          <Button variant="ghost" size="sm" asChild>
+            <Link href="/devices">Devices</Link>
+          </Button>
+        )}
         <Button variant="ghost" size="sm" asChild>
           <Link href="/settings/mcp">MCP servers</Link>
         </Button>
@@ -192,7 +199,7 @@ export function ToolsButton({ chatId, disabled, className }: { chatId: string | 
         size="sm"
         disabled={disabled}
         onClick={() => setOpen(true)}
-        title={`Clusters and MCP servers the model can use in this chat${auto ? ". Auto: tools run without asking" : ""}`}
+        title={`Clusters, devices and MCP servers the model can use in this chat${auto ? ". Auto: tools run without asking" : ""}`}
         aria-label={`Tools: ${on} of ${total} on${auto ? ", Auto mode" : ""}`}
         className={cn(on > 0 && "text-foreground", !on && "text-muted-foreground", className)}
       >

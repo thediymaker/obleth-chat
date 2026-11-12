@@ -30,6 +30,18 @@ export interface ClusterStatus {
   error?: string;
   checkedAt?: string;
   status?: SlurmStatus & KubernetesStatus;
+  /** The person's open file session on a Slurm cluster set to reach files; null when none. */
+  fileSession?: FileSession | null;
+}
+
+export interface FileSession {
+  state: "starting" | "live" | string;
+  jobId?: number | null;
+  host?: string | null;
+  createdAt?: string;
+  startedAt?: string | null;
+  lastSeenAt?: string | null;
+  endsAt?: string;
 }
 
 export const number = (n: number | null | undefined) => (n == null ? "–" : Number(n).toLocaleString());

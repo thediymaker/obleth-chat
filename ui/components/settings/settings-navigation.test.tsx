@@ -23,7 +23,7 @@ test("old administration links land on the same tab, and groups keep their id", 
 test("ordinary Settings navigation omits Administration, and MCP servers needs connections", () => {
   expect(settingsTabs(false, false).map((t) => t.label)).toEqual(["Personal"]);
   expect(settingsTabs(true, false).map((t) => t.href)).toEqual(["/settings", "/settings/admin"]);
-  expect(settingsTabs(false, true).map((t) => t.label)).toEqual(["Personal", "MCP servers"]);
+  expect(settingsTabs(false, true).map((t) => t.label)).toEqual(["Personal", "MCP servers", "Secrets"]);
 });
 
 test("administration deep links stay denied without asking for administrator data", async () => {

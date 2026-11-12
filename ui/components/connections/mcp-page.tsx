@@ -13,7 +13,7 @@ import { SectionHeading } from "@/components/settings/settings-frame";
 import { useCapabilities, useFeature } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 import { ConnectionRow, useConnectionManager } from "./connection-dialogs";
-import { native, useConnections } from "./connections";
+import { kindOf, useConnections } from "./connections";
 
 export function McpServersPage() {
   usePageChrome("MCP servers");
@@ -23,7 +23,7 @@ export function McpServersPage() {
   const clusters = useFeature("clusters");
   const { data, error, isLoading, refetch } = useConnections();
   const manager = useConnectionManager();
-  const servers = (data ?? []).filter((c) => !native(c));
+  const servers = (data ?? []).filter((c) => kindOf(c) === "mcp");
   const own = servers.filter((c) => !c.shared);
   const shared = servers.filter((c) => c.shared);
   if (capabilities.data && !enabled)

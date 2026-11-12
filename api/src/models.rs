@@ -30,6 +30,55 @@ const PARAMETER_NAMES: [&str; 5] = [
 fn allowed_defaults() -> Vec<String> {
     PARAMETER_NAMES.iter().map(|s| (*s).into()).collect()
 }
+fn actions_auto() -> String {
+    "auto".into()
+}
+const ACTIONS: [&str; 4] = ["auto", "certified", "provisional", "blocked"];
+/// A certification score (per cent of cases passed) from which `auto` counts as
+/// certified.
+pub const CERTIFIED_SCORE: f64 = 90.0;
+
+/// How far a model is trusted with changes through connections.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Actions {
+    /// Changes may run on a decision's say-so; otherwise they ask.
+    Certified,
+    /// Every change asks the person.
+    Provisional,
+    /// Only tools that read are offered.
+    Blocked,
+}
+
+/// What a model's setting and certification come to.
+pub fn effective(actions: &str, certification: Option<&Value>) -> Actions {
+    match actions {
+        "certified" => Actions::Certified,
+        "provisional" => Actions::Provisional,
+        "blocked" => Actions::Blocked,
+        _ => match certification.and_then(|c| c["score"].as_f64()) {
+            Some(score) if score >= CERTIFIED_SCORE => Actions::Certified,
+            _ => Actions::Provisional,
+        },
+    }
+}
+
+/// How far the model a turn runs on is trusted; a model without a profile, and
+/// `auto`, whose model is picked later, count as provisional.
+pub async fn actions_of(pool: &PgPool, model: &str) -> Actions {
+    let row: Option<(String, Option<Value>)> =
+        sqlx::query_as("SELECT actions, certification FROM model_profiles WHERE model_id=$1")
+            .bind(model)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    match row {
+        Some((actions, certification)) => effective(&actions, certification.as_ref()),
+        None => Actions::Provisional,
+    }
+}
+
 fn yes() -> bool {
     true
 }
@@ -144,6 +193,10 @@ pub struct ProfileInput {
     /// Other models may hand tasks to this one (see agents).
     #[serde(default)]
     pub worker: bool,
+    /// How far the model is trusted with changes through connections: `auto` decides
+    /// from its certification score; `certified`, `provisional` or `blocked` set it.
+    #[serde(default = "actions_auto")]
+    pub actions: String,
     #[serde(default)]
     pub defaults: ParameterOverrides,
     #[serde(default = "allowed_defaults")]
@@ -153,6 +206,12 @@ impl ProfileInput {
     fn validate(&mut self) -> Result<(), ApiError> {
         self.name = self.name.trim().into();
         self.description = self.description.trim().into();
+        self.actions = self.actions.trim().to_ascii_lowercase();
+        if !ACTIONS.contains(&self.actions.as_str()) {
+            return Err(ApiError::bad(
+                "actions is auto, certified, provisional or blocked",
+            ));
+        }
         if self.name.is_empty()
             || self.name.chars().count() > 120
             || self.name.chars().any(char::is_control)
@@ -224,6 +283,8 @@ struct ProfileRow {
     visibility: String,
     is_default: bool,
     worker: bool,
+    actions: String,
+    certification: Option<Value>,
     defaults: Value,
     allowed_overrides: Value,
     group_ids: Vec<Uuid>,
@@ -243,6 +304,12 @@ pub struct ModelView {
     pub group_ids: Vec<Uuid>,
     pub is_default: bool,
     pub worker: bool,
+    /// The setting: auto, certified, provisional or blocked.
+    pub actions: String,
+    /// What the setting and the certification come to.
+    pub effective_actions: Actions,
+    /// What certification found: score, passed, total, suite, at.
+    pub certification: Option<Value>,
     /// In the short list the model chooser shows first.
     pub short_list: bool,
     pub defaults: GenerationParameters,
@@ -302,6 +369,18 @@ impl ModelView {
                 .unwrap_or_default(),
             is_default: profile.as_ref().is_some_and(|p| p.is_default),
             worker: profile.as_ref().is_some_and(|p| p.worker),
+            actions: profile
+                .as_ref()
+                .map(|p| p.actions.clone())
+                .unwrap_or_else(actions_auto),
+            effective_actions: effective(
+                profile
+                    .as_ref()
+                    .map(|p| p.actions.as_str())
+                    .unwrap_or("auto"),
+                profile.as_ref().and_then(|p| p.certification.as_ref()),
+            ),
+            certification: profile.as_ref().and_then(|p| p.certification.clone()),
             short_list: false,
             defaults: concrete(&defaults),
             locked_parameters: PARAMETER_NAMES
@@ -462,6 +541,9 @@ fn auto_model(models: &[ModelView]) -> Option<ModelView> {
         group_ids: vec![],
         is_default: false,
         worker: false,
+        actions: actions_auto(),
+        effective_actions: Actions::Provisional,
+        certification: None,
         short_list: false,
         defaults: GenerationParameters::default(),
         allowed_overrides: allowed_defaults(),
@@ -592,6 +674,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/models/load", get(load))
         .route("/api/admin/models", get(admin_catalog))
         .route("/api/admin/models/{*id}", put(save_profile))
+        .route(
+            "/api/admin/model-certification/{*id}",
+            put(save_certification).delete(clear_certification),
+        )
+        .route(
+            "/api/conversations/{id}/suggestion",
+            axum::routing::post(answer_suggestion),
+        )
         .route("/api/admin/model-short-list", put(save_short_list))
         .route(
             "/api/preferences",
@@ -733,8 +823,8 @@ async fn save_profile(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("INSERT INTO model_profiles (model_id,name,description,tags,sort_order,enabled,published,visibility,is_default,defaults,allowed_overrides,worker) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(model_id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,tags=EXCLUDED.tags,sort_order=EXCLUDED.sort_order,enabled=EXCLUDED.enabled,published=EXCLUDED.published,visibility=EXCLUDED.visibility,is_default=EXCLUDED.is_default,defaults=EXCLUDED.defaults,allowed_overrides=EXCLUDED.allowed_overrides,worker=EXCLUDED.worker,updated_at=NOW()")
-        .bind(&id).bind(&body.name).bind(&body.description).bind(json!(body.tags)).bind(body.order).bind(body.enabled).bind(body.published).bind(&body.visibility).bind(body.is_default).bind(json!(body.defaults)).bind(json!(body.allowed_overrides)).bind(body.worker).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO model_profiles (model_id,name,description,tags,sort_order,enabled,published,visibility,is_default,defaults,allowed_overrides,worker,actions) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(model_id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,tags=EXCLUDED.tags,sort_order=EXCLUDED.sort_order,enabled=EXCLUDED.enabled,published=EXCLUDED.published,visibility=EXCLUDED.visibility,is_default=EXCLUDED.is_default,defaults=EXCLUDED.defaults,allowed_overrides=EXCLUDED.allowed_overrides,worker=EXCLUDED.worker,actions=EXCLUDED.actions,updated_at=NOW()")
+        .bind(&id).bind(&body.name).bind(&body.description).bind(json!(body.tags)).bind(body.order).bind(body.enabled).bind(body.published).bind(&body.visibility).bind(body.is_default).bind(json!(body.defaults)).bind(json!(body.allowed_overrides)).bind(body.worker).bind(&body.actions).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM model_profile_groups WHERE model_id=$1")
         .bind(&id)
         .execute(&mut *tx)
@@ -748,7 +838,7 @@ async fn save_profile(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.update','model',$3,$4)").bind(Uuid::new_v4()).bind(user.id).bind(&id).bind(json!({"enabled":body.enabled,"published":body.published,"visibility":body.visibility,"isDefault":body.is_default,"worker":body.worker,"allowedOverrides":body.allowed_overrides})).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.update','model',$3,$4)").bind(Uuid::new_v4()).bind(user.id).bind(&id).bind(json!({"enabled":body.enabled,"published":body.published,"visibility":body.visibility,"isDefault":body.is_default,"worker":body.worker,"actions":body.actions,"allowedOverrides":body.allowed_overrides})).execute(&mut *tx).await?;
     tx.commit().await?;
     // A successful local policy write must not appear to fail because a second
     // network-discovery request happened to fail after the transaction committed.
@@ -763,6 +853,8 @@ async fn save_profile(
     saved_model.group_ids = body.group_ids;
     saved_model.is_default = body.is_default;
     saved_model.worker = body.worker;
+    saved_model.effective_actions = effective(&body.actions, saved_model.certification.as_ref());
+    saved_model.actions = body.actions;
     saved_model.defaults = concrete(&body.defaults);
     saved_model.locked_parameters = PARAMETER_NAMES
         .iter()
@@ -771,6 +863,94 @@ async fn save_profile(
         .collect();
     saved_model.allowed_overrides = body.allowed_overrides;
     Ok(Json(json!({"model":saved_model})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CertificationInput {
+    /// Per cent of cases passed.
+    score: f64,
+    passed: i64,
+    total: i64,
+    suite: String,
+    /// When the run finished, RFC 3339; now when left out.
+    at: Option<String>,
+}
+
+/// Records what certification found for a model (evals/certify/publish.py sends
+/// it), which decides how far a model on `auto` is trusted with changes.
+async fn save_certification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<CertificationInput>,
+) -> Result<Json<Value>, ApiError> {
+    let user = state.auth.require_admin(&headers, true).await?;
+    if !crate::gateway::valid_model(&id) || id == "auto" {
+        return Err(ApiError::bad("Choose an explicit gateway model"));
+    }
+    if !(0.0..=100.0).contains(&body.score) || body.score.is_nan() {
+        return Err(ApiError::bad("score is a per cent from 0 to 100"));
+    }
+    if body.total < 1 || body.passed < 0 || body.passed > body.total {
+        return Err(ApiError::bad(
+            "passed and total are counts, with passed at most total",
+        ));
+    }
+    let suite = body.suite.trim();
+    if suite.is_empty() || suite.chars().count() > 80 || suite.chars().any(char::is_control) {
+        return Err(ApiError::bad(
+            "suite names the case file, up to 80 characters",
+        ));
+    }
+    let at = match &body.at {
+        Some(at) => chrono::DateTime::parse_from_rfc3339(at)
+            .map_err(|_| ApiError::bad("at is an RFC 3339 time"))?
+            .with_timezone(&chrono::Utc),
+        None => chrono::Utc::now(),
+    };
+    let certification = json!({"score": body.score, "passed": body.passed, "total": body.total, "suite": suite, "at": at});
+    let name: String = id.chars().take(120).collect();
+    let mut tx = admin_transaction(&state.store.pool, user.id).await?;
+    let actions: String = sqlx::query_scalar(
+        "INSERT INTO model_profiles (model_id,name,certification) VALUES($1,$2,$3) ON CONFLICT(model_id) DO UPDATE SET certification=EXCLUDED.certification,updated_at=NOW() RETURNING actions",
+    )
+    .bind(&id)
+    .bind(&name)
+    .bind(&certification)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.certify','model',$3,$4)")
+        .bind(Uuid::new_v4()).bind(user.id).bind(&id).bind(&certification).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(Json(json!({
+        "model": id,
+        "certification": certification,
+        "actions": actions,
+        "effectiveActions": effective(&actions, Some(&certification)),
+    })))
+}
+
+async fn clear_certification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let user = state.auth.require_admin(&headers, true).await?;
+    let mut tx = admin_transaction(&state.store.pool, user.id).await?;
+    let cleared = sqlx::query(
+        "UPDATE model_profiles SET certification=NULL, updated_at=NOW() WHERE model_id=$1 AND certification IS NOT NULL",
+    )
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
+    if cleared.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
+    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.certify','model',$3,'{\"cleared\":true}')")
+        .bind(Uuid::new_v4()).bind(user.id).bind(&id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// At most this many models in the short list; past that it isn't short.
@@ -830,6 +1010,9 @@ pub struct Preferences {
     pub favorites: Vec<String>,
     /// How the workspace agent works; None uses Chat's default instructions.
     pub agent_instructions: Option<String>,
+    /// Offer a certified model when a chat on one that is not starts tool work.
+    #[serde(default = "yes")]
+    pub model_suggestions: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -845,8 +1028,96 @@ impl Default for Preferences {
             context: true,
             favorites: vec![],
             agent_instructions: None,
+            model_suggestions: true,
         }
     }
+}
+
+/// The certified model to offer a chat that started tool work on `current`, which
+/// is not certified: the best score among the models the person can use that take
+/// tools, or None when there is no such model.
+pub async fn suggest(
+    pool: &PgPool,
+    gateway: &Gateway,
+    user: &Identity,
+    current: &str,
+) -> Option<ModelView> {
+    let models = effective_catalog(pool, gateway, user, false).await.ok()?;
+    models
+        .into_iter()
+        .filter(|m| {
+            m.available
+                && m.id != "auto"
+                && m.id != current
+                && m.effective_actions == Actions::Certified
+                && m.metadata.supports_function_calling != Some(false)
+        })
+        .max_by(|a, b| {
+            let score = |m: &ModelView| {
+                m.certification
+                    .as_ref()
+                    .and_then(|c| c["score"].as_f64())
+                    .unwrap_or(0.0)
+            };
+            score(a)
+                .partial_cmp(&score(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.order.cmp(&a.order))
+        })
+}
+
+/// Records that a chat was offered a model, once per chat; false when it already was.
+pub async fn record_suggestion(
+    pool: &PgPool,
+    conversation: Uuid,
+    user: Uuid,
+    model: &str,
+    suggested: &str,
+) -> bool {
+    sqlx::query("INSERT INTO model_suggestions(conversation_id,user_id,model,suggested) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        .bind(conversation)
+        .bind(user)
+        .bind(model)
+        .bind(suggested)
+        .execute(pool)
+        .await
+        .is_ok_and(|r| r.rows_affected() == 1)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestionAnswer {
+    outcome: String,
+}
+
+/// What the person did with the offer: switched, kept their model, or asked for no
+/// more offers (which turns the preference off).
+async fn answer_suggestion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation): Path<Uuid>,
+    Json(body): Json<SuggestionAnswer>,
+) -> Result<StatusCode, ApiError> {
+    let user = state.auth.require(&headers, true).await?;
+    if !["switched", "kept", "never"].contains(&body.outcome.as_str()) {
+        return Err(ApiError::bad("outcome is switched, kept or never"));
+    }
+    let done = sqlx::query("UPDATE model_suggestions SET outcome=$3, answered_at=NOW() WHERE conversation_id=$1 AND user_id=$2")
+        .bind(conversation)
+        .bind(user.id)
+        .bind(&body.outcome)
+        .execute(&state.store.pool)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
+    if body.outcome == "never" {
+        sqlx::query("INSERT INTO user_preferences(user_id,preferences) VALUES($1,'{\"modelSuggestions\":false}') ON CONFLICT (user_id) DO UPDATE SET preferences=user_preferences.preferences || '{\"modelSuggestions\":false}', updated_at=NOW()")
+            .bind(user.id)
+            .execute(&state.store.pool)
+            .await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The person's own workspace agent instructions, when they replaced the default.

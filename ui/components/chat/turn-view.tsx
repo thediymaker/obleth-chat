@@ -163,6 +163,46 @@ function Approval({ s }: { s: ActivityEntry }) {
   );
 }
 
+/**
+ * A device step this browser carries out: what it is doing, or the button that
+ * attaches the device when the call waits for it in this tab.
+ */
+function DeviceStep({ s }: { s: ActivityEntry }) {
+  const store = useChat();
+  const [, bump] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => store.devices.subscribe(() => bump((n) => n + 1)), [store]);
+  const waiting = s.id ? store.devices.waiting(s.id) : undefined;
+  const progress = s.id ? store.devices.progress(s.id) : "";
+  if (!store.devices.supported())
+    return <p className="mt-1.5 text-sm text-amber">This browser cannot reach devices. Open this chat in Chrome or Edge, with the device plugged in.</p>;
+  if (waiting)
+    return (
+      <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-amber/40 bg-amber/5 px-2.5 py-2 text-sm">
+        <span className="min-w-0 flex-1">{waiting.connection} is not attached in this browser tab. Plug it in and pick its port.</span>
+        <Button
+          size="xs"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError("");
+            try {
+              await store.devices.attach({ id: waiting.connectionId, name: waiting.connection });
+            } catch (e) {
+              setError((e as Error).message);
+            }
+            setBusy(false);
+          }}
+        >
+          Attach {waiting.connection}
+        </Button>
+        {error && <span className="basis-full text-destructive-foreground">{error}</span>}
+      </div>
+    );
+  return progress ? <p className="mt-1 text-sm text-muted-foreground">{progress}</p> : null;
+}
+
 /** The workers a delegate step sent: each one's progress, then its report. */
 function Agents({ s }: { s: ActivityEntry }) {
   const list: any[] = Array.isArray(s.agents) ? s.agents : [];
@@ -211,6 +251,7 @@ function Step({ s }: { s: ActivityEntry }) {
       {thumb && <img className="h-8 w-12 shrink-0 rounded border object-cover" src={thumb} alt="" loading="lazy" />}
       <span className="min-w-0 flex-1 text-md">
         <StepText s={s} />
+        {s.decision?.allowed && <span className="text-faint"> · allowed by a decision</span>}
         {s.check === "error" && <span className="text-destructive-foreground"> · preview broke</span>}
       </span>
       <small className="shrink-0 text-xs text-faint">{stepTime(s)}</small>
@@ -223,6 +264,13 @@ function Step({ s }: { s: ActivityEntry }) {
       <>
         <div className="flex items-center">{head}</div>
         {Array.isArray(s.agents) && s.agents.length ? <Agents s={s} /> : s.status === "error" && s.detail ? <Pre text={s.detail} /> : null}
+      </>
+    );
+  else if (s.service === "device" && s.status === "running")
+    body = (
+      <>
+        <div className="flex items-center">{head}</div>
+        <DeviceStep s={s} />
       </>
     );
   else if (s.status === "awaiting")
@@ -479,6 +527,13 @@ function Asked({ name, text }: { name: string; text: string }) {
   );
 }
 
+/** Why a change waits, in the words that fit where it runs. */
+export function changeNote(service?: string): string {
+  if (service === "device") return "It changes the device, so it waits for you. Your browser sends it.";
+  if (service === "slurm" || service === "kubernetes") return "It changes the cluster, so it waits for you. It runs as your own account.";
+  return "It changes something outside Chat, so it waits for you. It runs as your own account.";
+}
+
 /**
  * A call waiting for approval: what it does, as the server read it, and every argument
  * in full and in view. Nothing the call carries is folded away or cut short, so what
@@ -493,7 +548,7 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
       <div>
         <strong className="block text-md font-semibold">{head}</strong>
         {s.readOnly === false && (
-          <span className="text-sm text-muted-foreground">It changes {s.service === "mcp" || !s.service ? "something outside Chat" : "the cluster"}, so it waits for you. It runs as your own account.</span>
+          <span className="text-sm text-muted-foreground">{changeNote(s.service)}</span>
         )}
       </div>
       {change && change.items.length > 0 && (

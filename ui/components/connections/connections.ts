@@ -5,12 +5,12 @@
 // the list query, and the request bodies their dialogs send.
 
 import { useQuery } from "@tanstack/react-query";
-import { Box, Link2, Server } from "lucide-react";
+import { Box, Cpu, Link2, Server } from "lucide-react";
 import { api } from "@/lib/api";
 import { useCapabilities } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 
-export type ConnectionKind = "mcp" | "slurm" | "kubernetes";
+export type ConnectionKind = "mcp" | "slurm" | "kubernetes" | "device";
 export interface ConnectionTool {
   name: string;
   title?: string;
@@ -36,9 +36,22 @@ export interface Connection {
   serverName?: string;
   apiVersion?: string;
   returnOutput?: boolean;
+  /** A Slurm cluster set to reach the person's files through a session job, and how. */
+  files?: boolean;
+  filesPartition?: string | null;
+  filesQos?: string | null;
+  filesHours?: number | null;
+  filesRoots?: string | null;
   checkedAt?: string;
   user?: string;
   namespace?: string;
+  /** A device: its transport and the USB ids and label the browser read off the port. */
+  transport?: string;
+  vendorId?: number | null;
+  productId?: number | null;
+  label?: string | null;
+  /** A device's console sign-in: the password is in the secret of that name. */
+  secret?: string | null;
   tools: ConnectionTool[];
 }
 
@@ -58,10 +71,19 @@ export const KINDS: Record<ConnectionKind, { label: string; icon: typeof Link2; 
     urlHelp: "The API server address from your kubeconfig.",
     about: "Read and change resources with your own token, so the cluster’s RBAC decides what is allowed.",
   },
+  device: {
+    label: "Device",
+    icon: Cpu,
+    url: "",
+    urlHelp: "",
+    about: "A board or instrument plugged into your computer, reached through this browser: serial monitor, commands, identify and flash.",
+  },
 };
 export const kindOf = (c: { kind?: string } | null | undefined): ConnectionKind => (c?.kind && c.kind in KINDS ? (c.kind as ConnectionKind) : "mcp");
-export const native = (c: { kind?: string } | null | undefined) => kindOf(c) !== "mcp";
+export const native = (c: { kind?: string } | null | undefined) => kindOf(c) === "slurm" || kindOf(c) === "kubernetes";
+export const isDevice = (c: { kind?: string } | null | undefined) => kindOf(c) === "device";
 export const TOKEN_HELP: Record<ConnectionKind, string> = {
+  device: "",
   slurm: "On a login node run scontrol token lifespan=2592000 and paste the part after SLURM_JWT=. It acts as the Slurm user named above.",
   kubernetes: "For a service account run kubectl create token NAME -n NAMESPACE --duration=720h, or use the token from your kubeconfig.",
   mcp: "Your personal token or API key for this server. It is sent as a Bearer token.",
@@ -105,13 +127,33 @@ export function connectionBody(form: FormData, c: Connection | null, kind: Conne
     if (!shared && kind === "kubernetes") options.namespace = text(form, "connection-namespace");
     if (kind === "slurm") options.apiVersion = text(form, "connection-api-version");
     if (kind === "slurm" && jobOutput) options.returnOutput = checked(form, "connection-return-output");
+    if (kind === "slurm") {
+      options.files = checked(form, "connection-files");
+      if (options.files) {
+        options.filesPartition = text(form, "connection-files-partition");
+        options.filesQos = text(form, "connection-files-qos");
+        const hours = text(form, "connection-files-hours");
+        if (hours) options.filesHours = Number(hours);
+        options.filesRoots = text(form, "connection-files-roots");
+      }
+    }
+    const filesChanged =
+      kind === "slurm" &&
+      !!c &&
+      (options.files !== !!c.files ||
+        (!!options.files &&
+          (options.filesPartition !== (c.filesPartition || "") ||
+            options.filesQos !== (c.filesQos || "") ||
+            (options.filesHours ?? 8) !== (c.filesHours ?? 8) ||
+            options.filesRoots !== (c.filesRoots || ""))));
     const changed =
       !c ||
       "ca" in options ||
       (options.user ?? c.user) !== c.user ||
       (options.namespace ?? c.namespace) !== c.namespace ||
       (kind === "slurm" && options.apiVersion !== (c.apiVersion || "")) ||
-      ("returnOutput" in options && options.returnOutput !== !!c.returnOutput);
+      ("returnOutput" in options && options.returnOutput !== !!c.returnOutput) ||
+      filesChanged;
     if (changed) body.options = options;
   }
   return body;

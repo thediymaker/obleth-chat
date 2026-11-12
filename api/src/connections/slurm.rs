@@ -66,6 +66,60 @@ pub fn tools(output: bool, files: bool) -> Vec<Tool> {
     tools
 }
 
+/// Where one job stands: its state, why it waits, the node it ran on and how it exited.
+#[derive(Debug, Clone, Default)]
+pub struct Standing {
+    pub name: String,
+    pub state: String,
+    pub reason: String,
+    pub node: String,
+    pub exit: Option<i64>,
+    pub signal: Option<i64>,
+    /// When it was submitted, in seconds since the epoch: a job id can come back
+    /// once Slurm's ids wrap, and accounting keeps the old job under it.
+    pub submitted: Option<i64>,
+}
+impl Standing {
+    /// Held for a reason waiting will not clear: the job asks for more than its
+    /// partition, QoS or account allows, or for something that does not exist.
+    pub fn held_for_good(&self) -> bool {
+        self.state.contains("PENDING")
+            && (self.reason.starts_with("Invalid")
+                || matches!(
+                    self.reason.as_str(),
+                    "PartitionTimeLimit"
+                        | "PartitionNodeLimit"
+                        | "PartitionConfig"
+                        | "AccountNotAllowed"
+                        | "QOSNotAllowed"
+                        | "BadConstraints"
+                        | "QOSMaxWallDurationPerJobLimit"
+                        | "AssocMaxWallDurationPerJobLimit"
+                        | "QOSMaxCpuPerJobLimit"
+                        | "QOSMaxNodePerJobLimit"
+                        | "QOSMaxMemoryPerJob"
+                        | "QOSMinCpuNotSatisfied"
+                ))
+    }
+    /// Waiting for a node or running: still on its way to answering.
+    pub fn active(&self) -> bool {
+        self.state.split(',').any(|s| {
+            matches!(
+                s.trim(),
+                "PENDING"
+                    | "RUNNING"
+                    | "CONFIGURING"
+                    | "COMPLETING"
+                    | "REQUEUED"
+                    | "RESIZING"
+                    | "SUSPENDED"
+                    | "STAGE_OUT"
+                    | "SIGNALING"
+            )
+        }) || self.state.is_empty()
+    }
+}
+
 pub struct Client {
     http: reqwest::Client,
     base: Url,
@@ -786,6 +840,35 @@ impl Client {
     async fn accounted(&mut self, id: i64) -> Option<Value> {
         let data = self.call_db(&format!("job/{id}")).await.ok()?;
         data["jobs"].as_array()?.first().cloned()
+    }
+
+    /// Where a job stands, from the scheduler or, once it forgets the job, accounting.
+    pub async fn standing(&mut self, id: i64) -> Option<Standing> {
+        if let Ok(data) = self
+            .call_api(reqwest::Method::GET, &format!("job/{id}"), None)
+            .await
+        {
+            if let Some(j) = data["jobs"].as_array().and_then(|a| a.first()) {
+                return Some(Standing {
+                    name: text(&j["name"]),
+                    state: text(&j["job_state"]),
+                    reason: text(&j["state_reason"]),
+                    node: text(&j["nodes"]),
+                    exit: num(&j["exit_code"]["return_code"]),
+                    signal: num(&j["exit_code"]["signal"]["id"]),
+                    submitted: num(&j["submit_time"]),
+                });
+            }
+        }
+        self.accounted(id).await.map(|j| Standing {
+            name: text(&j["name"]),
+            state: text(&j["state"]["current"]),
+            reason: text(&j["state"]["reason"]),
+            node: text(&j["nodes"]),
+            exit: num(&j["exit_code"]["return_code"]),
+            signal: num(&j["exit_code"]["signal"]["id"]),
+            submitted: num(&j["time"]["submission"]),
+        })
     }
 
     /// The job's state, such as RUNNING or COMPLETED, from the scheduler or accounting.

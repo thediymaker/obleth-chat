@@ -192,6 +192,17 @@ async fn cluster(
                 {"name":"n3","state":["IDLE"],"cpus":16,"alloc_cpus":0,"real_memory":32000,"alloc_memory":0,"partitions":["hidden"]}
             ]})).into_response(),
             ("POST", "slurm", "job/submit") => Json(json!({"job_id":8,"errors":[]})).into_response(),
+            // A file session job whose node cannot look up Chat's address: it ends at
+            // once with the agent's exit code for that. Marked by its roots, so other
+            // tests sharing this fake see no such job.
+            ("GET", "slurm", "job/8")
+                if seen.lock().unwrap().iter().any(|r| {
+                    r["path"] == "/slurm/v0.0.45/job/submit"
+                        && r["body"].as_str().unwrap_or("").contains(UNRESOLVED_ROOT)
+                }) =>
+            {
+                Json(json!({"jobs":[{"job_id":8,"name":"chat-files","job_state":["FAILED"],"state_reason":"NonZeroExitCode","nodes":"n1","exit_code":{"status":["ERROR"],"return_code":{"set":true,"infinite":false,"number":3},"signal":{"id":{"set":false,"infinite":false,"number":0},"name":""}}}]})).into_response()
+            }
             _ => missing(),
         };
     }
@@ -2983,6 +2994,9 @@ async fn secrets_are_named_to_the_model_and_opened_only_by_the_owners_browser(po
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// The roots that mark a file session job whose node cannot look up Chat's address.
+const UNRESOLVED_ROOT: &str = "/marks-a-node-without-dns";
+
 /// The session job's batch script and environment, from what slurmrestd received.
 fn session_job(f: &Fixture, index: usize) -> (String, Vec<(String, String)>, Value) {
     let submitted = cluster_requests(f, "POST", "/slurm/v0.0.45/job/submit");
@@ -3758,5 +3772,55 @@ async fn a_cluster_the_person_cannot_use_yet_is_named_with_what_is_missing(pool:
     assert!(
         prompt.contains("A device is a board or instrument plugged into the person's computer, never a cluster or a remote server"),
         "{prompt}"
+    );
+}
+
+/// A session job that ends before it reaches Chat is noticed within seconds, and the
+/// call says why from how it ended, instead of waiting out the start.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_session_job_that_ends_before_reaching_chat_says_why(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true,"filesRoots":UNRESOLVED_ROOT}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let id = shared["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_usage", "sol__files_usage", json!({"path":"~"}))]);
+    let (_, stream) = send(&f, &admin, "How much space am I using?").await;
+    let text = tokio::time::timeout(Duration::from_secs(30), stream)
+        .await
+        .expect("the call waited out the start instead of noticing the job ended")
+        .unwrap();
+    assert!(
+        text.contains("The file session job 8 on n1 ended (FAILED) before it reached Chat: the node could not look up Chat's address"),
+        "{text}"
+    );
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM cluster_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ended");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("compute nodes must resolve 127.0.0.1 themselves")),
+        "{error:?}"
     );
 }

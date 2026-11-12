@@ -28,6 +28,13 @@ pub const AGENT: &str = include_str!("cluster_agent.py");
 const START_WAIT: Duration = Duration::from_secs(10 * 60);
 /// How long a call waits once the session is live.
 const CALL_WAIT: Duration = Duration::from_secs(3 * 60);
+/// How often a call waiting for its session's job to start looks the job up, so a
+/// job that ended before it reached Chat is reported at once; also the longest one
+/// look may take, so a slow slurmrestd does not hold up the answer.
+const JOB_CHECK: Duration = Duration::from_secs(5);
+/// The session job's name, which a look-up checks so an old job that once had the
+/// same id is not taken for it.
+const JOB_NAME: &str = "chat-files";
 /// A live session not heard from for this long is taken as gone.
 const STALE_SECONDS: f64 = 120.0;
 /// How long the job's poll for work waits before answering "nothing yet".
@@ -342,6 +349,11 @@ impl Files {
             START_WAIT
         };
         let deadline = tokio::time::Instant::now() + wait;
+        let job = session.job_id.or(started);
+        // Until the job says hello, it is looked up now and then: one that ended
+        // first never will, and how it ended says why.
+        let mut checked = tokio::time::Instant::now();
+        let mut waiting: Option<slurm::Standing> = None;
         let outcome = loop {
             if tokio::time::Instant::now() >= deadline {
                 break None;
@@ -358,6 +370,40 @@ impl Files {
                 }
                 Ok(Some((None, _, state, error))) if state == "ended" => {
                     break Some(Err(error.unwrap_or_else(|| "The file session ended".into())));
+                }
+                Ok(Some((None, _, state, _)))
+                    if state == "starting" && checked.elapsed() >= JOB_CHECK =>
+                {
+                    checked = tokio::time::Instant::now();
+                    let left = deadline.saturating_duration_since(checked).min(JOB_CHECK);
+                    let looked = match job {
+                        Some(job) => tokio::time::timeout(left, client.standing(job))
+                            .await
+                            .ok()
+                            .flatten()
+                            .filter(is_session_job)
+                            .map(|standing| (job, standing)),
+                        None => None,
+                    };
+                    if let Some((job, standing)) = looked {
+                        let gone = !standing.active();
+                        if gone || standing.held_for_good() {
+                            let why = ended_early(job, &standing, &self.origin);
+                            // Unless it said hello and ended in between.
+                            let ended = sqlx::query("UPDATE cluster_sessions SET state='ended', error=$2 WHERE id=$1 AND state='starting'")
+                                .bind(session.id).bind(&why).execute(&self.pool).await
+                                .map(|r| r.rows_affected() > 0)
+                                .unwrap_or(false);
+                            if ended {
+                                if !gone {
+                                    let _ = client.cancel(job).await;
+                                }
+                                break Some(Err(why));
+                            }
+                        } else {
+                            waiting = Some(standing);
+                        }
+                    }
                 }
                 Ok(Some(_)) => {}
                 Ok(None) => break Some(Err("The call was dropped".into())),
@@ -384,14 +430,10 @@ impl Files {
                     "The file session on the cluster did not answer within 3 minutes. Try again; a new session starts."
                         .to_string()
                 } else {
-                    let job = session.job_id.or(started);
                     if let Some(job) = job {
                         let _ = client.cancel(job).await;
                     }
-                    format!(
-                        "The file session's job{} did not start within 10 minutes; the queue may be full. Try again later.",
-                        job.map(|j| format!(" {j}")).unwrap_or_default()
-                    )
+                    not_started(job, waiting.as_ref())
                 };
                 let _ = sqlx::query("UPDATE cluster_sessions SET state='ended', error=$2 WHERE id=$1 AND state<>'ended'")
                     .bind(session.id).bind(&why).execute(&self.pool).await;
@@ -466,7 +508,7 @@ impl Files {
                 .ok_or_else(|| "The file session could not be started; try again".into());
         }
         let job = json!({
-            "name": "chat-files",
+            "name": JOB_NAME,
             "current_working_directory": format!("/home/{}", client.user()),
             "environment": [
                 "PATH=/usr/local/bin:/usr/bin:/bin",
@@ -515,6 +557,117 @@ impl Files {
     }
 }
 
+/// How the session job exits when it cannot serve; Chat reads the code back from
+/// Slurm, since the job could not tell Chat itself. Kept in step with the agent.
+const EXIT_UNRESOLVED: i64 = 3;
+const EXIT_UNREACHABLE: i64 = 4;
+const EXIT_REFUSED: i64 = 5;
+const EXIT_NO_PYTHON: i64 = 6;
+const EXIT_OLD_PYTHON: i64 = 7;
+const EXIT_SERVER: i64 = 8;
+
+/// A look-up that found this session's job, not an older one that once had its id.
+fn is_session_job(standing: &slurm::Standing) -> bool {
+    let recent = |t: i64| chrono::Utc::now().timestamp() - t < 2 * START_WAIT.as_secs() as i64;
+    (standing.name.is_empty() || standing.name == JOB_NAME) && standing.submitted.is_none_or(recent)
+}
+
+fn on_node(node: &str) -> String {
+    match node {
+        "" | "None" | "None assigned" | "(null)" => String::new(),
+        node => format!(" on {node}"),
+    }
+}
+
+/// Why a session job ended, or can never start, before it reached Chat: read from
+/// how it ended, the agent's own exit codes first. What only an administrator can
+/// fix says so; what is over by itself says to try again.
+fn ended_early(job: i64, standing: &slurm::Standing, origin: &Url) -> String {
+    let host = origin.host_str().unwrap_or("Chat");
+    let address = origin.as_str().trim_end_matches('/');
+    let node = on_node(&standing.node);
+    let state = if standing.state.is_empty() {
+        "ended".to_owned()
+    } else {
+        standing.state.clone()
+    };
+    if standing.held_for_good() {
+        return format!(
+            "The file session job {job} cannot start with this cluster's file session settings: Slurm holds it ({}) and waiting will not clear that, so it was cancelled. An administrator changes the partition, QoS or session length for file sessions on the cluster's connection.",
+            standing.reason
+        );
+    }
+    let direct = "The session job connects straight to Chat, without a proxy";
+    let (cause, fix) = match (standing.state.as_str(), standing.exit) {
+        (_, Some(EXIT_UNRESOLVED)) => (
+            format!("the node could not look up Chat's address, {host}. {direct}, so the cluster's compute nodes must resolve {host} themselves and reach {address}"),
+            true,
+        ),
+        (_, Some(EXIT_UNREACHABLE)) => (
+            format!("the node could not connect to Chat at {address}, most likely because of a firewall or a certificate the node does not trust. {direct}, so the cluster's compute nodes must reach {address} themselves"),
+            true,
+        ),
+        (_, Some(EXIT_REFUSED)) => (
+            format!("the server at {address} turned the session away: Chat itself, or a proxy, firewall or load balancer in front of it"),
+            true,
+        ),
+        (_, Some(EXIT_SERVER)) => (
+            format!("the server at {address} answered with an error: Chat itself, or a proxy or load balancer in front of it, which may be restarting"),
+            false,
+        ),
+        (_, Some(EXIT_NO_PYTHON)) => ("python3 is not installed on the node".to_owned(), true),
+        (_, Some(EXIT_OLD_PYTHON)) => ("the node's python3 is older than 3.6".to_owned(), true),
+        (s, _) if s.contains("CANCELLED") => ("it was cancelled, by a person or by Slurm".to_owned(), false),
+        (s, _) if s.contains("TIMEOUT") || s.contains("DEADLINE") => {
+            ("it reached its time limit".to_owned(), false)
+        }
+        (s, _) if s.contains("OUT_OF_MEMORY") => ("it ran out of memory".to_owned(), false),
+        (s, _) if s.contains("NODE_FAIL") || s.contains("BOOT_FAIL") => {
+            ("its node failed".to_owned(), false)
+        }
+        (s, _) if s.contains("PREEMPTED") => ("it was preempted".to_owned(), false),
+        (_, Some(code)) if code != 0 => (format!("it exited with code {code}"), false),
+        _ => match standing.signal {
+            Some(signal) if signal != 0 => (format!("it was stopped by signal {signal}"), false),
+            _ => ("it exited without saying why".to_owned(), false),
+        },
+    };
+    let next = if fix {
+        "An administrator fixes that; then try again, and a new session starts."
+    } else {
+        "Try again; a new session starts."
+    };
+    format!(
+        "The file session job {job}{node} ended ({state}) before it reached Chat: {cause}. {next}"
+    )
+}
+
+/// Why a session's job had not reached Chat when the wait ran out.
+fn not_started(job: Option<i64>, waiting: Option<&slurm::Standing>) -> String {
+    let named = job.map(|j| format!(" {j}")).unwrap_or_default();
+    match waiting {
+        Some(w) if w.state.contains("RUNNING") => format!(
+            "The file session's job{named} started{}, but its program neither reached Chat nor ended within 10 minutes, so it was cancelled. Something on the node may have hung, such as a slow file system; an administrator can look at the node.",
+            on_node(&w.node)
+        ),
+        _ => {
+            let reason = waiting
+                .map(|w| w.reason.as_str())
+                .filter(|r| !r.is_empty() && *r != "None");
+            let held = reason
+                .map(|r| format!(" Slurm kept it waiting: {r}."))
+                .unwrap_or_default();
+            let after = match reason {
+                None | Some("Priority" | "Resources") => " The partition and QoS set for file sessions on this cluster are busy; try again later.",
+                Some(_) => " If waiting does not clear that, an administrator changes the partition, QoS or session length for file sessions on the cluster's connection.",
+            };
+            format!(
+                "The file session's job{named} did not start within 10 minutes, so it was cancelled.{held}{after}"
+            )
+        }
+    }
+}
+
 /// The batch script of a session job: the agent, read by python3 from the script
 /// itself. Without python3 the job tells Chat why it cannot serve, so the chat
 /// learns it rather than waiting.
@@ -527,7 +680,12 @@ pub fn session_script() -> String {
 if ! command -v python3 >/dev/null 2>&1; then
   curl -s --connect-timeout 10 -m 30 -X POST -H "Authorization: Bearer $OBLETH_CHAT_SESSION" -H 'Content-Type: application/json' \
     -d "{{\"reason\":\"python3 is not installed on $(hostname -s), so the file session cannot run there\"}}" "$OBLETH_CHAT_URL/api/cluster-sessions/bye" >/dev/null 2>&1
-  exit 1
+  exit {EXIT_NO_PYTHON}
+fi
+if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 6))' >/dev/null 2>&1; then
+  curl -s --connect-timeout 10 -m 30 -X POST -H "Authorization: Bearer $OBLETH_CHAT_SESSION" -H 'Content-Type: application/json' \
+    -d "{{\"reason\":\"python3 on $(hostname -s) is older than 3.6, so the file session cannot run there\"}}" "$OBLETH_CHAT_URL/api/cluster-sessions/bye" >/dev/null 2>&1
+  exit {EXIT_OLD_PYTHON}
 fi
 exec python3 - <<'{end}'
 {AGENT}
@@ -893,6 +1051,213 @@ mod tests {
             .arg("--version")
             .output()
             .is_ok_and(|o| o.status.success())
+    }
+
+    fn standing(state: &str, node: &str, exit: Option<i64>) -> slurm::Standing {
+        slurm::Standing {
+            name: JOB_NAME.into(),
+            state: state.into(),
+            node: node.into(),
+            exit,
+            submitted: Some(chrono::Utc::now().timestamp()),
+            ..Default::default()
+        }
+    }
+
+    /// A job that ended before it reached Chat is explained by how it ended, the
+    /// agent's own exit codes first; only what an administrator must fix says so.
+    #[test]
+    fn a_session_job_that_ended_early_is_explained() {
+        let origin = Url::parse("https://chat.example.edu/").unwrap();
+        let why = |s: slurm::Standing| ended_early(41, &s, &origin);
+        assert_eq!(
+            why(standing("FAILED", "c12", Some(3))),
+            "The file session job 41 on c12 ended (FAILED) before it reached Chat: the node could not look up Chat's address, chat.example.edu. The session job connects straight to Chat, without a proxy, so the cluster's compute nodes must resolve chat.example.edu themselves and reach https://chat.example.edu. An administrator fixes that; then try again, and a new session starts."
+        );
+        let text = why(standing("FAILED", "c12", Some(4)));
+        assert!(
+            text.contains("could not connect to Chat at https://chat.example.edu, most likely"),
+            "{text}"
+        );
+        assert!(why(standing("FAILED", "c12", Some(5)))
+            .contains("turned the session away: Chat itself, or a proxy"));
+        let text = why(standing("FAILED", "c12", Some(8)));
+        assert!(
+            text.contains("answered with an error")
+                && text.ends_with("Try again; a new session starts."),
+            "{text}"
+        );
+        assert!(why(standing("FAILED", "c12", Some(6)))
+            .contains("python3 is not installed on the node"));
+        assert!(why(standing("FAILED", "c12", Some(7))).contains("older than 3.6"));
+        let text = why(standing("CANCELLED", "None", Some(0)));
+        assert!(text.contains("job 41 ended (CANCELLED) before it reached Chat: it was cancelled, by a person or by Slurm. Try again"), "{text}");
+        assert!(why(standing("OUT_OF_MEMORY", "c1", Some(0))).contains("ran out of memory"));
+        assert!(why(standing("FAILED", "c1", Some(1))).contains("exited with code 1. Try again;"));
+        assert!(!standing("FAILED", "", None).active());
+        assert!(!standing("COMPLETED", "", None).active());
+        assert!(standing("PENDING", "", None).active());
+        assert!(standing("RUNNING", "c1", None).active());
+        // Unknown is not taken as ended.
+        assert!(standing("", "", None).active());
+    }
+
+    /// A job Slurm will never start is given up at once, with what to change; one
+    /// that only waits its turn is not.
+    #[test]
+    fn a_session_job_held_for_good_is_given_up() {
+        let origin = Url::parse("https://chat.example.edu").unwrap();
+        let mut held = standing("PENDING", "", None);
+        held.reason = "PartitionTimeLimit".into();
+        assert!(held.held_for_good());
+        let text = ended_early(9, &held, &origin);
+        assert!(text.contains("cannot start with this cluster's file session settings: Slurm holds it (PartitionTimeLimit)"), "{text}");
+        held.reason = "InvalidQOS".into();
+        assert!(held.held_for_good());
+        for reason in [
+            "Priority",
+            "Resources",
+            "QOSMaxJobsPerUserLimit",
+            "AssocGrpCpuLimit",
+        ] {
+            held.reason = reason.into();
+            assert!(!held.held_for_good(), "{reason}");
+        }
+    }
+
+    /// An old job that once had the same id, under another name or long ago, is not
+    /// taken for the session's.
+    #[test]
+    fn only_the_session_job_is_taken_for_it() {
+        assert!(is_session_job(&standing("FAILED", "c1", Some(3))));
+        let mut other = standing("FAILED", "c1", Some(3));
+        other.name = "train".into();
+        assert!(!is_session_job(&other));
+        let mut old = standing("FAILED", "c1", Some(3));
+        old.submitted = Some(chrono::Utc::now().timestamp() - 86_400);
+        assert!(!is_session_job(&old));
+    }
+
+    /// A start that runs out says whether the job was queued, and why, or running
+    /// without reaching Chat.
+    #[test]
+    fn a_session_that_never_started_says_where_it_stood() {
+        let mut queued = standing("PENDING", "", None);
+        queued.reason = "Priority".into();
+        let text = not_started(Some(9), Some(&queued));
+        assert!(
+            text.contains("job 9 did not start within 10 minutes"),
+            "{text}"
+        );
+        assert!(text.contains("Slurm kept it waiting: Priority. The partition and QoS set for file sessions on this cluster are busy"), "{text}");
+        queued.reason = "QOSMaxJobsPerUserLimit".into();
+        let text = not_started(Some(9), Some(&queued));
+        assert!(
+            text.contains("If waiting does not clear that, an administrator changes"),
+            "{text}"
+        );
+        let text = not_started(Some(9), Some(&standing("RUNNING", "c3", None)));
+        assert!(
+            text.contains("started on c3, but its program neither reached Chat nor ended"),
+            "{text}"
+        );
+        assert!(not_started(None, None).contains("did not start within 10 minutes"));
+    }
+
+    /// Runs the agent as the job would, with only the job's own environment.
+    fn agent_exit(url: &str) -> (Option<i32>, String) {
+        let mut child = std::process::Command::new("python3")
+            .arg("-")
+            .env_clear()
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("OBLETH_CHAT_URL", url)
+            .env("OBLETH_CHAT_SESSION", "x")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(AGENT.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// Answers one request with the status line given.
+    fn answer_once(status: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                );
+            }
+        });
+        url
+    }
+
+    /// The agent exits with its own code when Chat's name does not resolve, its
+    /// address does not answer, or the answer is a refusal or a server error.
+    #[test]
+    fn the_agent_exits_with_why_it_could_not_reach_chat() {
+        if !python3() {
+            eprintln!("python3 is not installed; skipping");
+            return;
+        }
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        for (url, code) in [
+            // .invalid never resolves (RFC 2606).
+            ("http://chat.invalid".to_owned(), EXIT_UNRESOLVED),
+            (format!("http://127.0.0.1:{closed}"), EXIT_UNREACHABLE),
+            (answer_once("409 Conflict"), EXIT_REFUSED),
+            (answer_once("503 Service Unavailable"), EXIT_SERVER),
+        ] {
+            let (exit, stderr) = agent_exit(&url);
+            assert_eq!(exit, Some(code as i32), "{url}: {stderr}");
+        }
+    }
+
+    /// The script's own exit codes match what Chat reads back.
+    #[test]
+    fn the_script_exits_with_its_own_codes() {
+        let script = session_script();
+        assert!(
+            script.contains(&format!("exit {EXIT_NO_PYTHON}\n")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("exit {EXIT_OLD_PYTHON}\n")),
+            "{script}"
+        );
+        assert!(
+            script.contains("sys.exit(sys.version_info < (3, 6))"),
+            "{script}"
+        );
+        for (name, code) in [
+            ("EXIT_UNRESOLVED", EXIT_UNRESOLVED),
+            ("EXIT_UNREACHABLE", EXIT_UNREACHABLE),
+            ("EXIT_REFUSED", EXIT_REFUSED),
+            ("EXIT_SERVER", EXIT_SERVER),
+        ] {
+            assert!(AGENT.contains(&format!("{name} = {code}\n")), "{name}");
+        }
     }
 
     #[test]

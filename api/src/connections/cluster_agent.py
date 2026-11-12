@@ -12,12 +12,14 @@ To try one operation by hand on a cluster:
 import datetime
 import fnmatch
 import getpass
+import http.client
 import json
 import os
 import re
 import shutil
 import signal
 import socket
+import ssl
 import sys
 import time
 import urllib.error
@@ -37,6 +39,13 @@ WALK_SECONDS = 60
 USAGE_SECONDS = 120
 OUTPUT_LIMIT = 320 * 1024
 LINE_LIMIT = 300
+
+# How the job exits when it cannot serve. Chat reads the code back from Slurm, since
+# a job that cannot reach Chat cannot tell it why. Kept in step with files.rs.
+EXIT_UNRESOLVED = 3
+EXIT_UNREACHABLE = 4
+EXIT_REFUSED = 5
+EXIT_SERVER = 8
 
 HOME = os.path.realpath(os.path.expanduser("~"))
 TRASH = os.path.join(HOME, ".chat-trash")
@@ -63,7 +72,7 @@ ROOTS = roots()
 
 
 def shown_roots():
-    return ", ".join("~" if r == HOME else r for r in ROOTS)
+    return ", ".join(("~" if r == HOME else r) + ("" if os.path.isdir(r) else " (does not exist here)") for r in ROOTS)
 
 
 def resolve(path, must_exist=True):
@@ -80,7 +89,7 @@ def resolve(path, must_exist=True):
             if must_exist and not os.path.lexists(real):
                 raise Refused("There is no %s" % given)
             return real
-    raise Refused("%s is outside what Chat may reach here: %s" % (given, shown_roots()))
+    raise Refused("%s is outside what Chat may reach here: %s. The cluster's connection in Chat sets these directories." % (given, shown_roots()))
 
 
 def human(size):
@@ -426,6 +435,15 @@ def log(text):
     sys.stderr.flush()
 
 
+def unreachable(error):
+    """The exit code for a failed connection: the name did not resolve, or it did
+    and the connection still failed."""
+    reason = getattr(error, "reason", error)
+    if isinstance(reason, socket.gaierror) or isinstance(error, socket.gaierror):
+        return EXIT_UNRESOLVED
+    return EXIT_UNREACHABLE
+
+
 def serve():
     url = os.environ.get("OBLETH_CHAT_URL", "")
     token = os.environ.get("OBLETH_CHAT_SESSION", "")
@@ -444,12 +462,12 @@ def serve():
     hello = {"username": getpass.getuser(), "uid": os.getuid(), "host": socket.gethostname(), "version": VERSION, "roots": ROOTS}
     try:
         status, body = chat.request("POST", "/api/cluster-sessions/hello", hello)
-    except (urllib.error.URLError, OSError) as error:
+    except (urllib.error.URLError, OSError, ssl.CertificateError, http.client.HTTPException) as error:
         log("Chat at %s is not reachable from this node: %s" % (url, error))
-        return 1
+        return unreachable(error)
     if status != 200:
         log("Chat refused the session (HTTP %d): %s" % (status, body.decode("utf-8", "replace")[:300]))
-        return 1
+        return EXIT_SERVER if status >= 500 else EXIT_REFUSED
     try:
         idle = float(json.loads(body.decode("utf-8")).get("idle", idle))
     except (ValueError, AttributeError):

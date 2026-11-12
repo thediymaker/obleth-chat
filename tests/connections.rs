@@ -3192,7 +3192,10 @@ async fn a_slurm_cluster_reaches_files_through_a_session_job(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert!(text.contains("outside what Chat may reach here"), "{text}");
+    assert!(
+        text.contains("is not in a directory Chat may reach on this cluster"),
+        "{text}"
+    );
 
     // A write waits for Allow, then lands as the person.
     *f.script.lock().unwrap() = tool_script(&[(
@@ -3823,4 +3826,79 @@ async fn a_session_job_that_ends_before_reaching_chat_says_why(pool: PgPool) {
             .is_some_and(|e| e.contains("compute nodes must resolve 127.0.0.1 themselves")),
         "{error:?}"
     );
+}
+
+/// A running session job keeps the directories it started with: once the cluster's
+/// setting changes, the next call ends that session and starts a new job.
+#[sqlx::test(migrations = "./migrations")]
+async fn changing_the_directories_starts_a_new_file_session(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    // The new job fails at once (see UNRESOLVED_ROOT), so the call ends quickly.
+    let (status, shared) = call(
+        &f.app,
+        "POST",
+        "/api/connections",
+        json!({"kind":"slurm","name":"Sol","url":f.cluster_url,"shared":true,"options":{"files":true,"filesRoots":UNRESOLVED_ROOT}}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let id: Uuid = shared["id"].as_str().unwrap().parse().unwrap();
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/connections/{id}/credential"),
+        json!({"token":SLURM_TOKEN,"user":"alice"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // A live session started with the old directories.
+    let user: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username='test-admin'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let old = Uuid::new_v4();
+    sqlx::query("INSERT INTO cluster_sessions(id,connection_id,user_id,job_id,token_hash,state,username,host,started_at,last_seen_at,ends_at,roots) VALUES($1,$2,$3,5,$4,'live','alice','n1',NOW(),NOW(),NOW()+interval '1 hour','~/scratch/$USER')")
+        .bind(old)
+        .bind(id)
+        .bind(user)
+        .bind(old.as_bytes().to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    *f.script.lock().unwrap() =
+        tool_script(&[("call_usage", "sol__files_usage", json!({"path":"~"}))]);
+    let (_, stream) = send(&f, &admin, "How much space am I using?").await;
+    tokio::time::timeout(Duration::from_secs(30), stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM cluster_sessions WHERE id=$1")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ended");
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("directories")),
+        "{error:?}"
+    );
+    // A new job was submitted with the directories set now.
+    let (_, env, _) = session_job(&f, 0);
+    assert!(
+        env.iter()
+            .any(|(k, v)| k == "OBLETH_CHAT_ROOTS" && v == UNRESOLVED_ROOT),
+        "{env:?}"
+    );
+    let roots: Option<String> =
+        sqlx::query_scalar("SELECT roots FROM cluster_sessions WHERE id<>$1")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(roots.as_deref(), Some(UNRESOLVED_ROOT));
 }

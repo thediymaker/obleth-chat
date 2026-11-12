@@ -72,7 +72,14 @@ ROOTS = roots()
 
 
 def shown_roots():
-    return ", ".join(("~" if r == HOME else r) + ("" if os.path.isdir(r) else " (does not exist here)") for r in ROOTS)
+    """The roots, one to a line, marking any that do not exist here."""
+    lines = []
+    for root in ROOTS:
+        line = "  ~ (%s)" % root if root == HOME else "  " + root
+        if not os.path.isdir(root):
+            line += ", which does not exist on this cluster"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def resolve(path, must_exist=True):
@@ -89,7 +96,11 @@ def resolve(path, must_exist=True):
             if must_exist and not os.path.lexists(real):
                 raise Refused("There is no %s" % given)
             return real
-    raise Refused("%s is outside what Chat may reach here: %s. The cluster's connection in Chat sets these directories." % (given, shown_roots()))
+    shown = given if real == given else "%s (%s)" % (given, real)
+    raise Refused(
+        "%s is not in a directory Chat may reach on this cluster. Chat may reach:\n%s\n"
+        "These directories are set on the cluster's connection in Chat, on the Clusters page." % (shown, shown_roots())
+    )
 
 
 def human(size):

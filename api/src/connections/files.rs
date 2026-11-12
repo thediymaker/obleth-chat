@@ -467,6 +467,19 @@ impl Files {
         .execute(&self.pool)
         .await
         .map_err(database)?;
+        // A running job keeps the directories it was started with: once the cluster's
+        // setting changes, its session ends (the job stops at its next poll) and a
+        // new one starts with the directories set now.
+        sqlx::query(
+            "UPDATE cluster_sessions SET state='ended', error='The directories Chat may reach on this cluster changed, so a new file session starts' \
+             WHERE connection_id=$1 AND user_id=$2 AND state<>'ended' AND roots IS DISTINCT FROM $3",
+        )
+        .bind(connection)
+        .bind(self.user)
+        .bind(&options.roots)
+        .execute(&self.pool)
+        .await
+        .map_err(database)?;
         let open = || async {
             sqlx::query_as::<_, Open>(
                 "SELECT id, state, job_id FROM cluster_sessions WHERE connection_id=$1 AND user_id=$2 AND state<>'ended'",
@@ -486,8 +499,8 @@ impl Files {
         let hash = Sha256::digest(token.as_bytes()).to_vec();
         let id = Uuid::new_v4();
         let inserted = sqlx::query(
-            "INSERT INTO cluster_sessions(id,connection_id,user_id,token_hash,state,username,ends_at) \
-             VALUES($1,$2,$3,$4,'starting',$5,NOW() + make_interval(hours => $6)) \
+            "INSERT INTO cluster_sessions(id,connection_id,user_id,token_hash,state,username,ends_at,roots) \
+             VALUES($1,$2,$3,$4,'starting',$5,NOW() + make_interval(hours => $6),$7) \
              ON CONFLICT (connection_id, user_id) WHERE state <> 'ended' DO NOTHING",
         )
         .bind(id)
@@ -496,6 +509,7 @@ impl Files {
         .bind(&hash)
         .bind(client.user())
         .bind(options.hours as i32)
+        .bind(&options.roots)
         .execute(&self.pool)
         .await
         .map_err(database)?;
@@ -1360,9 +1374,12 @@ mod tests {
         // Outside the roots, or missing, is refused in words.
         let (ok, out) = agent(&roots, "list", json!({"path": "/etc"}));
         assert!(
-            !ok && out.contains("outside what Chat may reach here"),
+            !ok && out.contains("is not in a directory Chat may reach on this cluster"),
             "{out}"
         );
+        // One directory to a line, and where they are set.
+        assert!(out.contains("Chat may reach:\n  "), "{out}");
+        assert!(out.ends_with("on the Clusters page."), "{out}");
         let (ok, out) = agent(
             &roots,
             "read",

@@ -68,7 +68,7 @@ function Frame({ children }: { children: React.ReactNode }) {
   }, [router]);
 
   return (
-    <div className="flex h-dvh overflow-hidden" data-density={density} data-focus={focus || undefined}>
+    <div className="relative flex h-dvh overflow-hidden" data-density={density} data-focus={focus || undefined}>
       <a href="#main" className="fixed -top-16 left-2.5 z-50 rounded-md bg-foreground p-3 text-background focus:top-2.5">
         Skip to content
       </a>
@@ -103,7 +103,9 @@ function Frame({ children }: { children: React.ReactNode }) {
             {actions ?? <FocusToggle />}
           </div>
         </header>
-        <main id="main" tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto outline-none">
+        {/* relative: hidden form inputs (Radix checkboxes, sr-only labels) position against
+            the nearest positioned box; without one they stretch the document below the shell. */}
+        <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto outline-none">
           {children}
         </main>
         <StatusBar />

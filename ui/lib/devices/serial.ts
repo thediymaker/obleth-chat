@@ -2,6 +2,8 @@
 // API: open at a baud rate, collect what it prints, send to it, drive its DTR and
 // RTS lines, and hand the port over (and back) when a flasher needs it whole.
 
+import { completeUpTo, plainText } from "./plain";
+
 export interface OpenOptions {
   baudRate?: number;
   dataBits?: 7 | 8;
@@ -47,6 +49,7 @@ export class SerialDevice {
   private options: OpenOptions = {};
   private waiters = new Set<() => void>();
   private listeners = new Set<() => void>();
+  private outputs = new Set<(text: string) => void>();
   /** Set while a flasher owns the port. */
   busy = false;
   lastError = "";
@@ -73,6 +76,13 @@ export class SerialDevice {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+  /** Listens for each piece of output as it arrives, raw, for a terminal to draw. */
+  onOutput(listener: (text: string) => void) {
+    this.outputs.add(listener);
+    return () => {
+      this.outputs.delete(listener);
     };
   }
   private changed() {
@@ -121,6 +131,7 @@ export class SerialDevice {
     this.total += text.length;
     this.unread = (this.unread + text).slice(-KEEP);
     this.monitor = (this.monitor + text).slice(-MONITOR_KEEP);
+    for (const o of this.outputs) o(text);
     for (const w of this.waiters) w();
     this.changed();
   }
@@ -135,11 +146,18 @@ export class SerialDevice {
     this.changed();
   }
 
-  /** What arrived since the last read, waiting up to `waitMs` for more or for `until`. */
+  /**
+   * What arrived since the last read, as plain text (see plain.ts), waiting up to
+   * `waitMs` for more or for `until`.
+   */
   async read({ waitMs = 2000, until, maxChars = 6000 }: { waitMs?: number; until?: string; maxChars?: number } = {}) {
     if (!this.isOpen) throw new Error("The port is not open. Open it first.");
     const deadline = Date.now() + Math.min(Math.max(waitMs, 0), 60000);
-    const satisfied = () => (until ? this.unread.includes(until) : this.unread.length > 0);
+    const ready = () => plainText(this.unread.slice(0, completeUpTo(this.unread)));
+    const satisfied = () => {
+      const text = ready();
+      return until ? text.includes(until) : text.length > 0;
+    };
     while (!satisfied() && Date.now() < deadline) {
       await new Promise<void>((resolve) => {
         const waiter = () => {
@@ -150,11 +168,14 @@ export class SerialDevice {
         setTimeout(waiter, Math.max(0, Math.min(250, deadline - Date.now())));
       });
     }
-    let text = this.unread;
-    this.unread = "";
+    // An escape code still arriving at the end waits for the next read.
+    const cut = completeUpTo(this.unread);
+    let text = plainText(this.unread.slice(0, cut));
+    this.unread = this.unread.slice(cut);
+    const matched = until ? text.includes(until) : undefined;
     const dropped = Math.max(0, text.length - maxChars);
     if (dropped) text = text.slice(-maxChars);
-    return { text, dropped, matched: until ? text.includes(until) : undefined };
+    return { text, dropped, matched };
   }
 
   async write(bytes: Uint8Array) {

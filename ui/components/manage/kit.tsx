@@ -176,7 +176,9 @@ export function CheckField({
   className?: string;
 }) {
   return (
-    <div className={cn("flex items-start gap-2.5", className)}>
+    // relative keeps the checkbox's hidden form input with its row, so a scrolling list
+    // of these clips it instead of growing the page.
+    <div className={cn("relative flex items-start gap-2.5", className)}>
       <Checkbox
         id={id}
         name={id}

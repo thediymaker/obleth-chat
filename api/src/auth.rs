@@ -954,6 +954,11 @@ fn too_many_requests() -> ApiError {
     )
 }
 
+/// The one answer to a username that is already in use, wherever a user is made.
+pub(super) fn username_taken() -> ApiError {
+    ApiError(StatusCode::CONFLICT, "Username already exists".into())
+}
+
 async fn throttle_window(tx: &mut Transaction<'_, Postgres>) -> Result<i64, ApiError> {
     Ok(
         sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM NOW()) / 60)::BIGINT")
@@ -1471,7 +1476,7 @@ async fn change_password(
             .await?
             .flatten();
     let Some(encoded) = encoded else {
-        return Err(ApiError::bad("This account signs in through OIDC"));
+        return Err(ApiError::bad("This account signs in with single sign-on"));
     };
     if !auth
         .check_password(input.current_password, encoded.clone())
@@ -1610,10 +1615,7 @@ async fn create_user(
             tx.commit().await?;
             Ok((StatusCode::CREATED, Json(identity)))
         }
-        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => Err(ApiError(
-            StatusCode::CONFLICT,
-            "Username already exists".into(),
-        )),
+        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => Err(username_taken()),
         Err(error) => Err(error.into()),
     }
 }
@@ -1740,11 +1742,9 @@ async fn link_oidc_identity(
     Json(input): Json<LinkOidcInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
-    let provider = auth
-        .config
-        .oidc
-        .as_ref()
-        .ok_or_else(|| ApiError::bad("OIDC is not configured"))?;
+    let provider = auth.config.oidc.as_ref().ok_or_else(|| {
+        ApiError::bad("Single sign-on is not configured (OBLETH_CHAT_OIDC_ISSUER)")
+    })?;
     if input.subject.is_empty()
         || input.subject.len() > 255
         || !input.subject.is_ascii()
@@ -1791,7 +1791,7 @@ async fn link_oidc_identity(
     if inserted == 0 {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "This OIDC identity is already linked".into(),
+            "This single sign-on identity is already linked to another account".into(),
         ));
     }
     // Pending invitation or recovery links must not add a local password afterwards.

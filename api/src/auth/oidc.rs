@@ -313,11 +313,108 @@ impl Oidc {
     }
 }
 
-fn provider_unavailable() -> ApiError {
+/// The provider could not be reached or did not answer properly.
+pub(super) fn provider_unavailable() -> ApiError {
     ApiError(
         StatusCode::BAD_GATEWAY,
-        "The identity provider is unavailable".into(),
+        "The single sign-on provider is unavailable; try again shortly".into(),
     )
+}
+
+/// Why single sign-on did not complete, as the sign-in screen names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SignInError {
+    Throttled,
+    ProviderUnavailable,
+    StateExpired,
+    NotCompleted,
+    NotProvisioned,
+    AccountDisabled,
+    Other,
+}
+
+impl SignInError {
+    pub(super) fn code(self) -> &'static str {
+        match self {
+            SignInError::Throttled => "throttled",
+            SignInError::ProviderUnavailable => "provider_unavailable",
+            SignInError::StateExpired => "state_expired",
+            SignInError::NotCompleted => "not_completed",
+            SignInError::NotProvisioned => "not_provisioned",
+            SignInError::AccountDisabled => "account_disabled",
+            SignInError::Other => "other",
+        }
+    }
+}
+
+/// A step of single sign-on that failed: the API error for a caller that
+/// reads JSON, the code the sign-in screen shows a person, and where that
+/// person was going.
+#[derive(Debug)]
+pub(super) struct SignInFailure {
+    code: SignInError,
+    error: ApiError,
+    return_to: Option<String>,
+}
+
+impl SignInFailure {
+    fn new(code: SignInError, error: ApiError) -> Self {
+        Self {
+            code,
+            error,
+            return_to: None,
+        }
+    }
+    fn returning_to(mut self, path: Option<String>) -> Self {
+        self.return_to = path;
+        self
+    }
+}
+
+impl From<ApiError> for SignInFailure {
+    /// An error with no site-specific code: throttling and a provider that is
+    /// down are told apart by their status, everything else is "other".
+    fn from(error: ApiError) -> Self {
+        let code = match error.0 {
+            StatusCode::TOO_MANY_REQUESTS => SignInError::Throttled,
+            StatusCode::BAD_GATEWAY => SignInError::ProviderUnavailable,
+            _ => SignInError::Other,
+        };
+        Self::new(code, error)
+    }
+}
+
+impl From<sqlx::Error> for SignInFailure {
+    fn from(error: sqlx::Error) -> Self {
+        ApiError::from(error).into()
+    }
+}
+
+/// A browser following the sign-in link lands back on the sign-in screen with
+/// the failure named in the address; anything else gets the JSON error.
+fn sign_in_outcome(result: Result<Response, SignInFailure>, headers: &HeaderMap) -> Response {
+    let failure = match result {
+        Ok(response) => return response,
+        Err(failure) => failure,
+    };
+    let navigation = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"));
+    if !navigation {
+        return failure.error.into_response();
+    }
+    let path = failure.return_to.as_deref().unwrap_or("/");
+    let joiner = if path.contains('?') { '&' } else { '?' };
+    let mut response = Redirect::to(&format!(
+        "{path}{joiner}signin_error={}",
+        failure.code.code()
+    ))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// ID token algorithms Chat accepts: the asymmetric ones, never a MAC keyed with the
@@ -442,11 +539,24 @@ fn return_path(next: Option<String>) -> Option<String> {
 pub(super) async fn login(
     State(auth): State<Auth>,
     caller: Client,
+    headers: HeaderMap,
     Query(input): Query<LoginInput>,
-) -> Result<Response, ApiError> {
+) -> Response {
+    let return_to = return_path(input.next.clone());
+    let result = start_sign_in(&auth, &caller, input)
+        .await
+        .map_err(|failure| failure.returning_to(return_to));
+    sign_in_outcome(result, &headers)
+}
+
+async fn start_sign_in(
+    auth: &Auth,
+    caller: &Client,
+    input: LoginInput,
+) -> Result<Response, SignInFailure> {
     let provider = auth.oidc.as_ref().ok_or_else(ApiError::not_found)?;
     // A separate bucket keeps redirects from consuming the password-login budget.
-    auth.throttle("oidc", &caller, None).await?;
+    auth.throttle("oidc", caller, None).await?;
     let browser = random_token();
     let client = provider.discovered().await?.client;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
@@ -586,22 +696,49 @@ pub(super) async fn callback(
     State(auth): State<Auth>,
     headers: HeaderMap,
     Query(input): Query<CallbackInput>,
-) -> Result<Response, ApiError> {
+) -> Response {
+    let result = resume_sign_in(&auth, &headers, input).await;
+    sign_in_outcome(result, &headers)
+}
+
+/// The browser is back from the provider: find the sign-in it started, then
+/// finish it. Failures after that point carry where the person was going.
+async fn resume_sign_in(
+    auth: &Auth,
+    headers: &HeaderMap,
+    input: CallbackInput,
+) -> Result<Response, SignInFailure> {
     let provider = auth.oidc.as_ref().ok_or_else(ApiError::not_found)?;
+    let expired = || SignInFailure::new(SignInError::StateExpired, ApiError::forbidden());
     if input.state.len() > 1024 {
-        return Err(ApiError::forbidden());
+        return Err(expired());
     }
-    let browser =
-        cookie_value(&headers, auth.oidc_cookie_name()).ok_or_else(ApiError::forbidden)?;
+    let browser = cookie_value(headers, auth.oidc_cookie_name()).ok_or_else(expired)?;
     // Consuming the transaction atomically gives exactly one callback a chance to
     // exchange the code, across all replicas. A different browser cannot consume it.
     let transaction = sqlx::query_as::<_, OidcTransaction>(
         "DELETE FROM oidc_transactions WHERE state_hash = $1 AND browser_hash = $2 AND expires_at > NOW() RETURNING nonce, pkce_verifier, return_to"
-    ).bind(digest(&input.state)).bind(digest(&browser)).fetch_optional(&auth.pool).await?.ok_or_else(ApiError::forbidden)?;
+    ).bind(digest(&input.state)).bind(digest(&browser)).fetch_optional(&auth.pool).await?.ok_or_else(expired)?;
+    let return_to = transaction.return_to.clone();
+    finish_sign_in(auth, provider, headers, input, transaction)
+        .await
+        .map_err(|failure| failure.returning_to(return_to))
+}
+
+async fn finish_sign_in(
+    auth: &Auth,
+    provider: &Arc<Oidc>,
+    headers: &HeaderMap,
+    input: CallbackInput,
+    transaction: OidcTransaction,
+) -> Result<Response, SignInFailure> {
     if input.error.is_some() {
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "Identity provider sign-in was not completed".into(),
+        return Err(SignInFailure::new(
+            SignInError::NotCompleted,
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Single sign-on was not completed".into(),
+            ),
         ));
     }
     let code = input
@@ -618,13 +755,10 @@ pub(super) async fn callback(
         .await
         .map_err(|_| {
             tracing::warn!("OIDC authorization code exchange failed");
-            ApiError(
-                StatusCode::UNAUTHORIZED,
-                "Identity provider sign-in failed".into(),
-            )
+            ApiError(StatusCode::UNAUTHORIZED, "Single sign-on failed".into())
         })?;
     // Everything after the exchange runs here, so a failure can revoke the grant.
-    let outcome: Result<Response, ApiError> = async {
+    let outcome: Result<Response, SignInFailure> = async {
         let id_token = tokens.id_token().ok_or_else(ApiError::unauthorized)?;
         // Only the asymmetric algorithms the provider advertises; the library would
         // otherwise also accept an HMAC keyed with the client secret.
@@ -644,7 +778,7 @@ pub(super) async fn callback(
             || (claims.audiences().len() > 1 && claims.authorized_party().is_none())
             || claims.issue_time() > Utc::now() + chrono::Duration::seconds(60)
         {
-            return Err(ApiError::unauthorized());
+            return Err(ApiError::unauthorized().into());
         }
         if let Some(expected) = claims.access_token_hash() {
             let actual = AccessTokenHash::from_token(
@@ -658,7 +792,7 @@ pub(super) async fn callback(
             )
             .map_err(|_| ApiError::unauthorized())?;
             if actual != *expected {
-                return Err(ApiError::unauthorized());
+                return Err(ApiError::unauthorized().into());
             }
         }
         let mapped_groups = auth
@@ -666,7 +800,7 @@ pub(super) async fn callback(
             .groups_from_verified_token(&id_token.to_string())?;
         let subject = claims.subject().as_str();
         if subject.is_empty() || subject.len() > 255 {
-            return Err(ApiError::unauthorized());
+            return Err(ApiError::unauthorized().into());
         }
         // Forwarding the provider's tokens needs a refresh token to keep them current.
         let refresh = match (&auth.grants, tokens.refresh_token()) {
@@ -674,8 +808,8 @@ pub(super) async fn callback(
                 tracing::warn!("the identity provider issued no refresh token; check offline_access");
                 return Err(ApiError(
                     StatusCode::UNAUTHORIZED,
-                    "The identity provider did not allow Chat to stay signed in".into(),
-                ));
+                    "The single sign-on provider did not allow Chat to stay signed in".into(),
+                ).into());
             }
             (_, refresh) => refresh,
         };
@@ -688,7 +822,7 @@ pub(super) async fn callback(
                 .min(auth.config.session_hours as i64 * 3600),
         };
         if lifetime <= 0 {
-            return Err(ApiError::unauthorized());
+            return Err(ApiError::unauthorized().into());
         }
         let name = claims
             .name()
@@ -730,11 +864,19 @@ pub(super) async fn callback(
                 }
                 identity
             }
-            Some(_) => return Err(ApiError::forbidden()),
+            Some(_) => {
+                return Err(SignInFailure::new(
+                    SignInError::AccountDisabled,
+                    ApiError(StatusCode::FORBIDDEN, "This account is disabled".into()),
+                ))
+            }
             None if !provider.config.allow_signup => {
-                return Err(ApiError(
-                    StatusCode::FORBIDDEN,
-                    "This OIDC identity has not been provisioned; contact your administrator".into(),
+                return Err(SignInFailure::new(
+                    SignInError::NotProvisioned,
+                    ApiError(
+                        StatusCode::FORBIDDEN,
+                        "This single sign-on identity has not been provisioned; contact your administrator".into(),
+                    ),
                 ))
             }
             None => {
@@ -766,7 +908,7 @@ pub(super) async fn callback(
         auth.group_policy
             .reconcile(&mut tx, identity.id, &mapped_groups)
             .await?;
-        if let Some(old) = auth.session_token(&headers) {
+        if let Some(old) = auth.session_token(headers) {
             sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")
                 .bind(digest(&old))
                 .execute(&mut *tx)
@@ -774,7 +916,7 @@ pub(super) async fn callback(
         }
         let token = random_token();
         let session = auth
-            .insert_session(&mut tx, identity.id, &token, lifetime, &headers, true)
+            .insert_session(&mut tx, identity.id, &token, lifetime, headers, true)
             .await?;
         if let (Some(grants), Some(refresh)) = (&auth.grants, refresh) {
             grants

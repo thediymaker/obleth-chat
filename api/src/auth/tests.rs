@@ -896,6 +896,85 @@ async fn fake_revoke(
     StatusCode::OK
 }
 
+/// A browser that followed the sign-in link lands back on the sign-in screen
+/// with the failure named, never on a page of JSON; a caller that reads JSON
+/// still gets the JSON error.
+#[tokio::test]
+async fn single_sign_on_failures_send_a_browser_back_to_the_sign_in_screen() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let mut cfg = config();
+    cfg.oidc = Some(OidcConfig {
+        issuer: issuer.origin.clone(),
+        client_id: "chat".into(),
+        client_secret: "secret".into(),
+        allow_signup: false,
+        provider_usernames: false,
+        scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
+    });
+    let auth = Auth::new(db.pool.clone(), cfg).await.unwrap();
+    let app = auth.router();
+    // A stale or foreign state: back to the screen as "state_expired".
+    let stale = format!("/api/auth/oidc/callback?code=x&state={}", random_token());
+    assert_eq!(
+        navigate(&app, &stale, None).await,
+        "/?signin_error=state_expired"
+    );
+    // The same request from a JSON caller is the JSON error it always was.
+    let (status, _, body) = call(&app, "GET", &stale, None, None, None, Value::Null).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body["error"]["message"].is_string());
+    // The person did not complete it at the provider: back where they were going.
+    let (browser, path) = issuer
+        .flow_from(
+            &app,
+            "/api/auth/oidc/login?next=%2Fchat%2Fc1",
+            "valid",
+            "s1",
+        )
+        .await;
+    let cancelled = format!("{path}&error=access_denied");
+    assert_eq!(
+        navigate(&app, &cancelled, Some(&browser)).await,
+        "/chat/c1?signin_error=not_completed"
+    );
+    // An identity no administrator has provisioned.
+    let (browser, path) = issuer.flow(&app, "valid", "unknown-subject").await;
+    assert_eq!(
+        navigate(&app, &path, Some(&browser)).await,
+        "/?signin_error=not_provisioned"
+    );
+    task.abort();
+    db.close().await;
+}
+
+/// Follows `path` as a browser would (asking for HTML) and returns where the
+/// 303 sends it, checking that no JSON came with it.
+async fn navigate(app: &Router, path: &str, cookie: Option<&str>) -> String {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::ACCEPT, "text/html,application/xhtml+xml");
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, cookie);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty(), "a redirect carries no JSON: {body:?}");
+    location
+}
+
 #[tokio::test]
 async fn oidc_validates_tokens_pkce_state_replay_and_explicit_provisioning() {
     let Some(db) = Database::new().await else {

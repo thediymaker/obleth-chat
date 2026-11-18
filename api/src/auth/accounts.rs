@@ -731,7 +731,7 @@ async fn invite(
     let mut tx = auth.pool.begin().await?;
     auth.lock_admin(&mut tx, admin.id).await?;
     let user=sqlx::query_as::<_,Identity>("INSERT INTO users(id,username,display_name,role) VALUES($1,$2,$3,$4) RETURNING id,username,display_name,role")
-        .bind(Uuid::new_v4()).bind(username).bind(name).bind(role).fetch_one(&mut *tx).await.map_err(|e|match e{sqlx::Error::Database(e)if e.is_unique_violation()=>ApiError(StatusCode::CONFLICT,"Username already exists".into()),e=>e.into()})?;
+        .bind(Uuid::new_v4()).bind(username).bind(name).bind(role).fetch_one(&mut *tx).await.map_err(|e|match e{sqlx::Error::Database(e)if e.is_unique_violation()=>username_taken(),e=>e.into()})?;
     auth.group_policy.initial(&mut tx, user.id).await?;
     record_audit(
         &mut tx,

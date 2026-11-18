@@ -211,6 +211,23 @@ describe("the workspace bridge", () => {
     }
   });
 
+  it("checks an asleep workspace once, not every two seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = { request: vi.fn(async () => ({ workspace: { status: "stopped", previewPort: null } })) };
+      const bridge = createWorkspaceBridge({ api, enabled: () => true, changed: () => {}, showTab: () => {}, viewing: () => true });
+      await bridge.load("c1");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(api.request).toHaveBeenCalledTimes(1);
+      // A workspace tool in the chat wakes the pod, so one more check follows.
+      bridge.onEvent({ event: "tool", data: { tool: "run_command", status: "completed" } } as never, null as never, "c1");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps checking a starting workspace when a check fails", async () => {
     vi.useFakeTimers();
     try {

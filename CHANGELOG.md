@@ -8,6 +8,7 @@ Each release's section is also its GitHub Release notes.
 
 - **Editing a large workspace file no longer cuts it down.** The model's **edit_file** read a file through the command runner, which keeps only the last 256 KB of output, and then wrote that tail back as the whole file. **read_file** showed the same tail numbered from line 1. Both now read from the start and know when a file goes on; an edit of a file over 1 MB is refused with a reason instead of written short.
 - **A reloaded chat keeps its model.** Opening a chat by its address could leave the model picker, and the next message, on the default model when the model list arrived after the chat. The chat's own model is picked once the list is there.
+- **An asleep workspace is left alone.** A chat with a workspace that had gone to sleep asked Chat about it every two seconds for as long as the chat was open, redrawing the page each time. It is checked once, and again when something wakes it.
 
 ## v1.5.2
 

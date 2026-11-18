@@ -110,6 +110,8 @@ interface Context {
 }
 
 const FILE_TOOLS = new Set(["start_server", "write_file", "edit_file"]);
+/** Tools that run in the workspace pod, so they wake an asleep one. */
+const WORKSPACE_TOOLS = new Set(["read_file", "write_file", "edit_file", "run_command", "start_server", "server_logs", "sync_code"]);
 const CODE_TOOLS = new Set(["write_file", "edit_file", "run_command", "run_in_terminal", "sync_code"]);
 
 /** The chat or its Compute page is the one on screen. */
@@ -184,13 +186,15 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
     return space.workspace;
   }
 
-  /** Keeps checking while the pod wakes, then briefly while Chat restarts its dev server. */
+  /** Keeps checking while the pod wakes, then briefly while Chat restarts its dev
+   * server. An asleep workspace is not checked: nothing wakes it but a wake from
+   * this page or a workspace tool in the chat, and both check again themselves. */
   function watch(id: string) {
     clearTimeout(polling);
     const space = spaces.get(id);
     if (!space?.workspace || !viewing(id)) return;
     const w = space.workspace,
-      waking = w.status === "starting" || w.status === "stopped";
+      waking = w.status === "starting";
     if (waking) space.wakePolls = 0;
     else if (w.status !== "running" || w.previewPort || (space.wakePolls = space.wakePolls + 1) > 20) return;
     polling = setTimeout(() => void load(id), 2000);
@@ -348,8 +352,10 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
           reloading = setTimeout(() => void showPreview(id), 600);
         }
         if (data.tool === "run_in_terminal" && data.status === "completed") runInTerminal(id, data.command);
-        // Workers that needed files turned the chat's workspace on.
+        // Workers that needed files turned the chat's workspace on, and a workspace
+        // tool wakes an asleep one.
         if (data.tool === "delegate" && data.workspace && !spaces.get(id)?.workspace) void load(id);
+        else if (WORKSPACE_TOOLS.has(data.tool) && space?.workspace?.status === "stopped") void load(id);
         if (space && space.files === null) changed();
         return true;
       }

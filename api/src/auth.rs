@@ -1363,6 +1363,7 @@ async fn session(State(auth): State<Auth>, headers: HeaderMap) -> Result<Respons
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoginInput {
     username: String,
     password: String,
@@ -1450,6 +1451,7 @@ async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Result<Response
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct PasswordInput {
     current_password: String,
@@ -1561,6 +1563,7 @@ async fn list_users(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct CreateUserInput {
     username: String,
@@ -1684,6 +1687,7 @@ async fn update_user(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct ResetPasswordInput {
     new_password: String,
@@ -1728,6 +1732,7 @@ async fn reset_password(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct LinkOidcInput {
     user_id: Uuid,

@@ -28,11 +28,11 @@ async function responseError(response: Response): Promise<ApiError> {
       ? "Your session has expired. Sign in again to continue."
       : `The request failed (${response.status}). Please try again.`;
   try {
-    const data = await response.json();
-    const detail = typeof data.error === "string" ? data.error : data.error?.message || data.message;
+    // Every API answer is {"error":{"message":...}}; a proxy may return HTML instead.
+    const detail = (await response.json()).error?.message;
     if (typeof detail === "string") message = detail;
   } catch {
-    // A proxy may return HTML rather than an API error.
+    // Not JSON: the generic message stands.
   }
   return new ApiError(message, response.status);
 }

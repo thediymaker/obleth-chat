@@ -751,6 +751,7 @@ async fn cancel(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LabelChange {
     /// A new name; an empty one goes back to the name the batch started with.
     name: Option<String>,

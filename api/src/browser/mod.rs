@@ -750,6 +750,7 @@ async fn status(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Toggle {
     on: bool,
 }
@@ -768,6 +769,7 @@ async fn toggle(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Control {
     controller: String,
 }
@@ -821,6 +823,7 @@ async fn account(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<V
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct Settings {
     search_engine: String,

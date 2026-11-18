@@ -470,6 +470,7 @@ async fn stop(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Choice {
     path: String,
     side: String,
@@ -501,6 +502,7 @@ async fn choose(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UndoInput {
     path: Option<String>,
 }
@@ -531,6 +533,7 @@ async fn uncommit(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StartInput {
     sha: String,
 }

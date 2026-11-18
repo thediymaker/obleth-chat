@@ -1304,6 +1304,7 @@ async fn one(pool: &PgPool, owner: Uuid, id: Uuid) -> Result<Value, ApiError> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct Choose {
     use_memory: bool,
@@ -1331,6 +1332,7 @@ async fn choose(
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct Input {
     content: Option<String>,
@@ -1589,6 +1591,7 @@ async fn remove_topic(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TopicPatch {
     name: Option<String>,
     kind: Option<String>,
@@ -1729,6 +1732,7 @@ fn admin_json(settings: &Settings, people: i64, memories: i64, s: &AppState) -> 
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct AdminPatch {
     enabled: bool,

@@ -619,6 +619,7 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct CollectionInput {
     name: Option<String>,
@@ -1082,6 +1083,7 @@ async fn file(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct SearchInput {
     query: String,
@@ -1146,6 +1148,7 @@ async fn conversation_collections(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct ConversationCollections {
     collection_ids: Vec<Uuid>,

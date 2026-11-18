@@ -25,6 +25,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportInput {
     url: String,
     #[serde(default)]

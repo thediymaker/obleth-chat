@@ -128,6 +128,7 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct Input {
     name: Option<String>,
@@ -380,6 +381,7 @@ async fn remove_saved(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct Collections {
     collection_ids: Vec<Uuid>,
@@ -447,6 +449,7 @@ async fn conversation_project(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct SetProject {
     project_id: Option<Uuid>,

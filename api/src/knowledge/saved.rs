@@ -26,6 +26,7 @@ const COLUMNS: &str = "s.id, s.owner_id, s.kind, s.title, s.body, s.language, s.
 const SEES: &str = "(s.owner_id = $1 OR s.project_id IN (SELECT p.id FROM projects p WHERE p.scope = 'group' AND p.group_id IN (SELECT group_id FROM user_group_members WHERE user_id = $1)))";
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Input {
     pub kind: Option<String>,

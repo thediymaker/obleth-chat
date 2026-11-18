@@ -53,7 +53,7 @@ use axum::{
         sse::{Event, KeepAlive},
         IntoResponse, Response, Sse,
     },
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use error::ApiError;
@@ -173,10 +173,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
             "/api/conversations/{id}/messages/{message}/select",
             post(select_version),
         )
-        .route(
-            "/api/{*rest}",
-            get(|| async { ApiError::not_found() }).post(|| async { ApiError::not_found() }),
-        )
+        .route("/api/{*rest}", any(|| async { ApiError::not_found() }))
         .with_state(state)
         .merge(auth)
         .merge(catalog)
@@ -207,6 +204,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(batches)
         .fallback_service(web(branding_dir, sandboxes.as_ref()))
         .layer(DefaultBodyLimit::max(128 * 1024))
+        .layer(middleware::from_fn(error::envelope))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn_with_state(metrics, metrics::record))
         // Outermost: preview hosts are answered before any Chat route or header policy.

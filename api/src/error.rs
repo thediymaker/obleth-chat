@@ -1,5 +1,8 @@
 use axum::{
-    http::StatusCode,
+    body::Body,
+    extract::Request,
+    http::{header, HeaderValue, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
@@ -117,6 +120,45 @@ async fn read_within(
         .unwrap_or_else(|_| Err(stalled()))
 }
 
+/// Every answer under /api and /mcp is JSON. The extractors' plain-text
+/// rejections (a malformed body, a wrong content type, a bad id in the path, a
+/// body over the limit) and the bodiless 405 become the error envelope with the
+/// same status and headers. The message is Chat's, not serde's, so field names
+/// and positions never leak.
+pub async fn envelope(request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let api = path.starts_with("/api/") || path == "/mcp";
+    let response = next.run(request).await;
+    let json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if !api || !response.status().is_client_error() || json {
+        return response;
+    }
+    let (mut parts, _) = response.into_parts();
+    let message = match parts.status {
+        StatusCode::BAD_REQUEST => "The request could not be read. Check its body and path.",
+        StatusCode::NOT_FOUND => "Not found",
+        StatusCode::METHOD_NOT_ALLOWED => "That method is not allowed here",
+        StatusCode::LENGTH_REQUIRED => "Send the request with its size (Content-Length)",
+        StatusCode::PAYLOAD_TOO_LARGE => "The request is too large",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "Send JSON (Content-Type: application/json)",
+        StatusCode::UNPROCESSABLE_ENTITY => "The request has a missing, unknown or malformed field",
+        other => other
+            .canonical_reason()
+            .unwrap_or("The request was refused"),
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let body = json!({"error":{"message":message}}).to_string();
+    Response::from_parts(parts, Body::from(body))
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({"error":{"message":self.1}}))).into_response()
@@ -213,6 +255,216 @@ mod upload_tests {
             started.elapsed() < Duration::from_secs(2),
             "{:?}",
             started.elapsed()
+        );
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+    use axum::{
+        extract::{DefaultBodyLimit, Path},
+        middleware,
+        routing::{any, get, post},
+        Router,
+    };
+    use serde::Deserialize;
+    use serde_json::Value;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Probe {
+        #[allow(dead_code)]
+        name: String,
+    }
+    async fn take(Json(_): Json<Probe>) -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+    async fn by_id(Path(_): Path<Uuid>) -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+    fn app() -> Router {
+        Router::new()
+            .route("/api/probe", post(take))
+            .route("/api/things/{id}", get(by_id))
+            .route(
+                "/mcp",
+                post(take).get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+            )
+            .route("/api/{*rest}", any(|| async { ApiError::not_found() }))
+            .route(
+                "/page",
+                get(|| async { (StatusCode::NOT_FOUND, "no such page") }),
+            )
+            .layer(DefaultBodyLimit::max(64))
+            .layer(middleware::from_fn(envelope))
+    }
+    async fn call(
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (StatusCode, String, String) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let kind = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        (status, kind, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+    fn message(body: &str) -> String {
+        let value: Value = serde_json::from_str(body).expect(body);
+        value["error"]["message"].as_str().expect(body).to_owned()
+    }
+
+    #[tokio::test]
+    async fn extractor_rejections_and_unknown_routes_answer_with_the_envelope() {
+        let json = "application/json";
+        let cases = [
+            (
+                "POST",
+                "/api/probe",
+                json,
+                "{not json",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "POST",
+                "/api/probe",
+                "text/plain",
+                "{}",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ),
+            (
+                "POST",
+                "/api/probe",
+                json,
+                r#"{"name":"a","extra":1}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "GET",
+                "/api/things/not-a-uuid",
+                json,
+                "",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "POST",
+                "/api/probe",
+                json,
+                &format!(r#"{{"name":"{}"}}"#, "x".repeat(100)),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                "PATCH",
+                "/api/nowhere/at/all",
+                json,
+                "{}",
+                StatusCode::NOT_FOUND,
+            ),
+            ("GET", "/mcp", json, "", StatusCode::METHOD_NOT_ALLOWED),
+        ];
+        for (method, path, content_type, body, expected) in cases {
+            let (status, kind, answer) = call(method, path, content_type, body).await;
+            assert_eq!(status, expected, "{method} {path}");
+            assert_eq!(kind, "application/json", "{method} {path}");
+            let text = message(&answer);
+            assert!(
+                !text.is_empty() && !text.contains("extra") && !text.contains("line "),
+                "{text}"
+            );
+        }
+        // A well-formed request is untouched, as is a page outside the API.
+        assert_eq!(
+            call("POST", "/api/probe", json, r#"{"name":"a"}"#).await.0,
+            StatusCode::NO_CONTENT
+        );
+        let (status, kind, answer) = call("GET", "/page", json, "").await;
+        assert_eq!(
+            (status, kind.as_str(), answer.as_str()),
+            (
+                StatusCode::NOT_FOUND,
+                "text/plain; charset=utf-8",
+                "no such page"
+            )
+        );
+    }
+
+    /// Every JSON request body refuses fields it does not know, so a typo in a
+    /// client is answered instead of ignored. The one exception is the cluster
+    /// agent's protocol: agents already installed on clusters send fields Chat no
+    /// longer reads, and they update on their own schedule.
+    #[test]
+    fn every_request_body_refuses_unknown_fields() {
+        const AGENT_PROTOCOL: [&str; 3] = ["Hello", "Result_", "Bye"];
+        fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push((
+                        path.display().to_string(),
+                        std::fs::read_to_string(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut files = Vec::new();
+        sources(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/api/src")),
+            &mut files,
+        );
+        let mut lax = Vec::new();
+        let mut checked = 0;
+        for (path, source) in &files {
+            for (at, _) in source.match_indices("): Json<") {
+                let name: String = source[at + 8..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                    .collect();
+                let name = name.rsplit("::").next().unwrap().to_owned();
+                if name.is_empty() || name == "Value" || AGENT_PROTOCOL.contains(&name.as_str()) {
+                    continue;
+                }
+                // The struct is in the handler's file, or elsewhere for a path like store::X.
+                let defined_in = |s: &str| {
+                    s.find(&format!("struct {name} "))
+                        .or_else(|| s.find(&format!("struct {name}{{")))
+                };
+                let (holder, def) = match defined_in(source) {
+                    Some(def) => (source.as_str(), def),
+                    None => files
+                        .iter()
+                        .find_map(|(_, s)| defined_in(s).map(|def| (s.as_str(), def)))
+                        .unwrap_or_else(|| panic!("{path}: no struct {name}")),
+                };
+                let attrs = &holder[holder[..def].rfind("\n\n").map_or(0, |i| i + 2)..def];
+                checked += 1;
+                if !attrs.contains("deny_unknown_fields") {
+                    lax.push(format!("{path}: {name}"));
+                }
+            }
+        }
+        assert!(checked > 60, "found only {checked} JSON request bodies");
+        assert!(
+            lax.is_empty(),
+            "request bodies that ignore unknown fields:\n{}",
+            lax.join("\n")
         );
     }
 }

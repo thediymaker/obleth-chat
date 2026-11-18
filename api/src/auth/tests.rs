@@ -3,8 +3,9 @@ use super::*;
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
+
+use crate::test_support::Database;
 
 const ORIGIN: &str = "http://localhost:8085";
 const PASSWORD: &str = "test admin password 42";
@@ -18,66 +19,6 @@ fn config() -> AuthConfig {
         oidc: None,
         login_rate_per_minute: 300,
         ..AuthConfig::default()
-    }
-}
-
-static VECTOR: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-struct Database {
-    pool: PgPool,
-    admin: PgPool,
-    schema: String,
-}
-impl Database {
-    async fn new() -> Option<Self> {
-        let Ok(url) = env::var("TEST_DATABASE_URL") else {
-            eprintln!("Skipping Postgres auth test: set TEST_DATABASE_URL to run");
-            return None;
-        };
-        let schema = format!("auth_test_{}", Uuid::new_v4().simple());
-        let admin = PgPool::connect(&url).await.unwrap();
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        // pgvector's types live in public; the extension is made once per database.
-        VECTOR
-            .get_or_init(|| async {
-                sqlx::query("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
-                    .execute(&admin)
-                    .await
-                    .unwrap();
-            })
-            .await;
-        let search_path = format!("SET search_path TO {schema}, public");
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .after_connect(move |conn, _| {
-                let statement = search_path.clone();
-                Box::pin(async move {
-                    sqlx::query(&statement).execute(conn).await?;
-                    Ok(())
-                })
-            })
-            .connect(&url)
-            .await
-            .unwrap();
-        // Every migration, so handlers that touch other features' tables (deleting a
-        // group clears its shares, for one) work as they do in production.
-        crate::MIGRATOR.run(&pool).await.unwrap();
-        Some(Self {
-            pool,
-            admin,
-            schema,
-        })
-    }
-    async fn close(self) {
-        self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await
-            .unwrap();
-        self.admin.close().await;
     }
 }
 

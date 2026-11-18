@@ -38,6 +38,9 @@ pub mod steer;
 pub mod store;
 pub mod suggestions;
 pub mod ui;
+
+#[cfg(test)]
+mod test_support;
 pub mod workspace_usage;
 
 use auth::{Auth, Identity};

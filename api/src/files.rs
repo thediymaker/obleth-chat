@@ -22,6 +22,17 @@ use crate::{error::ApiError, knowledge::ObjectStore};
 const PENDING_GRACE: &str = "15 minutes";
 /// Objects read at once for one request.
 const PARALLEL_READS: usize = 8;
+/// How long the worker waits after a pass that moved nothing, doubling per idle
+/// pass up to [`IDLE_PAUSE_MAX`]: once every file is in the bucket there is nothing
+/// to do, and the trash grace is long enough that a five-minute check keeps up.
+const IDLE_PAUSE: Duration = Duration::from_secs(30);
+const IDLE_PAUSE_MAX: Duration = Duration::from_secs(5 * 60);
+
+fn idle_pause(idle_passes: u32) -> Duration {
+    IDLE_PAUSE
+        .saturating_mul(1 << idle_passes.saturating_sub(1).min(4))
+        .min(IDLE_PAUSE_MAX)
+}
 
 #[derive(Clone)]
 pub struct Files {
@@ -151,6 +162,7 @@ impl Files {
             return;
         };
         let mut reported = false;
+        let mut idle_passes = 0u32;
         loop {
             expire_job_output(&self.pool).await;
             empty_trash(&self.pool, &store).await;
@@ -165,10 +177,11 @@ impl Files {
                 tracing::info!("moving files kept in Postgres into object storage");
                 reported = true;
             }
+            idle_passes = if moved { 0 } else { idle_passes + 1 };
             let pause = if moved {
                 Duration::ZERO
             } else {
-                Duration::from_secs(30)
+                idle_pause(idle_passes)
             };
             tokio::select! {
                 _ = shutdown.cancelled() => return,
@@ -331,7 +344,13 @@ fn unavailable(error: anyhow::Error) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::served_type;
+    use super::{idle_pause, served_type};
+
+    #[test]
+    fn idle_pause_backs_off_to_five_minutes() {
+        let seconds: Vec<u64> = (1..=6).map(|n| idle_pause(n).as_secs()).collect();
+        assert_eq!(seconds, [30, 60, 120, 240, 300, 300]);
+    }
 
     #[test]
     fn only_documents_and_images_are_served_inline() {

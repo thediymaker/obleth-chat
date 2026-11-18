@@ -21,6 +21,8 @@ use crate::error::ApiError;
 use std::collections::HashMap;
 
 mod imports;
+#[cfg(test)]
+mod tests;
 mod variants;
 mod workflows;
 pub use imports::ImportSummary;

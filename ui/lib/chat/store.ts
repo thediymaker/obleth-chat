@@ -369,11 +369,14 @@ export class ChatStore {
       this.emit();
       return;
     }
+    const first = !this.modelsLoaded;
     this.models = models || [];
     this.modelsLoaded = true;
     if (!this.models.some((m) => m.id === this.model)) this.model = this.models[0]?.id || "";
     this.catalogError = this.models.length ? "" : "No models are available to this account. Contact your administrator.";
     if (this.preferences) this.applyPreferences(this.preferences, { generation: !this.active });
+    // A chat that loaded before the model list could not pick its own model yet.
+    if (first && this.active?.model && this.models.some((m) => m.id === this.active?.model)) this.model = this.active.model;
     this.emit();
   }
   applyPreferences(preferences: Preferences | null | undefined, { generation = true, overrides = this.preferenceOverrides }: { generation?: boolean; overrides?: Record<string, unknown> } = {}) {

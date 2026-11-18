@@ -252,6 +252,21 @@ describe("an open chat", () => {
     expect(t.store.streaming).toBe(false);
   });
 
+  it("picks the chat's own model when the model list arrives after the chat", async () => {
+    const api = { request: vi.fn(async () => ({ conversation: conversation({ model: "m2" }) })), send: vi.fn() };
+    const store = new ChatStore({ api: api as never, readEvents: (() => channel().events()) as never, toast: vi.fn(), go: vi.fn(), chats: { upsert: vi.fn(), remove: vi.fn(), refresh: vi.fn(), find: vi.fn() } });
+    stores.push(store);
+    store.setRoute(routeOf("/chat/c1"));
+    await until(() => !store.loadingChat && !!store.active);
+    expect(store.active?.model).toBe("m2");
+    store.setCatalog({ models: [{ id: "m1", name: "Model One" }, { id: "m2", name: "Model Two" }] as never });
+    expect(store.model).toBe("m2");
+    // A later refresh of the list leaves the picker alone.
+    store.model = "m1";
+    store.setCatalog({ models: [{ id: "m1", name: "Model One" }, { id: "m2", name: "Model Two" }] as never });
+    expect(store.model).toBe("m1");
+  });
+
   it("keeps someone else's shared chat read-only", async () => {
     const t = setup({
       "GET /api/conversations/s1": () => {

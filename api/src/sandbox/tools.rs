@@ -326,35 +326,19 @@ pub async fn read_bytes(
     Ok((output.stdout, truncated))
 }
 
+/// Up to `limit` bytes of a text file, and whether it was longer. Built on
+/// `read_bytes`, which asks the pod for one byte past the limit and so knows
+/// when the file goes on. A command's output keeps its newest bytes; a file
+/// read must keep its first ones, or an edit would write the tail back over
+/// the whole file.
 pub async fn read_text(
     sb: &Sandboxes,
     sandbox: &Sandbox,
     path: &str,
     limit: usize,
 ) -> Result<(String, bool), String> {
-    let path = clean_path(path, &sandbox.slug)?;
-    let limit_arg = (limit + 1).to_string();
-    let (out, err, code) = sh(
-        sb,
-        sandbox,
-        "head -c \"$2\" -- \"$1\"",
-        &[&path, &limit_arg],
-        None,
-        Duration::from_secs(20),
-    )
-    .await?;
-    if code != Some(0) {
-        return Err(one_line(&err, 200).trim_start_matches("head: ").to_owned());
-    }
-    let truncated = out.len() > limit;
-    Ok((
-        if truncated {
-            out.chars().take(limit).collect()
-        } else {
-            out
-        },
-        truncated,
-    ))
+    let (bytes, truncated) = read_bytes(sb, sandbox, path, limit).await?;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
 }
 
 pub async fn list_entries(
@@ -648,7 +632,7 @@ async fn edit(sb: &Sandboxes, sandbox: &Sandbox, args: &Value) -> ToolResult {
     }
     let (text, truncated) = read_text(sb, sandbox, arg(args, "path"), 1024 * 1024).await?;
     if truncated {
-        return Err("The file is larger than 1 MB; use write_file instead".into());
+        return Err("The file is larger than 1 MB, so it cannot be edited in place; write the whole file with write_file, or change it with a command".into());
     }
     let all = args
         .get("replace_all")

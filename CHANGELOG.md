@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Fixes**
+
+- **Editing a large workspace file no longer cuts it down.** The model's **edit_file** read a file through the command runner, which keeps only the last 256 KB of output, and then wrote that tail back as the whole file. **read_file** showed the same tail numbered from line 1. Both now read from the start and know when a file goes on; an edit of a file over 1 MB is refused with a reason instead of written short.
+
 ## v1.5.2
 
 **Fixes**

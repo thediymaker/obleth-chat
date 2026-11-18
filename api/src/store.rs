@@ -860,16 +860,15 @@ impl Store {
                     && matches!(message.status.as_str(), "error" | "interrupted"));
             replayed && !(message.role == "assistant" && replay_content(message).is_empty())
         });
-        let files =
-            attachments::load_owner(&mut tx, &self.files, owner, attachment_ids, vision).await?;
+        // Metadata only, under the lock: the bytes are read after the commit.
+        let files = attachments::load_owner(&mut tx, owner, attachment_ids, vision).await?;
         let message_ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
-        let mut attached =
-            attachments::load_messages(&mut tx, &self.files, owner, &message_ids, vision).await?;
+        let attached = attachments::load_messages(&mut tx, owner, &message_ids, vision).await?;
         let context_files = attached.values().flatten().chain(files.iter());
         let mut text_bytes = 0usize;
         let mut image_bytes = 0usize;
         for file in context_files {
-            if file.meta.kind != "image" {
+            if file.meta().kind != "image" {
                 text_bytes += file.context_bytes();
             } else {
                 image_bytes += file.context_bytes();
@@ -962,6 +961,29 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        // The bytes come after the lock, so a slow bucket never holds the user
+        // row. The turn is already recorded, so a read that fails ends it as an
+        // error instead of leaving the response pending.
+        let (files, mut attached) = match attachments::read_turn(&self.files, files, attached).await
+        {
+            Ok(read) => read,
+            Err(error) => {
+                self.finish_turn_detailed(
+                    owner,
+                    id,
+                    generation_id,
+                    "",
+                    "",
+                    "error",
+                    None,
+                    None,
+                    None,
+                    Some("An attached file could not be read from storage"),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
         messages.push(Message {
             id: user_id,
             role: "user".into(),

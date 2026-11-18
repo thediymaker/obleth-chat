@@ -219,12 +219,87 @@ impl Attachment {
         }
     }
 
-    /// UTF-8 context bytes for text, serialized image-part bytes for images.
+    /// UTF-8 context bytes for text, serialized image-part bytes for images:
+    /// what `text_context` and `content_part` would measure, computed from the
+    /// metadata alone, so the check neither needs the bytes nor encodes them.
     pub fn context_bytes(&self) -> usize {
-        self.text_context()
-            .map(|text| text.len())
-            .unwrap_or_else(|| self.content_part().to_string().len())
+        match self.meta.kind.as_str() {
+            "text" => TEXT_WRAP + json!(self.meta.name).to_string().len() + self.meta.size as usize,
+            "image" => {
+                IMAGE_PART_WRAP
+                    + self.meta.mime_type.len()
+                    + (self.meta.size as usize).div_ceil(3) * 4
+            }
+            _ => self.text_context().map_or(0, |text| text.len()),
+        }
     }
+}
+
+/// What `text_context` adds around a text file's bytes and its JSON name.
+const TEXT_WRAP: usize =
+    "\n\nAttached file ".len() + ":\n".len() + "\nEnd of attached file.\n".len();
+/// What `content_part` adds around an image's media type and base64 bytes.
+const IMAGE_PART_WRAP: usize = r#"{"type":"image_url","image_url":{"url":"data:;base64,"}}"#.len();
+
+/// An attachment as read under the owner's lock: its metadata and extracted
+/// text, with its bytes still where they are stored. [`read`] fetches them
+/// once the transaction has committed, so a slow bucket never holds the user
+/// row (user-row locks serialize only short database transactions).
+#[derive(Debug)]
+pub struct Unread {
+    file: Attachment,
+    stored: (Option<Vec<u8>>, Option<String>),
+}
+
+impl Unread {
+    pub fn meta(&self) -> &AttachmentMeta {
+        &self.file.meta
+    }
+    pub fn context_bytes(&self) -> usize {
+        self.file.context_bytes()
+    }
+}
+
+/// The attachments with their bytes, in the order given.
+pub async fn read(files: &Files, unread: Vec<Unread>) -> Result<Vec<Attachment>, ApiError> {
+    let (mut loaded, stored): (Vec<_>, Vec<_>) =
+        unread.into_iter().map(|u| (u.file, u.stored)).unzip();
+    let data = files.read_all(stored, MAX_FILE_BYTES).await?;
+    for (file, data) in loaded.iter_mut().zip(data) {
+        file.data = data;
+    }
+    Ok(loaded)
+}
+
+/// A turn's new files and the replayed messages' files, fetched in one batch.
+pub async fn read_turn(
+    files: &Files,
+    new: Vec<Unread>,
+    replayed: HashMap<Uuid, Vec<Unread>>,
+) -> Result<(Vec<Attachment>, HashMap<Uuid, Vec<Attachment>>), ApiError> {
+    let mut replayed = replayed;
+    let marker = Uuid::nil();
+    replayed.insert(marker, new);
+    let mut read = read_messages(files, replayed).await?;
+    let new = read.remove(&marker).unwrap_or_default();
+    Ok((new, read))
+}
+
+/// As [`read`], for the attachments of several messages, fetched in one batch.
+pub async fn read_messages(
+    files: &Files,
+    unread: HashMap<Uuid, Vec<Unread>>,
+) -> Result<HashMap<Uuid, Vec<Attachment>>, ApiError> {
+    let (messages, per_message): (Vec<Uuid>, Vec<Vec<Unread>>) = unread.into_iter().unzip();
+    let counts: Vec<usize> = per_message.iter().map(Vec::len).collect();
+    let mut loaded = read(files, per_message.into_iter().flatten().collect())
+        .await?
+        .into_iter();
+    Ok(messages
+        .into_iter()
+        .zip(counts)
+        .map(|(message, n)| (message, loaded.by_ref().take(n).collect()))
+        .collect())
 }
 
 /// The JSON form of an upload, with the file as base64.
@@ -605,8 +680,11 @@ fn validate_ids(ids: &[Uuid]) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn require_vision(files: &[Attachment], vision: bool) -> Result<(), ApiError> {
-    if !vision && files.iter().any(|file| file.meta.kind == "image") {
+fn require_vision<'a>(
+    files: impl IntoIterator<Item = &'a AttachmentMeta>,
+    vision: bool,
+) -> Result<(), ApiError> {
+    if !vision && files.into_iter().any(|meta| meta.kind == "image") {
         return Err(ApiError::bad("This conversation contains images. Choose a model with confirmed image support to continue."));
     }
     Ok(())
@@ -616,11 +694,10 @@ fn require_vision(files: &[Attachment], vision: bool) -> Result<(), ApiError> {
 /// users' IDs are indistinguishable. Input order is retained for model context.
 pub async fn load_owner(
     tx: &mut Transaction<'_, Postgres>,
-    files: &Files,
     owner: Uuid,
     ids: &[Uuid],
     vision: bool,
-) -> Result<Vec<Attachment>, ApiError> {
+) -> Result<Vec<Unread>, ApiError> {
     validate_ids(ids)?;
     if ids.is_empty() {
         return Ok(vec![]);
@@ -647,26 +724,28 @@ pub async fn load_owner(
             },
         )
         .unzip();
-    let data = files.read_all(stored, MAX_FILE_BYTES).await?;
     let mut by_id: HashMap<_, _> = rows
         .into_iter()
-        .zip(data)
+        .zip(stored)
         .map(
-            |((id, name, mime_type, size, kind, text, parts, searched), data)| {
+            |((id, name, mime_type, size, kind, text, parts, searched), stored)| {
                 (
                     id,
-                    Attachment {
-                        meta: AttachmentMeta {
-                            id,
-                            name,
-                            mime_type,
-                            size,
-                            kind,
-                            parts,
-                            searched,
+                    Unread {
+                        file: Attachment {
+                            meta: AttachmentMeta {
+                                id,
+                                name,
+                                mime_type,
+                                size,
+                                kind,
+                                parts,
+                                searched,
+                            },
+                            data: Vec::new(),
+                            text,
                         },
-                        data,
-                        text,
+                        stored,
                     },
                 )
             },
@@ -676,7 +755,7 @@ pub async fn load_owner(
         .iter()
         .map(|id| by_id.remove(id).expect("all IDs checked above"))
         .collect();
-    require_vision(&files, vision)?;
+    require_vision(files.iter().map(Unread::meta), vision)?;
     Ok(files)
 }
 
@@ -727,11 +806,10 @@ pub async fn link_message(
 /// capabilities again; switching models cannot bypass image support checks.
 pub async fn load_messages(
     tx: &mut Transaction<'_, Postgres>,
-    files: &Files,
     owner: Uuid,
     messages: &[Uuid],
     vision: bool,
-) -> Result<HashMap<Uuid, Vec<Attachment>>, ApiError> {
+) -> Result<HashMap<Uuid, Vec<Unread>>, ApiError> {
     if messages.len() > crate::store::MAX_HISTORY {
         return Err(ApiError::bad("Too many messages"));
     }
@@ -748,12 +826,12 @@ pub async fn load_messages(
     {
         return Err(ApiError::bad("Attached files exceed the conversation context limit. Start a new conversation or branch an earlier message."));
     }
-    load_message_data(tx, files, owner, messages, false, &[]).await
+    load_message_data(tx, owner, messages, false, &[]).await
 }
 
 /// The files of exported messages, by message, and the files left out of them.
 pub struct ForArchive {
-    pub files: HashMap<Uuid, Vec<Attachment>>,
+    pub files: HashMap<Uuid, Vec<Unread>>,
     /// Files too large for what is left of the archive's budget.
     pub left_out: HashMap<Uuid, Vec<AttachmentMeta>>,
 }
@@ -763,7 +841,6 @@ pub struct ForArchive {
 /// says so, so a chat with a large file still exports.
 pub async fn load_for_archive(
     tx: &mut Transaction<'_, Postgres>,
-    files: &Files,
     owner: Uuid,
     messages: &[Uuid],
     max_bytes: usize,
@@ -801,7 +878,7 @@ pub async fn load_for_archive(
             skipped.push(id);
         }
     }
-    let loaded = load_message_data(tx, files, owner, messages, true, &skipped).await?;
+    let loaded = load_message_data(tx, owner, messages, true, &skipped).await?;
     let mut left_out: HashMap<Uuid, Vec<AttachmentMeta>> = HashMap::new();
     if !skipped.is_empty() {
         for (message, metas) in metadata_for_messages(tx, owner, messages).await? {
@@ -824,12 +901,11 @@ pub async fn load_for_archive(
 /// needs. Files in `skip` are left out.
 async fn load_message_data(
     tx: &mut Transaction<'_, Postgres>,
-    files: &Files,
     owner: Uuid,
     messages: &[Uuid],
     originals: bool,
     skip: &[Uuid],
-) -> Result<HashMap<Uuid, Vec<Attachment>>, ApiError> {
+) -> Result<HashMap<Uuid, Vec<Unread>>, ApiError> {
     let rows: Vec<MessageAttachmentRow> = sqlx::query_as(&format!(
         "SELECT ma.message_id,{CONTEXT_COLUMNS} FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id WHERE a.owner_id=$1 AND c.owner_id=$1 AND ma.message_id=ANY($2) AND NOT a.id=ANY($4) ORDER BY ma.message_id,ma.position",
     )).bind(owner).bind(messages).bind(originals).bind(skip).fetch_all(&mut **tx).await?;
@@ -846,23 +922,25 @@ async fn load_message_data(
             },
         )
         .unzip();
-    let data = files.read_all(stored, MAX_FILE_BYTES).await?;
-    let mut result: HashMap<Uuid, Vec<Attachment>> = HashMap::new();
-    for ((message, id, name, mime_type, size, kind, text, parts, searched), data) in
-        rows.into_iter().zip(data)
+    let mut result: HashMap<Uuid, Vec<Unread>> = HashMap::new();
+    for ((message, id, name, mime_type, size, kind, text, parts, searched), stored) in
+        rows.into_iter().zip(stored)
     {
-        result.entry(message).or_default().push(Attachment {
-            meta: AttachmentMeta {
-                id,
-                name,
-                mime_type,
-                size,
-                kind,
-                parts,
-                searched,
+        result.entry(message).or_default().push(Unread {
+            stored,
+            file: Attachment {
+                meta: AttachmentMeta {
+                    id,
+                    name,
+                    mime_type,
+                    size,
+                    kind,
+                    parts,
+                    searched,
+                },
+                data: Vec::new(),
+                text,
             },
-            data,
-            text,
         });
     }
     Ok(result)
@@ -1137,5 +1215,51 @@ fn valid_image_header(mime: &str, data: &[u8]) -> bool {
                 && u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize + 8 == data.len()
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attachment(kind: &str, mime_type: &str, data: Vec<u8>, text: Option<&str>) -> Attachment {
+        Attachment {
+            meta: AttachmentMeta {
+                id: Uuid::nil(),
+                name: "notes \"q\".txt".into(),
+                mime_type: mime_type.into(),
+                size: data.len() as i32,
+                kind: kind.into(),
+                parts: None,
+                searched: false,
+            },
+            data,
+            text: text.map(str::to_owned),
+        }
+    }
+
+    /// The arithmetic size is exactly what building the part would measure,
+    /// so the context check decides the same without encoding anything.
+    #[test]
+    fn context_bytes_match_the_built_part_without_building_it() {
+        for size in (0..=10).chain([1_000_003, 3 * 1024 * 1024]) {
+            let image = attachment("image", "image/png", vec![7; size], None);
+            assert_eq!(
+                image.context_bytes(),
+                image.content_part().to_string().len(),
+                "image of {size} bytes"
+            );
+            let text = attachment("text", "text/plain", vec![b'a'; size], None);
+            assert_eq!(
+                text.context_bytes(),
+                text.text_context().unwrap().len(),
+                "text of {size} bytes"
+            );
+        }
+        let document = attachment("document", "application/pdf", vec![], Some("page one"));
+        assert_eq!(
+            document.context_bytes(),
+            document.text_context().unwrap().len()
+        );
     }
 }

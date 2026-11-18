@@ -233,8 +233,8 @@ function Files({ id, space, bridge }: { id: string; space: Space; bridge: Worksp
   // brings everything in it, so its rows show ticked and cannot be changed alone.
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
-    if (space.files == null && !space.loadingFiles && running && !space.file) void bridge.loadFiles(id);
-  }, [space.files, space.loadingFiles, running, space.file, bridge, id]);
+    if ((space.files == null || space.filesStale) && !space.loadingFiles && running && !space.file) void bridge.loadFiles(id);
+  }, [space.files, space.filesStale, space.loadingFiles, running, space.file, bridge, id]);
   // A refreshed list may no longer hold what was ticked.
   const listed = useMemo(() => new Set((space.files || []).map((e) => e.path)), [space.files]);
   const asking = useMemo(() => pickedPaths(new Set([...picked].filter((p) => listed.has(p)))), [picked, listed]);

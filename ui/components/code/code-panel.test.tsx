@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { fakeStore } from "@/components/workspace/test-store";
 import { CodePanel, CodeTabLabel } from "./code-panel";
+import { codeEvents } from "./events";
 import type { ChatCode } from "./model";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
@@ -60,6 +61,29 @@ describe("the chat's Git tab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sync" }));
     await waitFor(() => expect(calls.find((c) => c.path.endsWith("/sync"))?.body).toEqual({ message: "New header" }));
     expect(await screen.findByText("Everything here is in the project.")).toBeInTheDocument();
+  });
+
+  it("refreshes the Git state once per burst of changes, even with the tab label and panel both open", async () => {
+    const calls = mockApi(() => base, { code: true });
+    renderPage(
+      <>
+        <CodeTabLabel conversationId="c1" />
+        <CodePanel conversationId="c1" />
+      </>,
+    );
+    expect(await screen.findByText("Update the home page")).toBeInTheDocument();
+    const reads = () => calls.filter((c) => c.path === "/api/conversations/c1/code").length;
+    expect(reads()).toBe(1);
+    vi.useFakeTimers();
+    try {
+      for (let n = 0; n < 5; n++) codeEvents.emit({ id: "c1", kind: "changed" });
+      await vi.advanceTimersByTimeAsync(2400);
+      expect(reads()).toBe(1);
+      await vi.advanceTimersByTimeAsync(200);
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() => expect(reads()).toBe(2));
   });
 
   it("opens a file's diff and undoes it after asking", async () => {

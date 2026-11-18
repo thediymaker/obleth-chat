@@ -7,7 +7,7 @@
 import { toast as sonner } from "sonner";
 import type { StreamEvent } from "@/lib/api";
 import type { Message } from "@/lib/chat/types";
-import { codeEvents } from "@/components/code/events";
+import { SETTLE_MS, codeEvents } from "@/components/code/events";
 import { type FileEntry, type OpenFile, type Workspace, downloadUrl, imageFile, previewReload, rawUrl, startDownload, workspacePath } from "./model";
 
 export type { Workspace } from "./model";
@@ -17,6 +17,8 @@ export interface Space {
   workspace: Workspace | null;
   loaded: boolean;
   files: FileEntry[] | null;
+  /** The listed files changed since they were loaded; the old rows stay until the reload lands. */
+  filesStale: boolean;
   filesError: string;
   loadingFiles: boolean;
   file: OpenFile | null;
@@ -109,6 +111,7 @@ interface Context {
   wait?: (ms: number) => Promise<void>;
 }
 
+/** Tools that change what the Files tab lists. */
 const FILE_TOOLS = new Set(["start_server", "write_file", "edit_file"]);
 /** Tools that run in the workspace pod, so they wake an asleep one. */
 const WORKSPACE_TOOLS = new Set(["read_file", "write_file", "edit_file", "run_command", "start_server", "server_logs", "sync_code"]);
@@ -151,7 +154,7 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
     if (!space)
       spaces.set(
         id,
-        (space = { workspace: null, loaded: false, files: null, filesError: "", loadingFiles: false, file: null, url: "", origin: "", page: "", frame: 0, linking: false, waking: false, wakePolls: 0, command: null, terminal: 0 }),
+        (space = { workspace: null, loaded: false, files: null, filesStale: false, filesError: "", loadingFiles: false, file: null, url: "", origin: "", page: "", frame: 0, linking: false, waking: false, wakePolls: 0, command: null, terminal: 0 }),
       );
     return space;
   };
@@ -223,6 +226,7 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
     const space = entry(id);
     if (space.loadingFiles) return;
     space.loadingFiles = true;
+    space.filesStale = false;
     try {
       space.files = (await api.request(`${path(id)}/files`)).entries || [];
       space.filesError = "";
@@ -298,6 +302,23 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
     startDownload(downloadUrl(id));
   }
 
+  // A loaded file list is marked stale once a burst of edits settles, so the Files
+  // tab reloads it once and keeps showing the old rows meanwhile.
+  const settling = new Map<string, ReturnType<typeof setTimeout>>();
+  function filesChanged(id: string) {
+    clearTimeout(settling.get(id));
+    settling.set(
+      id,
+      setTimeout(() => {
+        settling.delete(id);
+        const space = spaces.get(id);
+        if (!space?.files) return;
+        space.filesStale = true;
+        changed();
+      }, SETTLE_MS),
+    );
+  }
+
   function runInTerminal(id: string, command: string) {
     const space = entry(id);
     if (!space.workspace || !command) return;
@@ -344,7 +365,7 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
       if (event.event === "tool") {
         const data = event.data || {};
         const space = spaces.get(id);
-        if (FILE_TOOLS.has(data.tool) && space) space.files = null;
+        if (FILE_TOOLS.has(data.tool) && data.status !== "running" && space?.files) filesChanged(id);
         if (CODE_TOOLS.has(data.tool) && data.status !== "running") codeEvents.emit({ id, kind: "changed" });
         // A plain web server has no live reload, so reload the preview after each change.
         if (data.reload) {
@@ -356,7 +377,6 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
         // tool wakes an asleep one.
         if (data.tool === "delegate" && data.workspace && !spaces.get(id)?.workspace) void load(id);
         else if (WORKSPACE_TOOLS.has(data.tool) && space?.workspace?.status === "stopped") void load(id);
-        if (space && space.files === null) changed();
         return true;
       }
       if (event.event === "draft") return true;

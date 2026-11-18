@@ -41,8 +41,6 @@ pub use storage::ObjectStore;
 /// leaves their cosine distances unchanged.
 pub const DIMENSIONS: usize = 1024;
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
-/// How long a browser has to send one.
-const UPLOAD_SECONDS: u64 = 300;
 const MAX_DOCUMENTS: i64 = 2000;
 const EMBED_BATCH: usize = 16;
 pub use embedding::Prompts;
@@ -897,29 +895,12 @@ async fn upload(
         }
         Ok::<_, ApiError>((user, k, name, kind))
     };
-    let (user, k, name, kind) = match allowed.await {
-        Ok(allowed) => allowed,
-        Err(refused) => {
-            crate::error::discard(body).await;
-            return Err(refused);
-        }
-    };
+    let ((user, k, name, kind), body) = crate::error::admitted(body, allowed.await).await?;
     // Room in the memory uploads share, for the size the upload states or the most a
     // file may be, so many at once wait their turn instead of adding up.
     let _held =
         crate::attachments::hold(declared.map_or(MAX_FILE_BYTES, |size| size as usize)).await?;
-    let body = tokio::time::timeout(
-        Duration::from_secs(UPLOAD_SECONDS),
-        axum::body::to_bytes(body, MAX_FILE_BYTES),
-    )
-    .await
-    .map_err(|_| {
-        ApiError(
-            StatusCode::REQUEST_TIMEOUT,
-            "The upload took too long".into(),
-        )
-    })?
-    .map_err(|_| too_large())?;
+    let body = crate::error::upload(body, MAX_FILE_BYTES, too_large().1).await?;
     if body.is_empty() {
         return Err(bad("The file is empty"));
     }
@@ -940,16 +921,13 @@ async fn upload(
     };
     let row = usage(&k.pool, user.id).await?;
     quota(row.get("used"), row.get("count"))?;
-    k.store
-        .put(&key, Vec::from(body), &mime)
-        .await
-        .map_err(|error| {
-            tracing::warn!("could not store a knowledge file: {error:#}");
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The file could not be stored. Try again.".into(),
-            )
-        })?;
+    k.store.put(&key, body, &mime).await.map_err(|error| {
+        tracing::warn!("could not store a knowledge file: {error:#}");
+        ApiError(
+            StatusCode::BAD_GATEWAY,
+            "The file could not be stored. Try again.".into(),
+        )
+    })?;
     let mut tx = k.pool.begin().await?;
     sqlx::query("SELECT 1 FROM users WHERE id=$1 FOR UPDATE")
         .bind(user.id)

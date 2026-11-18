@@ -365,70 +365,78 @@ async fn upload(
     RawQuery(query): RawQuery,
     body: Body,
 ) -> Result<(StatusCode, Json<AttachmentMeta>), ApiError> {
-    let user = s.auth.require(&headers, true).await?;
     let limits = s.store.limits;
     let raw = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(';').next())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/octet-stream"));
-    let declared = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .or_else(|| axum::body::HttpBody::size_hint(&body).exact())
-        .ok_or_else(|| {
-            ApiError(
-                StatusCode::LENGTH_REQUIRED,
-                "Send the upload with its size (Content-Length)".into(),
-            )
-        })?;
     // Base64 takes 4 bytes for every 3, and the JSON around it a little more.
     let most = if raw {
         limits.max_file_bytes
     } else {
         limits.max_file_bytes.div_ceil(3) * 4 + MIB
     };
-    let too_large = || {
-        ApiError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "Files can be at most {}. Choose a smaller file.",
-                size_label(limits.max_file_bytes)
-            ),
-        )
+    let too_large = format!(
+        "Files can be at most {}. Choose a smaller file.",
+        size_label(limits.max_file_bytes)
+    );
+    // Everything that can refuse the upload is decided before any of it is read:
+    // who sends it, and that its declared size fits.
+    let size_hint = axum::body::HttpBody::size_hint(&body).exact();
+    let checks = async {
+        let user = s.auth.require(&headers, true).await?;
+        let declared = headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .or(size_hint)
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::LENGTH_REQUIRED,
+                    "Send the upload with its size (Content-Length)".into(),
+                )
+            })?;
+        if declared > most as u64 {
+            return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, too_large.clone()));
+        }
+        Ok::<_, ApiError>((user, declared as usize))
     };
-    if declared > most as u64 {
-        return Err(too_large());
-    }
-    let length = declared as usize;
-    // Signed in first, then room in memory for the body, its decoded bytes (JSON
-    // only) and its copy on the way to storage, before the body is read.
+    let ((user, length), body) = crate::error::admitted(body, checks.await).await?;
+    // Room in memory for the body, its decoded bytes (JSON only) and its copy on the
+    // way to storage, before the body is read.
     let _held = hold(if raw { length } else { length * 2 }).await?;
-    let body = axum::body::to_bytes(body, length)
-        .await
-        .map_err(|_| too_large())?;
-    let incoming = if raw {
-        let mut name = None;
-        let mut mime_type = String::new();
-        for (key, value) in url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes()) {
-            match key.as_ref() {
-                "name" => name = Some(value.into_owned()),
-                "type" => mime_type = value.into_owned(),
-                _ => {}
+    let body = crate::error::upload(body, length, too_large).await?;
+    // The JSON decode and the hash walk the whole file: off the async workers.
+    let (incoming, digest) = tokio::task::spawn_blocking(move || {
+        let incoming = if raw {
+            let mut name = None;
+            let mut mime_type = String::new();
+            for (key, value) in
+                url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes())
+            {
+                match key.as_ref() {
+                    "name" => name = Some(value.into_owned()),
+                    "type" => mime_type = value.into_owned(),
+                    _ => {}
+                }
             }
-        }
-        Incoming {
-            name: name.ok_or_else(|| ApiError::bad("Name the file with ?name="))?,
-            mime_type,
-            data: Vec::from(body),
-        }
-    } else {
-        let upload: Upload =
-            serde_json::from_slice(&body).map_err(|_| ApiError::bad("Invalid upload"))?;
-        drop(body);
-        decoded(upload, &limits)?
-    };
+            Incoming {
+                name: name.ok_or_else(|| ApiError::bad("Name the file with ?name="))?,
+                mime_type,
+                data: body,
+            }
+        } else {
+            let upload: Upload =
+                serde_json::from_slice(&body).map_err(|_| ApiError::bad("Invalid upload"))?;
+            drop(body);
+            decoded(upload, &limits)?
+        };
+        let digest = Sha256::digest(&incoming.data).to_vec();
+        Ok::<_, ApiError>((incoming, digest))
+    })
+    .await
+    .map_err(|_| ApiError::internal())??;
     // A long document can be searched when Knowledge is set up and has a gateway to
     // embed it through.
     let searchable = s.knowledge.is_some() && s.gateway.is_some();
@@ -437,9 +445,15 @@ async fn upload(
         .as_ref()
         .map_or_else(Tools::from_env, |k| k.tools().clone());
     let mut file = validate_upload(incoming, &tools, searchable, &limits).await?;
-    let digest = Sha256::digest(&file.data).to_vec();
     let files = &s.store.files;
-    let placed = place(files, user.id, &file.meta, std::mem::take(&mut file.data)).await?;
+    let placed = place(
+        files,
+        user.id,
+        &file.meta,
+        std::mem::take(&mut file.data),
+        &digest,
+    )
+    .await?;
     let saved = async {
         let mut tx = s.store.pool.begin().await?;
         lock_owner(&mut tx, user.id).await?;
@@ -482,9 +496,15 @@ async fn place(
     owner: Uuid,
     meta: &AttachmentMeta,
     data: Vec<u8>,
+    sha256: &[u8],
 ) -> Result<Placed, ApiError> {
     files
-        .place(attachment_key(owner, meta.id), data, &meta.mime_type)
+        .place_hashed(
+            attachment_key(owner, meta.id),
+            data,
+            &meta.mime_type,
+            sha256,
+        )
         .await
 }
 
@@ -557,7 +577,14 @@ pub async fn import_in(
         if let Some(id) = existing {
             ids.push(id);
         } else {
-            let placed = place(store, owner, &file.meta, std::mem::take(&mut file.data)).await?;
+            let placed = place(
+                store,
+                owner,
+                &file.meta,
+                std::mem::take(&mut file.data),
+                &digest,
+            )
+            .await?;
             if let Err(error) = insert_in(tx, limits, owner, &file, &placed, &digest).await {
                 store.discard(&placed).await;
                 return Err(error);

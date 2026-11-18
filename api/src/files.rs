@@ -64,13 +64,36 @@ impl Files {
         bytes: Vec<u8>,
         content_type: &str,
     ) -> Result<Placed, ApiError> {
+        self.store_under(key, bytes, content_type, None).await
+    }
+
+    /// `place` for a caller that already has the bytes' SHA-256, so the bucket's
+    /// request is signed with it instead of hashing the bytes again.
+    pub async fn place_hashed(
+        &self,
+        key: String,
+        bytes: Vec<u8>,
+        content_type: &str,
+        sha256: &[u8],
+    ) -> Result<Placed, ApiError> {
+        self.store_under(key, bytes, content_type, Some(sha256))
+            .await
+    }
+
+    async fn store_under(
+        &self,
+        key: String,
+        bytes: Vec<u8>,
+        content_type: &str,
+        sha256: Option<&[u8]>,
+    ) -> Result<Placed, ApiError> {
         let Some(store) = &self.store else {
             return Ok(Placed {
                 data: Some(bytes),
                 key: None,
             });
         };
-        put(&self.pool, store, &key, bytes, content_type)
+        put(&self.pool, store, &key, bytes, content_type, sha256)
             .await
             .map_err(unavailable)?;
         Ok(Placed {
@@ -213,6 +236,7 @@ impl Files {
                 &key,
                 row.get("data"),
                 row.get("mime_type"),
+                None,
             )
             .await?;
             sqlx::query(&format!(
@@ -236,6 +260,7 @@ async fn put(
     key: &str,
     bytes: Vec<u8>,
     content_type: &str,
+    sha256: Option<&[u8]>,
 ) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO object_trash (object_key, pending) VALUES ($1, TRUE) ON CONFLICT DO NOTHING",
@@ -243,7 +268,10 @@ async fn put(
     .bind(key)
     .execute(pool)
     .await?;
-    store.put(key, bytes, content_type).await
+    match sha256 {
+        Some(sha256) => store.put_hashed(key, bytes, content_type, sha256).await,
+        None => store.put(key, bytes, content_type).await,
+    }
 }
 
 pub fn attachment_key(owner: Uuid, id: Uuid) -> String {

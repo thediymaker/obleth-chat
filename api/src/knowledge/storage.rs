@@ -86,7 +86,20 @@ impl ObjectStore {
     }
 
     pub async fn put(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> Result<()> {
-        let hash = hex(&Sha256::digest(&bytes));
+        let sha256 = Sha256::digest(&bytes);
+        self.put_hashed(key, bytes, content_type, &sha256).await
+    }
+
+    /// `put` for a caller that already has the bytes' SHA-256: the request is signed
+    /// with it instead of hashing the bytes again.
+    pub async fn put_hashed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: &str,
+        sha256: &[u8],
+    ) -> Result<()> {
+        let hash = hex(sha256);
         let url = self.object_url(key);
         let headers = self.sign("PUT", &url, &hash, Utc::now());
         let response = self
@@ -398,6 +411,49 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bucket's PUT is signed with the SHA-256 the caller already has, so the
+    /// bytes are hashed once per upload.
+    #[tokio::test]
+    async fn put_hashed_signs_with_the_digest_it_is_given() {
+        use axum::{
+            extract::State,
+            http::{HeaderMap, StatusCode},
+            routing::put,
+            Router,
+        };
+        use std::future::IntoFuture;
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Option<String>>> = Arc::default();
+        let app = Router::new()
+            .route(
+                "/bucket/{*key}",
+                put(|State(seen): State<Arc<Mutex<Option<String>>>>, headers: HeaderMap| async move {
+                    *seen.lock().unwrap() = headers
+                        .get("x-amz-content-sha256")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    StatusCode::OK
+                }),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        let store = ObjectStore::new(
+            endpoint,
+            "bucket".into(),
+            "us-east-1".into(),
+            "k".into(),
+            "s".into(),
+        );
+        let digest = [0xabu8; 32];
+        store
+            .put_hashed("knowledge/x", b"hello".to_vec(), "text/plain", &digest)
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some(hex(&digest).as_str()));
+    }
 
     #[test]
     fn presigned_urls_match_the_aws_example() {

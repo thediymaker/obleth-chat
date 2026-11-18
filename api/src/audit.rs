@@ -241,10 +241,7 @@ mod tests {
     /// kind as a filter; its table lives in the UI, so this reads that file.
     #[test]
     fn the_activity_page_knows_every_action_and_kind() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ui/components/admin/audit.ts"
-        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/components/admin/audit.ts");
         let ui = std::fs::read_to_string(path).expect("the UI's audit sentence table");
         for action in Action::ALL {
             let key = if action.name.contains('.') {

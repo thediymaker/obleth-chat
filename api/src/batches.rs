@@ -41,8 +41,6 @@ const MAX_PROMPT: usize = 50_000;
 const MAX_NAME: usize = 200;
 /// The JSON a browser may send to start a batch.
 const MAX_BODY: usize = 96 * 1024 * 1024;
-/// How long a browser has to send it.
-const BODY_SECONDS: u64 = 300;
 /// Spreadsheets being read at once: each is held whole while it is checked.
 static READING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 /// The input file sent to the gateway (its own limit is 200 MB by default).
@@ -647,34 +645,14 @@ async fn create(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<Value>, ApiError> {
-    let user = match state.auth.require(&headers, true).await {
-        Ok(user) => user,
-        Err(refused) => {
-            crate::error::discard(body).await;
-            return Err(refused);
-        }
-    };
+    let (user, body) =
+        crate::error::admitted(body, state.auth.require(&headers, true).await).await?;
     let gw = gateway(&state)?;
     let mut batch = {
         // Waits its turn before reading, so waiting spreadsheets hold no memory.
         let _turn = READING.acquire().await.map_err(|_| ApiError::internal())?;
-        let body = tokio::time::timeout(
-            Duration::from_secs(BODY_SECONDS),
-            axum::body::to_bytes(body, MAX_BODY),
-        )
-        .await
-        .map_err(|_| {
-            ApiError(
-                StatusCode::REQUEST_TIMEOUT,
-                "The upload took too long".into(),
-            )
-        })?
-        .map_err(|_| {
-            ApiError(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Choose a spreadsheet of 96 MB or less".into(),
-            )
-        })?;
+        let body =
+            crate::error::upload(body, MAX_BODY, "Choose a spreadsheet of 96 MB or less").await?;
         parse(&body)?
     };
     check(&mut batch)?;

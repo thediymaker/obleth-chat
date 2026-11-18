@@ -48,18 +48,45 @@ pub async fn discard(body: axum::body::Body) {
     .await;
 }
 
+/// The outcome of an upload's checks, with its body: kept for a request that
+/// passed them, drained before the refusal of one that did not. Every upload
+/// endpoint decides before it reads, so this is the one place a refusal and the
+/// body meet.
+pub async fn admitted<T>(
+    body: axum::body::Body,
+    checks: Result<T, ApiError>,
+) -> Result<(T, axum::body::Body), ApiError> {
+    match checks {
+        Ok(passed) => Ok((passed, body)),
+        Err(refused) => {
+            discard(body).await;
+            Err(refused)
+        }
+    }
+}
+
 /// Reads an upload of at most `most` bytes that keeps arriving. Thirty seconds
 /// without a byte, or fifteen minutes in all, ends it, so a stalled upload does not
 /// hold a turn or its memory for as long as its sender likes.
 pub async fn upload(
     body: axum::body::Body,
     most: usize,
-    too_large: &'static str,
+    too_large: impl Into<String>,
 ) -> Result<Vec<u8>, ApiError> {
-    use futures_util::StreamExt;
     use std::time::Duration;
     const QUIET: Duration = Duration::from_secs(30);
     const WHOLE: Duration = Duration::from_secs(15 * 60);
+    read_within(body, most, too_large.into(), QUIET, WHOLE).await
+}
+
+async fn read_within(
+    body: axum::body::Body,
+    most: usize,
+    too_large: String,
+    quiet: std::time::Duration,
+    whole: std::time::Duration,
+) -> Result<Vec<u8>, ApiError> {
+    use futures_util::StreamExt;
     let stalled = || {
         ApiError(
             StatusCode::REQUEST_TIMEOUT,
@@ -70,7 +97,7 @@ pub async fn upload(
     let read = async {
         let mut bytes = Vec::new();
         loop {
-            match tokio::time::timeout(QUIET, stream.next()).await {
+            match tokio::time::timeout(quiet, stream.next()).await {
                 Err(_) => return Err(stalled()),
                 Ok(None) => return Ok(bytes),
                 Ok(Some(Err(_))) => {
@@ -78,14 +105,14 @@ pub async fn upload(
                 }
                 Ok(Some(Ok(chunk))) => {
                     if bytes.len() + chunk.len() > most {
-                        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, too_large.into()));
+                        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, too_large));
                     }
                     bytes.extend_from_slice(&chunk);
                 }
             }
         }
     };
-    tokio::time::timeout(WHOLE, read)
+    tokio::time::timeout(whole, read)
         .await
         .unwrap_or_else(|_| Err(stalled()))
 }
@@ -118,5 +145,74 @@ impl From<sqlx::Error> for ApiError {
             "database operation failed"
         );
         Self::internal()
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use axum::body::{Body, Bytes};
+    use futures_util::{stream, StreamExt};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A body of `chunks` that counts how many of them were read.
+    fn counted(chunks: usize) -> (Body, Arc<AtomicUsize>) {
+        let read = Arc::new(AtomicUsize::new(0));
+        let seen = read.clone();
+        let body = Body::from_stream(
+            stream::iter(
+                (0..chunks).map(|_| Ok::<_, std::io::Error>(Bytes::from_static(b"0123456789"))),
+            )
+            .inspect(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        (body, read)
+    }
+
+    #[tokio::test]
+    async fn a_refused_upload_is_drained_before_its_answer() {
+        let (body, read) = counted(8);
+        let refused = admitted::<()>(body, Err(ApiError::bad("no"))).await;
+        assert_eq!(refused.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(read.load(Ordering::SeqCst), 8);
+
+        let (body, read) = counted(8);
+        let (passed, body) = admitted(body, Ok::<_, ApiError>("yes")).await.unwrap();
+        assert_eq!((passed, read.load(Ordering::SeqCst)), ("yes", 0));
+        assert_eq!(upload(body, 80, "big").await.unwrap().len(), 80);
+    }
+
+    #[tokio::test]
+    async fn an_upload_over_its_limit_is_refused_as_too_large() {
+        let (body, _) = counted(8);
+        let err = upload(body, 79, "Choose a smaller file").await.unwrap_err();
+        assert_eq!(
+            (err.0, err.1.as_str()),
+            (StatusCode::PAYLOAD_TOO_LARGE, "Choose a smaller file")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_upload_ends_at_the_quiet_bound() {
+        let body = Body::from_stream(stream::pending::<Result<Bytes, std::io::Error>>());
+        let started = Instant::now();
+        let err = read_within(
+            body,
+            10,
+            "big".into(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::REQUEST_TIMEOUT);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

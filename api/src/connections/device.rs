@@ -4,6 +4,7 @@
 //! Web Serial, posts the result, and the response goes on. The serial monitor,
 //! chip identification and flashing all live in the browser (ui/lib/devices).
 use super::mcp::Tool;
+use super::output;
 use crate::error::ApiError;
 use axum::{
     extract::{Path, State},
@@ -53,10 +54,6 @@ pub fn card_entry(call_id: &str, arguments: &str) -> Value {
     };
     json!({"id":call_id,"kind":"device-request","tool":REQUEST,"status":"asked","summary":"Asked for a device","reason":text("reason", 240),"name":text("name", 40)})
 }
-
-/// The longest result a browser may post.
-const RESULT_LIMIT: usize = 48 * 1024;
-const DETAIL_LIMIT: usize = 4 * 1024;
 
 fn tool(
     name: &str,
@@ -387,7 +384,8 @@ pub struct Result_ {
     detail: Option<String>,
 }
 
-/// The browser's result for one call. The output is cut to what the model reads.
+/// The browser's result for one call. The output is cut to what the model reads:
+/// what the device printed keeps its newest lines, everything else its start.
 pub async fn resolve(
     State(s): State<crate::AppState>,
     headers: HeaderMap,
@@ -395,8 +393,23 @@ pub async fn resolve(
     Json(body): Json<Result_>,
 ) -> Result<StatusCode, ApiError> {
     let user = s.auth.require(&headers, true).await?;
-    let output = clip(&body.output, RESULT_LIMIT);
-    let detail = body.detail.as_deref().map(|d| clip(d, DETAIL_LIMIT));
+    let tool: Option<String> = sqlx::query_scalar(
+        "SELECT tool_name FROM device_calls WHERE conversation_id=$1 AND call_id=$2 AND owner_id=$3",
+    )
+    .bind(conversation)
+    .bind(&call)
+    .bind(user.id)
+    .fetch_optional(&s.store.pool)
+    .await?;
+    let output = if tool.as_deref() == Some("read") {
+        output::tail(&body.output, output::MODEL_OUTPUT)
+    } else {
+        output::head(&body.output, output::MODEL_OUTPUT)
+    };
+    let detail = body
+        .detail
+        .as_deref()
+        .map(|d| output::head(d, output::DETAIL_OUTPUT));
     let done = sqlx::query("UPDATE device_calls SET ok=$4,output=$5,detail=$6 WHERE conversation_id=$1 AND call_id=$2 AND owner_id=$3 AND ok IS NULL")
         .bind(conversation).bind(&call).bind(user.id).bind(body.ok).bind(output).bind(detail)
         .execute(&s.store.pool).await?;
@@ -407,17 +420,6 @@ pub async fn resolve(
         ));
     }
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn clip(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_owned();
-    }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}… ({} more bytes)", &text[..end], text.len() - end)
 }
 
 #[cfg(test)]

@@ -38,8 +38,6 @@ use uuid::Uuid;
 const MAX_PER_OWNER: i64 = 20;
 /// Tools offered to the model in one request, across all connections.
 const MAX_OFFERED: usize = 128;
-const MODEL_OUTPUT: usize = 48 * 1024;
-const DETAIL_OUTPUT: usize = 4 * 1024;
 /// How long a tool call waits for Allow or Deny.
 pub const APPROVAL_WAIT: Duration = Duration::from_secs(15 * 60);
 
@@ -796,17 +794,6 @@ fn prefix(name: &str) -> String {
     }
 }
 
-fn clip(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_owned();
-    }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n… ({} more bytes)", &text[..end], text.len() - end)
-}
-
 struct Server {
     id: Uuid,
     name: String,
@@ -907,7 +894,7 @@ impl Toolset {
                     (Some(title), true) => title.clone(),
                     (None, _) => t.tool.description.clone(),
                 };
-                json!({"type":"function","function":{"name":t.exposed,"description":clip(&format!("[{server}] {about}"), 1024),"parameters":t.tool.input_schema}})
+                json!({"type":"function","function":{"name":t.exposed,"description":output::head(&format!("[{server}] {about}"), 1024),"parameters":t.tool.input_schema}})
             })
             .collect()
     }
@@ -1070,7 +1057,7 @@ impl Toolset {
                     .collect();
                 return Err(format!(
                     "This tool has no argument named {:?}. It takes: {}.",
-                    clip(key, 100),
+                    output::head(key, 100),
                     takes.join(", ")
                 ));
             }
@@ -1220,8 +1207,8 @@ impl Toolset {
         match result {
             Ok((ok, text)) => Outcome {
                 ok,
-                detail: clip(&text, DETAIL_OUTPUT),
-                output: clip(&text, MODEL_OUTPUT),
+                detail: output::head(&text, output::DETAIL_OUTPUT),
+                output: output::head(&text, output::MODEL_OUTPUT),
             },
             Err(error) => Outcome {
                 ok: false,
@@ -1272,7 +1259,7 @@ pub fn arguments_preview(arguments: &str) -> String {
         Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| arguments.to_owned()),
         Err(_) => arguments.to_owned(),
     };
-    clip(&preview, 2048)
+    output::head(&preview, 2048)
 }
 
 #[derive(Debug, PartialEq)]
@@ -2534,12 +2521,5 @@ mod tests {
         );
         assert_eq!(clean_token("").unwrap(), None);
         assert!(clean_token("two words").is_err());
-    }
-
-    #[test]
-    fn clipping_keeps_utf8_whole() {
-        assert_eq!(clip("short", 10), "short");
-        let clipped = clip("ééééé", 3);
-        assert!(clipped.starts_with('é') && clipped.contains("more bytes"));
     }
 }

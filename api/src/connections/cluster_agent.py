@@ -32,8 +32,11 @@ FIND_LIMIT = 500
 SEARCH_LIMIT = 200
 USAGE_LIMIT = 50
 REMOVE_LIMIT = 200
-READ_DEFAULT = 48 * 1024
-READ_LIMIT = 256 * 1024
+# A part of a file: what the model receives (48 KB) less room for the header, so
+# "more follows at offset N" is exact. Chat sends max_bytes on every read; these
+# are what an older Chat, or a call by hand, gets.
+READ_DEFAULT = 46 * 1024
+READ_LIMIT = 46 * 1024
 WRITE_LIMIT = 1024 * 1024
 SEARCH_FILE_LIMIT = 8 * 1024 * 1024
 WALK_SECONDS = 60
@@ -216,6 +219,20 @@ def op_find(args):
     return "\n".join(lines)
 
 
+def whole_part(data):
+    """A part that ends at a line, or failing that a character, so the next part
+    starts where this one stopped and nothing is split in two."""
+    cut = data.rfind(b"\n", max(0, len(data) - 1024)) + 1
+    if cut > 0:
+        return data[:cut]
+    # Back off from a UTF-8 continuation byte (10xxxxxx) to the character's start.
+    while data and data[-1] & 0xC0 == 0x80:
+        data = data[:-1]
+    if data and data[-1] & 0xC0 == 0xC0:
+        data = data[:-1]
+    return data
+
+
 def op_read(args):
     path = resolve(args.get("path"))
     if os.path.isdir(path):
@@ -228,6 +245,8 @@ def op_read(args):
         data = f.read(most)
     if b"\0" in data[:8192]:
         return "%s is a binary file of %s" % (path, human(total))
+    if offset + len(data) < total:
+        data = whole_part(data)
     end = offset + len(data)
     text = data.decode("utf-8", "replace")
     head = "%s (%s" % (path, human(total))

@@ -2,6 +2,9 @@
 //! cluster set to bring output back, each job Chat submits gets a link that can upload
 //! one object to Chat's object storage, and uploads the end of its output there as it
 //! ends. Job output reads it. The compute nodes must reach the storage.
+//!
+//! Also the one place a connection result is cut to what the model reads: [`head`]
+//! for most results, [`tail`] for log-like ones, where the newest lines matter.
 use super::slurm;
 use crate::knowledge::ObjectStore;
 use serde_json::Value;
@@ -13,6 +16,48 @@ use uuid::Uuid;
 const UPLOAD_SECONDS: u64 = 7 * 24 * 3600;
 /// How much of the output the model reads at once.
 const SHOWN: usize = 40 * 1024;
+/// How much of any connection result the model reads.
+pub(super) const MODEL_OUTPUT: usize = 48 * 1024;
+/// How much of it the chat shows as the step's detail.
+pub(super) const DETAIL_OUTPUT: usize = 4 * 1024;
+/// A cut tail skips a partial first line when the next line starts within this.
+const LINE_SKIP: usize = 1024;
+
+/// The first `limit` bytes of `text`, whole characters only, and how much follows.
+pub(super) fn head(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… ({} more bytes)", &text[..end], text.len() - end)
+}
+
+/// The last `limit` bytes of `text`, from a line start when one is near, and how
+/// much came before: for logs and device output, where the newest lines matter.
+pub(super) fn tail(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let kept = last(text, limit);
+    format!("… ({} earlier bytes)\n{kept}", text.len() - kept.len())
+}
+
+/// The last `limit` bytes of `text`, whole characters only, from the next line
+/// start when one is near.
+fn last(text: &str, limit: usize) -> &str {
+    let mut start = text.len().saturating_sub(limit);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let kept = &text[start..];
+    match kept.find('\n') {
+        Some(n) if n < LINE_SKIP && n + 1 < kept.len() => &kept[n + 1..],
+        _ => kept,
+    }
+}
 
 pub(super) struct Outputs {
     pub pool: PgPool,
@@ -123,12 +168,7 @@ fn shown(id: i64, bytes: &[u8]) -> String {
     if all.len() <= SHOWN {
         return format!("Output of job {id}:\n{all}");
     }
-    let mut start = all.len() - SHOWN;
-    while !all.is_char_boundary(start) {
-        start += 1;
-    }
-    let tail = &all[start..];
-    let tail = tail.find('\n').map_or(tail, |n| &tail[n + 1..]);
+    let tail = last(&all, SHOWN);
     format!(
         "Output of job {id}, the last {} KB of {} KB:\n{tail}",
         tail.len() / 1024,
@@ -139,6 +179,36 @@ fn shown(id: i64, bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_and_tail_keep_whole_characters_and_say_what_was_cut() {
+        assert_eq!(head("short", 10), "short");
+        assert_eq!(tail("short", 10), "short");
+        let cut = head("ééééé", 3);
+        assert!(cut.starts_with("é… (8 more bytes)"), "{cut}");
+        let cut = tail("ééééé", 3);
+        assert!(cut.ends_with("é"), "{cut}");
+        assert!(cut.starts_with("… (8 earlier bytes)\n"), "{cut}");
+    }
+
+    #[test]
+    fn a_cut_tail_starts_at_a_line_and_keeps_the_last_line() {
+        // 200 log lines of 300 bytes: 60 KB, past what the model reads.
+        let lines: Vec<String> = (0..200)
+            .map(|n| format!("{n:03} {}", "x".repeat(296)))
+            .collect();
+        let logs = lines.join("\n");
+        let cut = tail(&logs, MODEL_OUTPUT);
+        assert!(cut.len() <= MODEL_OUTPUT + 64, "{}", cut.len());
+        assert!(cut.ends_with(&lines[199]), "the last line is gone");
+        let body = cut.split_once('\n').unwrap().1;
+        assert!(
+            body.starts_with(|c: char| c.is_ascii_digit()),
+            "starts mid-line: {:?}",
+            &body[..12]
+        );
+        assert!(lines.contains(&body.split('\n').next().unwrap().to_string()));
+    }
 
     #[test]
     fn long_output_shows_its_end_from_a_line_start() {

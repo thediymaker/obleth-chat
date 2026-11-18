@@ -2,6 +2,7 @@
 //! anything else. It stays in Chat. Administrators read it on the Feedback tab with the
 //! page and Chat version it came from, and see who sent it only when that person said
 //! they may be contacted about it.
+use crate::audit::{self, Action, Target};
 use crate::{error::ApiError, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -246,22 +247,69 @@ async fn set_button(
     headers: HeaderMap,
     Json(body): Json<Button>,
 ) -> Result<Json<Value>, ApiError> {
-    s.auth.require_admin(&headers, true).await?;
+    let admin = s.auth.require_admin(&headers, true).await?;
     if !MODES.contains(&body.mode.as_str()) {
         return Err(ApiError::bad(
             "The Feedback button is off, sidebar or highlighted",
         ));
     }
-    sqlx::query("UPDATE feedback_button SET mode=$1,updated_at=NOW() WHERE id")
-        .bind(&body.mode)
-        .execute(&s.store.pool)
-        .await?;
+    set_mode(&s.store.pool, admin.id, &body.mode).await?;
     Ok(Json(json!({ "mode": body.mode })))
+}
+
+/// Write the button mode and the audit row that says who changed it.
+async fn set_mode(pool: &PgPool, admin: Uuid, mode: &str) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE feedback_button SET mode=$1,updated_at=NOW() WHERE id")
+        .bind(mode)
+        .execute(&mut *tx)
+        .await?;
+    audit::record(
+        &mut *tx,
+        Some(admin),
+        Action::FEEDBACK_BUTTON,
+        Target::site(),
+        json!({"mode": mode}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Database;
+
+    #[tokio::test]
+    async fn setting_the_button_records_who_changed_it() {
+        let Some(db) = Database::new().await else {
+            return;
+        };
+        let admin = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, 'ana', 'Ana', 'admin', 'x')")
+            .bind(admin)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        set_mode(&db.pool, admin, "highlighted").await.unwrap();
+        assert_eq!(mode(&db.pool).await.unwrap(), "highlighted");
+        let rows: Vec<(Option<Uuid>, String, String, Value)> =
+            sqlx::query_as("SELECT actor_id, action, target_type, metadata FROM audit_events")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                Some(admin),
+                Action::FEEDBACK_BUTTON.name.to_owned(),
+                "site".to_owned(),
+                json!({"mode": "highlighted"})
+            )]
+        );
+        db.close().await;
+    }
 
     fn send(kind: &str, message: &str, page: Option<&str>) -> Result<Clean, ApiError> {
         clean(&Send {

@@ -1,13 +1,13 @@
 //! The banner: one line an administrator shows at the top of every page, such as an
 //! announcement or a note that the service is in development. It reaches people with
 //! their session, so it shows from their next page load.
+use crate::audit::{self, Action, Target};
 use crate::{error::ApiError, AppState};
 use axum::{extract::State, http::HeaderMap, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 const TEXT_CHARS: usize = 200;
 const LABEL_CHARS: usize = 40;
@@ -159,12 +159,14 @@ async fn save(
     .fetch_one(&mut *tx)
     .await?;
     let saved = document(&row);
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'banner.update','site',$3)")
-        .bind(Uuid::new_v4())
-        .bind(user.id)
-        .bind(json!({"text": row.text, "link": row.link(), "tone": row.tone, "signedOut": row.signed_out, "dismissible": row.dismissible}))
-        .execute(&mut *tx)
-        .await?;
+    audit::record(
+        &mut *tx,
+        Some(user.id),
+        Action::BANNER_UPDATE,
+        Target::site(),
+        json!({"text": row.text, "link": row.link(), "tone": row.tone, "signedOut": row.signed_out, "dismissible": row.dismissible}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(saved))
 }

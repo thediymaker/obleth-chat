@@ -39,6 +39,7 @@ use tokio::sync::Semaphore;
 use url::Url;
 use uuid::Uuid;
 
+use crate::audit::{self, Action, Target};
 use crate::{error::ApiError, secrets::SecretKey};
 pub(crate) mod accounts;
 pub mod grants;
@@ -1502,12 +1503,11 @@ async fn change_password(
         .bind(identity.id)
         .execute(&mut *tx)
         .await?;
-    accounts::record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(identity.id),
-        "password_changed",
-        "user",
-        Some(&identity.id.to_string()),
+        Action::PASSWORD_CHANGED,
+        Target::user(identity.id),
         json!({}),
     )
     .await?;
@@ -1603,12 +1603,11 @@ async fn create_user(
     match result {
         Ok(identity) => {
             auth.group_policy.initial(&mut tx, identity.id).await?;
-            accounts::record_audit(
-                &mut tx,
+            audit::record(
+                &mut *tx,
                 Some(admin.id),
-                "user_created",
-                "user",
-                Some(&identity.id.to_string()),
+                Action::USER_CREATED,
+                Target::user(identity.id),
                 json!({"role":identity.role,"forcePasswordChange":force_password_change}),
             )
             .await?;
@@ -1678,7 +1677,7 @@ async fn update_user(
             .execute(&mut *tx)
             .await?;
     }
-    accounts::record_audit(&mut tx, Some(admin.id), "user_updated", "user", Some(&id.to_string()), json!({"enabled":next_enabled,"role":next_role,"displayNameChanged":display_name.is_some()})).await?;
+    audit::record(&mut *tx, Some(admin.id), Action::USER_UPDATED, Target::user(id), json!({"enabled":next_enabled,"role":next_role,"displayNameChanged":display_name.is_some()})).await?;
     tx.commit().await?;
     auth.after_sign_out();
     Ok(StatusCode::NO_CONTENT)
@@ -1715,12 +1714,11 @@ async fn reset_password(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    accounts::record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "password_reset",
-        "user",
-        Some(&id.to_string()),
+        Action::PASSWORD_RESET,
+        Target::user(id),
         json!({"forcePasswordChange":input.force_password_change}),
     )
     .await?;
@@ -1799,12 +1797,11 @@ async fn link_oidc_identity(
         .bind(input.user_id)
         .execute(&mut *tx)
         .await?;
-    accounts::record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "oidc_linked",
-        "user",
-        Some(&input.user_id.to_string()),
+        Action::OIDC_LINKED,
+        Target::user(input.user_id),
         json!({}),
     )
     .await?;

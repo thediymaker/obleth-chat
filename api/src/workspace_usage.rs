@@ -2,6 +2,7 @@
 //! over a period their pod hours, the busiest moment against the slots, starts that failed
 //! and starts turned away because every slot was in use. Shows who and when, never what ran
 //! in a workspace or which pages a browser had open.
+use crate::audit::{self, Action, Target};
 use crate::{auth::Identity, error::ApiError, AppState};
 use axum::{
     extract::{Query, State},
@@ -301,13 +302,14 @@ async fn stop(
         ApiError::bad("The pod could not be stopped. Try again.")
     })?;
     if stopped {
-        sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata)VALUES($1,$2,'workspaces.stop','user',$3,$4)")
-            .bind(Uuid::new_v4())
-            .bind(admin.id)
-            .bind(body.owner_id.to_string())
-            .bind(json!({"kind": body.kind}))
-            .execute(&s.store.pool)
-            .await?;
+        audit::record(
+            &s.store.pool,
+            Some(admin.id),
+            Action::WORKSPACES_STOP,
+            Target::user(body.owner_id),
+            json!({"kind": body.kind}),
+        )
+        .await?;
     }
     Ok(Json(json!({ "stopped": stopped })))
 }

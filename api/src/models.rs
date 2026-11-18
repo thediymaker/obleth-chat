@@ -1,5 +1,6 @@
 //! Chat-owned presentation and access policy over the Gateway's identity-scoped
 //! catalog. Neither discovery nor Auto can grant access the gateway did not list.
+use crate::audit::{self, Action, Target};
 use crate::{
     auth::Identity,
     error::ApiError,
@@ -838,7 +839,7 @@ async fn save_profile(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.update','model',$3,$4)").bind(Uuid::new_v4()).bind(user.id).bind(&id).bind(json!({"enabled":body.enabled,"published":body.published,"visibility":body.visibility,"isDefault":body.is_default,"worker":body.worker,"actions":body.actions,"allowedOverrides":body.allowed_overrides})).execute(&mut *tx).await?;
+    audit::record(&mut *tx, Some(user.id), Action::MODEL_UPDATE, Target::model(&id), json!({"enabled":body.enabled,"published":body.published,"visibility":body.visibility,"isDefault":body.is_default,"worker":body.worker,"actions":body.actions,"allowedOverrides":body.allowed_overrides})).await?;
     tx.commit().await?;
     // A successful local policy write must not appear to fail because a second
     // network-discovery request happened to fail after the transaction committed.
@@ -920,8 +921,14 @@ async fn save_certification(
     .bind(&certification)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.certify','model',$3,$4)")
-        .bind(Uuid::new_v4()).bind(user.id).bind(&id).bind(&certification).execute(&mut *tx).await?;
+    audit::record(
+        &mut *tx,
+        Some(user.id),
+        Action::MODEL_CERTIFY,
+        Target::model(&id),
+        certification.clone(),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(json!({
         "model": id,
@@ -947,8 +954,14 @@ async fn clear_certification(
     if cleared.rows_affected() == 0 {
         return Err(ApiError::not_found());
     }
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,'model.certify','model',$3,'{\"cleared\":true}')")
-        .bind(Uuid::new_v4()).bind(user.id).bind(&id).execute(&mut *tx).await?;
+    audit::record(
+        &mut *tx,
+        Some(user.id),
+        Action::MODEL_CERTIFY,
+        Target::model(&id),
+        json!({"cleared": true}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -990,7 +1003,14 @@ async fn save_short_list(
     .bind(&models)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata) VALUES($1,$2,'models.short_list','site',$3)").bind(Uuid::new_v4()).bind(user.id).bind(json!({"models":models})).execute(&mut *tx).await?;
+    audit::record(
+        &mut *tx,
+        Some(user.id),
+        Action::MODELS_SHORT_LIST,
+        Target::site(),
+        json!({"models":models}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(json!({"models":models})))
 }

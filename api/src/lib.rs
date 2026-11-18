@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod apps;
 pub mod attachments;
+pub mod audit;
 pub mod auth;
 pub mod autopilot;
 pub mod banner;

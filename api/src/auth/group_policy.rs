@@ -151,12 +151,11 @@ impl GroupPolicy {
             added+=sqlx::query("INSERT INTO user_group_members(group_id,user_id,managed_oidc) SELECT id,$2,TRUE FROM user_groups WHERE id=$1 ON CONFLICT DO NOTHING").bind(group_id).bind(user_id).execute(&mut **tx).await?.rows_affected();
         }
         if added + removed > 0 {
-            accounts::record_audit(
-                tx,
+            audit::record(
+                &mut **tx,
                 Some(user_id),
-                "oidc_groups_reconciled",
-                "user",
-                Some(&user_id.to_string()),
+                Action::OIDC_GROUPS_RECONCILED,
+                Target::user(user_id),
                 json!({"added":added,"removed":removed}),
             )
             .await?;

@@ -621,12 +621,11 @@ impl Grants {
             .execute(&mut *tx)
             .await?;
         end_session(&mut tx, grant.user_id, grant.session_id).await?;
-        accounts::record_audit(
-            &mut tx,
+        audit::record(
+            &mut *tx,
             None,
-            "sign_in_ended",
-            "session",
-            Some(&grant.session_id.to_string()),
+            Action::SIGN_IN_ENDED,
+            Target::session(grant.session_id),
             json!({"userId": grant.user_id, "reason": reason}),
         )
         .await?;

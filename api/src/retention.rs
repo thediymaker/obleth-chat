@@ -1,6 +1,7 @@
 //! Optional retention, disabled until an administrator explicitly sets a policy.
 //! Every cleanup is bounded, serialized across replicas, and uses the same owner
 //! row locks as chat/file writes. An active writer is skipped rather than blocked.
+use crate::audit::{self, Action, Target};
 use crate::{error::ApiError, store::Store, AppState};
 use axum::{extract::State, http::HeaderMap, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
@@ -102,7 +103,14 @@ async fn save(
         .bind(&policy)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'retention.update','site',$3)").bind(Uuid::new_v4()).bind(user.id).bind(&policy).execute(&mut *tx).await?;
+    audit::record(
+        &mut *tx,
+        Some(user.id),
+        Action::RETENTION_UPDATE,
+        Target::site(),
+        policy.clone(),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(document(policy, last_result)))
 }
@@ -169,7 +177,14 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
         + report.expired_access_tokens
         > 0
     {
-        sqlx::query("INSERT INTO audit_events(id,action,target_type,metadata)VALUES($1,'retention.cleanup','site',$2)").bind(Uuid::new_v4()).bind(result).execute(&mut *tx).await?;
+        audit::record(
+            &mut *tx,
+            None,
+            Action::RETENTION_CLEANUP,
+            Target::site(),
+            result,
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(Some(report))

@@ -29,19 +29,6 @@ pub(super) fn router() -> Router<Auth> {
         .route("/api/auth/activate", post(activate))
 }
 
-pub(crate) async fn record_audit(
-    tx: &mut Transaction<'_, Postgres>,
-    actor_id: Option<Uuid>,
-    action: &str,
-    target_type: &str,
-    target_id: Option<&str>,
-    metadata: Value,
-) -> Result<(), ApiError> {
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,$3,$4,$5,$6)")
-        .bind(Uuid::new_v4()).bind(actor_id).bind(action).bind(target_type).bind(target_id).bind(metadata).execute(&mut **tx).await?;
-    Ok(())
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProfileInput {
@@ -57,12 +44,11 @@ async fn profile(
     let mut tx = auth.pool.begin().await?;
     let user = sqlx::query_as::<_, Identity>("UPDATE users SET display_name=$2,updated_at=NOW() WHERE id=$1 AND enabled RETURNING id,username,display_name,role")
         .bind(user.id).bind(name).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::unauthorized)?;
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(user.id),
-        "profile_updated",
-        "user",
-        Some(&user.id.to_string()),
+        Action::PROFILE_UPDATED,
+        Target::user(user.id),
         json!({}),
     )
     .await?;
@@ -114,12 +100,11 @@ async fn revoke_session(
     } else {
         super::tokens::revoke_made_in(&mut tx, user.id, &[id]).await?
     };
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(user.id),
-        "session_revoked",
-        "session",
-        Some(&id.to_string()),
+        Action::SESSION_REVOKED,
+        Target::session(id),
         json!({"current":current,"tokens":tokens}),
     )
     .await?;
@@ -155,12 +140,11 @@ async fn revoke_others(
     .fetch_all(&mut *tx)
     .await?;
     let tokens = super::tokens::revoke_made_in(&mut tx, user.id, &ended).await?;
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(user.id),
-        "other_sessions_revoked",
-        "user",
-        Some(&user.id.to_string()),
+        Action::OTHER_SESSIONS_REVOKED,
+        Target::user(user.id),
         json!({"count":ended.len(),"tokens":tokens}),
     )
     .await?;
@@ -178,12 +162,11 @@ async fn admin_revoke_sessions(
     auth.lock_admin(&mut tx, admin.id).await?;
     require_user(&mut tx, id).await?;
     let count = super::end_sign_ins(&mut tx, id).await?;
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "user_sessions_revoked",
-        "user",
-        Some(&id.to_string()),
+        Action::USER_SESSIONS_REVOKED,
+        Target::user(id),
         json!({"count":count}),
     )
     .await?;
@@ -271,12 +254,11 @@ async fn create_group(
         .execute(&mut *tx)
         .await
         .map_err(group_error)?;
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "group_created",
-        "group",
-        Some(&id.to_string()),
+        Action::GROUP_CREATED,
+        Target::group(id),
         json!({}),
     )
     .await?;
@@ -365,12 +347,11 @@ async fn update_group(
     if changed == 0 {
         return Err(ApiError::not_found());
     }
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "group_updated",
-        "group",
-        Some(&id.to_string()),
+        Action::GROUP_UPDATED,
+        Target::group(id),
         json!({}),
     )
     .await?;
@@ -409,12 +390,11 @@ async fn delete_group(
     {
         return Err(ApiError::not_found());
     }
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "group_deleted",
-        "group",
-        Some(&id.to_string()),
+        Action::GROUP_DELETED,
+        Target::group(id),
         json!({}),
     )
     .await?;
@@ -469,16 +449,16 @@ async fn change_member(
             .rows_affected()
     };
     if changed > 0 {
-        record_audit(
-            &mut tx,
+        let action = if add {
+            Action::GROUP_MEMBER_ADDED
+        } else {
+            Action::GROUP_MEMBER_REMOVED
+        };
+        audit::record(
+            &mut *tx,
             Some(admin.id),
-            if add {
-                "group_member_added"
-            } else {
-                "group_member_removed"
-            },
-            "group",
-            Some(&id.to_string()),
+            action,
+            Target::group(id),
             json!({"userId":user_id}),
         )
         .await?;
@@ -496,93 +476,6 @@ struct AuditQuery {
 }
 /// The kinds Activity filters by, and the actions each holds. An action not listed
 /// here is kind "other".
-const AUDIT_KINDS: [(&str, &[&str]); 8] = [
-    (
-        "accounts",
-        &[
-            "user_created",
-            "user_invited",
-            "user_updated",
-            "profile_updated",
-            "password_changed",
-            "password_reset",
-            "oidc_linked",
-            "access_link_created",
-            "access_link_redeemed",
-        ],
-    ),
-    (
-        "sign_in",
-        &[
-            "session_revoked",
-            "other_sessions_revoked",
-            "user_sessions_revoked",
-            "sign_in_ended",
-            "api_token_created",
-            "api_token_revoked",
-        ],
-    ),
-    (
-        "groups",
-        &[
-            "group_created",
-            "group_updated",
-            "group_deleted",
-            "group_member_added",
-            "group_member_removed",
-            "oidc_groups_reconciled",
-        ],
-    ),
-    (
-        "settings",
-        &[
-            "model.update",
-            "models.short_list",
-            "limits.update",
-            "decisions.update",
-            "banner.update",
-            "knowledge.embedding.update",
-            "retention.update",
-            "insights.update",
-            "insights.report",
-            "workspaces.stop",
-        ],
-    ),
-    (
-        "connections",
-        &[
-            "connection.create",
-            "connection.update",
-            "connection.delete",
-        ],
-    ),
-    (
-        "mcp",
-        &[
-            "mcp_chat_started",
-            "mcp_message_sent",
-            "mcp_chat_stopped",
-            "mcp_chat_deleted",
-        ],
-    ),
-    (
-        "apps",
-        &[
-            "app.published",
-            "app.unpublished",
-            "app.deleted",
-            "app.key_created",
-            "app.key_revoked",
-        ],
-    ),
-    ("cleanup", &["retention.cleanup"]),
-];
-fn audit_kind(action: &str) -> &'static str {
-    AUDIT_KINDS
-        .iter()
-        .find(|(_, actions)| actions.contains(&action))
-        .map_or("other", |(kind, _)| kind)
-}
 #[derive(Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 struct AuditView {
@@ -627,12 +520,9 @@ async fn audit(
     let actions = match query.kind.as_deref() {
         None | Some("") => None,
         Some(kind) => Some(
-            AUDIT_KINDS
-                .iter()
-                .find(|(name, _)| *name == kind)
+            audit::Kind::from_name(kind)
                 .ok_or_else(|| ApiError::bad("Unknown activity kind"))?
-                .1
-                .to_vec(),
+                .actions(),
         ),
     };
     let search = query.q.as_deref().unwrap_or("").trim();
@@ -650,7 +540,7 @@ async fn audit(
     let more = events.len() > limit as usize;
     events.truncate(limit as usize);
     for event in &mut events {
-        event.kind = audit_kind(&event.action);
+        event.kind = audit::Action::kind_of(&event.action).map_or("other", audit::Kind::name);
     }
     let next = if more {
         events.last().map(|e| e.id)
@@ -704,12 +594,11 @@ async fn new_link(
     .bind(expires_at)
     .execute(&mut **tx)
     .await?;
-    record_audit(
-        tx,
+    audit::record(
+        &mut **tx,
         Some(admin),
-        "access_link_created",
-        "user",
-        Some(&user_id.to_string()),
+        Action::ACCESS_LINK_CREATED,
+        Target::user(user_id),
         json!({"kind":kind,"expiresAt":expires_at}),
     )
     .await?;
@@ -733,12 +622,11 @@ async fn invite(
     let user=sqlx::query_as::<_,Identity>("INSERT INTO users(id,username,display_name,role) VALUES($1,$2,$3,$4) RETURNING id,username,display_name,role")
         .bind(Uuid::new_v4()).bind(username).bind(name).bind(role).fetch_one(&mut *tx).await.map_err(|e|match e{sqlx::Error::Database(e)if e.is_unique_violation()=>username_taken(),e=>e.into()})?;
     auth.group_policy.initial(&mut tx, user.id).await?;
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "user_invited",
-        "user",
-        Some(&user.id.to_string()),
+        Action::USER_INVITED,
+        Target::user(user.id),
         json!({"role":user.role}),
     )
     .await?;
@@ -864,12 +752,11 @@ async fn activate(
     let lifetime = auth.password_session_lifetime();
     auth.insert_session(&mut tx, user.id, &token, lifetime, &headers, false)
         .await?;
-    record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(user.id),
-        "access_link_redeemed",
-        "user",
-        Some(&user.id.to_string()),
+        Action::ACCESS_LINK_REDEEMED,
+        Target::user(user.id),
         json!({"kind":kind}),
     )
     .await?;

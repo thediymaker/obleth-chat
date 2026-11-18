@@ -13,6 +13,7 @@ pub mod slurm;
 pub mod vault;
 pub mod wakeups;
 
+use crate::audit::{Action, Target};
 use crate::{
     auth::Identity,
     error::ApiError,
@@ -1471,10 +1472,19 @@ fn duplicate(error: sqlx::Error) -> ApiError {
     }
 }
 
-async fn audit(pool: &PgPool, actor: Uuid, action: &str, row_id: Uuid, name: &str, url: &str) {
-    let _ = sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,$3,'connection',$4,$5)")
-        .bind(Uuid::new_v4()).bind(actor).bind(action).bind(row_id.to_string()).bind(json!({"name":name,"url":without_query(url)}))
-        .execute(pool).await;
+async fn audit(pool: &PgPool, actor: Uuid, action: Action, row_id: Uuid, name: &str, url: &str) {
+    let metadata = json!({"name":name,"url":without_query(url)});
+    if let Err(error) = crate::audit::record(
+        pool,
+        Some(actor),
+        action,
+        Target::connection(row_id),
+        metadata,
+    )
+    .await
+    {
+        tracing::warn!(connection = %row_id, "could not record {}: {error}", action.name);
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -1719,7 +1729,7 @@ async fn create(
         audit(
             &connections.pool,
             user.id,
-            "connection.create",
+            Action::CONNECTION_CREATE,
             id,
             &name,
             url.as_str(),
@@ -1915,7 +1925,15 @@ async fn update(
             .bind(&options)
             .execute(pool).await.map_err(duplicate)?;
         if row.shared() {
-            audit(pool, user.id, "connection.update", id, &name, url.as_str()).await;
+            audit(
+                pool,
+                user.id,
+                Action::CONNECTION_UPDATE,
+                id,
+                &name,
+                url.as_str(),
+            )
+            .await;
         }
     }
     Ok(Json(view(&connections.find(&user, id).await?, &user)))
@@ -2040,7 +2058,7 @@ async fn remove(
         audit(
             &connections.pool,
             user.id,
-            "connection.delete",
+            Action::CONNECTION_DELETE,
             id,
             &row.name,
             &row.url,

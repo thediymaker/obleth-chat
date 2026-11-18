@@ -3,6 +3,7 @@
 //! Token admission uses reported totals plus reserved output budgets. Missing
 //! provider usage remains explicitly incomplete and is never reported as usage,
 //! but admission charges an estimate so Stop or errors cannot skip the allowance.
+use crate::audit::{self, Action, Target};
 use crate::{auth::Role, error::ApiError, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -691,7 +692,15 @@ async fn audit(
     target: Option<Uuid>,
     limits: Value,
 ) -> Result<(), ApiError> {
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata)VALUES($1,$2,'limits.update',$3,$4,$5)").bind(Uuid::new_v4()).bind(admin).bind(if target.is_some(){"user"}else{"site"}).bind(target.map(|id|id.to_string())).bind(limits).execute(&mut **tx).await?;
+    let target = target.map_or_else(Target::site, Target::user);
+    audit::record(
+        &mut **tx,
+        Some(admin),
+        Action::LIMITS_UPDATE,
+        target,
+        limits,
+    )
+    .await?;
     Ok(())
 }
 async fn save_limits(

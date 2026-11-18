@@ -22,6 +22,10 @@ test("each event reads as one sentence, with names in bold", () => {
   expect(sentenceText(auditSentence(e("retention.cleanup", { actorName: null, metadata: { conversations: 2, auditEvents: 1, at: "x" } })))).toBe("Automatic cleanup removed 2 inactive conversations, 1 old activity entry");
   expect(sentenceText(auditSentence(e("retention.cleanup", { metadata: {} })))).toBe("Automatic cleanup ran");
   expect(sentenceText(auditSentence(e("session_revoked", { actorName: null, metadata: { current: true } })))).toBe("Chat signed out");
+  expect(sentenceText(auditSentence(e("model.certify", { targetName: "glm", metadata: { score: 91 } })))).toBe("Ana recorded a certification for the model glm");
+  expect(sentenceText(auditSentence(e("model.certify", { targetName: "glm", metadata: { cleared: true } })))).toBe("Ana cleared the certification of the model glm");
+  expect(sentenceText(auditSentence(e("memory.update", { metadata: { enabled: false } })))).toBe("Ana turned memory off");
+  expect(sentenceText(auditSentence(e("feedback.button", { metadata: { mode: "sidebar" } })))).toBe("Ana put the Feedback button in the sidebar");
   expect(sentenceText(auditSentence(e("something_new")))).toBe("Ana · Something New");
 });
 

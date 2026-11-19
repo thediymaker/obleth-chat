@@ -140,6 +140,7 @@ export function ProjectOverview() {
               <span className="shrink-0 text-xs text-faint">{when(c.updatedAt)}</span>
             </Link>
           ))}
+          {d.moreChats && <Note>Your 50 newest chats here; find older ones from the sidebar.</Note>}
         </div>
       ) : (
         <Note>No chats yet. Start one here, or move a chat in from its Context panel.</Note>

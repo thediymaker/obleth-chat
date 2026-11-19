@@ -114,8 +114,12 @@ export interface SentFeedback {
 }
 export interface SentFeedbackList {
   items: SentFeedback[];
+  /** Whether older feedback exists past `items`. */
+  more?: boolean;
   open: Record<SentFeedback["kind"], number>;
 }
+/** Feedback shown at first; "Show more" asks for another page. */
+export const FEEDBACK_PAGE = 200;
 type ButtonMode = "off" | "sidebar" | "highlighted";
 const MODES = [
   ["highlighted", "Highlighted"],
@@ -183,10 +187,12 @@ function SentFeedbackSection() {
   const queries = useQueryClient();
   const [state, setState] = useKept<"open" | "done" | "all">("feedback.sent.state", "open");
   const [kind, setKind] = useKept<"all" | SentFeedback["kind"]>("feedback.sent.kind", "all");
+  const [shown, setShown] = useState(FEEDBACK_PAGE);
   const params = new URLSearchParams();
   if (state !== "all") params.set("done", String(state === "done"));
   if (kind !== "all") params.set("kind", kind);
-  const sent = useQuery({ queryKey: ["admin", "feedback", "sent", state, kind], queryFn: () => api.request<SentFeedbackList>(`/api/admin/feedback/sent?${params}`), placeholderData: (old) => old });
+  if (shown > FEEDBACK_PAGE) params.set("limit", String(shown));
+  const sent = useQuery({ queryKey: ["admin", "feedback", "sent", state, kind, shown], queryFn: () => api.request<SentFeedbackList>(`/api/admin/feedback/sent?${params}`), placeholderData: (old) => old });
   const mark = async (item: SentFeedback, done: boolean) => {
     try {
       await api.request(`/api/admin/feedback/sent/${encodeURIComponent(item.id)}`, { method: "PATCH", body: { done } });
@@ -210,6 +216,13 @@ function SentFeedbackSection() {
       )}
       <ErrorBox error={sent.error} onRetry={() => sent.refetch()} />
       {sent.data ? <SentFeedbackView data={sent.data} onDone={mark} /> : !sent.error && <Loading label="Loading feedback…" />}
+      {sent.data?.more && (
+        <div>
+          <Button variant="outline" size="sm" onClick={() => setShown(shown + FEEDBACK_PAGE)}>
+            Show more feedback
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

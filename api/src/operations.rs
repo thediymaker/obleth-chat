@@ -4,6 +4,7 @@
 //! provider usage remains explicitly incomplete and is never reported as usage,
 //! but admission charges an estimate so Stop or errors cannot skip the allowance.
 use crate::audit::{self, Action, Target};
+use crate::paging::PageQuery;
 use crate::{auth::Role, error::ApiError, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -377,6 +378,7 @@ async fn own_usage(
 struct UserQuery {
     q: Option<String>,
     limit: Option<i64>,
+    offset: Option<i64>,
 }
 #[derive(FromRow, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -401,13 +403,20 @@ async fn admin_usage(
 ) -> Result<Json<Value>, ApiError> {
     state.auth.require_admin(&headers, false).await?;
     let search = query.q.unwrap_or_default();
-    let limit = query.limit.unwrap_or(100);
-    if search.len() > 256 || !(1..=1000).contains(&limit) {
+    if search.len() > 256
+        || query
+            .limit
+            .is_some_and(|limit| !(1..=1000).contains(&limit))
+    {
         return Err(ApiError::bad("Invalid usage search or limit"));
     }
-    let mut users=sqlx::query_as::<_,UsageUser>("SELECT id,username,display_name,role,enabled FROM users WHERE $1='' OR strpos(lower(username),lower($1))>0 OR strpos(lower(display_name),lower($1))>0 OR id::text=$1 ORDER BY username,id LIMIT $2").bind(search.trim()).bind(limit+1).fetch_all(&state.store.pool).await?;
-    let has_more = users.len() > limit as usize;
-    users.truncate(limit as usize);
+    let page = PageQuery {
+        offset: query.offset,
+        limit: query.limit,
+    }
+    .page(100);
+    let users=sqlx::query_as::<_,UsageUser>("SELECT id,username,display_name,role,enabled FROM users WHERE $1='' OR strpos(lower(username),lower($1))>0 OR strpos(lower(display_name),lower($1))>0 OR id::text=$1 ORDER BY username,id LIMIT $2 OFFSET $3").bind(search.trim()).bind(page.fetch()).bind(page.offset).fetch_all(&state.store.pool).await?;
+    let (users, has_more) = page.cut(users);
     // Batch all selected accounts instead of issuing several queries per user.
     let ids: Vec<Uuid> = users.iter().map(|user| user.id).collect();
     let aggregate_sql = format!("SELECT user_id,created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS today,{AGGREGATES} FROM generation_usage g WHERE user_id=ANY($1) AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')-INTERVAL '29 days' GROUP BY user_id,today");

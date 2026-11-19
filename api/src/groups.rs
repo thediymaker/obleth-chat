@@ -2,6 +2,7 @@
 //! it (projects and knowledge collections). Administrators manage the groups and
 //! their members under Settings → Administration.
 
+use crate::paging::Page;
 use crate::{
     auth::{Identity, Role},
     error::ApiError,
@@ -112,16 +113,7 @@ async fn detail(
         .fetch_optional(pool)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let members: Vec<Value> = sqlx::query(
-        "SELECT u.id, u.display_name, u.username FROM user_group_members m JOIN users u ON u.id = m.user_id
-         WHERE m.group_id = $1 AND u.enabled ORDER BY u.display_name LIMIT 500",
-    )
-    .bind(id)
-    .fetch_all(pool)
-    .await?
-    .iter()
-    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"displayName":r.get::<String,_>("display_name"),"username":r.get::<String,_>("username")}))
-    .collect();
+    let (members, more_members) = members_of(pool, id, MEMBERS_SHOWN).await?;
     let projects: Vec<Value> = sqlx::query(
         "SELECT p.id, p.name, p.description, p.color, u.display_name AS owner_name, p.owner_id = $2 AS mine,
                 (SELECT COUNT(*) FROM saved_items s WHERE s.project_id = p.id)::bigint AS saved
@@ -145,20 +137,113 @@ async fn detail(
     .iter()
     .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"ownerName":r.get::<String,_>("owner_name"),"documents":r.get::<i64,_>("documents")}))
     .collect();
-    let chats: Vec<Value> = sqlx::query(
+    let (chats, more_chats) = chats_of(pool, id, user.id, CHATS_SHOWN).await?;
+    Ok(Json(
+        json!({"group":group_json(&row),"members":members,"moreMembers":more_members,"projects":projects,"collections":collections,"chats":chats,"moreChats":more_chats,"canManage":user.role == Role::Admin}),
+    ))
+}
+
+/// Members a group page shows; `moreMembers` says when the group is larger.
+const MEMBERS_SHOWN: i64 = 500;
+/// Shared chats a group page shows, newest first; `moreChats` says when there are older ones.
+const CHATS_SHOWN: i64 = 50;
+
+async fn members_of(
+    pool: &PgPool,
+    group: Uuid,
+    shown: i64,
+) -> Result<(Vec<Value>, bool), sqlx::Error> {
+    let page = Page {
+        offset: 0,
+        limit: shown,
+    };
+    let rows = sqlx::query(
+        "SELECT u.id, u.display_name, u.username FROM user_group_members m JOIN users u ON u.id = m.user_id
+         WHERE m.group_id = $1 AND u.enabled ORDER BY u.display_name, u.id LIMIT $2",
+    )
+    .bind(group)
+    .bind(page.fetch())
+    .fetch_all(pool)
+    .await?;
+    Ok(page.cut(rows.iter().map(|r| json!({"id":r.get::<Uuid,_>("id"),"displayName":r.get::<String,_>("display_name"),"username":r.get::<String,_>("username")})).collect()))
+}
+
+async fn chats_of(
+    pool: &PgPool,
+    group: Uuid,
+    viewer: Uuid,
+    shown: i64,
+) -> Result<(Vec<Value>, bool), sqlx::Error> {
+    let page = Page {
+        offset: 0,
+        limit: shown,
+    };
+    let rows = sqlx::query(
         "SELECT v.id, v.title, v.updated_at, u.display_name AS owner_name, v.owner_id = $2 AS mine
          FROM conversations v JOIN users u ON u.id = v.owner_id AND u.enabled
-         WHERE v.share_scope = 'group' AND v.share_group_id = $1 ORDER BY v.updated_at DESC LIMIT 50",
+         WHERE v.share_scope = 'group' AND v.share_group_id = $1 ORDER BY v.updated_at DESC, v.id LIMIT $3",
     )
-    .bind(id)
-    .bind(user.id)
+    .bind(group)
+    .bind(viewer)
+    .bind(page.fetch())
     .fetch_all(pool)
-    .await?
-    .iter()
-    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"title":r.get::<String,_>("title"),"ownerName":r.get::<String,_>("owner_name"),
-        "mine":r.get::<bool,_>("mine"),"updatedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("updated_at")}))
-    .collect();
-    Ok(Json(
-        json!({"group":group_json(&row),"members":members,"projects":projects,"collections":collections,"chats":chats,"canManage":user.role == Role::Admin}),
-    ))
+    .await?;
+    Ok(page.cut(rows.iter().map(|r| json!({"id":r.get::<Uuid,_>("id"),"title":r.get::<String,_>("title"),"ownerName":r.get::<String,_>("owner_name"),
+        "mine":r.get::<bool,_>("mine"),"updatedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("updated_at")})).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::Database;
+
+    #[tokio::test]
+    async fn a_group_page_says_when_members_and_chats_go_on() {
+        let Some(db) = Database::new().await else {
+            return;
+        };
+        let group = Uuid::new_v4();
+        sqlx::query("INSERT INTO user_groups (id, name) VALUES ($1, 'Lab')")
+            .bind(group)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let mut viewer = Uuid::nil();
+        for n in 0..3 {
+            let user = Uuid::new_v4();
+            viewer = user;
+            sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, $2, $2, 'user', 'x')")
+                .bind(user)
+                .bind(format!("person{n}"))
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO user_group_members (group_id, user_id) VALUES ($1, $2)")
+                .bind(group)
+                .bind(user)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO conversations (id, owner_id, title, model, share_scope, share_group_id) VALUES ($1, $2, $3, 'm', 'group', $4)")
+                .bind(Uuid::new_v4())
+                .bind(user)
+                .bind(format!("chat {n}"))
+                .bind(group)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+        let (members, more) = members_of(&db.pool, group, 2).await.unwrap();
+        assert_eq!((members.len(), more), (2, true));
+        let (members, more) = members_of(&db.pool, group, 3).await.unwrap();
+        assert_eq!((members.len(), more), (3, false));
+        let (chats, more) = chats_of(&db.pool, group, viewer, 2).await.unwrap();
+        assert_eq!(
+            (chats.len(), more, chats[0]["mine"].as_bool()),
+            (2, true, Some(true))
+        );
+        let (chats, more) = chats_of(&db.pool, group, viewer, 50).await.unwrap();
+        assert_eq!((chats.len(), more), (3, false));
+        db.close().await;
+    }
 }

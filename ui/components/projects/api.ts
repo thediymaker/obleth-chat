@@ -35,7 +35,9 @@ export interface SavedSummary {
 export interface ProjectDetail {
   project: Project;
   collections: { id: string; name: string; documents: number }[];
+  /** The newest 50 of this person's chats here; `moreChats` says when there are older ones. */
   chats: { id: string; title: string; updatedAt: string }[];
+  moreChats?: boolean;
   saved: SavedSummary[];
   /** The app's code, for the owner; null when the project has none. */
   app: string | null;

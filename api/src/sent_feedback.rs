@@ -3,6 +3,7 @@
 //! page and Chat version it came from, and see who sent it only when that person said
 //! they may be contacted about it.
 use crate::audit::{self, Action, Target};
+use crate::paging::PageQuery;
 use crate::{error::ApiError, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -132,6 +133,8 @@ async fn send(
 struct Filter {
     kind: Option<String>,
     done: Option<bool>,
+    #[serde(flatten)]
+    page: PageQuery,
 }
 
 /// One piece of feedback as administrators see it. The sender is named only when
@@ -179,17 +182,7 @@ async fn list(
         return Err(ApiError::bad("Unknown kind of feedback"));
     }
     let pool = &s.store.pool;
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT f.id,f.kind,f.message,f.contact,f.page,f.version,f.done,f.created_at,u.username,u.display_name
-         FROM sent_feedback f LEFT JOIN users u ON u.id=f.user_id AND f.contact
-         WHERE ($1::text IS NULL OR f.kind=$1) AND ($2::boolean IS NULL OR f.done=$2)
-         ORDER BY f.created_at DESC LIMIT $3",
-    )
-    .bind(&filter.kind)
-    .bind(filter.done)
-    .bind(LISTED)
-    .fetch_all(pool)
-    .await?;
+    let (rows, more) = sent_for(pool, &filter).await?;
     let counts: Vec<(String, i64)> =
         sqlx::query_as("SELECT kind,COUNT(*) FROM sent_feedback WHERE NOT done GROUP BY kind")
             .fetch_all(pool)
@@ -202,8 +195,27 @@ async fn list(
     };
     Ok(Json(json!({
         "items": rows.iter().map(document).collect::<Vec<_>>(),
+        "more": more,
         "open": {"problem": open("problem"), "idea": open("idea"), "other": open("other")},
     })))
+}
+
+/// A page of the feedback the filter matches, newest first.
+async fn sent_for(pool: &PgPool, filter: &Filter) -> Result<(Vec<Row>, bool), sqlx::Error> {
+    let page = filter.page.page(LISTED);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT f.id,f.kind,f.message,f.contact,f.page,f.version,f.done,f.created_at,u.username,u.display_name
+         FROM sent_feedback f LEFT JOIN users u ON u.id=f.user_id AND f.contact
+         WHERE ($1::text IS NULL OR f.kind=$1) AND ($2::boolean IS NULL OR f.done=$2)
+         ORDER BY f.created_at DESC, f.id LIMIT $3 OFFSET $4",
+    )
+    .bind(&filter.kind)
+    .bind(filter.done)
+    .bind(page.fetch())
+    .bind(page.offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(page.cut(rows))
 }
 
 #[derive(Deserialize)]
@@ -293,6 +305,34 @@ mod tests {
             .await
             .unwrap();
         set_mode(&db.pool, admin, "highlighted").await.unwrap();
+        // The sent list pages: 201 rows come back as 200 + more, then 1.
+        for n in 0..201 {
+            sqlx::query("INSERT INTO sent_feedback (id, kind, message, version, created_at) VALUES ($1, 'idea', $2, 'test', NOW() - make_interval(secs => $3))")
+                .bind(Uuid::new_v4())
+                .bind(format!("idea {n}"))
+                .bind(n as f64)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+        let filter = |offset| Filter {
+            kind: Some("idea".into()),
+            done: Some(false),
+            page: PageQuery {
+                offset,
+                limit: None,
+            },
+        };
+        let (rows, more) = sent_for(&db.pool, &filter(None)).await.unwrap();
+        assert_eq!(
+            (rows.len(), more, rows[0].message.as_str()),
+            (200, true, "idea 0")
+        );
+        let (rows, more) = sent_for(&db.pool, &filter(Some(200))).await.unwrap();
+        assert_eq!(
+            (rows.len(), more, rows[0].message.as_str()),
+            (1, false, "idea 200")
+        );
         assert_eq!(mode(&db.pool).await.unwrap(), "highlighted");
         let rows: Vec<(Option<Uuid>, String, String, Value)> =
             sqlx::query_as("SELECT actor_id, action, target_type, metadata FROM audit_events")

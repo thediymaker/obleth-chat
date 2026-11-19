@@ -1535,7 +1535,12 @@ struct AdminUser {
 struct UserQuery {
     q: Option<String>,
     limit: Option<i64>,
+    /// The last account of the previous page: the next page starts after it.
+    after: Option<Uuid>,
 }
+
+/// Accounts per page, unless the request asks for a limit.
+const USERS_LISTED: i64 = 100;
 
 async fn list_users(
     State(auth): State<Auth>,
@@ -1544,7 +1549,7 @@ async fn list_users(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     auth.require_admin(&headers, false).await?;
     let search = query.q.as_deref().unwrap_or("").trim();
-    let limit = query.limit.unwrap_or(1000);
+    let limit = query.limit.unwrap_or(USERS_LISTED);
     if search.len() > 256 || !(1..=1000).contains(&limit) {
         return Err(ApiError::bad(
             "Search is limited to 256 bytes and limit must be between 1 and 1000",
@@ -1552,14 +1557,23 @@ async fn list_users(
     }
     // strpos treats wildcard characters literally; a search cannot silently match
     // every user through SQL LIKE patterns. UUIDs can also be searched exactly.
+    // Newest first, and a page continues after the cursor account by (created_at, id).
     let mut users = sqlx::query_as::<_, AdminUser>("SELECT id, username, display_name, role, enabled, password_hash IS NOT NULL AS local_password, password_change_required, created_at, last_sign_in_at FROM users \
-        WHERE $1 = '' OR strpos(lower(username), lower($1)) > 0 OR strpos(lower(display_name), lower($1)) > 0 OR id::text = $1 \
+        WHERE ($1 = '' OR strpos(lower(username), lower($1)) > 0 OR strpos(lower(display_name), lower($1)) > 0 OR id::text = $1) \
+        AND ($3::uuid IS NULL OR (created_at, id) < (SELECT c.created_at, c.id FROM users c WHERE c.id = $3)) \
         ORDER BY created_at DESC, id DESC LIMIT $2")
-        .bind(search).bind(limit + 1)
+        .bind(search).bind(limit + 1).bind(query.after)
         .fetch_all(&auth.pool).await?;
     let has_more = users.len() > limit as usize;
     users.truncate(limit as usize);
-    Ok(Json(json!({"users": users, "hasMore": has_more})))
+    let cursor = if has_more {
+        users.last().map(|u| u.id)
+    } else {
+        None
+    };
+    Ok(Json(
+        json!({"users": users, "hasMore": has_more, "nextCursor": cursor}),
+    ))
 }
 
 #[derive(Deserialize)]

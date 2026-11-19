@@ -3,6 +3,7 @@
 //! project with a group, whose members start their own chats in it and see the items
 //! saved there. Each person's chats stay their own.
 
+use crate::paging::Page;
 use crate::{auth::Identity, error::ApiError, AppState};
 use axum::{
     extract::{Path, State},
@@ -263,16 +264,7 @@ async fn detail(
     .iter()
     .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"documents":r.get::<i64,_>("documents")}))
     .collect();
-    let chats: Vec<Value> = sqlx::query(
-        "SELECT id, title, updated_at FROM conversations WHERE project_id = $1 AND owner_id = $2 AND NOT archived ORDER BY updated_at DESC LIMIT 50",
-    )
-    .bind(id)
-    .bind(user.id)
-    .fetch_all(pool)
-    .await?
-    .iter()
-    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"title":r.get::<String,_>("title"),"updatedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("updated_at")}))
-    .collect();
+    let (chats, more_chats) = chats_in(pool, id, user.id, CHATS_SHOWN).await?;
     let saved = crate::knowledge::saved::in_project(pool, user.id, id, 30).await?;
     // The app's code, for the owner, whose page offers to make one when there is none.
     let app: Option<String> = if project["mine"] == true {
@@ -284,8 +276,33 @@ async fn detail(
         None
     };
     Ok(Json(
-        json!({"project":project,"collections":collections,"chats":chats,"saved":saved,"app":app}),
+        json!({"project":project,"collections":collections,"chats":chats,"moreChats":more_chats,"saved":saved,"app":app}),
     ))
+}
+
+/// A person's chats a project page shows, newest first; `moreChats` says when there
+/// are older ones (`project.chats` counts them all).
+const CHATS_SHOWN: i64 = 50;
+
+async fn chats_in(
+    pool: &PgPool,
+    project: Uuid,
+    owner: Uuid,
+    shown: i64,
+) -> Result<(Vec<Value>, bool), sqlx::Error> {
+    let page = Page {
+        offset: 0,
+        limit: shown,
+    };
+    let rows = sqlx::query(
+        "SELECT id, title, updated_at FROM conversations WHERE project_id = $1 AND owner_id = $2 AND NOT archived ORDER BY updated_at DESC, id LIMIT $3",
+    )
+    .bind(project)
+    .bind(owner)
+    .bind(page.fetch())
+    .fetch_all(pool)
+    .await?;
+    Ok(page.cut(rows.iter().map(|r| json!({"id":r.get::<Uuid,_>("id"),"title":r.get::<String,_>("title"),"updatedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("updated_at")})).collect()))
 }
 
 pub(crate) async fn owned(pool: &PgPool, user: Uuid, id: Uuid) -> Result<(), ApiError> {
@@ -490,4 +507,45 @@ async fn set_conversation_project(
         None => None,
     };
     Ok(Json(json!({"project":project})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::Database;
+
+    #[tokio::test]
+    async fn a_project_page_says_when_chats_go_on() {
+        let Some(db) = Database::new().await else {
+            return;
+        };
+        let owner = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, 'ana', 'Ana', 'user', 'x')")
+            .bind(owner)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let project = Uuid::new_v4();
+        sqlx::query("INSERT INTO projects (id, owner_id, name) VALUES ($1, $2, 'Thesis')")
+            .bind(project)
+            .bind(owner)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        for n in 0..3 {
+            sqlx::query("INSERT INTO conversations (id, owner_id, title, model, project_id) VALUES ($1, $2, $3, 'm', $4)")
+                .bind(Uuid::new_v4())
+                .bind(owner)
+                .bind(format!("chat {n}"))
+                .bind(project)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+        let (chats, more) = chats_in(&db.pool, project, owner, 2).await.unwrap();
+        assert_eq!((chats.len(), more), (2, true));
+        let (chats, more) = chats_in(&db.pool, project, owner, 50).await.unwrap();
+        assert_eq!((chats.len(), more), (3, false));
+        db.close().await;
+    }
 }

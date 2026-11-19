@@ -470,6 +470,10 @@ async fn change_member(
 #[derive(Deserialize)]
 struct AuditQuery {
     limit: Option<i64>,
+    /// The last event of the previous page: the next page continues after it
+    /// (older events). `before` is the same cursor under its old name, kept for
+    /// one release.
+    after: Option<Uuid>,
     before: Option<Uuid>,
     kind: Option<String>,
     q: Option<String>,
@@ -504,7 +508,7 @@ async fn audit(
     if !(1..=200).contains(&limit) {
         return Err(ApiError::bad("Audit limit must be between 1 and 200"));
     }
-    let cursor = if let Some(id) = query.before {
+    let cursor = if let Some(id) = query.after.or(query.before) {
         Some(
             sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
                 "SELECT created_at,id FROM audit_events WHERE id=$1",

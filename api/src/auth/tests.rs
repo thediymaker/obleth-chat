@@ -276,6 +276,22 @@ async fn local_auth_origin_csrf_and_account_isolation() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed["hasMore"], true);
     assert_eq!(listed["users"].as_array().unwrap().len(), 1);
+    // The next page continues after the cursor and never repeats an account.
+    let cursor = listed["nextCursor"].as_str().unwrap();
+    let (_, _, next) = call(
+        &app,
+        "GET",
+        &format!("/api/admin/users?limit=1&after={cursor}"),
+        None,
+        Some(&cookie),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(next["users"].as_array().unwrap().len(), 1);
+    assert_ne!(next["users"][0]["id"], listed["users"][0]["id"]);
+    assert_eq!(next["hasMore"], false);
+    assert!(next["nextCursor"].is_null());
     let (_, _, searched) = call(
         &app,
         "GET",
@@ -1836,7 +1852,7 @@ async fn groups_membership_and_audit_are_admin_only_and_paginated() {
     let second = call(
         &app,
         "GET",
-        &format!("/api/admin/audit?limit=2&before={cursor}"),
+        &format!("/api/admin/audit?limit=2&after={cursor}"),
         None,
         Some(&ac),
         None,

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Path, RawQuery, State},
+    extract::{DefaultBodyLimit, Path, Query, RawQuery, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::Response,
     routing::get,
@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::paging::{Page, PageQuery};
 use crate::{
     error::ApiError,
     files::{attachment_key, Files, Placed},
@@ -326,19 +327,54 @@ pub fn router(state: AppState) -> Router {
             // The upload reads its own body, after sign-in.
             get(list).post(upload).layer(DefaultBodyLimit::disable()),
         )
+        .route("/api/attachments/limits", get(limits))
         .route("/api/attachments/{id}", get(download).delete(delete))
         .with_state(state)
 }
 
-async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+/// Files per page of the list, unless the request asks for a limit.
+const LISTED: i64 = 100;
+
+/// A page of the person's files, newest first. `limits` rides along for interfaces
+/// that still read it here; `GET /api/attachments/limits` serves it alone.
+async fn list(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Query(page): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
-    let attachments = sqlx::query_as::<_, AttachmentMeta>(
-        "SELECT id,name,mime_type,size,kind,parts,searched FROM attachments WHERE owner_id=$1 ORDER BY created_at DESC,id LIMIT 100",
-    ).bind(user.id).fetch_all(&s.store.pool).await?;
-    let limits = s.store.limits;
+    let (items, more) = list_for(&s.store.pool, user.id, page.page(LISTED)).await?;
     Ok(Json(
-        json!({"attachments":attachments,"limits":{"maxFiles":limits.max_files,"maxBytes":limits.quota_bytes,"maxFileBytes":limits.max_file_bytes,"maxTextBytes":MAX_TEXT_BYTES,"maxImageBytes":MAX_IMAGE_BYTES,"maxDocumentBytes":limits.max_file_bytes,"maxDocumentTextBytes":MAX_DOCUMENT_TEXT_BYTES,"maxPerMessage":MAX_PER_MESSAGE}}),
+        json!({"items":items,"more":more,"limits":limits_json(&s.store.limits)}),
     ))
+}
+
+async fn list_for(
+    pool: &PgPool,
+    owner: Uuid,
+    page: Page,
+) -> Result<(Vec<AttachmentMeta>, bool), sqlx::Error> {
+    let rows = sqlx::query_as::<_, AttachmentMeta>(
+        "SELECT id,name,mime_type,size,kind,parts,searched FROM attachments WHERE owner_id=$1
+         ORDER BY created_at DESC,id LIMIT $2 OFFSET $3",
+    )
+    .bind(owner)
+    .bind(page.fetch())
+    .bind(page.offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(page.cut(rows))
+}
+
+/// The sizes and counts an upload must fit, for the composer to check a file
+/// before sending it.
+async fn limits(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    s.auth.require(&headers, false).await?;
+    Ok(Json(limits_json(&s.store.limits)))
+}
+
+fn limits_json(limits: &Limits) -> Value {
+    json!({"maxFiles":limits.max_files,"maxBytes":limits.quota_bytes,"maxFileBytes":limits.max_file_bytes,"maxTextBytes":MAX_TEXT_BYTES,"maxImageBytes":MAX_IMAGE_BYTES,"maxDocumentBytes":limits.max_file_bytes,"maxDocumentTextBytes":MAX_DOCUMENT_TEXT_BYTES,"maxPerMessage":MAX_PER_MESSAGE})
 }
 
 /// File bytes held in memory at once on each server, in MiB: upload bodies while
@@ -1248,6 +1284,57 @@ fn valid_image_header(mime: &str, data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Database;
+
+    #[tokio::test]
+    async fn the_file_list_pages_past_the_first_hundred() {
+        let Some(db) = Database::new().await else {
+            return;
+        };
+        let owner = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, 'ana', 'Ana', 'user', 'x')")
+            .bind(owner)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        for n in 0..150 {
+            sqlx::query("INSERT INTO attachments (id, owner_id, name, mime_type, kind, size, data, created_at) VALUES ($1, $2, $3, 'text/plain', 'file', 1, 'x', NOW() - make_interval(secs => $4))")
+                .bind(Uuid::new_v4())
+                .bind(owner)
+                .bind(format!("file-{n}"))
+                .bind(n as f64)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+        let first = PageQuery::default().page(LISTED);
+        let (items, more) = list_for(&db.pool, owner, first).await.unwrap();
+        assert_eq!(
+            (items.len(), more, items[0].name.as_str()),
+            (100, true, "file-0")
+        );
+        let next = PageQuery {
+            offset: Some(100),
+            limit: None,
+        }
+        .page(LISTED);
+        let (items, more) = list_for(&db.pool, owner, next).await.unwrap();
+        assert_eq!(
+            (items.len(), more, items[49].name.as_str()),
+            (50, false, "file-149")
+        );
+        db.close().await;
+    }
+
+    #[test]
+    fn the_limits_are_the_configured_ones() {
+        let limits = Limits::new(20, Some(300), 400, true);
+        let json = limits_json(&limits);
+        assert_eq!(json["maxFileBytes"], 20 * MIB);
+        assert_eq!(json["maxBytes"], 300 * MIB as i64);
+        assert_eq!(json["maxFiles"], 400);
+        assert_eq!(json["maxPerMessage"], MAX_PER_MESSAGE);
+    }
 
     fn attachment(kind: &str, mime_type: &str, data: Vec<u8>, text: Option<&str>) -> Attachment {
         Attachment {

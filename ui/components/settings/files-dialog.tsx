@@ -4,6 +4,7 @@
 // next message in Chat) and Delete. Opened from Settings › Your files.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Archive, File, FileText, Image as ImageIcon, Monitor, Sheet } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -54,16 +55,20 @@ export function describeFile(a: Attachment): { Icon: typeof File; detail: string
 }
 
 const filesKey = ["settings", "files"] as const;
+/** Files shown at first; "Show more" asks for another page, so the oldest can be reached. */
+export const FILES_PAGE = 100;
 
 export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const queries = useQueryClient();
   const router = useRouter();
   const confirm = useConfirm();
+  const [shown, setShown] = useState(FILES_PAGE);
   const { data, error, isLoading } = useQuery({
-    queryKey: filesKey,
-    queryFn: async () => (await api.request<{ attachments?: Attachment[] }>("/api/attachments")).attachments ?? [],
+    queryKey: [...filesKey, shown],
+    queryFn: () => api.request<{ items?: Attachment[]; more?: boolean }>(`/api/attachments?limit=${shown}`),
     enabled: open,
   });
+  const files = data?.items ?? [];
   return (
     <FormDialog open={open} onOpenChange={onOpenChange} title="Your files" wide>
       {confirm.element}
@@ -77,9 +82,9 @@ export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChang
         </p>
       ) : error ? (
         <Note role="alert">{error.message}</Note>
-      ) : data?.length ? (
+      ) : files.length ? (
         <ul className="grid max-h-[50dvh] gap-1 overflow-y-auto">
-          {data.map((a) => {
+          {files.map((a) => {
             const { Icon, detail } = describeFile(a);
             return (
               <li key={a.id} className="flex items-center gap-3 rounded-md border px-3 py-2">
@@ -124,6 +129,13 @@ export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChang
               </li>
             );
           })}
+          {data?.more && (
+            <li>
+              <Button variant="ghost" size="sm" onClick={() => setShown(shown + FILES_PAGE)}>
+                Show more files
+              </Button>
+            </li>
+          )}
         </ul>
       ) : (
         <EmptyState title="No uploaded files" text="Use the paperclip in Chat to attach a file." />

@@ -50,8 +50,12 @@ export interface KnowledgeDocument {
 }
 export interface CollectionDetail {
   collection: Omit<Collection, "documents" | "processing" | "problems" | "passages" | "bytes">;
+  /** The newest documents, up to the limit asked for; `more` says whether older ones exist. */
   documents: KnowledgeDocument[];
+  more?: boolean;
 }
+/** Documents a collection page shows at first; "Show more" asks for another page. */
+export const DOCUMENTS_PAGE = 100;
 export interface SearchResult {
   n: number;
   documentId: string;
@@ -89,10 +93,10 @@ export function useCollections(enabled = true, poll = false) {
     refetchInterval: (q) => (poll && q.state.data?.collections?.some((c) => c.processing > 0) ? 2500 : false),
   });
 }
-export function useCollection(id: string) {
+export function useCollection(id: string, limit = DOCUMENTS_PAGE) {
   return useQuery({
-    queryKey: knowledgeKeys.detail(id),
-    queryFn: () => api.request<CollectionDetail>(collectionPath(id)),
+    queryKey: [...knowledgeKeys.detail(id), limit],
+    queryFn: () => api.request<CollectionDetail>(`${collectionPath(id)}?limit=${limit}`),
     enabled: !!id,
     retry: (n, e) => (e as { status?: number }).status !== 404 && n < 2,
     refetchInterval: (q) => (q.state.data?.documents?.some(busy) ? 2500 : false),

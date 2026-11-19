@@ -26,6 +26,7 @@ pub mod memory;
 pub mod metrics;
 pub mod models;
 pub mod operations;
+pub mod paging;
 pub mod pause;
 pub mod projects;
 pub mod questions;

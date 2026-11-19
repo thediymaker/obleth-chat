@@ -42,7 +42,7 @@ export interface AttachmentsOptions {
 }
 
 export function createAttachments({ api, toast, streaming }: AttachmentsOptions) {
-  // The server's limits (GET /api/attachments), read once per session.
+  // The server's limits (GET /api/attachments/limits), read once per session.
   let selected: Attachment[] = [],
     uploading = false,
     sequence = 0,
@@ -74,7 +74,7 @@ export function createAttachments({ api, toast, streaming }: AttachmentsOptions)
     try {
       if (!limits) {
         try {
-          limits = (await api.request("/api/attachments"))?.limits || null;
+          limits = (await api.request("/api/attachments/limits")) || null;
         } catch (e) {
           if ((e as Error).name === "AbortError") throw e;
         }

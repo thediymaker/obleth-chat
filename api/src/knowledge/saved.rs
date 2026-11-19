@@ -3,6 +3,7 @@
 //! alongside collection passages, and listed in Library.
 
 use super::{bad, knowledge, vector_literal, words, Hit, Knowledge};
+use crate::paging::PageQuery;
 use crate::{auth::Identity, error::ApiError, gateway::Gateway, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -453,13 +454,17 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Items per page, unless the request asks for a limit.
+const LISTED: i64 = 60;
+
 #[derive(Deserialize)]
 struct ListQuery {
     q: Option<String>,
     kind: Option<String>,
     tag: Option<String>,
     project: Option<Uuid>,
-    offset: Option<i64>,
+    #[serde(flatten)]
+    page: PageQuery,
 }
 
 async fn list(
@@ -475,7 +480,7 @@ async fn list(
         .map(|t| clean_tags(&[t]))
         .and_then(|t| t.into_iter().next());
     let query = q.q.unwrap_or_default();
-    let offset = q.offset.unwrap_or(0).clamp(0, 100_000);
+    let page = q.page.page(LISTED);
     // One project's items (anyone's, when it is shared), or all of the person's own.
     let project = match q.project {
         Some(p) => Some(usable_project(&k.pool, user.id, p).await?),
@@ -491,23 +496,20 @@ async fn list(
     );
     let (items, more) = if query.trim().is_empty() {
         let rows = sqlx::query(&format!(
-            "{base} ORDER BY s.pinned DESC, s.created_at DESC LIMIT 61 OFFSET $4"
+            "{base} ORDER BY s.pinned DESC, s.created_at DESC LIMIT $4 OFFSET $5"
         ))
         .bind(user.id)
         .bind(&kind)
         .bind(&tag)
-        .bind(offset)
+        .bind(page.fetch())
+        .bind(page.offset)
         .fetch_all(&k.pool)
         .await?;
-        let more = rows.len() > 60;
-        (
-            rows.iter().take(60).map(item_json).collect::<Vec<_>>(),
-            more,
-        )
+        page.cut(rows.iter().map(item_json).collect())
     } else {
         let gateway = s.gateway.as_ref().ok_or_else(crate::gateway::unavailable)?;
         let ranked = k
-            .rank_saved(gateway, &user, &query, false, project, 60)
+            .rank_saved(gateway, &user, &query, false, project, page.limit as usize)
             .await?;
         let ids: Vec<Uuid> = ranked.iter().map(|r| r.0).collect();
         let rows = sqlx::query(&format!("{base} AND s.id = ANY($4)"))

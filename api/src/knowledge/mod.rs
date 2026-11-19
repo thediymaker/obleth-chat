@@ -13,6 +13,7 @@ pub mod extract;
 pub mod saved;
 pub mod storage;
 
+use crate::paging::{Page, PageQuery};
 use crate::{
     auth::{Identity, Role},
     error::ApiError,
@@ -739,25 +740,40 @@ async fn owned(pool: &PgPool, user: Uuid, id: Uuid) -> Result<(), ApiError> {
     }
 }
 
+/// Documents per page of a collection, unless the request asks for a limit.
+const DOCUMENTS_LISTED: i64 = 100;
+
 async fn detail(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
     let k = knowledge(&s)?;
     let (collection, _) = visible_collection(&k.pool, user.id, id).await?;
-    let documents: Vec<Value> = sqlx::query(
+    let (documents, more) = documents_for(&k.pool, id, page.page(DOCUMENTS_LISTED)).await?;
+    Ok(Json(
+        json!({"collection":collection,"documents":documents,"more":more}),
+    ))
+}
+
+/// A page of a collection's documents, newest first.
+async fn documents_for(
+    pool: &PgPool,
+    collection: Uuid,
+    page: Page,
+) -> Result<(Vec<Value>, bool), sqlx::Error> {
+    let rows = sqlx::query(
         "SELECT id, name, mime_type, size, status, stage, progress_done, progress_total, pages, passages, error, created_at
-         FROM knowledge_documents WHERE collection_id=$1 ORDER BY created_at DESC",
+         FROM knowledge_documents WHERE collection_id=$1 ORDER BY created_at DESC, id LIMIT $2 OFFSET $3",
     )
-    .bind(id)
-    .fetch_all(&k.pool)
-    .await?
-    .iter()
-    .map(document_json)
-    .collect();
-    Ok(Json(json!({"collection":collection,"documents":documents})))
+    .bind(collection)
+    .bind(page.fetch())
+    .bind(page.offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(page.cut(rows.iter().map(document_json).collect()))
 }
 
 fn document_json(r: &sqlx::postgres::PgRow) -> Value {
@@ -1209,6 +1225,58 @@ pub async fn set_for_conversation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Database;
+
+    #[tokio::test]
+    async fn a_collection_lists_its_documents_a_page_at_a_time() {
+        let Some(db) = Database::new().await else {
+            return;
+        };
+        let owner = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, 'ana', 'Ana', 'user', 'x')")
+            .bind(owner)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let collection = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO knowledge_collections (id, owner_id, name) VALUES ($1, $2, 'Papers')",
+        )
+        .bind(collection)
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        for n in 0..150 {
+            sqlx::query("INSERT INTO knowledge_documents (id, collection_id, owner_id, name, mime_type, size, object_key, created_at) VALUES ($1, $2, $3, $4, 'text/plain', 1, $5, NOW() - make_interval(secs => $6))")
+                .bind(Uuid::new_v4())
+                .bind(collection)
+                .bind(owner)
+                .bind(format!("paper-{n}"))
+                .bind(format!("knowledge/{owner}/{n}"))
+                .bind(n as f64)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+        let first = PageQuery::default().page(DOCUMENTS_LISTED);
+        let (documents, more) = documents_for(&db.pool, collection, first).await.unwrap();
+        assert_eq!(
+            (documents.len(), more, documents[0]["name"].as_str()),
+            (100, true, Some("paper-0"))
+        );
+        let rest = PageQuery {
+            offset: Some(100),
+            limit: None,
+        }
+        .page(DOCUMENTS_LISTED);
+        let (documents, more) = documents_for(&db.pool, collection, rest).await.unwrap();
+        assert_eq!(
+            (documents.len(), more, documents[49]["name"].as_str()),
+            (50, false, Some("paper-149"))
+        );
+        db.close().await;
+    }
 
     #[test]
     fn short_vectors_are_padded() {

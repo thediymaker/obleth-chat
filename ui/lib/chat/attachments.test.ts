@@ -18,7 +18,7 @@ test("an upload waiting on the limits after session reset cannot upload into the
 test("long pasted text is attached as a file whose chip can show it", async () => {
   const sent: [string, any][] = [], toasts: string[] = [];
   const attachments = createAttachments({
-    api: { request: async (path, options) => { if (!options) return { attachments: [], limits: { maxFileBytes: 50 * 1024 * 1024 } }; sent.push([path, options]); return { attachment: { id: "a1", name: options.raw.name, size: 9000, kind: "text" } }; } },
+    api: { request: async (path, options) => { if (!options) return { maxFileBytes: 50 * 1024 * 1024 }; sent.push([path, options]); return { attachment: { id: "a1", name: options.raw.name, size: 9000, kind: "text" } }; } },
     toast: (m) => toasts.push(m), streaming: () => false,
   });
   const text = `<b>line</b>\n${"x".repeat(9000)}`;
@@ -51,7 +51,7 @@ test("pasted text a conversation could not hold, or pasted mid-reply, is refused
 test("a document chip names its type and parts, and says when Chat searches it", async () => {
   const toasts: string[] = [];
   const attachments = createAttachments({
-    api: { request: async (_path, options) => (options ? { id: "d1", name: options.raw.name, size: 3 * 1024 * 1024, kind: "document", parts: 120, searched: true } : { attachments: [], limits: { maxFileBytes: 20 * 1024 * 1024 } }) },
+    api: { request: async (_path, options) => (options ? { id: "d1", name: options.raw.name, size: 3 * 1024 * 1024, kind: "document", parts: 120, searched: true } : { maxFileBytes: 20 * 1024 * 1024 }) },
     toast: (m) => toasts.push(m), streaming: () => false,
   });
   const file = new File([new Uint8Array(8)], "Thesis.pdf", { type: "application/pdf" });

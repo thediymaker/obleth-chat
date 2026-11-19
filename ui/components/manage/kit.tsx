@@ -296,6 +296,18 @@ interface Pending {
   action: () => Promise<unknown> | unknown;
 }
 
+/**
+ * The one rule for destructive actions:
+ * - Irreversible (delete, revoke, end a session, forget data): the trigger is a
+ *   `DangerButton`, it asks first through `useConfirm`, and a success is toasted.
+ * - Reversible (archive, turn off, detach): it acts at once and offers Undo in the toast.
+ * - Either way a failure is toasted (or shown in the open dialog), never left as an
+ *   unhandled rejection.
+ */
+export function DangerButton({ className, variant = "outline", size = "sm", ...props }: React.ComponentProps<typeof Button>) {
+  return <Button variant={variant} size={size} className={cn("border-destructive/40 text-destructive-foreground hover:bg-destructive/10 hover:text-destructive-foreground", className)} {...props} />;
+}
+
 /** A confirmation before something that can't be undone. `ask` opens it; the element renders it. */
 export function useConfirm() {
   const [pending, setPending] = useState<Pending | null>(null);

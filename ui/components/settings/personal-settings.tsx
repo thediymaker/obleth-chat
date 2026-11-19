@@ -12,7 +12,7 @@ import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState } from "@/components/app-shell/page";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { CheckField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, displayName, useConfirm, useSubmit } from "@/components/manage/kit";
+import { CheckField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, displayName, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { SectionHeading } from "@/components/settings/settings-frame";
 import { SecurityCard, TokensCard, type ApiToken, type DeviceSession } from "@/components/settings/account-cards";
 import { BrowserCard } from "@/components/settings/browser-card";
@@ -180,9 +180,8 @@ export function PersonalSettings() {
                       <Button size="xs" variant="outline" onClick={() => setPreset(x)}>
                         Edit
                       </Button>
-                      <Button
+                      <DangerButton
                         size="xs"
-                        variant="outline"
                         onClick={() =>
                           confirm.ask({
                             title: "Delete this preset?",
@@ -198,7 +197,7 @@ export function PersonalSettings() {
                         }
                       >
                         Delete
-                      </Button>
+                      </DangerButton>
                     </div>
                   </li>
                 ))}

@@ -11,7 +11,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { Field, FormActions, FormDialog, FormError, Dropdown, Note, Section, TableWrap, TextAreaField, TextField, displayName, td, th, titleCase, useConfirm, useSubmit } from "@/components/manage/kit";
+import { Field, FormActions, FormDialog, FormError, Dropdown, Note, Section, TableWrap, TextAreaField, TextField, displayName, td, th, titleCase, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { SearchForm, useAdminUsers } from "./people-tab";
 import { useKept } from "./state";
@@ -202,9 +202,7 @@ function GroupDetail({ id }: { id: string }) {
           <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
             Edit group
           </Button>
-          <Button
-            size="sm"
-            variant="destructive"
+          <DangerButton
             onClick={() =>
               confirm.ask({
                 title: "Delete this group?",
@@ -220,7 +218,7 @@ function GroupDetail({ id }: { id: string }) {
             }
           >
             Delete
-          </Button>
+          </DangerButton>
         </div>
       </div>
       <ErrorBox error={detail.error || users.error} onRetry={() => detail.refetch()} />
@@ -271,9 +269,8 @@ function GroupDetail({ id }: { id: string }) {
                   </td>
                   <td className={td}>{titleCase(u.role)}</td>
                   <td className={`${td} text-right`}>
-                    <Button
+                    <DangerButton
                       size="xs"
-                      variant="outline"
                       onClick={() =>
                         confirm.ask({
                           title: "Remove this member?",
@@ -288,7 +285,7 @@ function GroupDetail({ id }: { id: string }) {
                       }
                     >
                       Remove
-                    </Button>
+                    </DangerButton>
                   </td>
                 </tr>
               ))}

@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { messageOf } from "@/components/projects/form-field";
+import { DangerButton, useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -276,20 +277,25 @@ function SavedView({ openId }: { openId?: string }) {
 
 function GeneratedView() {
   const client = useQueryClient();
+  const confirm = useConfirm();
   const { data, error, isPending, refetch } = useGeneratedImages();
   const images = data?.images ?? [];
-  async function remove(id: string) {
-    try {
-      await api.request(`/api/images/${encodeURIComponent(id)}`, { method: "DELETE" });
-      client.setQueryData(["library", "images"], { ...data, images: images.filter((i) => i.id !== id) });
-      toast("Image deleted");
-    } catch (e) {
-      toast(messageOf(e));
-    }
-  }
+  const remove = (id: string) =>
+    confirm.ask({
+      title: "Delete this image?",
+      text: "It is deleted for good; chats that showed it lose it.",
+      label: "Delete image",
+      cancel: "Keep it",
+      action: async () => {
+        await api.request(`/api/images/${encodeURIComponent(id)}`, { method: "DELETE" });
+        client.setQueryData(["library", "images"], { ...data, images: images.filter((i) => i.id !== id) });
+        toast("Image deleted");
+      },
+    });
   if (isPending) return <Loading />;
   return (
     <>
+      {confirm.element}
       {data?.usage && (
         <div className="mb-4 flex justify-end">
           <StorageMeter label="Generated images" used={data.usage.used} limit={data.usage.limit} format={imageSize} />
@@ -313,9 +319,9 @@ function GeneratedView() {
                     {when(i.createdAt)} · {imageSize(i.size)}
                   </span>
                 </div>
-                <Button variant="ghost" size="icon-sm" aria-label="Delete image" title="Delete" onClick={() => remove(i.id)}>
+                <DangerButton size="icon-sm" aria-label="Delete image" title="Delete" onClick={() => remove(i.id)}>
                   <Trash2 />
-                </Button>
+                </DangerButton>
               </figcaption>
             </figure>
           ))}

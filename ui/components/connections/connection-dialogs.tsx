@@ -128,7 +128,7 @@ export function useConnectionManager({ onChange }: { onChange?: (item: Connectio
       )}
     </>
   );
-  return { ...actions, element };
+  return { ...actions, ask: confirm.ask, run, element };
 }
 export type ConnectionManager = ReturnType<typeof useConnectionManager>;
 

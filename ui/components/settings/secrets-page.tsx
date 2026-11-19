@@ -11,7 +11,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
-import { FormActions, FormDialog, FormError, Note, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
+import { FormActions, FormDialog, FormError, Note, TextField, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { SectionHeading } from "@/components/settings/settings-frame";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -126,9 +126,9 @@ export function SecretsPage() {
               <Button size="sm" variant="ghost" onClick={() => setDialog({ secret: s })}>
                 Change
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => remove(s)}>
+              <DangerButton variant="ghost" onClick={() => remove(s)}>
                 Remove
-              </Button>
+              </DangerButton>
             </li>
           ))}
         </ul>

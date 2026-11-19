@@ -1,6 +1,6 @@
 // The Library: older saved items show on request.
 
-import { screen } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { polyfillLayout, renderWithQueries } from "@/components/chat/test-queries";
@@ -27,11 +27,28 @@ test("Show more asks for a larger page", async () => {
     if (path.startsWith("/api/projects")) return { projects: [] };
     return {};
   });
-  renderWithQueries(<LibraryPage />);
+  renderWithQueries(<LibraryPage tab="saved" />);
   expect(await screen.findByText("Note 1")).toBeInTheDocument();
   expect(screen.queryByText("Note 70")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Show more" }));
   expect(await screen.findByText("Note 70")).toBeInTheDocument();
   expect(request.mock.calls.some(([path]) => path === `/api/saved?limit=${2 * SAVED_PAGE}`)).toBe(true);
   expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+});
+
+test("deleting a generated image asks first, on the danger button", async () => {
+  request.mockImplementation(async (path: string, options?: { method?: string }) => {
+    if (path.startsWith("/api/images/") && options?.method === "DELETE") return {};
+    if (path.startsWith("/api/images")) return { images: [{ id: "i1", prompt: "a cat", size: 1000, createdAt: "2026-11-01T10:00:00Z", url: "/api/images/i1" }], usage: null };
+    if (path.startsWith("/api/saved")) return { items: [], more: false, tags: [], kinds: [] };
+    if (path.startsWith("/api/projects")) return { projects: [] };
+    return {};
+  });
+  renderWithQueries(<LibraryPage tab="generated" />);
+  const trigger = await screen.findByRole("button", { name: "Delete image" });
+  expect(trigger.className).toContain("text-destructive-foreground");
+  await userEvent.click(trigger);
+  expect(request.mock.calls.some(([, o]) => (o as { method?: string } | undefined)?.method === "DELETE")).toBe(false);
+  await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Delete image" }));
+  await waitFor(() => expect(request.mock.calls.some(([path, o]) => path === "/api/images/i1" && (o as { method?: string }).method === "DELETE")).toBe(true));
 });

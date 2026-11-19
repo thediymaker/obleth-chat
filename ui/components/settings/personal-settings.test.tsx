@@ -63,6 +63,9 @@ test("signed-in devices can be revoked, but not this one", async () => {
   const other = (await screen.findByText("Safari")).closest("li")!;
   expect(within(screen.getByText("Firefox").closest("li")!).queryByRole("button", { name: "Revoke" })).toBeNull();
   await userEvent.click(within(other).getByRole("button", { name: "Revoke" }));
+  // Revoking asks first: nothing is sent until the dialog's Revoke.
+  expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Revoke" }));
   await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.path === "/api/auth/sessions/s2")).toBe(true));
   expect(screen.getByRole("button", { name: "Sign out other devices" })).toBeInTheDocument();
 });

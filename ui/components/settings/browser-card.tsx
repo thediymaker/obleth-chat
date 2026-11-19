@@ -9,7 +9,7 @@ import { X } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { DetailRow, Field, Dropdown, Note, Pill, Section, useConfirm } from "@/components/manage/kit";
+import { DetailRow, Field, Dropdown, Note, Pill, Section, useConfirm, DangerButton } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 
 export interface BrowserSettings {
@@ -121,10 +121,7 @@ export function BrowserCard() {
             Sleep now
           </Button>
         )}
-        <Button
-          size="sm"
-          variant="outline"
-          className="text-destructive-foreground"
+        <DangerButton
           onClick={() =>
             confirm.ask({
               title: "Forget all browser data?",
@@ -140,7 +137,7 @@ export function BrowserCard() {
           }
         >
           Forget all browser data
-        </Button>
+        </DangerButton>
       </div>
     </Section>
   );

@@ -29,6 +29,9 @@ pub struct RunReport {
     pub audit_events: u64,
     pub expired_sessions: u64,
     pub expired_access_tokens: u64,
+    /// Batch spreadsheets and labels kept past the batch retention.
+    #[serde(default)]
+    pub batch_rows: u64,
 }
 fn validate(body: &Value) -> Result<(), ApiError> {
     let object = body
@@ -159,6 +162,7 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
     }
     report.expired_sessions=sqlx::query("DELETE FROM auth_sessions WHERE token_hash IN(SELECT token_hash FROM auth_sessions WHERE expires_at<NOW() ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED)").execute(&mut *tx).await?.rows_affected();
     report.expired_access_tokens=sqlx::query("DELETE FROM account_access_tokens WHERE token_hash IN(SELECT token_hash FROM account_access_tokens WHERE expires_at<NOW() ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED)").execute(&mut *tx).await?.rows_affected();
+    report.batch_rows = crate::batches::expire(&mut tx).await?;
     report.at = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *tx)
         .await?;
@@ -175,6 +179,7 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
         + report.audit_events
         + report.expired_sessions
         + report.expired_access_tokens
+        + report.batch_rows
         > 0
     {
         audit::record(

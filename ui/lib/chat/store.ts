@@ -173,6 +173,8 @@ export class ChatStore {
   shared: ShareInfo | null = null;
   loadingChat = false;
   chatError = "";
+  /** The chat at this address does not exist, or is not shared with this person. */
+  chatMissing = false;
   error = "";
   catalogError = "";
   streaming = false;
@@ -632,6 +634,7 @@ export class ChatStore {
     if (left) this.leaveTemporary(left);
     const { page, id } = this.route;
     this.chatError = "";
+    this.chatMissing = false;
     this.shared = null;
     this.loadSequence++;
     if (page !== "chat" || !id) {
@@ -685,7 +688,10 @@ export class ChatStore {
         const r = await this.options.api.request<any>(sharedPath(id)).catch(() => null);
         if (sequence !== this.loadSequence || this.disposed) return;
         if (r && !r.mine) this.openShared(r, sequence);
-        else this.chatError = "This chat does not exist, or it is not shared with you.";
+        else {
+          this.chatError = "This chat does not exist, or it is not shared with you.";
+          this.chatMissing = true;
+        }
       }
     } finally {
       if (sequence === this.loadSequence && !this.disposed) {
@@ -710,6 +716,7 @@ export class ChatStore {
     this.active = r.conversation;
     this.shared = r.share;
     this.chatError = "";
+    this.chatMissing = false;
     this.sharedSignature = sharedSignatureOf(r.conversation);
     this.watchShared(r.conversation.id, sequence);
   }

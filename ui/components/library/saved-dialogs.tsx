@@ -22,6 +22,7 @@ import { useProjects } from "@/lib/queries";
 import { useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { getSaved, host, KINDS, kindOf, parseTags, refreshSaved, type SavedItem, type SavedKind, savedPath, suggestTags, useSaved } from "./api";
+import { isNotFound } from "@/components/app-shell/page";
 
 /** What the save dialog starts from: a new item (maybe from a chat) or one being edited. */
 export interface SaveDraft {
@@ -398,7 +399,7 @@ export function useLibraryDialogs(items: SavedItem[] = []) {
       try {
         show(items.find((i) => i.id === id) || (await getSaved(id)));
       } catch (e) {
-        toast(messageOf(e));
+        toast(isNotFound(e) ? "This item does not exist, or it is not shared with you." : messageOf(e));
       }
     },
     [items, show],

@@ -27,6 +27,7 @@ import { NamedIcon } from "./icon";
 import { MessageView, messageSignature } from "./message";
 import { SelectionBar } from "./selection-bar";
 import { SidePane } from "./side-pane";
+import { NotFound } from "@/components/app-shell/page";
 
 function Alert({ message, onRetry }: { message: string; onRetry?: () => void }) {
   if (!message) return null;
@@ -281,15 +282,24 @@ export function ChatPage({ id }: { id: string }) {
         Opening your conversation…
       </div>
     );
+  const newChat = (
+    <Button variant="outline" size="sm" asChild>
+      <Link href="/" onClick={() => window.dispatchEvent(new Event(NEW_CHAT_EVENT))}>
+        <Plus /> Start a new chat
+      </Link>
+    </Button>
+  );
+  if (store.chatMissing && !c)
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-8">
+        <NotFound what="chat" to="/" back="Chat" action={newChat} />
+      </div>
+    );
   if (store.chatError && !c)
     return (
       <div className="mx-auto grid max-w-3xl gap-3 px-4 py-8">
         <Alert message={store.chatError} onRetry={() => store.reload()} />
-        <Button variant="outline" className="justify-self-start" asChild>
-          <Link href="/" onClick={() => window.dispatchEvent(new Event(NEW_CHAT_EVENT))}>
-            <Plus /> Start a new chat
-          </Link>
-        </Button>
+        <div className="justify-self-start">{newChat}</div>
       </div>
     );
   if (!c)

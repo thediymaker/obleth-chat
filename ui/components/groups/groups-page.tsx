@@ -8,7 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { BookOpen, MessageSquare, Settings } from "lucide-react";
 import Link from "next/link";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader, isNotFound, NotFound } from "@/components/app-shell/page";
 import { projectDot } from "@/components/app-shell/sidebar";
 import { Button } from "@/components/ui/button";
 import { Note } from "@/components/manage/kit";
@@ -73,7 +73,8 @@ export function GroupsPage({ id = "" }: { id?: string }) {
     enabled: !!chosen && !!all,
   });
   const canManage = !!list.data?.canManage;
-  const error = list.error || detail.error;
+  const missing = isNotFound(detail.error);
+  const error = list.error || (missing ? null : detail.error);
   const retry = () => {
     list.refetch();
     if (chosen) detail.refetch();
@@ -198,6 +199,10 @@ export function GroupsPage({ id = "" }: { id?: string }) {
               )}
             </section>
           </>
+        ) : missing ? (
+          <div className="lg:col-span-2">
+            <NotFound what="group" to="/groups" back="your groups" />
+          </div>
         ) : (
           !error && <Loading label="Loading the group…" />
         )}

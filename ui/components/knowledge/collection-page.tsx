@@ -10,7 +10,7 @@ import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { ErrorBox, Loading, Page } from "@/components/app-shell/page";
+import { ErrorBox, Loading, Page, isNotFound, NotFound } from "@/components/app-shell/page";
 import { chatDraft } from "@/components/projects/chat-draft";
 import { Confirm, messageOf } from "@/components/projects/form-field";
 import { Badge } from "@/components/ui/badge";
@@ -373,6 +373,8 @@ export function CollectionPage({ id }: { id: string }) {
       <Page wide>
         {isPending ? (
           <Loading label="Opening the collection…" />
+        ) : isNotFound(error) ? (
+          <NotFound what="collection" to="/knowledge" back="all collections" />
         ) : (
           <>
             <ErrorBox error={error} onRetry={() => refetch()} />

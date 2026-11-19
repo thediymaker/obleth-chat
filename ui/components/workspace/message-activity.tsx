@@ -5,7 +5,7 @@
 // shows any reply with tool steps, so this shows only for replies saved without them.
 
 import { ChevronDown, Orbit, Shield, Terminal } from "lucide-react";
-import { useChatStore as useChat } from "@/components/chat/chat-provider";
+import { useChatStore } from "@/components/chat/chat-provider";
 import type { ActivityEntry, Message } from "@/lib/chat/types";
 import { NamedIcon } from "@/components/chat/icon";
 
@@ -17,7 +17,7 @@ export const activitySteps = (m: Message) =>
   (Array.isArray(m.activity) ? m.activity : []).filter((s) => !HIDDEN_KINDS.has(s.kind || "") && s.tool !== "search_knowledge" && s.tool !== "save_item");
 
 function Step({ s }: { s: ActivityEntry }) {
-  const store = useChat();
+  const store = useChatStore();
   const time = STEP_STATE[s.status || ""] || (s.durationMs != null ? `${(s.durationMs / 1000).toFixed(1)}s` : "");
   return (
     <li className="flex gap-2 py-1">
@@ -42,7 +42,7 @@ function Step({ s }: { s: ActivityEntry }) {
 }
 
 export function MessageActivity({ m }: { m: Message }) {
-  const store = useChat();
+  const store = useChatStore();
   const steps = activitySteps(m);
   if (!steps.length) return null;
   const live = steps.find((s) => s.status === "awaiting") || steps.find((s) => s.status === "running"),

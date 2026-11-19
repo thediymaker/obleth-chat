@@ -4,7 +4,8 @@
 
 import { Dropdown } from "@/components/manage/kit";
 import { cn } from "@/lib/utils";
-import { KINDS, kindColor, percent, share, tokens, type Change } from "./insights";
+import { KINDS, kindColor, percent, share, type Change } from "./insights";
+import { compact } from "@/lib/format";
 
 /** "↑ 20% on the 7 days before", the arrow colored; nothing when there is nothing to compare. */
 export function ChangeNote({ change }: { change: Change }) {
@@ -51,7 +52,7 @@ export function KindBar({ kinds, label, by = "tokens", className }: { kinds?: { 
       {present.map(([id, name, color]) => (
         <span
           key={id}
-          title={`${name} ${percent(share(values[id], total))}${by === "tokens" ? ` · ${tokens(values[id])} tokens` : ` · ${values[id]}`}`}
+          title={`${name} ${percent(share(values[id], total))}${by === "tokens" ? ` · ${compact(values[id])} tokens` : ` · ${values[id]}`}`}
           style={{ width: `${(100 * share(values[id], total)).toFixed(2)}%`, background: kindColor(color) }}
         />
       ))}

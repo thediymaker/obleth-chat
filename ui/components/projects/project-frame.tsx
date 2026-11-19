@@ -11,7 +11,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { appKeys, createApp } from "@/components/apps/api";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { ErrorBox, Loading, Page } from "@/components/app-shell/page";
+import { ErrorBox, Loading, Page, isNotFound, NotFound } from "@/components/app-shell/page";
 import { SectionTabs } from "@/components/app-shell/section-tabs";
 import { Button } from "@/components/ui/button";
 import { count } from "@/lib/format";
@@ -71,6 +71,8 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
       <Page wide>
         {isPending ? (
           <Loading />
+        ) : isNotFound(error) ? (
+          <NotFound what="project" to="/projects" back="all projects" />
         ) : (
           <>
             <ErrorBox error={error} onRetry={() => refetch()} />
@@ -90,7 +92,8 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   const facts = [p.description, count(p.chats, "chat"), knowledge ? count(p.saved, "saved item") : ""].filter(Boolean).join(" · ");
   const list = [
     { href: base, label: "Overview" },
-    ...(tabs.code ? [{ href: `${base}/code`, label: "Code" }] : []),
+    // History, Files and Compare live under /code and keep it highlighted.
+    ...(tabs.code ? [{ href: `${base}/code`, label: "Code", prefix: true }] : []),
     ...(tabs.research ? [{ href: `${base}/research`, label: "Research" }] : []),
     ...(tabs.app ? [{ href: `${base}/app`, label: "App" }] : []),
   ];

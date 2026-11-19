@@ -1,7 +1,7 @@
 "use client";
 
 import { AlertCircle, LogIn, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AuthIntro, AuthLayout } from "@/components/auth/auth-layout";
 import { Copy, ExternalAwareLink } from "@/components/brand";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,30 @@ import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 import { useBranding } from "@/lib/branding-context";
 import { useSession } from "@/lib/session";
+
+/** What the sign-in screen says for each way single sign-on can fail; the API
+ * names the failure in the address it sends the browser back to. */
+const SIGN_IN_ERRORS: Record<string, string> = {
+  throttled: "Too many sign-in attempts. Wait a minute and try again.",
+  provider_unavailable: "The single sign-on provider is unavailable. Try again shortly.",
+  state_expired: "That sign-in took too long or was already used. Start again.",
+  not_completed: "Single sign-on was not completed.",
+  not_provisioned: "This single sign-on identity has not been provisioned. Contact your administrator.",
+  account_disabled: "This account is disabled.",
+  other: "Single sign-on failed. Try again.",
+};
+
+/** The failure named in the address, if any, taken out of it so a reload or the
+ * next sign-in link does not carry it along. */
+function takeSignInError() {
+  if (typeof window === "undefined") return "";
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get("signin_error");
+  if (!code) return "";
+  url.searchParams.delete("signin_error");
+  window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+  return SIGN_IN_ERRORS[code] ?? SIGN_IN_ERRORS.other;
+}
 
 /** Signing in with the provider, back to this page afterwards. */
 function signInHref() {
@@ -88,6 +112,12 @@ function SignIn() {
   const login = branding.login;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Read after mounting, so the server-rendered screen and the first client
+  // render agree; the address is the only place the API can leave a message.
+  useEffect(() => {
+    const failed = takeSignInError();
+    if (failed) setError(failed);
+  }, []);
   // With single sign-on the provider is the main way in and passwords come second;
   // with passwords turned off it is the only way in.
   const withPasswords = !(oidc && passwords === false);

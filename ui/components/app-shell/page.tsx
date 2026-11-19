@@ -1,6 +1,7 @@
 // Building blocks every page uses, so pages share spacing and type.
 
-import { LayoutGrid, RefreshCw } from "lucide-react";
+import { ArrowLeft, LayoutGrid, RefreshCw, SearchX } from "lucide-react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -45,6 +46,31 @@ export function EmptyState({ title, text, icon: Icon = LayoutGrid, action }: { t
       {text && <p className="max-w-md text-sm text-muted-foreground">{text}</p>}
       {action}
     </div>
+  );
+}
+
+/** Whether a request failed because the thing is not there (or not shared with this person). */
+export const isNotFound = (error: unknown) => !!error && (error as { status?: number }).status === 404;
+
+/** A page or item that does not exist, or is not shared with this person: one block for
+ *  every kind, with a way back and no Retry (asking again will not make it appear). The
+ *  wording never says which of the two it is. */
+export function NotFound({ what, to, back, action }: { what: string; to: string; back: string; action?: React.ReactNode }) {
+  return (
+    <EmptyState
+      icon={SearchX}
+      title={`${what[0]!.toUpperCase()}${what.slice(1)} not found`}
+      text={`This ${what} does not exist, or it is not shared with you.`}
+      action={
+        action ?? (
+          <Button asChild size="sm" variant="outline">
+            <Link href={to}>
+              <ArrowLeft /> Back to {back}
+            </Link>
+          </Button>
+        )
+      }
+    />
   );
 }
 

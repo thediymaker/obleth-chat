@@ -2,7 +2,8 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, test, vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
-import { ago, topicNames, type MemoryState } from "./api";
+import { topicNames, type MemoryState } from "./api";
+import { ago } from "@/lib/format";
 import { MemoryCards } from "./memory-cards";
 import { MemoryPage } from "./memory-page";
 

@@ -6,7 +6,7 @@
 //! job's hello must name that same user. The job runs `cluster_agent.py`, shipped
 //! inside the batch script; each operation is a row in `cluster_calls` that the job
 //! claims, carries out and answers.
-use super::{mcp::Tool, slurm, wakeups::Wakeups, Connections};
+use super::{mcp::Tool, output, slurm, wakeups::Wakeups, Connections};
 use crate::error::ApiError;
 use axum::{
     extract::{Path, State},
@@ -44,6 +44,9 @@ const POLL_WAIT: Duration = Duration::from_secs(50);
 const FALLBACK: Duration = Duration::from_secs(5);
 /// The longest result the job may post; the model reads the first 48 KB.
 pub const RESULT_LIMIT: usize = 320 * 1024;
+/// How much of a file one read brings back: what the model receives, less room for
+/// the header, so "more follows at offset N" is exact and no bytes fall between parts.
+const READ_PART: usize = output::MODEL_OUTPUT - 2 * 1024;
 /// The job exits after this long without a call.
 const IDLE_SECONDS: i64 = 20 * 60;
 const DEFAULT_HOURS: i64 = 8;
@@ -198,10 +201,10 @@ pub fn tools() -> Vec<Tool> {
             "older_than_days": {"type":"number","description":"Only entries not modified in this many days"},
             "limit": {"type":"integer","minimum":1,"maximum":500}
         }), &[]),
-        tool("files_read", "Read file", "The text of a file, up to 48 KB at a time (256 KB at most), from an offset; says so when the file is binary. Read in parts for a long file.", true, json!({
+        tool("files_read", "Read file", "The text of a file, up to 46 KB at a time, from an offset; says so when the file is binary. Read in parts for a long file.", true, json!({
             "path": path("The file"),
             "offset": {"type":"integer","minimum":0,"description":"Byte offset to start at"},
-            "max_bytes": {"type":"integer","minimum":1,"maximum":262144}
+            "max_bytes": {"type":"integer","minimum":1,"maximum":READ_PART}
         }), &["path"]),
         tool("files_search", "Search in files", "Lines matching a regular expression in text files under a path (or in one file), with file and line number; up to 200 lines, within 60 seconds. Files over 8 MB and binary files are skipped.", true, json!({
             "path": path("Directory or file to search; defaults to the home directory"),
@@ -350,6 +353,7 @@ impl Files {
         let op = tool
             .strip_prefix("files_")
             .ok_or_else(|| format!("There is no files tool named {tool}"))?;
+        let arguments = &bounded(op, arguments);
         let (session, started) = self.session(client, connection, options).await?;
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO cluster_calls(id,session_id,generation_id,op,arguments) VALUES($1,$2,$3,$4,$5)")
@@ -785,7 +789,7 @@ pub async fn hello(
     if body.username != session.username {
         let why = format!(
             "The file session job ran as {}, not {}: the Slurm token saved for this cluster belongs to another account",
-            clip(&body.username, 64),
+            output::head(&body.username, 64),
             session.username
         );
         sqlx::query("UPDATE cluster_sessions SET state='ended', error=$2 WHERE id=$1")
@@ -797,7 +801,7 @@ pub async fn hello(
     }
     sqlx::query("UPDATE cluster_sessions SET state='live', host=$2, agent_version=$3, started_at=NOW(), last_seen_at=NOW(), error=NULL WHERE id=$1")
         .bind(session.id)
-        .bind(clip(&body.host, 253))
+        .bind(output::head(&body.host, 253))
         .bind(body.version)
         .execute(&s.store.pool)
         .await?;
@@ -882,7 +886,7 @@ pub async fn resolve(
     .bind(call)
     .bind(session.id)
     .bind(body.ok)
-    .bind(clip(&body.output, RESULT_LIMIT))
+    .bind(output::head(&body.output, RESULT_LIMIT))
     .execute(&s.store.pool)
     .await?;
     if done.rows_affected() == 0 {
@@ -916,7 +920,7 @@ pub async fn bye(
     let session = session_of(&s, &headers).await?;
     let why = match body.reason.trim() {
         "" => "The file session ended".to_string(),
-        reason => format!("The file session ended: {}", clip(reason, 300)),
+        reason => format!("The file session ended: {}", output::head(reason, 300)),
     };
     sqlx::query("UPDATE cluster_sessions SET state='ended', error=$2 WHERE id=$1")
         .bind(session.id)
@@ -967,15 +971,15 @@ pub async fn end_sessions(pool: &PgPool, wakeups: &Wakeups, connection: Uuid, us
     }
 }
 
-fn clip(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_owned();
+/// A read asks for at most [`READ_PART`] bytes whatever the agent's own default, so
+/// an older agent on the cluster brings back parts that fit as well.
+fn bounded(op: &str, arguments: &Value) -> Value {
+    let mut arguments = arguments.clone();
+    if op == "read" {
+        let asked = arguments["max_bytes"].as_u64().unwrap_or(READ_PART as u64);
+        arguments["max_bytes"] = json!(asked.min(READ_PART as u64));
     }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}… ({} more bytes)", &text[..end], text.len() - end)
+    arguments
 }
 
 #[cfg(test)]
@@ -1095,7 +1099,8 @@ mod tests {
     /// Runs one operation of the agent as the command line does, under temporary
     /// roots, and returns its exit status and output.
     fn agent(roots: &str, op: &str, args: Value) -> (bool, String) {
-        agent_with(roots, op, args, &[])
+        let (ok, out) = agent_with(roots, op, args, &[]);
+        (ok, out.trim_end().to_string())
     }
 
     fn agent_with(roots: &str, op: &str, args: Value, env: &[(&str, &str)]) -> (bool, String) {
@@ -1117,7 +1122,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         (
             out.status.success(),
-            String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
+            // The agent prints the result, so stdout carries one newline more than it.
+            String::from_utf8_lossy(&out.stdout)
+                .strip_suffix('\n')
+                .unwrap_or_default()
+                .to_string(),
         )
     }
 
@@ -1572,9 +1581,56 @@ mod tests {
     }
 
     #[test]
-    fn clipping_keeps_utf8_whole() {
-        assert_eq!(clip("héllo", 100), "héllo");
-        let cut = clip("héllo", 2);
-        assert!(cut.starts_with("h… ("), "{cut}");
+    fn a_read_is_bounded_to_a_part_that_fits() {
+        assert_eq!(bounded("read", &json!({}))["max_bytes"], READ_PART);
+        assert_eq!(bounded("read", &json!({"max_bytes": 10}))["max_bytes"], 10);
+        assert_eq!(
+            bounded("read", &json!({"max_bytes": 262144}))["max_bytes"],
+            READ_PART
+        );
+        assert_eq!(
+            bounded("list", &json!({"max_bytes": 262144}))["max_bytes"],
+            262144
+        );
+    }
+
+    #[test]
+    fn a_long_file_read_in_parts_comes_back_whole() {
+        if !python3() {
+            eprintln!("python3 is not installed; skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("chat-read-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("long.log");
+        let original: String = (0..4000)
+            .map(|n| format!("line {n} {}\n", "é".repeat(10)))
+            .collect();
+        std::fs::write(&path, &original).unwrap();
+        let roots = dir.to_string_lossy().to_string();
+        let mut offset = 0usize;
+        let mut whole = String::new();
+        loop {
+            let args = bounded(
+                "read",
+                &json!({"path": path.to_string_lossy(), "offset": offset}),
+            );
+            // Untrimmed: a part's trailing newline is part of the file.
+            let (ok, out) = agent_with(&roots, "read", args, &[]);
+            assert!(ok, "{out}");
+            assert!(
+                out.len() <= output::MODEL_OUTPUT,
+                "a part of {} bytes would be cut",
+                out.len()
+            );
+            let (header, text) = out.split_once("):\n").unwrap();
+            whole.push_str(text);
+            match header.split("more follows at offset ").nth(1) {
+                Some(next) => offset = next.parse().unwrap(),
+                None => break,
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(whole, original);
     }
 }

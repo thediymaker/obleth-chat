@@ -22,6 +22,10 @@ test("each event reads as one sentence, with names in bold", () => {
   expect(sentenceText(auditSentence(e("retention.cleanup", { actorName: null, metadata: { conversations: 2, auditEvents: 1, at: "x" } })))).toBe("Automatic cleanup removed 2 inactive conversations, 1 old activity entry");
   expect(sentenceText(auditSentence(e("retention.cleanup", { metadata: {} })))).toBe("Automatic cleanup ran");
   expect(sentenceText(auditSentence(e("session_revoked", { actorName: null, metadata: { current: true } })))).toBe("Chat signed out");
+  expect(sentenceText(auditSentence(e("model.certify", { targetName: "glm", metadata: { score: 91 } })))).toBe("Ana recorded a certification for the model glm");
+  expect(sentenceText(auditSentence(e("model.certify", { targetName: "glm", metadata: { cleared: true } })))).toBe("Ana cleared the certification of the model glm");
+  expect(sentenceText(auditSentence(e("memory.update", { metadata: { enabled: false } })))).toBe("Ana turned memory off");
+  expect(sentenceText(auditSentence(e("feedback.button", { metadata: { mode: "sidebar" } })))).toBe("Ana put the Feedback button in the sidebar");
   expect(sentenceText(auditSentence(e("something_new")))).toBe("Ana · Something New");
 });
 
@@ -39,12 +43,12 @@ test("details list what was stored, and cleanup leaves out its time", () => {
 
 test("the Activity tab filters by kind and loads older pages", async () => {
   forgetKept();
-  const calls = mockApi((path) => (path.includes("before=") ? { events: [e("user_invited", { createdAt: "2026-10-01T10:00:00Z" })], nextCursor: null } : { events: [e("user_created")], nextCursor: "c1" }));
+  const calls = mockApi((path) => (path.includes("after=") ? { events: [e("user_invited", { createdAt: "2026-10-01T10:00:00Z" })], nextCursor: null } : { events: [e("user_created")], nextCursor: "c1" }));
   renderPage(<ActivityTab />);
   expect(await screen.findByText(/created the account/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
   expect(await screen.findByText(/invited/)).toBeInTheDocument();
-  expect(calls.some((c) => c.path === "/api/admin/audit?limit=50&before=c1")).toBe(true);
+  expect(calls.some((c) => c.path === "/api/admin/audit?limit=50&after=c1")).toBe(true);
   await choose(screen.getByLabelText("Kind of activity"), "Groups");
   await waitFor(() => expect(calls.at(-1)!.path).toBe("/api/admin/audit?limit=50&kind=groups"));
 });

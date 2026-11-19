@@ -5,8 +5,9 @@
 // store (store.devices).
 
 import type { StreamEvent } from "@/lib/api";
-import { withFlasher, formatBytes, type FlashPart } from "./flashers";
+import { withFlasher, type FlashPart } from "./flashers";
 import { hexBytes, portInfo, SerialDevice, type OpenOptions } from "./serial";
+import { bytes } from "@/lib/format";
 
 export interface DeviceRequest {
   tool: string;
@@ -233,7 +234,7 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
         parts.push({ offset, path, data });
       }
       const total = parts.reduce((n, p) => n + p.data.length, 0);
-      progress(`Connecting to the chip (${formatBytes(total)} to write)…`);
+      progress(`Connecting to the chip (${bytes(total)} to write)…`);
       const summary = await device.lend((port) => withFlasher(a.vendorId, (f) => f.flash(port, parts, { eraseAll: !!args.eraseAll, baudRate: typeof args.baudRate === "number" ? args.baudRate : undefined }, progress, logLine)));
       return { ok: true, output: summary, detail: [summary, ...log.slice(-12)].join("\n") };
     }
@@ -245,6 +246,12 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
     default:
       throw new Error(`This browser has no device tool named ${request.tool}`);
   }
+}
+
+/** The device's state, as one string: equal while nothing the chat shows has moved. */
+function deviceState(device: SerialDevice): string {
+  const s = device.status();
+  return `${s.open}|${device.busy}|${device.lastError}|${s.total > 0}`;
 }
 
 export function createDevicesBridge(ctx: Context): DevicesBridge {
@@ -271,7 +278,18 @@ export function createDevicesBridge(ctx: Context): DevicesBridge {
     if (old) old.device.close().catch(() => {});
     const info = portInfo(port);
     const a: Attached = { id: connection.id, device: new SerialDevice(port), ...info, user: connection.user, secret: connection.secret };
-    a.device.subscribe(changed);
+    // Every chunk the device prints reaches the bridge's own listeners (the devices
+    // page counts them), but the chat re-renders only when the device's state moves:
+    // open, closed, lent to a flasher, an error, or its first output.
+    let state = deviceState(a.device);
+    a.device.subscribe(() => {
+      for (const l of listeners) l();
+      const now = deviceState(a.device);
+      if (now !== state) {
+        state = now;
+        ctx.changed();
+      }
+    });
     attached.set(connection.id, a);
     changed();
     for (const w of [...waiting.values()]) if (w.connectionId === connection.id) void run(w);

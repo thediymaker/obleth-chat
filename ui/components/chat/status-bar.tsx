@@ -7,9 +7,8 @@
 import { useBranding } from "@/lib/branding-context";
 import { cn } from "@/lib/utils";
 import { useChat } from "./chat-provider";
+import { compact, count } from "@/lib/format";
 
-const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
-const count = (value: unknown) => compact.format(Number(value) || 0);
 
 interface DailyUsage {
   today?: { requests?: number; totalTokens?: number };
@@ -21,7 +20,8 @@ export function usageText(usage: DailyUsage | null | undefined) {
   const today = usage?.today,
     limits = usage?.limits || {};
   if (!today) return "—";
-  return `${count(today.requests)}${limits.dailyRequests ? ` / ${count(limits.dailyRequests)}` : ""} requests · ${count(today.totalTokens)}${limits.dailyTokens ? ` / ${count(limits.dailyTokens)}` : ""} tokens`;
+  const requests = limits.dailyRequests ? `${compact(today.requests)} / ${compact(limits.dailyRequests)} requests` : count(today.requests, "request");
+  return `${requests} · ${compact(today.totalTokens)}${limits.dailyTokens ? ` / ${compact(limits.dailyTokens)}` : ""} tokens`;
 }
 
 export function modelsText(store: { catalogError: string; models: { id: string }[] }) {

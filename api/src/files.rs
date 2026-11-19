@@ -22,6 +22,17 @@ use crate::{error::ApiError, knowledge::ObjectStore};
 const PENDING_GRACE: &str = "15 minutes";
 /// Objects read at once for one request.
 const PARALLEL_READS: usize = 8;
+/// How long the worker waits after a pass that moved nothing, doubling per idle
+/// pass up to [`IDLE_PAUSE_MAX`]: once every file is in the bucket there is nothing
+/// to do, and the trash grace is long enough that a five-minute check keeps up.
+const IDLE_PAUSE: Duration = Duration::from_secs(30);
+const IDLE_PAUSE_MAX: Duration = Duration::from_secs(5 * 60);
+
+fn idle_pause(idle_passes: u32) -> Duration {
+    IDLE_PAUSE
+        .saturating_mul(1 << idle_passes.saturating_sub(1).min(4))
+        .min(IDLE_PAUSE_MAX)
+}
 
 #[derive(Clone)]
 pub struct Files {
@@ -53,13 +64,36 @@ impl Files {
         bytes: Vec<u8>,
         content_type: &str,
     ) -> Result<Placed, ApiError> {
+        self.store_under(key, bytes, content_type, None).await
+    }
+
+    /// `place` for a caller that already has the bytes' SHA-256, so the bucket's
+    /// request is signed with it instead of hashing the bytes again.
+    pub async fn place_hashed(
+        &self,
+        key: String,
+        bytes: Vec<u8>,
+        content_type: &str,
+        sha256: &[u8],
+    ) -> Result<Placed, ApiError> {
+        self.store_under(key, bytes, content_type, Some(sha256))
+            .await
+    }
+
+    async fn store_under(
+        &self,
+        key: String,
+        bytes: Vec<u8>,
+        content_type: &str,
+        sha256: Option<&[u8]>,
+    ) -> Result<Placed, ApiError> {
         let Some(store) = &self.store else {
             return Ok(Placed {
                 data: Some(bytes),
                 key: None,
             });
         };
-        put(&self.pool, store, &key, bytes, content_type)
+        put(&self.pool, store, &key, bytes, content_type, sha256)
             .await
             .map_err(unavailable)?;
         Ok(Placed {
@@ -151,6 +185,7 @@ impl Files {
             return;
         };
         let mut reported = false;
+        let mut idle_passes = 0u32;
         loop {
             expire_job_output(&self.pool).await;
             empty_trash(&self.pool, &store).await;
@@ -165,10 +200,11 @@ impl Files {
                 tracing::info!("moving files kept in Postgres into object storage");
                 reported = true;
             }
+            idle_passes = if moved { 0 } else { idle_passes + 1 };
             let pause = if moved {
                 Duration::ZERO
             } else {
-                Duration::from_secs(30)
+                idle_pause(idle_passes)
             };
             tokio::select! {
                 _ = shutdown.cancelled() => return,
@@ -200,6 +236,7 @@ impl Files {
                 &key,
                 row.get("data"),
                 row.get("mime_type"),
+                None,
             )
             .await?;
             sqlx::query(&format!(
@@ -223,6 +260,7 @@ async fn put(
     key: &str,
     bytes: Vec<u8>,
     content_type: &str,
+    sha256: Option<&[u8]>,
 ) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO object_trash (object_key, pending) VALUES ($1, TRUE) ON CONFLICT DO NOTHING",
@@ -230,7 +268,10 @@ async fn put(
     .bind(key)
     .execute(pool)
     .await?;
-    store.put(key, bytes, content_type).await
+    match sha256 {
+        Some(sha256) => store.put_hashed(key, bytes, content_type, sha256).await,
+        None => store.put(key, bytes, content_type).await,
+    }
 }
 
 pub fn attachment_key(owner: Uuid, id: Uuid) -> String {
@@ -331,7 +372,86 @@ fn unavailable(error: anyhow::Error) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::served_type;
+    use super::{empty_trash, Files};
+    use super::{idle_pause, served_type};
+    use crate::knowledge::storage::stub;
+    use crate::test_support::Database;
+    use axum::http::Method;
+    use uuid::Uuid;
+
+    /// A knowledge object whose document row never commits (the server died in
+    /// between) is swept after the grace period; one whose row is written is claimed
+    /// by the row's trigger and kept.
+    #[tokio::test]
+    async fn an_object_whose_row_never_commits_is_swept_and_a_recorded_one_is_kept() {
+        let Some(db) = Database::new().await else {
+            return;
+        };
+        let (store, seen) = stub::bucket().await;
+        let files = Files::new(db.pool.clone(), Some(store.clone()));
+        let owner = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, 'ana', 'Ana', 'user', 'x')")
+            .bind(owner).execute(&db.pool).await.unwrap();
+        let collection = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO knowledge_collections (id, owner_id, name) VALUES ($1, $2, 'Papers')",
+        )
+        .bind(collection)
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let lost = format!("knowledge/{owner}/lost");
+        let kept = format!("knowledge/{owner}/kept");
+        for key in [&lost, &kept] {
+            files
+                .place(key.clone(), b"hello".to_vec(), "text/plain")
+                .await
+                .unwrap();
+        }
+        let pending: Vec<String> = sqlx::query_scalar(
+            "SELECT object_key FROM object_trash WHERE pending ORDER BY object_key",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, vec![kept.clone(), lost.clone()]);
+
+        // The kept one's row is written: the trigger claims the object.
+        sqlx::query("INSERT INTO knowledge_documents (id, collection_id, owner_id, name, mime_type, size, object_key) VALUES ($1, $2, $3, 'kept.txt', 'text/plain', 5, $4)")
+            .bind(Uuid::new_v4()).bind(collection).bind(owner).bind(&kept).execute(&db.pool).await.unwrap();
+        // The lost one's row never comes; the grace period passes.
+        sqlx::query(
+            "UPDATE object_trash SET created_at = NOW() - INTERVAL '1 hour' WHERE object_key = $1",
+        )
+        .bind(&lost)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        empty_trash(&db.pool, &store).await;
+
+        let deleted: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| *m == Method::DELETE)
+            .map(|(_, k)| k.clone())
+            .collect();
+        assert_eq!(deleted, vec![lost.clone()]);
+        let left: Vec<String> = sqlx::query_scalar("SELECT object_key FROM object_trash")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+        assert!(left.is_empty(), "{left:?}");
+        db.close().await;
+    }
+
+    #[test]
+    fn idle_pause_backs_off_to_five_minutes() {
+        let seconds: Vec<u64> = (1..=6).map(|n| idle_pause(n).as_secs()).collect();
+        assert_eq!(seconds, [30, 60, 120, 240, 300, 300]);
+    }
 
     #[test]
     fn only_documents_and_images_are_served_inline() {

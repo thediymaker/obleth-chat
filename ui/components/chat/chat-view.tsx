@@ -21,12 +21,13 @@ import { useBranding } from "@/lib/branding-context";
 import type { Attachment } from "@/lib/chat/types";
 import { useConversations } from "@/lib/queries";
 import { ChatMenuItems } from "./chat-menu";
-import { NEW_CHAT_EVENT, OPEN_SEARCH_EVENT, useChat } from "./chat-provider";
+import { NEW_CHAT_EVENT, OPEN_SEARCH_EVENT, useChat, useChatContent, useChatSelect, useChatStore } from "./chat-provider";
 import { Composer, TemporaryNote } from "./composer";
 import { NamedIcon } from "./icon";
 import { MessageView, messageSignature } from "./message";
 import { SelectionBar } from "./selection-bar";
 import { SidePane } from "./side-pane";
+import { NotFound } from "@/components/app-shell/page";
 
 function Alert({ message, onRetry }: { message: string; onRetry?: () => void }) {
   if (!message) return null;
@@ -45,7 +46,7 @@ function Alert({ message, onRetry }: { message: string; onRetry?: () => void }) 
 
 /** The scroll column of a chat page, kept at its end on opening and while a reply is written. */
 function useScroller() {
-  const store = useChat();
+  const store = useChatContent();
   // A callback ref: the column only appears once the conversation has loaded.
   const [el, setEl] = useState<HTMLDivElement | null>(null);
   const pinUntil = useRef(0);
@@ -77,7 +78,7 @@ function useScroller() {
 }
 
 function Messages() {
-  const store = useChat();
+  const store = useChatContent();
   const started = performance.now();
   const messages = store.active?.messages || [];
   useLayoutEffect(() => {
@@ -226,9 +227,10 @@ export function ChatHome() {
 
 /** The top bar's Focus mode button: hides the main navigation, saved to the account. */
 export function FocusToggle() {
-  const store = useChat();
+  const store = useChatStore();
+  const focus = useChatSelect((s) => s.focus);
   return (
-    <Button variant="ghost" size="sm" className="max-[760px]:hidden" aria-pressed={store.focus} onClick={() => store.run(() => store.savePreference({ focus: !store.focus }))}>
+    <Button variant="ghost" size="sm" className="max-[760px]:hidden" aria-pressed={focus} onClick={() => store.run(() => store.savePreference({ focus: !store.focus }))}>
       <PanelLeftClose /> <span className="max-[1000px]:hidden">Focus mode</span>
     </Button>
   );
@@ -280,15 +282,24 @@ export function ChatPage({ id }: { id: string }) {
         Opening your conversation…
       </div>
     );
+  const newChat = (
+    <Button variant="outline" size="sm" asChild>
+      <Link href="/" onClick={() => window.dispatchEvent(new Event(NEW_CHAT_EVENT))}>
+        <Plus /> Start a new chat
+      </Link>
+    </Button>
+  );
+  if (store.chatMissing && !c)
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-8">
+        <NotFound what="chat" to="/" back="Chat" action={newChat} />
+      </div>
+    );
   if (store.chatError && !c)
     return (
       <div className="mx-auto grid max-w-3xl gap-3 px-4 py-8">
         <Alert message={store.chatError} onRetry={() => store.reload()} />
-        <Button variant="outline" className="justify-self-start" asChild>
-          <Link href="/" onClick={() => window.dispatchEvent(new Event(NEW_CHAT_EVENT))}>
-            <Plus /> Start a new chat
-          </Link>
-        </Button>
+        <div className="justify-self-start">{newChat}</div>
       </div>
     );
   if (!c)

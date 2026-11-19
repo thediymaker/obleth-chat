@@ -39,6 +39,7 @@ use tokio::sync::Semaphore;
 use url::Url;
 use uuid::Uuid;
 
+use crate::audit::{self, Action, Target};
 use crate::{error::ApiError, secrets::SecretKey};
 pub(crate) mod accounts;
 pub mod grants;
@@ -954,6 +955,11 @@ fn too_many_requests() -> ApiError {
     )
 }
 
+/// The one answer to a username that is already in use, wherever a user is made.
+pub(super) fn username_taken() -> ApiError {
+    ApiError(StatusCode::CONFLICT, "Username already exists".into())
+}
+
 async fn throttle_window(tx: &mut Transaction<'_, Postgres>) -> Result<i64, ApiError> {
     Ok(
         sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM NOW()) / 60)::BIGINT")
@@ -1357,6 +1363,7 @@ async fn session(State(auth): State<Auth>, headers: HeaderMap) -> Result<Respons
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoginInput {
     username: String,
     password: String,
@@ -1444,6 +1451,7 @@ async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Result<Response
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct PasswordInput {
     current_password: String,
@@ -1471,7 +1479,7 @@ async fn change_password(
             .await?
             .flatten();
     let Some(encoded) = encoded else {
-        return Err(ApiError::bad("This account signs in through OIDC"));
+        return Err(ApiError::bad("This account signs in with single sign-on"));
     };
     if !auth
         .check_password(input.current_password, encoded.clone())
@@ -1497,12 +1505,11 @@ async fn change_password(
         .bind(identity.id)
         .execute(&mut *tx)
         .await?;
-    accounts::record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(identity.id),
-        "password_changed",
-        "user",
-        Some(&identity.id.to_string()),
+        Action::PASSWORD_CHANGED,
+        Target::user(identity.id),
         json!({}),
     )
     .await?;
@@ -1528,7 +1535,12 @@ struct AdminUser {
 struct UserQuery {
     q: Option<String>,
     limit: Option<i64>,
+    /// The last account of the previous page: the next page starts after it.
+    after: Option<Uuid>,
 }
+
+/// Accounts per page, unless the request asks for a limit.
+const USERS_LISTED: i64 = 100;
 
 async fn list_users(
     State(auth): State<Auth>,
@@ -1537,7 +1549,7 @@ async fn list_users(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     auth.require_admin(&headers, false).await?;
     let search = query.q.as_deref().unwrap_or("").trim();
-    let limit = query.limit.unwrap_or(1000);
+    let limit = query.limit.unwrap_or(USERS_LISTED);
     if search.len() > 256 || !(1..=1000).contains(&limit) {
         return Err(ApiError::bad(
             "Search is limited to 256 bytes and limit must be between 1 and 1000",
@@ -1545,17 +1557,27 @@ async fn list_users(
     }
     // strpos treats wildcard characters literally; a search cannot silently match
     // every user through SQL LIKE patterns. UUIDs can also be searched exactly.
+    // Newest first, and a page continues after the cursor account by (created_at, id).
     let mut users = sqlx::query_as::<_, AdminUser>("SELECT id, username, display_name, role, enabled, password_hash IS NOT NULL AS local_password, password_change_required, created_at, last_sign_in_at FROM users \
-        WHERE $1 = '' OR strpos(lower(username), lower($1)) > 0 OR strpos(lower(display_name), lower($1)) > 0 OR id::text = $1 \
+        WHERE ($1 = '' OR strpos(lower(username), lower($1)) > 0 OR strpos(lower(display_name), lower($1)) > 0 OR id::text = $1) \
+        AND ($3::uuid IS NULL OR (created_at, id) < (SELECT c.created_at, c.id FROM users c WHERE c.id = $3)) \
         ORDER BY created_at DESC, id DESC LIMIT $2")
-        .bind(search).bind(limit + 1)
+        .bind(search).bind(limit + 1).bind(query.after)
         .fetch_all(&auth.pool).await?;
     let has_more = users.len() > limit as usize;
     users.truncate(limit as usize);
-    Ok(Json(json!({"users": users, "hasMore": has_more})))
+    let cursor = if has_more {
+        users.last().map(|u| u.id)
+    } else {
+        None
+    };
+    Ok(Json(
+        json!({"users": users, "hasMore": has_more, "nextCursor": cursor}),
+    ))
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct CreateUserInput {
     username: String,
@@ -1598,22 +1620,18 @@ async fn create_user(
     match result {
         Ok(identity) => {
             auth.group_policy.initial(&mut tx, identity.id).await?;
-            accounts::record_audit(
-                &mut tx,
+            audit::record(
+                &mut *tx,
                 Some(admin.id),
-                "user_created",
-                "user",
-                Some(&identity.id.to_string()),
+                Action::USER_CREATED,
+                Target::user(identity.id),
                 json!({"role":identity.role,"forcePasswordChange":force_password_change}),
             )
             .await?;
             tx.commit().await?;
             Ok((StatusCode::CREATED, Json(identity)))
         }
-        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => Err(ApiError(
-            StatusCode::CONFLICT,
-            "Username already exists".into(),
-        )),
+        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => Err(username_taken()),
         Err(error) => Err(error.into()),
     }
 }
@@ -1676,13 +1694,14 @@ async fn update_user(
             .execute(&mut *tx)
             .await?;
     }
-    accounts::record_audit(&mut tx, Some(admin.id), "user_updated", "user", Some(&id.to_string()), json!({"enabled":next_enabled,"role":next_role,"displayNameChanged":display_name.is_some()})).await?;
+    audit::record(&mut *tx, Some(admin.id), Action::USER_UPDATED, Target::user(id), json!({"enabled":next_enabled,"role":next_role,"displayNameChanged":display_name.is_some()})).await?;
     tx.commit().await?;
     auth.after_sign_out();
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct ResetPasswordInput {
     new_password: String,
@@ -1713,12 +1732,11 @@ async fn reset_password(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    accounts::record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "password_reset",
-        "user",
-        Some(&id.to_string()),
+        Action::PASSWORD_RESET,
+        Target::user(id),
         json!({"forcePasswordChange":input.force_password_change}),
     )
     .await?;
@@ -1728,6 +1746,7 @@ async fn reset_password(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct LinkOidcInput {
     user_id: Uuid,
@@ -1740,11 +1759,9 @@ async fn link_oidc_identity(
     Json(input): Json<LinkOidcInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
-    let provider = auth
-        .config
-        .oidc
-        .as_ref()
-        .ok_or_else(|| ApiError::bad("OIDC is not configured"))?;
+    let provider = auth.config.oidc.as_ref().ok_or_else(|| {
+        ApiError::bad("Single sign-on is not configured (OBLETH_CHAT_OIDC_ISSUER)")
+    })?;
     if input.subject.is_empty()
         || input.subject.len() > 255
         || !input.subject.is_ascii()
@@ -1791,7 +1808,7 @@ async fn link_oidc_identity(
     if inserted == 0 {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "This OIDC identity is already linked".into(),
+            "This single sign-on identity is already linked to another account".into(),
         ));
     }
     // Pending invitation or recovery links must not add a local password afterwards.
@@ -1799,12 +1816,11 @@ async fn link_oidc_identity(
         .bind(input.user_id)
         .execute(&mut *tx)
         .await?;
-    accounts::record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(admin.id),
-        "oidc_linked",
-        "user",
-        Some(&input.user_id.to_string()),
+        Action::OIDC_LINKED,
+        Target::user(input.user_id),
         json!({}),
     )
     .await?;

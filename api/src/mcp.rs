@@ -4,6 +4,7 @@
 //! The chats run as they would from the browser and appear in the person's history,
 //! under the same limits. Streamable HTTP answered with plain JSON: no sessions and
 //! no server push, so every call stands alone.
+use crate::audit::{Action, Target};
 use axum::{
     body::Bytes,
     extract::State,
@@ -17,7 +18,6 @@ use uuid::Uuid;
 
 use crate::{
     auth::{
-        accounts::record_audit,
         tokens::{TokenUser, READ, WRITE},
         Identity,
     },
@@ -349,7 +349,7 @@ async fn start_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Val
         .await;
         return Err(error);
     }
-    audit(s, token, "mcp_chat_started", chat.id).await?;
+    audit(s, token, Action::MCP_CHAT_STARTED, chat.id).await?;
     Ok(json!({"id":chat.id,"title":chat.title,"url":link(s, chat.id),"state":"running"}))
 }
 
@@ -419,7 +419,7 @@ async fn send_message(s: &AppState, token: &TokenUser, args: &Value) -> Result<V
     let chat = s.store.get(token.user.id, id).await?;
     let preferences = models::preferences(&s.store.pool, token.user.id).await;
     begin(s, token, id, content, chat.model, args, &preferences).await?;
-    audit(s, token, "mcp_message_sent", id).await?;
+    audit(s, token, Action::MCP_MESSAGE_SENT, id).await?;
     Ok(json!({"id":id,"url":link(s, id),"state":"running"}))
 }
 
@@ -507,7 +507,7 @@ async fn stop_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Valu
         > 0;
     tx.commit().await?;
     if stopped {
-        audit(s, token, "mcp_chat_stopped", id).await?;
+        audit(s, token, Action::MCP_CHAT_STOPPED, id).await?;
     }
     Ok(json!({"id":id,"stopped":stopped}))
 }
@@ -515,21 +515,24 @@ async fn stop_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Valu
 async fn delete_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Value, ApiError> {
     let id = chat_id(args)?;
     s.store.delete(token.user.id, id).await?;
-    audit(s, token, "mcp_chat_deleted", id).await?;
+    audit(s, token, Action::MCP_CHAT_DELETED, id).await?;
     Ok(json!({"id":id,"deleted":true}))
 }
 
-async fn audit(s: &AppState, token: &TokenUser, action: &str, chat: Uuid) -> Result<(), ApiError> {
-    let mut tx = s.store.pool.begin().await?;
-    record_audit(
-        &mut tx,
+async fn audit(
+    s: &AppState,
+    token: &TokenUser,
+    action: Action,
+    chat: Uuid,
+) -> Result<(), ApiError> {
+    let metadata = json!({"apiToken":token.id});
+    crate::audit::record(
+        &s.store.pool,
         Some(token.user.id),
         action,
-        "conversation",
-        Some(&chat.to_string()),
-        json!({"apiToken":token.id}),
+        Target::conversation(chat),
+        metadata,
     )
     .await?;
-    tx.commit().await?;
     Ok(())
 }

@@ -7,12 +7,13 @@
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Info, Lock, MessageSquare, Plus, RefreshCw, Server } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { useChatStore } from "@/components/chat/chat-provider";
 import { useConnectionManager } from "@/components/connections/connection-dialogs";
 import { type Connection, KINDS, useConnections } from "@/components/connections/connections";
-import { Meter, Pill, TableWrap, td, th } from "@/components/manage/kit";
+import { Meter, Pill, TableWrap, td, th, DangerButton } from "@/components/manage/kit";
 import { ComputeOff, ComputeTabs } from "@/components/workspace/compute";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -101,9 +102,7 @@ function FileSessionPart({ session, onEnd }: { session: FileSession | null; onEn
             )}{" "}
             It ends after 20 minutes without a call{session.endsAt ? `, or at ${when(session.endsAt)}` : ""}.
           </p>
-          <Button size="sm" variant="outline" onClick={onEnd}>
-            End session
-          </Button>
+          <DangerButton onClick={onEnd}>End session</DangerButton>
         </div>
       ) : (
         <p className="text-sm text-muted-foreground">None running. One starts as a job of yours when a chat first needs your files, and ends after 20 minutes without a call.</p>
@@ -278,10 +277,20 @@ function ClusterCard({ c, s, loading, onRefresh, manager }: { c: Cluster; s?: Cl
         <Slurm
           s={s.status}
           session={c.files ? (s.fileSession ?? null) : undefined}
-          onEnd={async () => {
-            await api.request(`/api/connections/${encodeURIComponent(c.id)}/file-session`, { method: "DELETE" });
-            onRefresh();
-          }}
+          onEnd={() =>
+            manager.ask({
+              title: "End your file session?",
+              text: "The job that serves your files on the cluster stops. A chat that needs them starts a new one.",
+              label: "End session",
+              cancel: "Keep it",
+              action: () =>
+                manager.run(async () => {
+                  await api.request(`/api/connections/${encodeURIComponent(c.id)}/file-session`, { method: "DELETE" });
+                  onRefresh();
+                  toast("File session ended");
+                }),
+            })
+          }
         />
       ) : (
         <Kubernetes k={s.status} />

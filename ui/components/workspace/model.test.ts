@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { csvRows, csvTable, diskUsage, formatBytes, previewReload, statusLabel, terminalUrl, treeItem } from "./model";
+import { bytes as formatBytes } from "@/lib/format";
+import { csvRows, csvTable, diskUsage, previewReload, statusLabel, terminalUrl, treeItem } from "./model";
 
 describe("previewReload", () => {
   it("reloads a running app and otherwise wakes the workspace", () => {

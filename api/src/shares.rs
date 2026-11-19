@@ -90,6 +90,7 @@ async fn sharing(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct ShareInput {
     scope: String,

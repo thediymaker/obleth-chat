@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { api } from "@/lib/api";
 import type { Conversation } from "@/lib/chat/types";
 import type { ConversationSummary } from "@/lib/queries";
+import { count } from "@/lib/format";
 
 /** The largest export file Chat takes (the server's import limit). */
 export const MAX_IMPORT_BYTES = 200 * 1024 * 1024;
@@ -13,7 +14,6 @@ export const SOURCES: Record<string, string> = { "open-webui": "Open WebUI", cha
 /** Conversations per page of All chats. */
 export const PAGE_SIZE = 50;
 
-const count = (n: number, one: string, many = `${one}s`) => `${Number(n).toLocaleString("en-US")} ${n === 1 ? one : many}`;
 const were = (n: number) => (n === 1 ? "was" : "were");
 
 export interface ImportResult {

@@ -73,13 +73,6 @@ impl From<String> for ProviderToken {
     }
 }
 
-fn unavailable() -> ApiError {
-    ApiError(
-        StatusCode::BAD_GATEWAY,
-        "The identity provider is unavailable; try again shortly".into(),
-    )
-}
-
 /// No live grant is left for someone who signs in with the provider.
 pub fn sign_in_again() -> ApiError {
     ApiError(StatusCode::UNAUTHORIZED, SIGN_IN_AGAIN.into())
@@ -408,7 +401,7 @@ impl Grants {
             // The provider failed to answer just now, or shutdown began: asking again
             // won't help yet.
             if failing || closing || tokio::time::Instant::now() >= deadline {
-                return Err(unavailable());
+                return Err(super::oidc::provider_unavailable());
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -521,7 +514,7 @@ impl Grants {
                         return Ok(Some(token.into()));
                     }
                 }
-                Err(unavailable())
+                Err(super::oidc::provider_unavailable())
             }
         }
     }
@@ -604,7 +597,7 @@ impl Grants {
         };
         match self.open("access", id, user, &sealed) {
             Some(token) if live => Ok(Some(token.into())),
-            _ => Err(unavailable()),
+            _ => Err(super::oidc::provider_unavailable()),
         }
     }
 
@@ -628,12 +621,11 @@ impl Grants {
             .execute(&mut *tx)
             .await?;
         end_session(&mut tx, grant.user_id, grant.session_id).await?;
-        accounts::record_audit(
-            &mut tx,
+        audit::record(
+            &mut *tx,
             None,
-            "sign_in_ended",
-            "session",
-            Some(&grant.session_id.to_string()),
+            Action::SIGN_IN_ENDED,
+            Target::session(grant.session_id),
             json!({"userId": grant.user_id, "reason": reason}),
         )
         .await?;

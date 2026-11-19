@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod apps;
 pub mod attachments;
+pub mod audit;
 pub mod auth;
 pub mod autopilot;
 pub mod banner;
@@ -25,6 +26,7 @@ pub mod memory;
 pub mod metrics;
 pub mod models;
 pub mod operations;
+pub mod paging;
 pub mod pause;
 pub mod projects;
 pub mod questions;
@@ -38,6 +40,9 @@ pub mod steer;
 pub mod store;
 pub mod suggestions;
 pub mod ui;
+
+#[cfg(test)]
+mod test_support;
 pub mod workspace_usage;
 
 use auth::{Auth, Identity};
@@ -49,7 +54,7 @@ use axum::{
         sse::{Event, KeepAlive},
         IntoResponse, Response, Sse,
     },
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use error::ApiError;
@@ -169,10 +174,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
             "/api/conversations/{id}/messages/{message}/select",
             post(select_version),
         )
-        .route(
-            "/api/{*rest}",
-            get(|| async { ApiError::not_found() }).post(|| async { ApiError::not_found() }),
-        )
+        .route("/api/{*rest}", any(|| async { ApiError::not_found() }))
         .with_state(state)
         .merge(auth)
         .merge(catalog)
@@ -203,6 +205,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(batches)
         .fallback_service(web(branding_dir, sandboxes.as_ref()))
         .layer(DefaultBodyLimit::max(128 * 1024))
+        .layer(middleware::from_fn(error::envelope))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn_with_state(metrics, metrics::record))
         // Outermost: preview hosts are answered before any Chat route or header policy.
@@ -481,13 +484,7 @@ async fn import(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<(StatusCode, Json<store::ImportSummary>), ApiError> {
-    let u = match s.auth.require(&headers, true).await {
-        Ok(u) => u,
-        Err(refused) => {
-            error::discard(body).await;
-            return Err(refused);
-        }
-    };
+    let (u, body) = error::admitted(body, s.auth.require(&headers, true).await).await?;
     // Waits its turn before reading the body, so waiting uploads hold no memory.
     let _turn = imports::RUNNING
         .acquire()

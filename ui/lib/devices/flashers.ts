@@ -58,8 +58,3 @@ export async function withFlasher<T>(vendorId: number | undefined, work: (flashe
   throw new Error(`No supported chip answered. ${errors.join(" · ")}`);
 }
 
-export function formatBytes(n: number) {
-  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${n} bytes`;
-}

@@ -8,7 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { BookOpen, MessageSquare, Settings } from "lucide-react";
 import Link from "next/link";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader, isNotFound, NotFound } from "@/components/app-shell/page";
 import { projectDot } from "@/components/app-shell/sidebar";
 import { Button } from "@/components/ui/button";
 import { Note } from "@/components/manage/kit";
@@ -30,8 +30,12 @@ export interface GroupDetail {
   group: { id: string; name: string; description?: string; members: number };
   projects: { id: string; name: string; color: string; mine: boolean; ownerName?: string; saved?: number }[];
   chats?: { id: string; title: string; mine: boolean; ownerName?: string }[];
+  /** The newest 50 shared chats are listed; this says when there are older ones. */
+  moreChats?: boolean;
   collections: { id: string; name: string; documents: number }[];
   members: { id: string; username: string; displayName?: string }[];
+  /** The first 500 members are listed; this says when the group is larger. */
+  moreMembers?: boolean;
   canManage?: boolean;
 }
 
@@ -69,7 +73,8 @@ export function GroupsPage({ id = "" }: { id?: string }) {
     enabled: !!chosen && !!all,
   });
   const canManage = !!list.data?.canManage;
-  const error = list.error || detail.error;
+  const missing = isNotFound(detail.error);
+  const error = list.error || (missing ? null : detail.error);
   const retry = () => {
     list.refetch();
     if (chosen) detail.refetch();
@@ -165,13 +170,15 @@ export function GroupsPage({ id = "" }: { id?: string }) {
                   {d.collections.map((c) => (
                     <SharedRow key={c.id} href={`/knowledge/${encodeURIComponent(c.id)}`} icon={<BookOpen className="size-4 shrink-0 text-muted-foreground" />} title={c.name} detail={`collection · ${count(c.documents, "doc")}`} />
                   ))}
+                  {d.moreChats && <p className="px-2 py-1 text-xs text-faint">Only the 50 newest shared chats are listed.</p>}
                 </div>
               ) : (
                 <Note>Nothing yet. Share a chat from its Share button, a project from its Edit dialog, or a collection from its page, and everyone here can use it.</Note>
               )}
             </section>
             <section className="grid content-start gap-2 rounded-lg border bg-card p-4">
-              <Eyebrow>People · {d.members.length}</Eyebrow>
+              <Eyebrow>People · {d.group.members || d.members.length}</Eyebrow>
+              {d.moreMembers && <p className="text-xs text-faint">The first 500 are listed.</p>}
               {d.members.map((m) => (
                 <div key={m.id} className="flex items-center gap-2.5 py-1">
                   <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-full bg-secondary text-2xs font-semibold">
@@ -192,6 +199,10 @@ export function GroupsPage({ id = "" }: { id?: string }) {
               )}
             </section>
           </>
+        ) : missing ? (
+          <div className="lg:col-span-2">
+            <NotFound what="group" to="/groups" back="your groups" />
+          </div>
         ) : (
           !error && <Loading label="Loading the group…" />
         )}

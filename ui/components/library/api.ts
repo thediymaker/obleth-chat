@@ -53,7 +53,6 @@ export const kindLabel = (item: Pick<SavedItem, "kind" | "language">) => {
   const label = kindOf(item.kind)[2];
   return item.kind === "code" && item.language ? `${label} · ${item.language}` : label;
 };
-export const imageSize = (n: number) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`);
 export const host = (url: string) => {
   try {
     return new URL(url).host;
@@ -86,8 +85,11 @@ export const savedQuery = (filters: SavedFilters) => {
   const q = new URLSearchParams(Object.entries(filters).filter(([, v]) => v) as [string, string][]);
   return `/api/saved${q.size ? `?${q}` : ""}`;
 };
-export function useSaved(filters: SavedFilters = {}, enabled = true) {
-  return useQuery({ queryKey: libraryKey(filters), queryFn: () => api.request<SavedList>(savedQuery(filters)), enabled });
+/** Items shown at first; "Show more" asks for another page. */
+export const SAVED_PAGE = 60;
+export function useSaved(filters: SavedFilters = {}, enabled = true, limit = SAVED_PAGE) {
+  const query = `${savedQuery(filters)}${limit > SAVED_PAGE ? `${savedQuery(filters).includes("?") ? "&" : "?"}limit=${limit}` : ""}`;
+  return useQuery({ queryKey: [...libraryKey(filters), limit], queryFn: () => api.request<SavedList>(query), enabled });
 }
 export const getSaved = async (id: string) => (await api.request<{ item: SavedItem }>(savedPath(id))).item;
 

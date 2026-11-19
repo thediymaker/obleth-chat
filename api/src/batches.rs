@@ -8,10 +8,10 @@
 //! people give their batches (`batch_labels`).
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Read;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
@@ -21,6 +21,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::{Postgres, Transaction};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -41,8 +42,6 @@ const MAX_PROMPT: usize = 50_000;
 const MAX_NAME: usize = 200;
 /// The JSON a browser may send to start a batch.
 const MAX_BODY: usize = 96 * 1024 * 1024;
-/// How long a browser has to send it.
-const BODY_SECONDS: u64 = 300;
 /// Spreadsheets being read at once: each is held whole while it is checked.
 static READING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 /// The input file sent to the gateway (its own limit is 200 MB by default).
@@ -57,6 +56,8 @@ static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 const DOWNLOAD_WAIT: Duration = Duration::from_secs(30);
 /// How long Chat keeps a batch's rows; the gateway keeps batches 30 days.
 const KEEP_DAYS: i32 = 35;
+/// How long a start waits for its turn to read a spreadsheet before saying so.
+const READING_WAIT: Duration = Duration::from_secs(30);
 /// Deadlines a person may choose.
 const WINDOWS: &[&str] = &["24h", "3d", "7d"];
 /// The gateway lists 100 batches a page; the page shows up to this many pages.
@@ -278,13 +279,40 @@ async fn sources(
 }
 
 /// The person's batches, newest first, with their progress.
-async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListQuery {
+    /// `active`: one page of the batches still running, for the progress poll.
+    status: Option<String>,
+    /// The last batch of the previous page: the next page continues after it.
+    after: Option<String>,
+}
+
+async fn list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
     let user = state.auth.require(&headers, false).await?;
     let gw = gateway(&state)?;
+    let active_only = match query.status.as_deref() {
+        None => false,
+        Some("active") => true,
+        Some(_) => return Err(ApiError::bad("status can only be active")),
+    };
+    if query.after.as_deref().is_some_and(|after| !valid_id(after)) {
+        return Err(ApiError::bad("Unknown batch cursor"));
+    }
+    let pages = if active_only { 1 } else { LIST_PAGES };
     let mut list: Vec<Value> = Vec::new();
     let mut more = false;
-    for page in 0..LIST_PAGES {
-        let path = match list.last().and_then(|b| b["id"].as_str()) {
+    for page in 0..pages {
+        let after = list
+            .last()
+            .and_then(|b| b["id"].as_str())
+            .map(String::from)
+            .or_else(|| query.after.clone());
+        let path = match after {
             Some(after) => format!("v1/batches?limit=100&after={after}"),
             None => "v1/batches?limit=100".to_string(),
         };
@@ -311,28 +339,17 @@ async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<
             break;
         }
     }
+    if active_only {
+        list.retain(|b| is_active(b["status"].as_str()));
+        more = false;
+    }
+    let next_after = page_cursor(&list, more);
     let ids: Vec<String> = list
         .iter()
         .filter_map(|b| b["id"].as_str().map(String::from))
         .collect();
     let kept = sources(&state, user.id, &ids).await?;
     let label = labels(&state, user.id, &ids).await?;
-    // Rows outlive the gateway's own retention by a few days, then go.
-    for table in ["batch_sources", "batch_labels"] {
-        let stamp = if table == "batch_sources" {
-            "created_at"
-        } else {
-            "updated_at"
-        };
-        sqlx::query(&format!(
-            "DELETE FROM {table} WHERE user_id = $1
-             AND {stamp} < NOW() - make_interval(days => $2)"
-        ))
-        .bind(user.id)
-        .bind(KEEP_DAYS)
-        .execute(&state.store.pool)
-        .await?;
-    }
     let batches: Vec<Value> = list
         .iter()
         .map(|b| {
@@ -341,8 +358,24 @@ async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<
         })
         .collect();
     Ok(Json(
-        json!({"available": true, "batches": batches, "more": more}),
+        json!({"available": true, "batches": batches, "more": more, "nextAfter": next_after}),
     ))
+}
+
+/// A batch the gateway is still working on (or stopping).
+fn is_active(status: Option<&str>) -> bool {
+    matches!(
+        status,
+        Some("validating" | "in_progress" | "finalizing" | "cancelling")
+    )
+}
+
+/// Where the next page starts: the last batch listed, when more follow.
+fn page_cursor(list: &[Value], more: bool) -> Option<String> {
+    if !more {
+        return None;
+    }
+    list.last().and_then(|b| b["id"].as_str()).map(String::from)
 }
 
 #[derive(Deserialize)]
@@ -610,18 +643,46 @@ fn check(batch: &mut NewBatch) -> Result<(), ApiError> {
 }
 
 /// A multipart body with the purpose field and the file, as `/v1/files` takes it.
-fn multipart(boundary: &str, file: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(file.len() + 512);
-    write!(
-        body,
+/// The upload as a multipart form: the head, the JSONL file as it is, and the
+/// trailer, sent one after the other so the file is never copied into a body.
+fn multipart(boundary: &str, file: Vec<u8>) -> reqwest::Body {
+    let [head, tail] = multipart_parts(boundary);
+    let parts = [head, file, tail].map(Ok::<_, std::convert::Infallible>);
+    reqwest::Body::wrap_stream(futures_util::stream::iter(parts))
+}
+
+/// What goes before and after the file in the form.
+fn multipart_parts(boundary: &str) -> [Vec<u8>; 2] {
+    let head = format!(
         "--{boundary}\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nbatch\r\n\
          --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chat-batch.jsonl\"\r\n\
          Content-Type: application/jsonl\r\n\r\n"
-    )
-    .expect("writing to a Vec");
-    body.extend_from_slice(file);
-    write!(body, "\r\n--{boundary}--\r\n").expect("writing to a Vec");
-    body
+    );
+    [
+        head.into_bytes(),
+        format!("\r\n--{boundary}--\r\n").into_bytes(),
+    ]
+}
+
+/// Removes batch rows older than Chat keeps them, a bounded number per call, for
+/// every owner: the hourly retention sweep calls this, so rows of people who never
+/// open the Batches page go too.
+pub(crate) async fn expire(tx: &mut Transaction<'_, Postgres>) -> Result<u64, sqlx::Error> {
+    let mut removed = 0;
+    for (table, stamp, key) in [
+        ("batch_sources", "created_at", "batch_id"),
+        ("batch_labels", "updated_at", "user_id, batch_id"),
+    ] {
+        removed += sqlx::query(&format!(
+            "DELETE FROM {table} WHERE ({key}) IN (SELECT {key} FROM {table}
+             WHERE {stamp} < NOW() - make_interval(days => $1) ORDER BY {stamp} LIMIT 200 FOR UPDATE SKIP LOCKED)"
+        ))
+        .bind(KEEP_DAYS)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    }
+    Ok(removed)
 }
 
 fn gzip_rows(rows: &[Vec<String>]) -> Result<Vec<u8>, ApiError> {
@@ -647,38 +708,35 @@ async fn create(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<Value>, ApiError> {
-    let user = match state.auth.require(&headers, true).await {
-        Ok(user) => user,
-        Err(refused) => {
-            crate::error::discard(body).await;
-            return Err(refused);
-        }
-    };
+    let (user, body) =
+        crate::error::admitted(body, state.auth.require(&headers, true).await).await?;
     let gw = gateway(&state)?;
-    let mut batch = {
-        // Waits its turn before reading, so waiting spreadsheets hold no memory.
-        let _turn = READING.acquire().await.map_err(|_| ApiError::internal())?;
-        let body = tokio::time::timeout(
-            Duration::from_secs(BODY_SECONDS),
-            axum::body::to_bytes(body, MAX_BODY),
-        )
+    // Two spreadsheets are read and sent at a time; a third waits its turn holding no
+    // memory, and says so instead of hanging when the turn does not come.
+    let _turn = tokio::time::timeout(READING_WAIT, READING.acquire())
         .await
         .map_err(|_| {
             ApiError(
-                StatusCode::REQUEST_TIMEOUT,
-                "The upload took too long".into(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Other spreadsheets are being started. Try again in a moment.".into(),
             )
         })?
-        .map_err(|_| {
-            ApiError(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Choose a spreadsheet of 96 MB or less".into(),
-            )
-        })?;
-        parse(&body)?
-    };
-    check(&mut batch)?;
-    let (file, _sent) = input_file(&batch)?;
+        .map_err(|_| ApiError::internal())?;
+    let body =
+        crate::error::upload(body, MAX_BODY, "Choose a spreadsheet of 96 MB or less").await?;
+    // Parsing, checking, rendering the requests and packing the rows walk the whole
+    // spreadsheet: off the async workers, in one go.
+    let prepared = tokio::task::spawn_blocking(move || {
+        let mut batch = parse(&body)?;
+        drop(body);
+        check(&mut batch)?;
+        let (file, _sent) = input_file(&batch)?;
+        let rows = gzip_rows(&batch.rows)?;
+        Ok::<_, ApiError>((batch, file, rows))
+    })
+    .await
+    .map_err(|_| ApiError::internal())??;
+    let (batch, file, rows) = prepared;
 
     let boundary = format!("chatbatch{}", Uuid::new_v4().simple());
     let uploaded = call(
@@ -691,7 +749,7 @@ async fn create(
                 format!("multipart/form-data; boundary={boundary}"),
             )
             .timeout(Duration::from_secs(300))
-            .body(multipart(&boundary, &file)),
+            .body(multipart(&boundary, file)),
     )
     .await?;
     let file_id = json_of(uploaded).await?["id"]
@@ -720,7 +778,6 @@ async fn create(
         .ok_or_else(crate::gateway::unavailable)?
         .to_string();
 
-    let rows = gzip_rows(&batch.rows)?;
     sqlx::query(
         "INSERT INTO batch_sources
            (batch_id, user_id, name, model, file_name, columns, rows, row_count, system_prompt, template)
@@ -773,6 +830,7 @@ async fn cancel(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LabelChange {
     /// A new name; an empty one goes back to the name the batch started with.
     name: Option<String>,
@@ -1433,12 +1491,87 @@ mod tests {
         assert_eq!(gunzip_rows(&gzip_rows(&rows).unwrap()).unwrap(), rows);
     }
 
+    /// Rows of someone who never opens the Batches page are removed by the sweep.
+    #[tokio::test]
+    async fn old_batch_rows_expire_without_their_owner_listing() {
+        let Some(db) = crate::test_support::Database::new().await else {
+            return;
+        };
+        let owner = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, 'ana', 'Ana', 'user', 'x')")
+            .bind(owner).execute(&db.pool).await.unwrap();
+        for (id, age) in [("batch_old", 40), ("batch_new", 3)] {
+            sqlx::query("INSERT INTO batch_sources (batch_id, user_id, name, model, columns, rows, row_count, template, created_at) VALUES ($1, $2, 'n', 'm', '[]', '', 0, 't', NOW() - make_interval(days => $3))")
+                .bind(id).bind(owner).bind(age).execute(&db.pool).await.unwrap();
+            sqlx::query("INSERT INTO batch_labels (user_id, batch_id, name, updated_at) VALUES ($1, $2, 'label', NOW() - make_interval(days => $3))")
+                .bind(owner).bind(id).bind(age).execute(&db.pool).await.unwrap();
+        }
+        let mut tx = db.pool.begin().await.unwrap();
+        assert_eq!(expire(&mut tx).await.unwrap(), 2);
+        tx.commit().await.unwrap();
+        let left: Vec<String> = sqlx::query_scalar(
+            "SELECT batch_id FROM batch_sources UNION ALL SELECT batch_id FROM batch_labels",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(left, vec!["batch_new", "batch_new"]);
+        db.close().await;
+    }
+
     #[test]
-    fn the_upload_is_a_multipart_form() {
-        let body = String::from_utf8(multipart("B", b"{}\n")).unwrap();
+    fn the_list_keeps_active_batches_and_names_where_the_next_page_starts() {
+        let rows: Vec<Value> = [
+            "validating",
+            "in_progress",
+            "completed",
+            "cancelling",
+            "failed",
+            "finalizing",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, status)| json!({"id": format!("batch_{i}"), "status": status}))
+        .collect();
+        let active: Vec<&str> = rows
+            .iter()
+            .filter(|b| is_active(b["status"].as_str()))
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(active, ["batch_0", "batch_1", "batch_3", "batch_5"]);
+        assert_eq!(page_cursor(&rows, true).as_deref(), Some("batch_5"));
+        assert_eq!(page_cursor(&rows, false), None);
+        assert_eq!(page_cursor(&[], true), None);
+    }
+
+    #[tokio::test]
+    async fn the_upload_is_a_multipart_form_sent_in_three_parts() {
+        let [head, tail] = multipart_parts("B");
+        let body = String::from_utf8([head, b"{}\n".to_vec(), tail].concat()).unwrap();
         assert!(body.starts_with(
             "--B\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nbatch\r\n--B\r\n"
         ));
         assert!(body.ends_with("{}\n\r\n--B--\r\n"));
+        // The streamed body carries the same bytes.
+        let streamed = multipart("B", b"{}\n".to_vec());
+        let bytes = axum::body::to_bytes(axum::body::Body::new(streamed), 4096)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(bytes.to_vec()).unwrap(), body);
+    }
+
+    /// A third start waits for a reading turn, and says so instead of hanging.
+    #[tokio::test]
+    async fn a_third_start_waits_for_its_turn() {
+        let first = READING.acquire().await.unwrap();
+        let second = READING.acquire().await.unwrap();
+        let third = tokio::time::timeout(Duration::from_millis(100), READING.acquire()).await;
+        assert!(
+            third.is_err(),
+            "a third reader got a turn while two held them"
+        );
+        drop(first);
+        assert!(READING.try_acquire().is_ok());
+        drop(second);
     }
 }

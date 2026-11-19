@@ -373,42 +373,24 @@ async fn references_enforce_ownership_capabilities_and_safe_deletion(pool: PgPoo
     let (conversation, message) = message(&pool, alice.id).await;
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
-        attachments::load_owner(
-            &mut tx,
-            &Files::new(pool.clone(), None),
-            bob.id,
-            &[text],
-            true
-        )
-        .await
-        .unwrap_err()
-        .0,
+        attachments::load_owner(&mut tx, bob.id, &[text], true)
+            .await
+            .unwrap_err()
+            .0,
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        attachments::load_owner(
-            &mut tx,
-            &Files::new(pool.clone(), None),
-            alice.id,
-            &[text, text],
-            true
-        )
-        .await
-        .unwrap_err()
-        .0,
+        attachments::load_owner(&mut tx, alice.id, &[text, text], true)
+            .await
+            .unwrap_err()
+            .0,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        attachments::load_owner(
-            &mut tx,
-            &Files::new(pool.clone(), None),
-            alice.id,
-            &[image],
-            false
-        )
-        .await
-        .unwrap_err()
-        .0,
+        attachments::load_owner(&mut tx, alice.id, &[image], false)
+            .await
+            .unwrap_err()
+            .0,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
@@ -432,27 +414,19 @@ async fn references_enforce_ownership_capabilities_and_safe_deletion(pool: PgPoo
     );
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
-        attachments::load_messages(
-            &mut tx,
-            &Files::new(pool.clone(), None),
-            alice.id,
-            &[message],
-            false
-        )
-        .await
-        .unwrap_err()
-        .0,
+        attachments::load_messages(&mut tx, alice.id, &[message], false)
+            .await
+            .unwrap_err()
+            .0,
         StatusCode::BAD_REQUEST
     );
-    let files = attachments::load_messages(
-        &mut tx,
-        &Files::new(pool.clone(), None),
-        alice.id,
-        &[message],
-        true,
-    )
-    .await
-    .unwrap();
+    let files = attachments::load_messages(&mut tx, alice.id, &[message], true)
+        .await
+        .unwrap();
+    // Bytes are read apart from the transaction, as a turn does after it commits.
+    let files = attachments::read_messages(&Files::new(pool.clone(), None), files)
+        .await
+        .unwrap();
     assert_eq!(files[&message][0].meta.id, image);
     assert_eq!(files[&message][1].meta.id, text);
     assert!(files[&message][0].content_part()["image_url"]["url"]
@@ -527,25 +501,18 @@ async fn portable_archives_preserve_private_bytes_and_import_atomically(pool: Pg
         .unwrap();
     tx.commit().await.unwrap();
     let mut tx = pool.begin().await.unwrap();
-    let files = attachments::load_for_archive(
-        &mut tx,
-        &Files::new(pool.clone(), None),
-        alice.id,
-        &[message],
-        1024,
-    )
-    .await
-    .unwrap();
-    let archive = files.files[&message][0].archive();
-    assert!(attachments::load_for_archive(
-        &mut tx,
-        &Files::new(pool.clone(), None),
-        alice.id,
-        &[message],
-        10
-    )
-    .await
-    .is_err());
+    let files = attachments::load_for_archive(&mut tx, alice.id, &[message], 1024)
+        .await
+        .unwrap();
+    let files = attachments::read_messages(&Files::new(pool.clone(), None), files.files)
+        .await
+        .unwrap();
+    let archive = files[&message][0].archive();
+    assert!(
+        attachments::load_for_archive(&mut tx, alice.id, &[message], 10)
+            .await
+            .is_err()
+    );
     tx.commit().await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     let ids = attachments::import_in(
@@ -660,37 +627,23 @@ async fn replayed_context_is_bounded_before_loading_file_bytes(pool: PgPool) {
     tx.commit().await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
-        attachments::load_messages(
-            &mut tx,
-            &Files::new(pool.clone(), None),
-            alice.id,
-            &[first, second],
-            true
-        )
-        .await
-        .unwrap_err()
-        .0,
+        attachments::load_messages(&mut tx, alice.id, &[first, second], true)
+            .await
+            .unwrap_err()
+            .0,
         StatusCode::BAD_REQUEST
     );
-    assert!(attachments::load_for_archive(
-        &mut tx,
-        &Files::new(pool.clone(), None),
-        alice.id,
-        &[first, second],
-        200 * 1024
-    )
-    .await
-    .is_ok());
+    assert!(
+        attachments::load_for_archive(&mut tx, alice.id, &[first, second], 200 * 1024)
+            .await
+            .is_ok()
+    );
     let oversized = vec![Uuid::new_v4(); 201];
-    assert!(attachments::load_messages(
-        &mut tx,
-        &Files::new(pool.clone(), None),
-        alice.id,
-        &oversized,
-        true
-    )
-    .await
-    .is_err());
+    assert!(
+        attachments::load_messages(&mut tx, alice.id, &oversized, true)
+            .await
+            .is_err()
+    );
     assert!(
         attachments::metadata_for_messages(&mut tx, alice.id, &oversized)
             .await

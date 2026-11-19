@@ -12,32 +12,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { clock } from "@/lib/chat/composer";
 import { steerDraft } from "@/lib/chat/steer-draft";
-import {
-  changeOf,
-  duration,
-  FILE_TOOLS,
-  filterOf,
-  gist,
-  isLive,
-  plural,
-  runState,
-  stagesOf,
-  stats as statsOf,
-  steerPlaceholder,
-  stepMark,
-  stepTime,
-  browsing,
-  TOOL_ICONS,
-  workOf,
-  type Row,
-  type Stats,
-  type Work,
-} from "@/lib/chat/turn";
+import { changeOf, FILE_TOOLS, filterOf, gist, isLive, runState, stagesOf, stats as statsOf, steerPlaceholder, stepMark, stepTime, browsing, TOOL_ICONS, workOf, type Row, type Stats, type Work } from "@/lib/chat/turn";
 import type { ActivityEntry, Message } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
-import { useChatStore as useChat } from "./chat-provider";
+import { useChatStore } from "./chat-provider";
 import { NamedIcon } from "./icon";
 import { Markdown } from "./markdown-view";
+import { duration, count, compact } from "@/lib/format";
 
 const MARK_TONE: Record<string, string> = {
   bad: "text-destructive-foreground",
@@ -69,7 +50,7 @@ function Lines({ s }: { s: ActivityEntry }) {
 }
 
 function FileButton({ path }: { path: string }) {
-  const store = useChat();
+  const store = useChatStore();
   return (
     <button type="button" className="font-mono text-[12px] underline-offset-2 hover:underline" onClick={() => store.workspace.openFile(store.route.id, path)}>
       {path}
@@ -79,7 +60,7 @@ function FileButton({ path }: { path: string }) {
 
 /** A step in words: what it did, the file it wrote, the host it browsed. */
 function StepText({ s }: { s: ActivityEntry }) {
-  const store = useChat();
+  const store = useChatStore();
   if (s.tool === "delegate") {
     const model = s.workerModel || s.agents?.[0]?.model,
       getting = s.status === "running" && !s.agents && s.detail;
@@ -107,7 +88,7 @@ function StepText({ s }: { s: ActivityEntry }) {
         </button>
       </>
     );
-  if (s.tool === "plan" && Array.isArray(s.files)) return <>Planned {plural(s.files.length, "file")}</>;
+  if (s.tool === "plan" && Array.isArray(s.files)) return <>Planned {count(s.files.length, "file")}</>;
   if (browsing(s) && s.url) {
     let host = "";
     try {
@@ -131,7 +112,7 @@ const DECISIONS: ["allow" | "chat" | "deny", (s: ActivityEntry) => string, boole
   ["deny", () => "Deny", false],
 ];
 function Decisions({ s }: { s: ActivityEntry }) {
-  const store = useChat();
+  const store = useChatStore();
   const [busy, setBusy] = useState(false);
   return (
     <>
@@ -168,7 +149,7 @@ function Approval({ s }: { s: ActivityEntry }) {
  * attaches the device when the call waits for it in this tab.
  */
 function DeviceStep({ s }: { s: ActivityEntry }) {
-  const store = useChat();
+  const store = useChatStore();
   const [, bump] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -212,7 +193,7 @@ function Agents({ s }: { s: ActivityEntry }) {
     <ol className="mt-1.5 grid gap-1">
       {list.map((a, i) => {
         const mark = a.status === "error" ? "bad" : a.status === "completed" ? "ok" : a.status === "running" ? "now" : "next";
-        const facts = [a.status === "completed" ? plural(a.steps, "step") : a.doing, a.status !== "completed" && a.steps ? `step ${a.steps}` : "", a.tokens ? tokens(a.tokens) : ""].filter(Boolean).join(" · ");
+        const facts = [a.status === "completed" ? count(a.steps, "step") : a.doing, a.status !== "completed" && a.steps ? `step ${a.steps}` : "", a.tokens ? compact(a.tokens) : ""].filter(Boolean).join(" · ");
         const head = (
           <span className="flex min-w-0 items-center gap-2">
             <span className={cn("size-2 shrink-0 rounded-full bg-current", MARK_TONE[mark])} aria-label={a.status || ""} />
@@ -304,7 +285,7 @@ const Pre = ({ text, className }: { text: string; className?: string }) => (
 );
 
 function TraceRow({ r }: { r: Row }) {
-  const store = useChat();
+  const store = useChatStore();
   if (r.type === "thought")
     return (
       <li className="flex gap-2.5 py-1" data-f="thinking">
@@ -520,7 +501,7 @@ function Asked({ name, text }: { name: string; text: string }) {
   return (
     <div className="grid gap-1">
       <span className="text-sm text-muted-foreground">
-        {name} · {plural(lines, "line")}
+        {name} · {count(lines, "line")}
       </span>
       <Pre text={text} className="max-h-80" />
     </div>
@@ -585,7 +566,7 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
       ) : (
         s.detail && (
           <div className="grid gap-1">
-            <span className="text-sm text-muted-foreground">Arguments · {plural(String(s.detail).trim().split("\n").length, "line")}</span>
+            <span className="text-sm text-muted-foreground">Arguments · {count(String(s.detail).trim().split("\n").length, "line")}</span>
             <Pre text={String(s.detail)} className="max-h-80" />
           </div>
         )
@@ -607,13 +588,12 @@ function WorkerGraph({ s, m }: { s: ActivityEntry; m: Message }) {
   const [pickedState, setPicked] = useState<number | null>(chosen.has(s.id!) ? chosen.get(s.id!)! : null);
   const picked = Math.min(n - 1, pickedState ?? Math.max(0, list.findIndex((a) => a.status === "running")));
   const mark = (a: any) => (a.status === "error" ? "bad" : a.status === "completed" ? "ok" : a.status === "running" ? "now" : "next");
-  const tokens = (k: number) => (!k ? "" : k >= 1000 ? `${(k / 1000).toFixed(k >= 10000 ? 0 : 1)}k` : String(k));
   const done = list.filter((a) => a.status === "completed").length,
     bad = list.filter((a) => a.status === "error").length,
     left = n - done - bad;
   const lead = m.settings?.resolvedModel || m.settings?.model || "Lead model";
   const a = list[picked];
-  const facts = [a.status === "completed" || a.status === "error" ? plural(a.steps || 0, "step") : `step ${a.steps || 0} of 30`, a.tokens ? `${tokens(a.tokens)} tokens` : ""].filter(Boolean).join(" · ");
+  const facts = [a.status === "completed" || a.status === "error" ? count(a.steps || 0, "step") : `step ${a.steps || 0} of 30`, a.tokens ? `${compact(a.tokens)} tokens` : ""].filter(Boolean).join(" · ");
   const status = ({ completed: "Reported", error: "Failed", running: "Working", queued: "Waiting to start" } as Record<string, string>)[a.status] || "";
   return (
     <div className="grid gap-3 rounded-md border p-3">
@@ -640,9 +620,9 @@ function WorkerGraph({ s, m }: { s: ActivityEntry; m: Message }) {
                 <span className="flex items-center gap-2">
                   <span className={cn("size-2 shrink-0 rounded-full bg-current", MARK_TONE[mark(w)])} aria-hidden="true" />
                   <strong className="min-w-0 flex-1 truncate text-sm font-medium">{w.title}</strong>
-                  <small className="font-mono text-xs text-faint">{tokens(w.tokens)}</small>
+                  <small className="font-mono text-xs text-faint">{compact(w.tokens)}</small>
                 </span>
-                <span className="block truncate text-xs text-muted-foreground">{w.status === "completed" ? `Reported · ${plural(w.steps || 0, "step")}` : w.doing || ""}</span>
+                <span className="block truncate text-xs text-muted-foreground">{w.status === "completed" ? `Reported · ${count(w.steps || 0, "step")}` : w.doing || ""}</span>
                 <span className="absolute bottom-0 left-0 h-0.5 bg-blue" style={{ width: `${progress}%` }} aria-hidden="true" />
               </button>
             );
@@ -727,7 +707,7 @@ function Target({ s, draft }: { s?: ActivityEntry; draft: unknown }) {
 const RAIL_TONE: Record<string, string> = { done: "bg-success", now: "bg-blue animate-pulse", ask: "bg-amber animate-pulse", next: "bg-line-strong" };
 
 function RunCard({ m, work }: { m: Message; work: Work }) {
-  const store = useChat();
+  const store = useChatStore();
   const now = useNow(true);
   const run = runState(m, work, now);
   const id = m.id || "live";
@@ -779,8 +759,8 @@ function RunCard({ m, work }: { m: Message; work: Work }) {
           <div className="min-w-0 flex-1">
             <strong className="block truncate text-md font-semibold">{run.headline}</strong>
             <small className="text-xs text-muted-foreground">
-              {clock(now - run.began)} · {plural(run.stats.steps, "step")}
-              {run.stats.files.length ? ` · ${plural(run.stats.files.length, "file")} changed` : ""}
+              {clock(now - run.began)} · {count(run.stats.steps, "step")}
+              {run.stats.files.length ? ` · ${count(run.stats.files.length, "file")} changed` : ""}
             </small>
           </div>
           <Target s={run.lastStep} draft={run.draft} />
@@ -841,7 +821,7 @@ function RunCard({ m, work }: { m: Message; work: Work }) {
 }
 
 function ResultCard({ m, s }: { m: Message; s: Stats }) {
-  const store = useChat();
+  const store = useChatStore();
   if (!s.files.length) return null;
   const stopped = m.status !== "completed";
   const id = store.route.id;
@@ -855,7 +835,7 @@ function ResultCard({ m, s }: { m: Message; s: Stats }) {
             {s.span ? ` · ${duration(s.span)}` : ""}
           </span>
           <strong className="block text-md font-semibold">
-            {plural(s.files.length, "file")} changed <span className="text-success">+{s.added}</span>
+            {count(s.files.length, "file")} changed <span className="text-success">+{s.added}</span>
             {s.removed ? <span className="text-destructive-foreground"> −{s.removed}</span> : null}
           </strong>
           <ul className="mt-1 grid gap-0.5 text-sm">
@@ -913,7 +893,7 @@ function ResultCard({ m, s }: { m: Message; s: Stats }) {
 }
 
 function Checkpoints({ s }: { s: Stats }) {
-  const store = useChat();
+  const store = useChatStore();
   if (!s.checkpoints.length) return null;
   const list = s.checkpoints.slice(-6);
   return (
@@ -952,7 +932,7 @@ export function TurnAfter({ m }: { m: Message }) {
   if (isLive(m)) return null;
   const work = workOf(m),
     s = statsOf(work);
-  const facts = [plural(s.steps, "step"), s.thoughtMs ? `thought for ${duration(s.thoughtMs)}` : "", s.deadEnds ? plural(s.deadEnds, "dead end") : "", s.fixes ? `${s.fixes} fix${s.fixes === 1 ? "" : "es"}` : ""]
+  const facts = [count(s.steps, "step"), s.thoughtMs ? `thought for ${duration(s.thoughtMs)}` : "", s.deadEnds ? count(s.deadEnds, "dead end") : "", s.fixes ? `${s.fixes} fix${s.fixes === 1 ? "" : "es"}` : ""]
     .filter(Boolean)
     .join(" · ");
   return (
@@ -970,7 +950,7 @@ export function TurnAfter({ m }: { m: Message }) {
 }
 
 export function SteerForm({ m }: { m: Message }) {
-  const store = useChat();
+  const store = useChatStore();
   const [text, setText] = useState(steerDraft.text);
   const [busy, setBusy] = useState(false);
   return (

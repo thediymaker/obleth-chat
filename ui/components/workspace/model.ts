@@ -49,8 +49,6 @@ export const statusLabel = (w: Pick<Workspace, "status">) =>
 
 export const statusTone = (w: Pick<Workspace, "status">): "accent" | "amber" | "" => (w.status === "running" ? "accent" : w.status === "error" ? "amber" : "");
 
-export const formatBytes = (n: number | null | undefined) =>
-  n == null ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 
 export const GiB = 2 ** 30;
 /** "1.2 / 10 GB", and whether every workspace together is over the limit. */

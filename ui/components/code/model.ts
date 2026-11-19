@@ -1,6 +1,8 @@
 // Code in projects: the shapes api/src/code returns, and the diff and
 // conflict readers the Git tab and the project's Code tab share.
 
+import { count } from "@/lib/format";
+
 export interface ChatRef {
   id: string;
   title?: string | null;
@@ -84,9 +86,7 @@ export interface LineVersion extends CommitEntry {
 
 export const LETTER: Record<string, string> = { added: "A", modified: "M", deleted: "D", conflict: "!" };
 export const short = (sha: string | null | undefined) => String(sha || "").slice(0, 7);
-export const count = (n: number | null | undefined, one: string, many = `${one}s`) => `${Number(n || 0).toLocaleString()} ${n === 1 ? one : many}`;
 export const initial = (name: string | null | undefined) => String(name || "?").trim().slice(0, 1).toUpperCase() || "?";
-export const bytes = (n: number | null | undefined) => (n == null ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 /** A project name as a repository or file name. */
 export const slug = (name: string | null | undefined) =>
   String(name || "project")
@@ -95,13 +95,6 @@ export const slug = (name: string | null | undefined) =>
     .replace(/^-|-$/g, "")
     .slice(0, 80) || "project";
 
-/** "just now", "5 min ago", "3 h ago", "yesterday", "4 d ago"; numbers are seconds. */
-export function ago(value: string | number | null | undefined, now = Date.now()) {
-  if (value == null || value === "") return "";
-  const t = typeof value === "number" ? value * 1000 : new Date(value).getTime(),
-    m = Math.round((now - t) / 60000);
-  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : m < 2880 ? "yesterday" : `${Math.round(m / 1440)} d ago`;
-}
 
 export type DiffRow = { kind: "hunk" | "more" | "note"; text: string; n?: undefined } | { kind: "add" | "ctx"; n: number; text: string } | { kind: "del"; n: ""; text: string };
 

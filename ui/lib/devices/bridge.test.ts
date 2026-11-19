@@ -58,6 +58,29 @@ test("a device step is carried out on the attached port and its result posted", 
   expect(requests.at(-1)!.body).toMatchObject({ ok: false, output: "This browser has no device tool named levitate" });
 });
 
+test("what a device prints reaches the chat once, and each change of state", async () => {
+  const port = new FakePort({ usbVendorId: 0x303a, usbProductId: 0x1001 });
+  let changes = 0;
+  const b = createDevicesBridge({
+    api: { request: async () => ({}) },
+    enabled: () => true,
+    changed: () => changes++,
+    serial: fakeSerial([port]),
+    fetchBytes: async () => new Uint8Array(),
+  });
+  b.adopt({ id: "dev1", name: "Board" }, asPort(port));
+  const device = b.attached("dev1")!.device;
+  const settled = changes;
+  await device.open({ baudRate: 9600 });
+  expect(changes).toBe(settled + 1);
+  for (let i = 0; i < 100; i++) port.print(`line ${i}\n`);
+  await vi.waitFor(() => expect(device.status().total).toBeGreaterThan(500));
+  // The first output changed the device's state; the next 99 lines did not.
+  expect(changes).toBe(settled + 2);
+  await device.close();
+  expect(changes).toBe(settled + 3);
+});
+
 test("a step for a device not attached here waits, then runs once the person attaches it", async () => {
   const port = new FakePort({ usbVendorId: 0x1a86, usbProductId: 0x7523 });
   const requests: { path: string; body?: any }[] = [];

@@ -170,6 +170,7 @@ async fn zip(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct GithubInput {
     owner: Option<String>,

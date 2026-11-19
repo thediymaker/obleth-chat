@@ -2,9 +2,8 @@
 // are, at most four per message. A small store the composer subscribes to.
 
 import type { Attachment } from "./types";
+import { bytes as formatBytes } from "@/lib/format";
 
-export const sizeLabel = (n: number) =>
-  n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(1)} GB`;
 // Text a conversation can hold in all (store::MAX_CONTEXT_BYTES); pasted text over it can't be read whole.
 export const CONTEXT_BYTES = 100 * 1024;
 export const MAX_FILES = 4;
@@ -21,13 +20,13 @@ export function describe(a: Pick<Attachment, "name" | "kind" | "size" | "parts" 
   if (a.kind === "file") {
     const type = archive(a.name);
     const entries = type && a.parts ? `${a.parts.toLocaleString()} file${a.parts === 1 ? "" : "s"}` : "";
-    return { glyph: type ? "archive" : "file", detail: [type || extension(a.name).toUpperCase(), entries, sizeLabel(a.size)].filter(Boolean).join(" · "), note: "" };
+    return { glyph: type ? "archive" : "file", detail: [type || extension(a.name).toUpperCase(), entries, formatBytes(a.size)].filter(Boolean).join(" · "), note: "" };
   }
   const doc = a.kind === "document" && DOCUMENTS[extension(a.name)];
-  if (!doc) return { glyph: a.kind === "image" ? "image" : "file", detail: sizeLabel(a.size), note: "" };
+  if (!doc) return { glyph: a.kind === "image" ? "image" : "file", detail: formatBytes(a.size), note: "" };
   const [type, glyph, unit] = doc;
   const parts = unit && a.parts ? `${a.parts.toLocaleString()} ${unit}${a.parts === 1 ? "" : "s"}` : "";
-  return { glyph, detail: [type, parts, sizeLabel(a.size)].filter(Boolean).join(" · "), note: a.searched ? "Large document: Chat searches it instead of reading it all." : "" };
+  return { glyph, detail: [type, parts, formatBytes(a.size)].filter(Boolean).join(" · "), note: a.searched ? "Large document: Chat searches it instead of reading it all." : "" };
 }
 export const attachmentUrl = (a: Pick<Attachment, "id" | "url">) => (a.url as string) || `/api/attachments/${encodeURIComponent(a.id)}`;
 
@@ -42,7 +41,7 @@ export interface AttachmentsOptions {
 }
 
 export function createAttachments({ api, toast, streaming }: AttachmentsOptions) {
-  // The server's limits (GET /api/attachments), read once per session.
+  // The server's limits (GET /api/attachments/limits), read once per session.
   let selected: Attachment[] = [],
     uploading = false,
     sequence = 0,
@@ -74,7 +73,7 @@ export function createAttachments({ api, toast, streaming }: AttachmentsOptions)
     try {
       if (!limits) {
         try {
-          limits = (await api.request("/api/attachments"))?.limits || null;
+          limits = (await api.request("/api/attachments/limits")) || null;
         } catch (e) {
           if ((e as Error).name === "AbortError") throw e;
         }
@@ -82,7 +81,7 @@ export function createAttachments({ api, toast, streaming }: AttachmentsOptions)
       if (epoch !== sequence) return;
       const most = limits?.maxFileBytes;
       for (const file of files) {
-        if (most && file.size > most) throw new Error(`${file.name} is ${sizeLabel(file.size)}, and files can be at most ${sizeLabel(most)}.`);
+        if (most && file.size > most) throw new Error(`${file.name} is ${formatBytes(file.size)}, and files can be at most ${formatBytes(most)}.`);
         // The file's own bytes, unread here and not re-encoded.
         const query = new URLSearchParams({ name: file.name, type: file.type || "" });
         const r = await api.request(`/api/attachments?${query}`, { method: "POST", raw: file, contentType: "application/octet-stream" });
@@ -104,7 +103,7 @@ export function createAttachments({ api, toast, streaming }: AttachmentsOptions)
   async function addText(text: string) {
     const bytes = new TextEncoder().encode(text).length;
     if (bytes > CONTEXT_BYTES) {
-      toast(`That text is ${sizeLabel(bytes)}, and a conversation can hold ${sizeLabel(CONTEXT_BYTES)}. Paste a shorter part.`);
+      toast(`That text is ${formatBytes(bytes)}, and a conversation can hold ${formatBytes(CONTEXT_BYTES)}. Paste a shorter part.`);
       return;
     }
     if (streaming() || uploading) {

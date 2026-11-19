@@ -4,6 +4,7 @@
 // next message in Chat) and Delete. Opened from Settings › Your files.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Archive, File, FileText, Image as ImageIcon, Monitor, Sheet } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -11,7 +12,7 @@ import { EmptyState } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { FormActions, FormDialog, Note, useConfirm } from "@/components/manage/kit";
 import { api } from "@/lib/api";
-import { when } from "@/lib/format";
+import { when, bytes } from "@/lib/format";
 
 export interface Attachment {
   id: string;
@@ -22,8 +23,6 @@ export interface Attachment {
   searched?: boolean;
   createdAt?: string;
 }
-const sizeLabel = (n: number) =>
-  n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(1)} GB`;
 const DOCUMENTS: Record<string, [string, typeof File, string]> = { pdf: ["PDF", FileText, "page"], docx: ["Word", FileText, ""], pptx: ["PowerPoint", Monitor, "slide"], xlsx: ["Excel", Sheet, "sheet"] };
 const extension = (name: string) => (name.match(/\.([^.]+)$/)?.[1] || "").toLowerCase();
 const ARCHIVES = [
@@ -44,26 +43,30 @@ export function describeFile(a: Attachment): { Icon: typeof File; detail: string
   if (a.kind === "file") {
     const type = ARCHIVES.find(([end]) => a.name.toLowerCase().endsWith(end!))?.[1];
     const entries = type && a.parts ? `${a.parts.toLocaleString()} file${a.parts === 1 ? "" : "s"}` : "";
-    return { Icon: type ? Archive : File, detail: [type || extension(a.name).toUpperCase(), entries, sizeLabel(a.size)].filter(Boolean).join(" · ") };
+    return { Icon: type ? Archive : File, detail: [type || extension(a.name).toUpperCase(), entries, bytes(a.size)].filter(Boolean).join(" · ") };
   }
   const doc = a.kind === "document" ? DOCUMENTS[extension(a.name)] : undefined;
-  if (!doc) return { Icon: a.kind === "image" ? ImageIcon : File, detail: sizeLabel(a.size) };
+  if (!doc) return { Icon: a.kind === "image" ? ImageIcon : File, detail: bytes(a.size) };
   const [type, Icon, unit] = doc;
   const parts = unit && a.parts ? `${a.parts.toLocaleString()} ${unit}${a.parts === 1 ? "" : "s"}` : "";
-  return { Icon, detail: [type, parts, sizeLabel(a.size)].filter(Boolean).join(" · ") };
+  return { Icon, detail: [type, parts, bytes(a.size)].filter(Boolean).join(" · ") };
 }
 
 const filesKey = ["settings", "files"] as const;
+/** Files shown at first; "Show more" asks for another page, so the oldest can be reached. */
+export const FILES_PAGE = 100;
 
 export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const queries = useQueryClient();
   const router = useRouter();
   const confirm = useConfirm();
+  const [shown, setShown] = useState(FILES_PAGE);
   const { data, error, isLoading } = useQuery({
-    queryKey: filesKey,
-    queryFn: async () => (await api.request<{ attachments?: Attachment[] }>("/api/attachments")).attachments ?? [],
+    queryKey: [...filesKey, shown],
+    queryFn: () => api.request<{ items?: Attachment[]; more?: boolean }>(`/api/attachments?limit=${shown}`),
     enabled: open,
   });
+  const files = data?.items ?? [];
   return (
     <FormDialog open={open} onOpenChange={onOpenChange} title="Your files" wide>
       {confirm.element}
@@ -77,9 +80,9 @@ export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChang
         </p>
       ) : error ? (
         <Note role="alert">{error.message}</Note>
-      ) : data?.length ? (
+      ) : files.length ? (
         <ul className="grid max-h-[50dvh] gap-1 overflow-y-auto">
-          {data.map((a) => {
+          {files.map((a) => {
             const { Icon, detail } = describeFile(a);
             return (
               <li key={a.id} className="flex items-center gap-3 rounded-md border px-3 py-2">
@@ -124,6 +127,13 @@ export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChang
               </li>
             );
           })}
+          {data?.more && (
+            <li>
+              <Button variant="ghost" size="sm" onClick={() => setShown(shown + FILES_PAGE)}>
+                Show more files
+              </Button>
+            </li>
+          )}
         </ul>
       ) : (
         <EmptyState title="No uploaded files" text="Use the paperclip in Chat to attach a file." />

@@ -20,42 +20,14 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useModels } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import {
-  BATCHES_KEY,
-  cancelBatch,
-  deletable,
-  deleteBatch,
-  doneOf,
-  duration,
-  GROUPS,
-  groupCounts,
-  isActive,
-  matches,
-  percentOf,
-  refreshBatches,
-  resultsHref,
-  startBatch,
-  stateOf,
-  tagCounts,
-  updateBatch,
-  useBatches,
-  WINDOWS,
-  type Batch,
-  type BatchList,
-  type Group,
-  type Tone,
-} from "./api";
+import { cancelBatch, deletable, deleteBatch, doneOf, GROUPS, groupCounts, isActive, matches, percentOf, refreshBatches, resultsHref, startBatch, stateOf, tagCounts, updateBatch, useBatches, WINDOWS, type Batch, type Group, type Tone, patchBatches, addBatch } from "./api";
 import { parseCsv, renderPrompt, toSheet, unknownPlaceholders, usedColumns, type Sheet } from "./csv";
 import { EXAMPLE_CSV, EXAMPLE_FILE_NAME, EXAMPLE_NAME, EXAMPLE_SYSTEM, EXAMPLE_TEMPLATE, exampleHref } from "./example";
+import { ago, count } from "@/lib/format";
 
 const MAX_ROWS = 50_000;
 const MAX_FILE_BYTES = 90 * 1024 * 1024;
 
-function ago(iso: string | null, now: number): string {
-  if (!iso) return "";
-  const s = (now - Date.parse(iso)) / 1000;
-  return Number.isFinite(s) ? `${duration(s)} ago` : "";
-}
 
 export function BatchesPage() {
   usePageChrome("Batches");
@@ -96,17 +68,12 @@ export function BatchesPage() {
           }
         />
       ) : batches.length > 0 ? (
-        <BatchList batches={batches} more={!!data?.more} now={list.dataUpdatedAt || Date.now()} />
+        <BatchList batches={batches} more={!!data?.more} loading={list.isFetchingNextPage} onMore={() => list.fetchNextPage()} now={list.dataUpdatedAt || Date.now()} />
       ) : null}
     </Page>
   );
 }
 
-/** Puts changed batches into the cached list, and drops deleted ones. */
-function patchList(client: ReturnType<typeof useQueryClient>, changed: Batch[], removed: string[] = []) {
-  const next = new Map(changed.map((b) => [b.id, b]));
-  client.setQueryData<BatchList>(BATCHES_KEY, (old) => (old ? { ...old, batches: old.batches.filter((b) => !removed.includes(b.id)).map((b) => next.get(b.id) ?? b) } : old));
-}
 
 /** Runs `work` over every item, four at a time, and counts what failed. */
 async function eachOf<T>(items: T[], work: (item: T) => Promise<unknown>): Promise<number> {
@@ -118,9 +85,8 @@ async function eachOf<T>(items: T[], work: (item: T) => Promise<unknown>): Promi
   return failed;
 }
 
-const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 
-function BatchList({ batches, more, now }: { batches: Batch[]; more: boolean; now: number }) {
+function BatchList({ batches, more, loading, onMore, now }: { batches: Batch[]; more: boolean; loading: boolean; onMore: () => void; now: number }) {
   const client = useQueryClient();
   const confirm = useConfirm();
   const [group, setGroup] = useState<Group>("all");
@@ -160,9 +126,9 @@ function BatchList({ batches, more, now }: { batches: Batch[]; more: boolean; no
     }
     const one = stopped.length === 1 ? stopped[0] : null;
     confirm.ask({
-      title: one ? `Delete “${one.name}”?` : `Delete ${plural(stopped.length, "batch", "batches")}?`,
-      text: `${one ? "Its answers and the spreadsheet you uploaded are" : "Their answers and the spreadsheets you uploaded are"} removed for good. Download the results first if you still need them.${skipped ? ` ${plural(skipped, "running batch is", "running batches are")} left alone; cancel ${skipped === 1 ? "it" : "them"} first.` : ""}`,
-      label: one ? "Delete batch" : `Delete ${plural(stopped.length, "batch", "batches")}`,
+      title: one ? `Delete “${one.name}”?` : `Delete ${count(stopped.length, "batch", "batches")}?`,
+      text: `${one ? "Its answers and the spreadsheet you uploaded are" : "Their answers and the spreadsheets you uploaded are"} removed for good. Download the results first if you still need them.${skipped ? ` ${count(skipped, "running batch is", "running batches are")} left alone; cancel ${skipped === 1 ? "it" : "them"} first.` : ""}`,
+      label: one ? "Delete batch" : `Delete ${count(stopped.length, "batch", "batches")}`,
       cancel: "Keep",
       action: async () => {
         const gone: string[] = [];
@@ -170,11 +136,11 @@ function BatchList({ batches, more, now }: { batches: Batch[]; more: boolean; no
           await deleteBatch(b.id);
           gone.push(b.id);
         });
-        patchList(client, [], gone);
+        patchBatches(client, [], gone);
         setSelected((old) => new Set([...old].filter((id) => !gone.includes(id))));
         refreshBatches(client);
-        if (failed) toast(`${plural(gone.length, "batch", "batches")} deleted; ${plural(failed, "batch", "batches")} couldn't be.`);
-        else toast(gone.length === 1 ? "Batch deleted" : `${plural(gone.length, "batch", "batches")} deleted`);
+        if (failed) toast(`${count(gone.length, "batch", "batches")} deleted; ${count(failed, "batch", "batches")} couldn't be.`);
+        else toast(gone.length === 1 ? "Batch deleted" : `${count(gone.length, "batch", "batches")} deleted`);
       },
     });
   };
@@ -229,7 +195,7 @@ function BatchList({ batches, more, now }: { batches: Batch[]; more: boolean; no
             aria-label="Select every batch shown"
             disabled={!shown.length}
           />
-          {picked.length ? `${plural(picked.length, "batch", "batches")} selected` : filtered ? `${plural(shown.length, "batch", "batches")} of ${batches.length.toLocaleString()}` : running ? `${plural(running, "batch is", "batches are")} running. This page updates on its own.` : plural(batches.length, "batch", "batches")}
+          {picked.length ? `${count(picked.length, "batch", "batches")} selected` : filtered ? `${count(shown.length, "batch", "batches")} of ${batches.length.toLocaleString()}` : running ? `${count(running, "batch is", "batches are")} running. This page updates on its own.` : count(batches.length, "batch", "batches")}
         </label>
         {picked.length > 0 && (
           <span className="flex flex-wrap items-center gap-2">
@@ -256,7 +222,13 @@ function BatchList({ batches, more, now }: { batches: Batch[]; more: boolean; no
           </Button>
         </p>
       )}
-      {more && <p className="py-2 text-sm text-muted-foreground">Showing your newest {batches.length.toLocaleString()} batches. Delete old ones to see further back.</p>}
+      {more && (
+        <div className="py-2">
+          <Button variant="outline" size="sm" onClick={onMore} disabled={loading}>
+            Load more batches
+          </Button>
+        </div>
+      )}
       {editing && <EditBatchDialog batch={editing} known={tags.map((t) => t.tag)} onClose={() => setEditing(null)} />}
       {tagging && <AddTagsDialog batches={picked} known={tags.map((t) => t.tag)} onClose={() => setTagging(false)} />}
     </div>
@@ -293,7 +265,7 @@ function EditBatchDialog({ batch, known, onClose }: { batch: Batch; known: strin
     setError("");
     try {
       const next = await updateBatch(batch.id, { name: name.trim(), tags: used });
-      patchList(client, [next]);
+      patchBatches(client, [next]);
       onClose();
     } catch (err) {
       setError(messageOf(err));
@@ -335,14 +307,14 @@ function AddTagsDialog({ batches, known, onClose }: { batches: Batch[]; known: s
     const failed = await eachOf(batches, async (b) => {
       changed.push(await updateBatch(b.id, { tags: [...new Set([...b.tags, ...adding])].slice(0, 12) }));
     });
-    patchList(client, changed);
+    patchBatches(client, changed);
     setBusy(false);
-    if (failed) return setError(`${plural(failed, "batch", "batches")} couldn't be tagged. Try again.`);
-    toast(`Tagged ${plural(changed.length, "batch", "batches")}`);
+    if (failed) return setError(`${count(failed, "batch", "batches")} couldn't be tagged. Try again.`);
+    toast(`Tagged ${count(changed.length, "batch", "batches")}`);
     onClose();
   };
   return (
-    <FormDialog open onOpenChange={(o) => !o && onClose()} title={`Add tags to ${plural(batches.length, "batch", "batches")}`} description="Tags they already have stay. A batch holds up to 12.">
+    <FormDialog open onOpenChange={(o) => !o && onClose()} title={`Add tags to ${count(batches.length, "batch", "batches")}`} description="Tags they already have stay. A batch holds up to 12.">
       <form onSubmit={save} className="grid gap-4">
         <Field id="batch-add-tags" label="Tags" help="Separate tags with spaces.">
           <Input id="batch-add-tags" value={tags} onChange={(e) => setTags(e.target.value)} maxLength={400} placeholder="#survey #round-2" autoFocus />
@@ -403,7 +375,7 @@ function BatchRow({
       cancel: "Keep running",
       action: async () => {
         const next = await cancelBatch(b.id);
-        client.setQueryData<BatchList>(BATCHES_KEY, (old) => (old ? { ...old, batches: old.batches.map((x) => (x.id === b.id ? next : x)) } : old));
+        patchBatches(client, [next]);
         refreshBatches(client);
       },
     });
@@ -561,7 +533,7 @@ function NewBatchPanel({ onClose }: { onClose: () => void }) {
     setBusy(true);
     try {
       const batch = await startBatch({ name: name.trim() || fileName, model: chosen, system: showSystem ? system : "", template, columns: sheet.columns, rows: sheet.rows, window, fileName });
-      client.setQueryData<BatchList>(BATCHES_KEY, (old) => ({ available: true, batches: [batch, ...(old?.batches ?? []).filter((b) => b.id !== batch.id)] }));
+      addBatch(client, batch);
       refreshBatches(client);
       toast(`Started “${batch.name}”. It runs in the background.`);
       onClose();

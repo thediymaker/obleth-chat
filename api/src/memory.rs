@@ -7,6 +7,7 @@
 //! go into the system prompt, and the reply records which ones it was given. People
 //! can see, change, pin and delete every memory, add their own, and turn memory off.
 //! Temporary chats are never read and never given memories.
+use crate::audit::{self, Action, Target};
 use crate::{
     auth::{Identity, Role},
     decisions::{self, Decisions},
@@ -1303,6 +1304,7 @@ async fn one(pool: &PgPool, owner: Uuid, id: Uuid) -> Result<Value, ApiError> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct Choose {
     use_memory: bool,
@@ -1330,6 +1332,7 @@ async fn choose(
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct Input {
     content: Option<String>,
@@ -1588,6 +1591,7 @@ async fn remove_topic(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TopicPatch {
     name: Option<String>,
     kind: Option<String>,
@@ -1685,6 +1689,36 @@ async fn admin_read(
     Ok(Json(admin_json(&settings, people, memories, &s)))
 }
 
+/// Write the memory settings and the audit row that says who changed them.
+async fn save_settings(
+    pool: &PgPool,
+    admin: Uuid,
+    enabled: bool,
+    default_on: bool,
+    model: Option<String>,
+) -> Result<Settings, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let saved: Settings = sqlx::query_as(
+        "UPDATE memory_settings SET enabled = $1, default_on = $2, model = $3, updated_at = NOW()
+         WHERE id RETURNING enabled, default_on, model",
+    )
+    .bind(enabled)
+    .bind(default_on)
+    .bind(model)
+    .fetch_one(&mut *tx)
+    .await?;
+    audit::record(
+        &mut *tx,
+        Some(admin),
+        Action::MEMORY_UPDATE,
+        Target::site(),
+        json!({"enabled": saved.enabled, "defaultOn": saved.default_on, "model": saved.model}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(saved)
+}
+
 fn admin_json(settings: &Settings, people: i64, memories: i64, s: &AppState) -> Value {
     json!({
         "enabled": settings.enabled,
@@ -1698,6 +1732,7 @@ fn admin_json(settings: &Settings, people: i64, memories: i64, s: &AppState) -> 
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct AdminPatch {
     enabled: bool,
@@ -1710,7 +1745,7 @@ async fn admin_save(
     headers: HeaderMap,
     Json(body): Json<AdminPatch>,
 ) -> Result<Json<Value>, ApiError> {
-    s.auth.require_admin(&headers, true).await?;
+    let admin = s.auth.require_admin(&headers, true).await?;
     let model = body
         .model
         .map(|m| m.trim().to_owned())
@@ -1726,14 +1761,13 @@ async fn admin_save(
             "Memory asks models through the gateway; connect one first",
         ));
     }
-    let saved: Settings = sqlx::query_as(
-        "UPDATE memory_settings SET enabled = $1, default_on = $2, model = $3, updated_at = NOW()
-         WHERE id RETURNING enabled, default_on, model",
+    let saved = save_settings(
+        &s.store.pool,
+        admin.id,
+        body.enabled,
+        body.default_on,
+        model,
     )
-    .bind(body.enabled)
-    .bind(body.default_on)
-    .bind(model)
-    .fetch_one(&s.store.pool)
     .await?;
     let (people, memories): (i64, i64) =
         sqlx::query_as("SELECT COUNT(DISTINCT owner_id), COUNT(*) FROM memories")
@@ -1745,6 +1779,42 @@ async fn admin_save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Database;
+
+    #[tokio::test]
+    async fn saving_the_settings_records_who_changed_them() {
+        let Some(db) = Database::new().await else {
+            return;
+        };
+        let admin = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, 'ana', 'Ana', 'admin', 'x')")
+            .bind(admin)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let saved = save_settings(&db.pool, admin, true, false, Some("remember-1".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            (saved.enabled, saved.default_on, saved.model.as_deref()),
+            (true, false, Some("remember-1"))
+        );
+        let rows: Vec<(Option<Uuid>, String, String, Value)> =
+            sqlx::query_as("SELECT actor_id, action, target_type, metadata FROM audit_events")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                Some(admin),
+                Action::MEMORY_UPDATE.name.to_owned(),
+                "site".to_owned(),
+                json!({"enabled": true, "defaultOn": false, "model": "remember-1"})
+            )]
+        );
+        db.close().await;
+    }
 
     fn answer(content: &str) -> Value {
         json!({"choices":[{"message":{"content":content}}]})

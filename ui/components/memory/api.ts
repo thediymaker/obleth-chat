@@ -79,15 +79,6 @@ export const deleteMemory = (id: string) =>
 export const saveChoices = (body: { useMemory: boolean; learn: boolean }) => api.request("/api/memory/settings", { method: "PUT", body });
 
 /** "just now", "5 min ago", "3 h ago", "2 days ago", or a date. */
-export function ago(at: string | null | undefined): string {
-  if (!at) return "";
-  const s = (Date.now() - new Date(at).getTime()) / 1000;
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  if (s < 86400 * 14) return `${Math.floor(s / 86400)} day${s < 86400 * 2 ? "" : "s"} ago`;
-  return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-}
 
 /** Topic names typed as "a, b, c": trimmed, three at most, no repeats. */
 export function topicNames(text: string): string[] {

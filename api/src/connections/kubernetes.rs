@@ -2,6 +2,7 @@
 //! do. Resource kinds are found through API discovery, and manifests are applied with
 //! server-side apply, as JSON or YAML.
 use super::mcp::{self, Tool};
+use super::output;
 use serde_json::{json, Value};
 use std::{collections::HashMap, time::Duration};
 use url::Url;
@@ -55,7 +56,7 @@ pub fn tools() -> Vec<Tool> {
         tool("overview", "Overview", "Who you are on the cluster, your namespace's quotas and pods, and what you are allowed to do there.", true, json!({"namespace":namespace}), &[]),
         tool("list", "List", "List resources of one kind with their status.", true, json!({"kind":kind,"namespace":namespace,"all_namespaces":{"type":"boolean"},"label_selector":{"type":"string"},"api_version":api_version}), &["kind"]),
         tool("get", "Get", "One resource as JSON, without managed fields. A Secret is shown with its keys but not its values.", true, json!({"kind":kind,"name":{"type":"string"},"namespace":namespace,"api_version":api_version}), &["kind","name"]),
-        tool("logs", "Logs", "The latest log lines of a pod's container.", true, json!({"pod":{"type":"string"},"namespace":namespace,"container":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000},"previous":{"type":"boolean","description":"Logs of the previous, crashed container"}}), &["pod"]),
+        tool("logs", "Logs", "The latest log lines of a pod's container; past 48 KB the newest are kept.", true, json!({"pod":{"type":"string"},"namespace":namespace,"container":{"type":"string"},"tail_lines":{"type":"integer","minimum":1,"maximum":2000},"previous":{"type":"boolean","description":"Logs of the previous, crashed container"}}), &["pod"]),
         tool("apply", "Apply", "Create or update resources with server-side apply. Give one manifest object, a list of them, or YAML text (documents separated by ---).", false, json!({"manifest":{"description":"Manifest object, array of objects, or YAML text"}}), &["manifest"]),
         tool("delete", "Delete", "Delete one resource.", false, json!({"kind":kind,"name":{"type":"string"},"namespace":namespace,"api_version":api_version}), &["kind","name"]),
     ]
@@ -533,11 +534,13 @@ impl Client {
             path.push_str("&previous=true");
         }
         let (_, bytes) = self.send(reqwest::Method::GET, &path, None).await?;
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let text = String::from_utf8_lossy(&bytes);
+        // Cut here, from the end: a limitBytes on the request would keep the oldest
+        // lines of the window instead.
         Ok(if text.trim().is_empty() {
             "(no log output)".into()
         } else {
-            text
+            output::tail(&text, output::MODEL_OUTPUT)
         })
     }
 

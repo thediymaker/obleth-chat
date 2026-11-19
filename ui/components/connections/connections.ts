@@ -9,6 +9,7 @@ import { Box, Cpu, Link2, Server } from "lucide-react";
 import { api } from "@/lib/api";
 import { useCapabilities } from "@/lib/queries";
 import { useSession } from "@/lib/session";
+import { count } from "@/lib/format";
 
 export type ConnectionKind = "mcp" | "slurm" | "kubernetes" | "device";
 export interface ConnectionTool {
@@ -88,7 +89,6 @@ export const TOKEN_HELP: Record<ConnectionKind, string> = {
   kubernetes: "For a service account run kubectl create token NAME -n NAMESPACE --duration=720h, or use the token from your kubeconfig.",
   mcp: "Your personal token or API key for this server. It is sent as a Bearer token.",
 };
-export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 export const connectionsKey = ["connections"] as const;
 /** Every connection this account sees: its own, and shared ones. Nothing is asked while connections are off. */
@@ -170,7 +170,7 @@ export function credentialBody(form: FormData, c: Connection) {
 /** The toast after adding a connection, and whether to ask for the person's own token next. */
 export function addedMessage(item: Connection): { message: string; askToken: boolean } {
   if (kindOf(item) === "mcp" && item.personalTokens) return { message: `${item.name} shared. Add your own token to use it.`, askToken: true };
-  if (kindOf(item) === "mcp") return { message: `${item.name} connected with ${plural(item.tools.length, "tool")}`, askToken: false };
+  if (kindOf(item) === "mcp") return { message: `${item.name} connected with ${count(item.tools.length, "tool")}`, askToken: false };
   if (item.shared) return { message: `${item.name} shared. Add your own token to use it.`, askToken: true };
   return { message: `${item.name} connected as ${item.identity || "you"}`, askToken: false };
 }

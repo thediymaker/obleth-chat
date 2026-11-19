@@ -1,6 +1,7 @@
 import { screen } from "@testing-library/react";
 import { vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
+import { ApiError } from "@/lib/api";
 import { GroupsPage, groupLine } from "./groups-page";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
@@ -35,4 +36,13 @@ test("with no groups, people are told how they join one", async () => {
   renderPage(<GroupsPage />, { user: { role: "user" } });
   expect(await screen.findByText("You are not in any groups")).toBeInTheDocument();
   expect(groupLine({ id: "g", name: "x", members: 1, collections: 2, member: false })).toBe("Not a member · 1 person · 2 collections");
+});
+
+test("a group that is not there shows the not-found block beside the list", async () => {
+  mockApi((path) => (path === "/api/groups" ? { groups: [{ id: "g1", name: "Physics lab", members: 2, member: true }], canManage: false } : new ApiError("Not found", 404)));
+  renderPage(<GroupsPage id="g9" />, { user: { role: "user" } });
+  expect(await screen.findByRole("heading", { name: "Group not found" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /Back to your groups/ })).toHaveAttribute("href", "/groups");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /Physics lab/ })).toBeInTheDocument();
 });

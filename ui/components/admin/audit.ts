@@ -58,6 +58,7 @@ export function auditSentence(e: AuditEvent): Part[] {
       ["auditEvents", "old activity entry", "old activity entries"],
       ["expiredSessions", "expired sign-in"],
       ["expiredAccessTokens", "expired sign-in link"],
+      ["batchRows", "old batch"], // a spreadsheet's rows or labels kept past the batch retention
     ] as [string, string, string?][]
   )
     .filter(([key]) => Number(m[key]) > 0)
@@ -86,6 +87,7 @@ export function auditSentence(e: AuditEvent): Part[] {
     group_member_removed: () => [actor, " removed ", member, " from ", target("a group")],
     oidc_groups_reconciled: () => ["Single sign-on updated the groups of ", target("a person")],
     "model.update": () => trim([actor, " changed the model ", target("")]),
+    "model.certify": () => trim([actor, m.cleared ? " cleared the certification of the model " : " recorded a certification for the model ", target("")]),
     "models.short_list": () => (models.length ? [actor, ` set the short list of models to ${models.length}`] : [actor, " cleared the short list of models"]),
     "limits.update": () => (e.targetType === "user" ? [actor, " changed the limits for ", target("a person")] : [actor, " changed the workspace limits"]),
     "decisions.update": () => [actor, " changed the decisions settings"],
@@ -98,6 +100,8 @@ export function auditSentence(e: AuditEvent): Part[] {
     "workspaces.stop": () => [actor, " stopped ", target("a person"), `’s ${m.kind === "browser" ? "browser" : "workspace"}`],
     "insights.report": () => [actor, " asked to find the workstreams again"],
     "banner.update": () => [actor, " changed the banner"],
+    "memory.update": () => [actor, m.enabled === false ? " turned memory off" : " changed the memory settings"],
+    "feedback.button": () => [actor, m.mode === "off" ? " turned the Feedback button off" : m.mode === "sidebar" ? " put the Feedback button in the sidebar" : " highlighted the Feedback button"],
     "knowledge.embedding.update": () => [actor, " changed the knowledge search model"],
     "retention.update": () => [actor, " changed data retention"],
     "retention.cleanup": () => [removed.length ? `Automatic cleanup removed ${removed.join(", ")}` : "Automatic cleanup ran"],

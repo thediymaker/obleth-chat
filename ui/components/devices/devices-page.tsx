@@ -14,7 +14,7 @@ import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { useChatStore } from "@/components/chat/chat-provider";
 import { connectionsKey, isDevice, useConnections, type Connection } from "@/components/connections/connections";
-import { CheckField, FormActions, FormDialog, FormError, Note, Pill, SelectField, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
+import { CheckField, FormActions, FormDialog, FormError, Note, Pill, SelectField, TextField, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { saveSecret, secretsKey, useSecrets } from "@/components/settings/secrets-page";
 import { Button } from "@/components/ui/button";
 import { ComputeOff, ComputeTabs } from "@/components/workspace/compute";
@@ -277,9 +277,9 @@ function DeviceCard({ c, onEdit, onSignIn, onRemove }: { c: Connection; onEdit: 
           <Button size="sm" variant="ghost" onClick={onEdit}>
             Edit
           </Button>
-          <Button size="sm" variant="ghost" onClick={onRemove}>
+          <DangerButton variant="ghost" onClick={onRemove}>
             Remove
-          </Button>
+          </DangerButton>
         </div>
       </div>
       {identity && <pre className="rounded-md bg-muted px-3 py-2 font-mono text-[12px] whitespace-pre-wrap">{identity}</pre>}

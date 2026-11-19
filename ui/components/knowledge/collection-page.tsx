@@ -10,7 +10,7 @@ import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { ErrorBox, Loading, Page } from "@/components/app-shell/page";
+import { ErrorBox, Loading, Page, isNotFound, NotFound } from "@/components/app-shell/page";
 import { chatDraft } from "@/components/projects/chat-draft";
 import { Confirm, messageOf } from "@/components/projects/form-field";
 import { Badge } from "@/components/ui/badge";
@@ -20,26 +20,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
-import { count, when } from "@/lib/format";
+import { count, when, bytes as formatBytes } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
-import {
-  ACCEPT,
-  type CollectionDetail,
-  collectionPath,
-  DEFAULT_MAX_FILE,
-  fileUrl,
-  type KnowledgeDocument,
-  knowledgeKeys,
-  refreshKnowledge,
-  type Scope,
-  scopeLabel,
-  type SearchResult,
-  size,
-  uploadDocument,
-  useCollection,
-  useCollections,
-} from "./api";
+import { ACCEPT, collectionPath, DEFAULT_MAX_FILE, DOCUMENTS_PAGE, fileUrl, knowledgeKeys, refreshKnowledge, scopeLabel, type CollectionDetail, type KnowledgeDocument, type Scope, type SearchResult, uploadDocument, useCollection, useCollections } from "./api";
 import { CollectionDialog } from "./collection-dialog";
 
 function Status({ d }: { d: KnowledgeDocument }) {
@@ -211,7 +195,7 @@ function Sharing({ detail }: { detail: CollectionDetail }) {
   );
 }
 
-function Documents({ detail, maxFileBytes }: { detail: CollectionDetail; maxFileBytes: number }) {
+function Documents({ detail, maxFileBytes, onMore }: { detail: CollectionDetail; maxFileBytes: number; onMore?: () => void }) {
   const client = useQueryClient();
   const c = detail.collection;
   const [uploading, setUploading] = useState<string[]>([]);
@@ -223,7 +207,7 @@ function Documents({ detail, maxFileBytes }: { detail: CollectionDetail; maxFile
     if (!c.mine) return;
     for (const file of files) {
       if (file.size > maxFileBytes) {
-        toast(`${file.name} is larger than ${size(maxFileBytes)}.`);
+        toast(`${file.name} is larger than ${formatBytes(maxFileBytes)}.`);
         continue;
       }
       setUploading((u) => [...u, file.name]);
@@ -276,7 +260,7 @@ function Documents({ detail, maxFileBytes }: { detail: CollectionDetail; maxFile
           <span className="grid gap-0.5">
             <strong className="text-md font-medium">Drop files here or choose them</strong>
             <small className="text-xs text-muted-foreground">
-              PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code · up to {size(maxFileBytes)} each
+              PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code · up to {formatBytes(maxFileBytes)} each
             </small>
           </span>
           <input
@@ -326,7 +310,7 @@ function Documents({ detail, maxFileBytes }: { detail: CollectionDetail; maxFile
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">{d.pages ?? "—"}</TableCell>
                   <TableCell className="hidden sm:table-cell">{d.status === "ready" ? d.passages.toLocaleString() : "—"}</TableCell>
-                  <TableCell className="hidden md:table-cell">{size(d.size)}</TableCell>
+                  <TableCell className="hidden md:table-cell">{formatBytes(d.size)}</TableCell>
                   <TableCell>
                     <Status d={d} />
                   </TableCell>
@@ -349,6 +333,13 @@ function Documents({ detail, maxFileBytes }: { detail: CollectionDetail; maxFile
               ))}
             </TableBody>
           </Table>
+          {onMore && (
+            <div className="border-t p-2">
+              <Button variant="ghost" size="sm" onClick={onMore}>
+                Show more documents
+              </Button>
+            </div>
+          )}
         </div>
       ) : (
         !c.mine && <p className="text-sm text-muted-foreground">No documents yet.</p>
@@ -372,7 +363,8 @@ function Documents({ detail, maxFileBytes }: { detail: CollectionDetail; maxFile
 
 export function CollectionPage({ id }: { id: string }) {
   const router = useRouter();
-  const { data: detail, error, isPending, refetch } = useCollection(id);
+  const [shown, setShown] = useState(DOCUMENTS_PAGE);
+  const { data: detail, error, isPending, refetch } = useCollection(id, shown);
   const { data: list } = useCollections();
   const [editing, setEditing] = useState(false);
   usePageChrome(detail?.collection.name || "Collection");
@@ -381,6 +373,8 @@ export function CollectionPage({ id }: { id: string }) {
       <Page wide>
         {isPending ? (
           <Loading label="Opening the collection…" />
+        ) : isNotFound(error) ? (
+          <NotFound what="collection" to="/knowledge" back="all collections" />
         ) : (
           <>
             <ErrorBox error={error} onRetry={() => refetch()} />
@@ -414,7 +408,7 @@ export function CollectionPage({ id }: { id: string }) {
           <h1 className="text-[26px] leading-tight font-semibold tracking-tight">{c.name}</h1>
           {c.description && <p className="mt-1.5 text-sm text-muted-foreground">{c.description}</p>}
           <p className="mt-1 text-sm text-faint">
-            {count(docs.length, "document")} · {count(passages, "passage")} · {size(bytes)}
+            {count(docs.length, "document")} · {count(passages, "passage")} · {formatBytes(bytes)}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -439,7 +433,7 @@ export function CollectionPage({ id }: { id: string }) {
       <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="grid gap-6">
           <TrySearch key={c.id} detail={detail} />
-          <Documents detail={detail} maxFileBytes={list?.maxFileBytes || DEFAULT_MAX_FILE} />
+          <Documents detail={detail} maxFileBytes={list?.maxFileBytes || DEFAULT_MAX_FILE} onMore={detail.more ? () => setShown(shown + DOCUMENTS_PAGE) : undefined} />
         </div>
         <aside className="grid gap-4">
           <Card title="Who can search it">

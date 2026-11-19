@@ -57,7 +57,8 @@ describe("the workspace bridge", () => {
     const changed = vi.fn();
     const off = codeEvents.subscribe(changed);
     expect(bridge.onEvent(tool({ id: "t1", tool: "write_file", status: "running" }), assistant, "c1")).toBe(true);
-    expect(bridge.space("c1").files).toBeNull();
+    // The listed files stay on screen; a settled burst of edits marks them stale instead.
+    expect(bridge.space("c1").files).toEqual([{ path: "a.txt" }]);
     expect(changed).not.toHaveBeenCalled();
     bridge.onEvent(tool({ id: "t1", tool: "write_file", status: "completed" }), assistant, "c1");
     expect(changed).toHaveBeenCalledWith({ id: "c1", kind: "changed" });
@@ -206,6 +207,53 @@ describe("the workspace bridge", () => {
       await vi.advanceTimersByTimeAsync(10000);
       // Starting, starting, then running with a preview: no more checks.
       expect(api.request).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("checks an asleep workspace once, not every two seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = { request: vi.fn(async () => ({ workspace: { status: "stopped", previewPort: null } })) };
+      const bridge = createWorkspaceBridge({ api, enabled: () => true, changed: () => {}, showTab: () => {}, viewing: () => true });
+      await bridge.load("c1");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(api.request).toHaveBeenCalledTimes(1);
+      // A workspace tool in the chat wakes the pod, so one more check follows.
+      bridge.onEvent({ event: "tool", data: { tool: "run_command", status: "completed" } } as never, null as never, "c1");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes a loaded file list once after a burst of edits settles, keeping the old rows meanwhile", async () => {
+    vi.useFakeTimers();
+    try {
+      const { bridge, calls, changed } = setup((path) => (path.endsWith("/files") ? { entries: [{ path: "a.txt", type: "file", size: 1 }] } : { workspace: running }));
+      await bridge.load("c1");
+      await bridge.loadFiles("c1");
+      const before = bridge.space("c1").files;
+      changed.mockClear();
+      for (const n of [1, 2, 3, 4, 5]) bridge.onEvent(tool({ tool: "write_file", status: "completed", path: `f${n}` }) as never, assistant as never, "c1");
+      // Nothing is dropped or fetched while the edits are still landing.
+      expect(bridge.space("c1").files).toBe(before);
+      expect(bridge.space("c1").filesStale).toBe(false);
+      expect(changed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(bridge.space("c1").files).toBe(before);
+      expect(bridge.space("c1").filesStale).toBe(true);
+      expect(changed).toHaveBeenCalledTimes(1);
+      // The Files tab reloads once; the list it had stays until the new one lands.
+      await bridge.loadFiles("c1");
+      expect(bridge.space("c1").filesStale).toBe(false);
+      expect(calls.filter((c) => c.path.endsWith("/files"))).toHaveLength(2);
+      // A list that was never loaded is not fetched on the chat's behalf.
+      bridge.onEvent(tool({ tool: "edit_file", status: "completed" }) as never, assistant as never, "c2");
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(calls.filter((c) => c.path.includes("/c2/"))).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }

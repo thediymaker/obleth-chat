@@ -9,7 +9,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { ErrorBox } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { CheckField, CopyField, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
+import { CheckField, CopyField, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextField, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { api, ApiError } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useSession, useUser } from "@/lib/session";
@@ -81,17 +81,23 @@ export function SecurityCard({ sessions, loading, error, onRefresh }: { sessions
   const user = useUser();
   const { passwords, signOut } = useSession();
   const [password, setPassword] = useState(false);
-  const act = async (path: string, method: string, done: string) => {
-    try {
-      await api.request(path, { method });
-      onRefresh();
-      toast(done);
-    } catch (e) {
-      toast((e as Error).message);
-    }
-  };
+  const confirm = useConfirm();
+  /** Asks, then revokes: the sign-in and every API token made on it go together. */
+  const revoke = (title: string, text: string, path: string, method: string, done: string) =>
+    confirm.ask({
+      title,
+      text,
+      label: "Revoke",
+      cancel: "Keep it",
+      action: async () => {
+        await api.request(path, { method });
+        onRefresh();
+        toast(done);
+      },
+    });
   return (
     <Section title="Security" description="Manage your password and active sessions.">
+      {confirm.element}
       <PasswordDialog open={password} onOpenChange={setPassword} />
       {passwords !== false && (
         <Line
@@ -145,17 +151,17 @@ export function SecurityCard({ sessions, loading, error, onRefresh }: { sessions
                   </small>
                 </div>
                 {!s.current && (
-                  <Button size="xs" variant="outline" onClick={() => act(`/api/auth/sessions/${encodeURIComponent(s.id)}`, "DELETE", "Session revoked, and API tokens made on it")}>
+                  <DangerButton size="xs" onClick={() => revoke("Revoke this session?", "That device is signed out, and API tokens made on it stop working.", `/api/auth/sessions/${encodeURIComponent(s.id)}`, "DELETE", "Session revoked, and API tokens made on it")}>
                     Revoke
-                  </Button>
+                  </DangerButton>
                 )}
               </li>
             ))}
           </ul>
           {sessions.some((s) => !s.current) && (
-            <Button size="sm" variant="outline" className="w-fit" onClick={() => act("/api/auth/sessions/revoke-others", "POST", "Other devices signed out, and API tokens made on them revoked")}>
+            <DangerButton className="w-fit" onClick={() => revoke("Sign out your other devices?", "Every other sign-in ends, and API tokens made on them stop working.", "/api/auth/sessions/revoke-others", "POST", "Other devices signed out, and API tokens made on them revoked")}>
               Sign out other devices
-            </Button>
+            </DangerButton>
           )}
         </>
       ) : (

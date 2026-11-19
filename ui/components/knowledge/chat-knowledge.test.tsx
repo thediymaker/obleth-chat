@@ -2,7 +2,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { citeHtml, KnowledgeSources, type ReplyLike } from "./chat-knowledge";
-import { scopeLabel, size } from "./api";
+import { scopeLabel } from "./api";
+import { bytes as size } from "@/lib/format";
 
 const reply: ReplyLike = {
   role: "assistant",
@@ -79,9 +80,9 @@ describe("sources under a reply", () => {
 describe("collection helpers", () => {
   it("sizes and sharing labels", () => {
     expect(size(512)).toBe("512 B");
-    expect(size(2048)).toBe("2 KB");
+    expect(size(2048)).toBe("2.0 KB");
     expect(size(5 * 1048576)).toBe("5.0 MB");
-    expect(size(3 * 1073741824)).toBe("3.00 GB");
+    expect(size(3 * 1073741824)).toBe("3.0 GB");
     expect(scopeLabel({ scope: "group", groupName: "Lab" })).toBe("Lab");
     expect(scopeLabel({ scope: "everyone", groupName: null })).toBe("Everyone");
     expect(scopeLabel({ scope: "personal", groupName: null })).toBe("Personal");

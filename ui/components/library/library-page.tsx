@@ -11,14 +11,15 @@ import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { messageOf } from "@/components/projects/form-field";
+import { DangerButton, useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import { when } from "@/lib/format";
+import { when, bytes } from "@/lib/format";
 import { useProjects } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { host, imageSize, KINDS, kindLabel, kindOf, type SavedItem, type SavedKind, useGeneratedImages, useSaved } from "./api";
+import { host, KINDS, kindLabel, kindOf, type SavedItem, type SavedKind, useGeneratedImages, useSaved, SAVED_PAGE } from "./api";
 import { LibraryTabs, StorageMeter } from "./library-shell";
 import { useLibraryDialogs } from "./saved-dialogs";
 
@@ -108,7 +109,8 @@ function SavedView({ openId }: { openId?: string }) {
   const [kind, setKind] = useState<"" | SavedKind>("");
   const [tag, setTag] = useState("");
   const filters = { q: query, kind, tag, project };
-  const { data, error, isPending, refetch } = useSaved(filters);
+  const [shown, setShown] = useState(SAVED_PAGE);
+  const { data, error, isPending, refetch } = useSaved(filters, true, shown);
   const { data: projects } = useProjects();
   const dialogs = useLibraryDialogs(data?.items);
   const opened = useRef("");
@@ -259,7 +261,13 @@ function SavedView({ openId }: { openId?: string }) {
               <SavedCard key={item.id} item={item} onOpen={() => dialogs.open(item.id)} />
             ))}
           </div>
-          {data?.more && <p className="py-4 text-sm text-muted-foreground">Showing the newest 60. Search or filter to find older ones.</p>}
+          {data?.more && (
+            <div className="py-4">
+              <Button variant="outline" size="sm" onClick={() => setShown(shown + SAVED_PAGE)}>
+                Show more
+              </Button>
+            </div>
+          )}
         </>
       )}
       {dialogs.element}
@@ -269,23 +277,28 @@ function SavedView({ openId }: { openId?: string }) {
 
 function GeneratedView() {
   const client = useQueryClient();
+  const confirm = useConfirm();
   const { data, error, isPending, refetch } = useGeneratedImages();
   const images = data?.images ?? [];
-  async function remove(id: string) {
-    try {
-      await api.request(`/api/images/${encodeURIComponent(id)}`, { method: "DELETE" });
-      client.setQueryData(["library", "images"], { ...data, images: images.filter((i) => i.id !== id) });
-      toast("Image deleted");
-    } catch (e) {
-      toast(messageOf(e));
-    }
-  }
+  const remove = (id: string) =>
+    confirm.ask({
+      title: "Delete this image?",
+      text: "It is deleted for good; chats that showed it lose it.",
+      label: "Delete image",
+      cancel: "Keep it",
+      action: async () => {
+        await api.request(`/api/images/${encodeURIComponent(id)}`, { method: "DELETE" });
+        client.setQueryData(["library", "images"], { ...data, images: images.filter((i) => i.id !== id) });
+        toast("Image deleted");
+      },
+    });
   if (isPending) return <Loading />;
   return (
     <>
+      {confirm.element}
       {data?.usage && (
         <div className="mb-4 flex justify-end">
-          <StorageMeter label="Generated images" used={data.usage.used} limit={data.usage.limit} format={imageSize} />
+          <StorageMeter label="Generated images" used={data.usage.used} limit={data.usage.limit} format={bytes} />
         </div>
       )}
       <ErrorBox error={error} onRetry={() => refetch()} />
@@ -303,12 +316,12 @@ function GeneratedView() {
                     {i.conversationTitle}
                   </Link>
                   <span className="text-xs text-faint">
-                    {when(i.createdAt)} · {imageSize(i.size)}
+                    {when(i.createdAt)} · {bytes(i.size)}
                   </span>
                 </div>
-                <Button variant="ghost" size="icon-sm" aria-label="Delete image" title="Delete" onClick={() => remove(i.id)}>
+                <DangerButton size="icon-sm" aria-label="Delete image" title="Delete" onClick={() => remove(i.id)}>
                   <Trash2 />
-                </Button>
+                </DangerButton>
               </figcaption>
             </figure>
           ))}

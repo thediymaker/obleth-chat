@@ -9,6 +9,7 @@
 //!
 //! Administrators see counts for a period and a group, and can have a model group the
 //! topic lines into workstreams. A group with fewer than five people shows totals only.
+use crate::audit::{self, Action, Target};
 use crate::{
     auth::{Identity, Role},
     error::ApiError,
@@ -1168,12 +1169,14 @@ async fn save(
     .bind(user.id)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'insights.update','site',$3)")
-        .bind(Uuid::new_v4())
-        .bind(user.id)
-        .bind(json!({"enabled": saved.enabled, "titles": saved.titles, "model": saved.model, "reportModel": saved.report_model}))
-        .execute(&mut *tx)
-        .await?;
+    audit::record(
+        &mut *tx,
+        Some(user.id),
+        Action::INSIGHTS_UPDATE,
+        Target::site(),
+        json!({"enabled": saved.enabled, "titles": saved.titles, "model": saved.model, "reportModel": saved.report_model}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(json!({ "settings": saved })))
 }
@@ -1198,11 +1201,14 @@ async fn refresh(
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'insights.report','site','{}')")
-        .bind(Uuid::new_v4())
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
+    audit::record(
+        &mut *tx,
+        Some(user.id),
+        Action::INSIGHTS_REPORT,
+        Target::site(),
+        json!({}),
+    )
+    .await?;
     tx.commit().await?;
     let started = s.clone();
     tokio::spawn(async move {

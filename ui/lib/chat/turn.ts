@@ -4,6 +4,7 @@
 // work" trace in which each thought sits before the step it led to.
 
 import type { ActivityEntry, Message } from "./types";
+import { count as counted, duration } from "@/lib/format";
 
 export const TOOL_ICONS: Record<string, string> = {
   search_knowledge: "book", write_file: "edit", edit_file: "edit", read_file: "file", list_files: "grid", run_command: "terminal",
@@ -39,12 +40,6 @@ export const COMMANDS = new Set(["run_command", "start_server", "run_in_terminal
 // Searching knowledge, saving and asking are not work to show: their cards sit below the answer.
 const KNOWLEDGE = (e: ActivityEntry) => CARDS.has(e.kind || "") || e.tool === "search_knowledge" || e.tool === "save_item";
 
-export function duration(ms: number | null | undefined): string {
-  if (ms == null || !Number.isFinite(ms)) return "";
-  if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
-  const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
-}
 
 /** The first sentence of a thought, without markdown, for its one-line row. */
 export function gist(text: string | undefined, max = 160): string {
@@ -272,7 +267,6 @@ export const steerPlaceholder = (m: Message | null | undefined) => `Add a note w
 
 /** The last lines of a step's output. */
 export const lastLines = (text: string | undefined, n: number) => String(text || "").replace(/\s+$/, "").split("\n").slice(-n).join("\n");
-export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 export const stepTime = (s: ActivityEntry) => (({ running: "Running…", awaiting: "Needs your answer", error: "Failed", declined: "Declined" }) as Record<string, string>)[s.status || ""] || duration(s.durationMs);
 /** How a step went, for its mark: bad, now, off, warn or ok. */
 export const stepMark = (s: ActivityEntry) =>
@@ -329,7 +323,7 @@ export function runState(m: Message, work: Work, now = Date.now()) {
                 ? "working"
                 : "thinking"
           : count(p)
-            ? plural(count(p), "step")
+            ? counted(count(p), "step")
             : "";
     return { phase: p, status, note };
   });
@@ -337,7 +331,7 @@ export function runState(m: Message, work: Work, now = Date.now()) {
     .reverse()
     .find((x) => x.status !== "running" && x.status !== "awaiting" && x.detail && !FILE_TOOLS.has(x.tool || "") && x.tool !== "delegate");
   let pane: { label: string; note: string; kind: "draft" | "running" | "thinking" | "output" | "idle"; text: string };
-  if (draft) pane = { label: draft.path || "file", note: `${plural(draft.lines, "line")} so far`, kind: "draft", text: draft.tail };
+  if (draft) pane = { label: draft.path || "file", note: `${counted(draft.lines, "line")} so far`, kind: "draft", text: draft.tail };
   else if (running && (COMMANDS.has(running.tool || "") || running.connection || browsing(running)))
     pane = {
       label: running.summary || running.tool || "",

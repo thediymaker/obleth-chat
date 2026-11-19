@@ -8,9 +8,9 @@ use axum::{extract::State, http::HeaderMap, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
-use uuid::Uuid;
 
 use super::{bad, knowledge, Knowledge};
+use crate::audit::{self, Action, Target};
 use crate::{error::ApiError, gateway::valid_model, AppState};
 
 const MAX_PREFIX: usize = 500;
@@ -354,12 +354,14 @@ async fn save(
     .execute(&mut *tx)
     .await?;
     let reindexed = reconcile_in(&mut tx, &k.defaults()).await?;
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'knowledge.embedding.update','site',$3)")
-        .bind(Uuid::new_v4())
-        .bind(user.id)
-        .bind(json!({"model": chosen_model, "queryPrefix": chosen_query, "documentPrefix": chosen_document, "reindexed": reindexed}))
-        .execute(&mut *tx)
-        .await?;
+    audit::record(
+        &mut *tx,
+        Some(user.id),
+        Action::KNOWLEDGE_EMBEDDING_UPDATE,
+        Target::site(),
+        json!({"model": chosen_model, "queryPrefix": chosen_query, "documentPrefix": chosen_document, "reindexed": reindexed}),
+    )
+    .await?;
     tx.commit().await?;
     let mut out = document(&s, k, &user).await?;
     out["reindexed"] = json!(reindexed);

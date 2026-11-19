@@ -12,12 +12,10 @@ import { Button } from "@/components/ui/button";
 import { INPUT, Legend, OUTPUT, TimeBars } from "@/components/manage/bar-chart";
 import { Chips, Note, Pill, Quota, Section, TableWrap, Tiles, displayName, td, th, useConfirm, type Tone } from "@/components/manage/kit";
 import { api } from "@/lib/api";
-import { when } from "@/lib/format";
+import { when, num, count, bytes } from "@/lib/format";
 import { useKept } from "./state";
-import { WORKSPACE_PERIODS, bytes, cores, hours, pointLabel, pointTip, since, until, type OpenPod, type PodCounts, type WorkspacesOverview } from "./workspaces";
+import { WORKSPACE_PERIODS, cores, hours, pointLabel, pointTip, since, until, type OpenPod, type PodCounts, type WorkspacesOverview } from "./workspaces";
 
-const count = (n: number | null | undefined) => Number(n || 0).toLocaleString();
-const plural = (n: number | null | undefined, one: string, many: string) => `${count(n)} ${Number(n) === 1 ? one : many}`;
 const STATUS: Record<string, [string, Tone]> = { running: ["Running", "accent"], starting: ["Starting", ""], error: ["Failed", "danger"] };
 type Metric = "hours" | "peak";
 
@@ -27,7 +25,7 @@ function Now({ data }: { data: WorkspacesOverview }) {
   const br = n.browsers || {};
   const used = Number(n.inUse) || 0;
   const slots = Number(data.slots) || 0;
-  const extra = (s: PodCounts, fallback: string) => [s.starting && `${count(s.starting)} starting`, s.error && `${count(s.error)} failed`].filter(Boolean).join(" · ") || fallback;
+  const extra = (s: PodCounts, fallback: string) => [s.starting && `${num(s.starting)} starting`, s.error && `${num(s.error)} failed`].filter(Boolean).join(" · ") || fallback;
   return (
     <Tiles
       tiles={[
@@ -35,14 +33,14 @@ function Now({ data }: { data: WorkspacesOverview }) {
           label: "Pods in use",
           value: (
             <>
-              {count(used)} <small className="text-sm font-normal text-muted-foreground">of {count(slots)}</small>
+              {num(used)} <small className="text-sm font-normal text-muted-foreground">of {num(slots)}</small>
             </>
           ),
           note: <Quota value={Math.min(used, slots)} max={Math.max(1, slots)} label="Pods in use" className="mt-1.5" />,
         },
-        { label: "Workspaces", value: count(ws.running), note: extra(ws, "Running now") },
-        { label: "Browsers", value: data.browsers ? count(br.running) : "Off", note: data.browsers ? extra(br, "Running now") : "The browser is turned off" },
-        { label: "Previews", value: count(n.previews), note: "Web servers people are previewing" },
+        { label: "Workspaces", value: num(ws.running), note: extra(ws, "Running now") },
+        { label: "Browsers", value: data.browsers ? num(br.running) : "Off", note: data.browsers ? extra(br, "Running now") : "The browser is turned off" },
+        { label: "Previews", value: num(n.previews), note: "Web servers people are previewing" },
         { label: "CPU now", value: data.metrics ? cores(n.cpuMillis) : "—", note: data.metrics ? "Across open pods" : "Chat can’t read pod metrics" },
         { label: "Memory now", value: data.metrics ? bytes(n.memoryBytes) : "—", note: data.metrics ? "Across open pods" : "See the note below" },
       ]}
@@ -52,7 +50,7 @@ function Now({ data }: { data: WorkspacesOverview }) {
 
 function Open({ data, onStop }: { data: WorkspacesOverview; onStop: (o: OpenPod) => void }) {
   const idle = data.idleMinutes || {};
-  const note = `Workspaces stop after ${count(idle.workspace)} minutes without use${data.browsers ? `, browsers after ${count(idle.browser)}` : ""}. Stopping keeps a person’s files and browser profile; their next use starts the pod again.`;
+  const note = `Workspaces stop after ${num(idle.workspace)} minutes without use${data.browsers ? `, browsers after ${num(idle.browser)}` : ""}. Stopping keeps a person’s files and browser profile; their next use starts the pod again.`;
   const open = data.open || [];
   return (
     <Section title="Open now" description={note}>
@@ -74,7 +72,7 @@ function Open({ data, onStop }: { data: WorkspacesOverview; onStop: (o: OpenPod)
             <tbody>
               {open.map((o) => {
                 const [label, tone] = STATUS[o.status] || [o.status, ""];
-                const what = o.kind === "browser" ? `${plural(o.chats, "chat", "chats")} with a tab` : `${plural(o.chats, "chat", "chats")}${o.previews ? ` · ${plural(o.previews, "preview", "previews")}` : ""}`;
+                const what = o.kind === "browser" ? `${count(o.chats, "chat", "chats")} with a tab` : `${count(o.chats, "chat", "chats")}${o.previews ? ` · ${count(o.previews, "preview", "previews")}` : ""}`;
                 return (
                   <tr key={`${o.kind}-${o.ownerId}`} className="border-b border-line-soft last:border-0">
                     <td className={td}>
@@ -141,11 +139,11 @@ function History({ data, days, metric, setMetric }: { data: WorkspacesOverview; 
       <Tiles
         tiles={[
           { label: "Pod hours", value: hours((Number(t.workspaceHours) || 0) + (Number(t.browserHours) || 0)), note: `${hours(t.workspaceHours)} workspaces · ${hours(t.browserHours)} browsers` },
-          { label: "Busiest", value: t.peak ? `${count(t.peak)} of ${count(slots)}` : "0", note: t.peakAt ? `Pods at once, ${when(t.peakAt)}` : "Pods at once" },
-          { label: "People", value: count(t.people), note: "Used a workspace or browser" },
-          { label: "Starts", value: count(t.starts), note: t.medianStartSeconds != null ? `Ready in ${count(t.medianStartSeconds)} s, typically` : "Pods started" },
-          { label: "Failed starts", value: count(t.failed), note: "Pods that did not start" },
-          { label: "Turned away", value: count(t.refused), note: t.refused ? "Every slot was in use" : "Nobody waited for a slot" },
+          { label: "Busiest", value: t.peak ? `${num(t.peak)} of ${num(slots)}` : "0", note: t.peakAt ? `Pods at once, ${when(t.peakAt)}` : "Pods at once" },
+          { label: "People", value: num(t.people), note: "Used a workspace or browser" },
+          { label: "Starts", value: num(t.starts), note: t.medianStartSeconds != null ? `Ready in ${num(t.medianStartSeconds)} s, typically` : "Pods started" },
+          { label: "Failed starts", value: num(t.failed), note: "Pods that did not start" },
+          { label: "Turned away", value: num(t.refused), note: t.refused ? "Every slot was in use" : "Nobody waited for a slot" },
         ]}
       />
       <Legend
@@ -153,7 +151,7 @@ function History({ data, days, metric, setMetric }: { data: WorkspacesOverview; 
           metric === "peak"
             ? [
                 { name: "Pods at once", color: INPUT },
-                { name: `Slots (${count(slots)})`, color: "var(--destructive)", dashed: true },
+                { name: `Slots (${num(slots)})`, color: "var(--destructive)", dashed: true },
               ]
             : [
                 { name: "Workspaces", color: INPUT },
@@ -186,7 +184,7 @@ function SettingsInEffect({ data }: { data: WorkspacesOverview }) {
   const l = data.limits || {};
   const rows: [string, string][] = [
     ["Who can use them", data.everyone ? "Everyone" : "Administrators only"],
-    ["Pods at once", count(data.slots)],
+    ["Pods at once", num(data.slots)],
     ["Each workspace", `${l.cpu || "—"} CPU · ${l.memory || "—"} memory · ${l.disk || "—"} of files`],
     ...(data.browsers ? ([["Each browser", `${l.browserCpu || "—"} CPU · ${l.browserMemory || "—"} memory`]] as [string, string][]) : []),
   ];

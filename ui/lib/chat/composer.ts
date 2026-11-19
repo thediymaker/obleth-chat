@@ -20,7 +20,6 @@ export const EFFORT_DESCRIPTIONS: Record<string, string> = {
 };
 
 /** Token counts in a few characters: 950, 1.2k, 34k, 1.5M. */
-export const tokens = (n: number) => (n < 1000 ? String(n) : n < 10000 ? `${(n / 1000).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`);
 
 /** Minutes and seconds, as the live timers show them. */
 export const clock = (ms: number) => {

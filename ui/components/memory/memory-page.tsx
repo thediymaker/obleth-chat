@@ -19,29 +19,10 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { initials } from "@/lib/format";
+import { initials, ago } from "@/lib/format";
 import { useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
-import {
-  addMemory,
-  ago,
-  changeMemory,
-  deleteMemory,
-  MEMORY_KEY,
-  MEMORY_KINDS,
-  refreshMemory,
-  saveChoices,
-  topicColor,
-  topicNames,
-  topicPath,
-  TOPIC_KINDS,
-  useMemory,
-  type Memory,
-  type MemoryKind,
-  type MemoryState,
-  type Topic,
-  type TopicKind,
-} from "./api";
+import { addMemory, changeMemory, deleteMemory, MEMORY_KEY, MEMORY_KINDS, refreshMemory, saveChoices, topicColor, topicNames, topicPath, TOPIC_KINDS, useMemory, type Memory, type MemoryKind, type MemoryState, type Topic, type TopicKind } from "./api";
 import { MemoryGraph, type Selection } from "./memory-graph";
 
 const KIND_OPTIONS = Object.entries(MEMORY_KINDS).map(([k, [label]]) => [k, label] as const);

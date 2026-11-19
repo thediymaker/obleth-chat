@@ -126,7 +126,26 @@ export function useChat(): ChatStore {
   return store;
 }
 
-/** The store without subscribing, for event handlers. */
+/** The store, re-rendering only when the transcript's content changes: for the
+ *  message list and its scroller, which must follow every streamed word. */
+export function useChatContent(): ChatStore {
+  const store = useContext(Context);
+  if (!store) throw new Error("useChatContent needs a ChatProvider");
+  useSyncExternalStore(store.subscribeContent, store.getContentVersion, store.getContentVersion);
+  return store;
+}
+
+/** One value of the store, re-rendering only when it changes. `select` must return
+ *  a primitive or a stable reference. */
+export function useChatSelect<T>(select: (store: ChatStore) => T): T {
+  const store = useContext(Context);
+  if (!store) throw new Error("useChatSelect needs a ChatProvider");
+  const read = () => select(store);
+  return useSyncExternalStore(store.subscribe, read, read);
+}
+
+/** The store without subscribing, for event handlers and for components whose
+ *  parent already re-renders them. */
 export function useChatStore(): ChatStore {
   const store = useContext(Context);
   if (!store) throw new Error("useChatStore needs a ChatProvider");

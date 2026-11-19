@@ -15,9 +15,10 @@ import { useChat } from "@/components/chat/chat-provider";
 import { useCapabilities } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import type { Space, WorkspaceBridge } from "./bridge";
-import { PICKED_URL_LIMIT, csvFile, csvTable, diskUsage, downloadUrl, formatBytes, htmlFile, pickedAbove, pickedPaths, previewReload, statusLabel, statusTone, treeItem } from "./model";
+import { PICKED_URL_LIMIT, csvFile, csvTable, diskUsage, downloadUrl, htmlFile, pickedAbove, pickedPaths, previewReload, statusLabel, statusTone, treeItem } from "./model";
 import { PaneLoading, PaneNote } from "./pane-note";
 import { WorkspaceTerminal } from "./terminal";
+import { bytes } from "@/lib/format";
 
 export type WorkspaceTab = "preview" | "files" | "terminal";
 
@@ -233,8 +234,8 @@ function Files({ id, space, bridge }: { id: string; space: Space; bridge: Worksp
   // brings everything in it, so its rows show ticked and cannot be changed alone.
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
-    if (space.files == null && !space.loadingFiles && running && !space.file) void bridge.loadFiles(id);
-  }, [space.files, space.loadingFiles, running, space.file, bridge, id]);
+    if ((space.files == null || space.filesStale) && !space.loadingFiles && running && !space.file) void bridge.loadFiles(id);
+  }, [space.files, space.filesStale, space.loadingFiles, running, space.file, bridge, id]);
   // A refreshed list may no longer hold what was ticked.
   const listed = useMemo(() => new Set((space.files || []).map((e) => e.path)), [space.files]);
   const asking = useMemo(() => pickedPaths(new Set([...picked].filter((p) => listed.has(p)))), [picked, listed]);
@@ -303,7 +304,7 @@ function Files({ id, space, bridge }: { id: string; space: Space; bridge: Worksp
               <button type="button" className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left" onClick={() => bridge.showFile(id, e.path)}>
                 <File className="size-3.5 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate">{name}</span>
-                <small className="shrink-0 text-xs text-faint">{formatBytes(e.size)}</small>
+                <small className="shrink-0 text-xs text-faint">{bytes(e.size)}</small>
               </button>
             </li>
           );

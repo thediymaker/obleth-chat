@@ -100,7 +100,7 @@ export function ActivityTab() {
     initialPageParam: "",
     queryFn: ({ pageParam }) =>
       api.request<{ events?: AuditEvent[]; nextCursor?: string | null }>(
-        `/api/admin/audit?limit=50${kind ? `&kind=${encodeURIComponent(kind)}` : ""}${query ? `&q=${encodeURIComponent(query)}` : ""}${pageParam ? `&before=${encodeURIComponent(pageParam)}` : ""}`,
+        `/api/admin/audit?limit=50${kind ? `&kind=${encodeURIComponent(kind)}` : ""}${query ? `&q=${encodeURIComponent(query)}` : ""}${pageParam ? `&after=${encodeURIComponent(pageParam)}` : ""}`,
       ),
     getNextPageParam: (last) => last.nextCursor || undefined,
   });

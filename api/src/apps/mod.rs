@@ -8,6 +8,7 @@
 mod code;
 pub mod engine;
 
+use crate::audit::{Action, Target};
 use crate::{
     auth::{Identity, Role},
     error::ApiError,
@@ -141,14 +142,11 @@ async fn person(pool: &PgPool, id: Uuid) -> Result<Option<Identity>, sqlx::Error
 async fn audit(
     pool: &PgPool,
     actor: Uuid,
-    action: &str,
+    action: Action,
     app: &str,
     metadata: Value,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,target_id,metadata) VALUES($1,$2,$3,'app',$4,$5)")
-        .bind(Uuid::new_v4()).bind(actor).bind(action).bind(app).bind(metadata)
-        .execute(pool).await?;
-    Ok(())
+    crate::audit::record(pool, Some(actor), action, Target::app(app), metadata).await
 }
 
 /// An app its project's owner may change: an administrator who owns the project.
@@ -320,7 +318,7 @@ async fn remove(
     audit(
         &state.store.pool,
         user.id,
-        "app.deleted",
+        Action::APP_DELETED,
         &app.id,
         json!({"name": app.name}),
     )
@@ -349,7 +347,7 @@ async fn publish(
     audit(
         &state.store.pool,
         user.id,
-        "app.published",
+        Action::APP_PUBLISHED,
         &app.id,
         json!({"name": saved.name, "version": saved.version}),
     )
@@ -372,7 +370,7 @@ async fn unpublish(
     audit(
         &state.store.pool,
         user.id,
-        "app.unpublished",
+        Action::APP_UNPUBLISHED,
         &app.id,
         json!({"name": saved.name}),
     )
@@ -817,7 +815,7 @@ async fn create_key(
     audit(
         &state.store.pool,
         user.id,
-        "app.key_created",
+        Action::APP_KEY_CREATED,
         &app.id,
         json!({"name": name}),
     )
@@ -845,7 +843,7 @@ async fn revoke_key(
     audit(
         &state.store.pool,
         user.id,
-        "app.key_revoked",
+        Action::APP_KEY_REVOKED,
         &app.id,
         json!({"name": name}),
     )

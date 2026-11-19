@@ -355,10 +355,12 @@ impl Store {
 
     pub async fn export(&self, owner: Uuid, ids: &[Uuid]) -> Result<ChatArchive, ApiError> {
         validate_ids(ids)?;
+        // Under the owner's lock: the chats and which files go with them. The
+        // files' bytes are read after the commit, as for a turn, since only the
+        // archive's own size check needs them.
         let mut tx = self.owner_transaction(owner).await?;
-        let mut conversations = Vec::new();
-        let mut omitted = Vec::new();
-        let mut bytes = 0usize;
+        let mut chats = Vec::new();
+        let mut budget = ARCHIVE_BYTES;
         for id in ids {
             let chat = read_conversation(&mut tx, owner, *id).await?;
             refuse_temporary(&chat, "exported")?;
@@ -366,17 +368,33 @@ impl Store {
                 return Err(conflict("Stop responses before exporting"));
             }
             let ids = chat.messages.iter().map(|m| m.id).collect::<Vec<_>>();
-            let attachments::ForArchive {
-                mut files,
+            let archive = attachments::load_for_archive(&mut tx, owner, &ids, budget).await?;
+            // The files' encoded size is what the archive budget is spent on;
+            // the messages' text is counted when the archive is built below.
+            budget = budget.saturating_sub(
+                archive
+                    .files
+                    .values()
+                    .flatten()
+                    .map(|f| (f.meta().size as usize).div_ceil(3) * 4)
+                    .sum(),
+            );
+            chats.push((chat, archive));
+        }
+        tx.commit().await?;
+
+        let mut conversations = Vec::new();
+        let mut omitted = Vec::new();
+        let mut bytes = 0usize;
+        for (
+            chat,
+            attachments::ForArchive {
+                files,
                 mut left_out,
-            } = attachments::load_for_archive(
-                &mut tx,
-                &self.files,
-                owner,
-                &ids,
-                ARCHIVE_BYTES.saturating_sub(bytes),
-            )
-            .await?;
+            },
+        ) in chats
+        {
+            let mut files = attachments::read_messages(&self.files, files).await?;
             let exported = ArchivedChat {
                 title: chat.title,
                 model: chat.model,
@@ -398,21 +416,21 @@ impl Store {
                             omitted.push(file.name);
                         }
                         ArchivedMessage {
-                        attachments: files
-                            .remove(&m.id)
-                            .unwrap_or_default()
-                            .iter()
-                            .map(Attachment::archive)
-                            .collect(),
-                        role: m.role,
-                        content,
-                        reasoning_content: m.reasoning_content,
-                        status: m.status,
-                        settings: m.settings,
-                        usage: m.usage,
-                        finish_reason: m.finish_reason,
-                        error_message: m.error_message,
-                    }
+                            attachments: files
+                                .remove(&m.id)
+                                .unwrap_or_default()
+                                .iter()
+                                .map(Attachment::archive)
+                                .collect(),
+                            role: m.role,
+                            content,
+                            reasoning_content: m.reasoning_content,
+                            status: m.status,
+                            settings: m.settings,
+                            usage: m.usage,
+                            finish_reason: m.finish_reason,
+                            error_message: m.error_message,
+                        }
                     })
                     .collect(),
             };
@@ -426,7 +444,6 @@ impl Store {
             }
             conversations.push(exported);
         }
-        tx.commit().await?;
         Ok(ChatArchive {
             format: "obleth-chat".into(),
             version: 1,
@@ -434,7 +451,6 @@ impl Store {
             left_out: omitted,
         })
     }
-
     pub async fn import(
         &self,
         owner: Uuid,

@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::audit::{self, Action, Target};
 use axum::{
     extract::State,
     http::HeaderMap,
@@ -22,7 +23,6 @@ use reqwest::{redirect, Client, Response};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use url::Url;
-use uuid::Uuid;
 
 use crate::{
     auth::Identity,
@@ -677,12 +677,7 @@ async fn save(
     .execute(&mut *tx)
     .await?;
     // The key itself never reaches the audit log; only that it changed.
-    sqlx::query("INSERT INTO audit_events(id,actor_id,action,target_type,metadata)VALUES($1,$2,'decisions.update','site',$3)")
-        .bind(Uuid::new_v4())
-        .bind(user.id)
-        .bind(json!({"endpoint": row.endpoint, "url": row.url, "model": row.model, "checkRuns": row.check_runs, "checkTree": row.check_tree, "checkReports": row.check_reports, "pickSections": row.pick_sections, "checkMemories": row.check_memories, "checkActions": row.check_actions, "keyChanged": patch.key.is_some(), "hasKey": row.api_key.is_some()}))
-        .execute(&mut *tx)
-        .await?;
+    audit::record(&mut *tx, Some(user.id), Action::DECISIONS_UPDATE, Target::site(), json!({"endpoint": row.endpoint, "url": row.url, "model": row.model, "checkRuns": row.check_runs, "checkTree": row.check_tree, "checkReports": row.check_reports, "pickSections": row.pick_sections, "checkMemories": row.check_memories, "checkActions": row.check_actions, "keyChanged": patch.key.is_some(), "hasKey": row.api_key.is_some()})).await?;
     tx.commit().await?;
     Ok(Json(document(&s, &user).await?))
 }

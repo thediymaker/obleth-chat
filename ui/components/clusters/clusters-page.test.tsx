@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { fakeStore } from "@/components/workspace/test-store";
@@ -9,6 +9,7 @@ vi.mock("@/components/chat/chat-provider", () => import("@/components/workspace/
 const push = vi.fn();
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: vi.fn() }), usePathname: () => "/clusters" }));
 vi.mock("sonner", () => ({ toast: vi.fn() }));
+import { toast } from "sonner";
 vi.mock("@/components/app-shell/chrome", () => ({ usePageChrome: () => {} }));
 
 const slurm = { id: "s1", kind: "slurm", name: "Sol", url: "https://sol:6820", shared: true, enabled: true, active: true, canManage: true, confirmActions: true, credential: { user: "ana" }, files: true, tools: [] };
@@ -52,7 +53,24 @@ describe("Compute › Clusters", () => {
     expect(screen.getByText("File session")).toBeInTheDocument();
     expect(screen.getByText(/Job 4471233 on c001, last call/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "End session" }));
+    // Ending asks first.
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "End session" }));
     await waitFor(() => expect(calls.some((c) => c.path === "/api/connections/s1/file-session" && c.method === "DELETE")).toBe(true));
+  });
+
+  it("says when a file session could not be ended, instead of failing silently", async () => {
+    const calls = mockApi((path, options) => {
+      if (path === "/api/connections") return { connections: [slurm] };
+      if (path === "/api/connections/s1/status") return slurmStatus;
+      if (path === "/api/connections/s1/file-session" && options.method === "DELETE") return new Error("The cluster did not answer");
+      return {};
+    }, { connections: true, clusters: true });
+    renderPage(<ClustersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "End session" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "End session" }));
+    await waitFor(() => expect(calls.some((c) => c.path === "/api/connections/s1/file-session" && c.method === "DELETE")).toBe(true));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith("The cluster did not answer"));
   });
 
   it("asks in a new chat about a cluster", async () => {

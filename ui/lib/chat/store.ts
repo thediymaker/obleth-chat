@@ -173,6 +173,8 @@ export class ChatStore {
   shared: ShareInfo | null = null;
   loadingChat = false;
   chatError = "";
+  /** The chat at this address does not exist, or is not shared with this person. */
+  chatMissing = false;
   error = "";
   catalogError = "";
   streaming = false;
@@ -215,7 +217,10 @@ export class ChatStore {
   private timers: ReturnType<typeof setInterval>[] = [];
   private disposed = false;
   private listeners = new Set<() => void>();
+  /** Listeners of the transcript's content alone: the message list and its scroller. */
+  private contentListeners = new Set<() => void>();
   version = 0;
+  contentVersion = 0;
   private paintCost = 0;
   /** Set when the next render should show the end of the conversation. */
   wantsEnd = false;
@@ -243,11 +248,29 @@ export class ChatStore {
     };
   };
   getVersion = () => this.version;
+  /** A change of anything: every subscriber, content ones included. */
   emit() {
     if (this.disposed) return;
     this.syncStreamingState();
     this.version++;
+    this.contentVersion++;
     this.listeners.forEach((l) => l());
+    this.contentListeners.forEach((l) => l());
+  }
+  subscribeContent = (listener: () => void) => {
+    this.contentListeners.add(listener);
+    return () => {
+      this.contentListeners.delete(listener);
+    };
+  };
+  getContentVersion = () => this.contentVersion;
+  /** More of a reply arrived: only the transcript repaints, not the composer, side
+   *  pane, status bar and dialogs around it. State changes (a reply starting or
+   *  ending, an error) still go through emit(). */
+  paint() {
+    if (this.disposed) return;
+    this.contentVersion++;
+    this.contentListeners.forEach((l) => l());
   }
   /** How long the last render of the conversation took, to pace repaints while streaming. */
   reportPaint(ms: number) {
@@ -369,11 +392,14 @@ export class ChatStore {
       this.emit();
       return;
     }
+    const first = !this.modelsLoaded;
     this.models = models || [];
     this.modelsLoaded = true;
     if (!this.models.some((m) => m.id === this.model)) this.model = this.models[0]?.id || "";
     this.catalogError = this.models.length ? "" : "No models are available to this account. Contact your administrator.";
     if (this.preferences) this.applyPreferences(this.preferences, { generation: !this.active });
+    // A chat that loaded before the model list could not pick its own model yet.
+    if (first && this.active?.model && this.models.some((m) => m.id === this.active?.model)) this.model = this.active.model;
     this.emit();
   }
   applyPreferences(preferences: Preferences | null | undefined, { generation = true, overrides = this.preferenceOverrides }: { generation?: boolean; overrides?: Record<string, unknown> } = {}) {
@@ -608,6 +634,7 @@ export class ChatStore {
     if (left) this.leaveTemporary(left);
     const { page, id } = this.route;
     this.chatError = "";
+    this.chatMissing = false;
     this.shared = null;
     this.loadSequence++;
     if (page !== "chat" || !id) {
@@ -661,7 +688,10 @@ export class ChatStore {
         const r = await this.options.api.request<any>(sharedPath(id)).catch(() => null);
         if (sequence !== this.loadSequence || this.disposed) return;
         if (r && !r.mine) this.openShared(r, sequence);
-        else this.chatError = "This chat does not exist, or it is not shared with you.";
+        else {
+          this.chatError = "This chat does not exist, or it is not shared with you.";
+          this.chatMissing = true;
+        }
       }
     } finally {
       if (sequence === this.loadSequence && !this.disposed) {
@@ -686,6 +716,7 @@ export class ChatStore {
     this.active = r.conversation;
     this.shared = r.share;
     this.chatError = "";
+    this.chatMissing = false;
     this.sharedSignature = sharedSignatureOf(r.conversation);
     this.watchShared(r.conversation.id, sequence);
   }
@@ -1089,7 +1120,7 @@ export class ChatStore {
       if (paintTimer) clearTimeout(paintTimer);
       paintTimer = null;
       if (!this.operationIsCurrent(op) || this.active !== op.conversation || this.route.page !== "chat" || !op.assistant) return;
-      this.emit();
+      this.paint();
     };
     const readEvents = this.options.readEvents || readEventsDefault;
     try {

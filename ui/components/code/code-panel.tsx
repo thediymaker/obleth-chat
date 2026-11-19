@@ -5,12 +5,12 @@
 // shares the result as the project's main line. Rendered when the side pane shows
 // the "code" tab, and on the workspace's Compute page.
 
-import { useQuery } from "@tanstack/react-query";
+import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, ChevronRight, Clock, Download, Folder, GitBranch, Info, RefreshCw, Sparkles, Terminal } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useChat, useChatStore } from "@/components/chat/chat-provider";
+import { useChat } from "@/components/chat/chat-provider";
 import { Eyebrow } from "@/components/app-shell/page";
 import { useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
@@ -20,37 +20,50 @@ import { api } from "@/lib/api";
 import { useFeature } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { DiffStat, DiffView } from "./diff-view";
-import { codeEvents } from "./events";
+import { SETTLE_MS, codeEvents } from "./events";
 import { ExportDialog } from "./export-dialog";
 import { MoveToProjectDialog } from "@/components/projects/chat-project";
-import { type ChatCode, type ConflictRegion, LETTER, ago, chatCodePath, codeHref, conflictRegions, count, resolvePrompt, short, syncSays } from "./model";
+import { type ChatCode, type ConflictRegion, LETTER, chatCodePath, codeHref, conflictRegions, resolvePrompt, short, syncSays } from "./model";
+import { ago, count } from "@/lib/format";
 
 export const chatCodeKey = (id: string) => ["chat-code", id] as const;
 
 /** The chat's Git state; files the model changes refresh it a moment later. */
 export function useChatCode(id: string) {
   const on = useFeature("code");
-  const query = useQuery({ queryKey: chatCodeKey(id), queryFn: () => api.request<ChatCode>(chatCodePath(id)), enabled: on && !!id, staleTime: 15_000 });
-  const { refetch, dataUpdatedAt } = query;
-  const project = !!query.data?.project;
-  const updated = useRef(dataUpdatedAt);
-  updated.current = dataUpdatedAt;
-  useEffect(() => {
-    let soon: ReturnType<typeof setTimeout> | undefined;
-    const off = codeEvents.subscribe((e) => {
-      if (e.id !== id) return;
-      if (e.kind === "changed") {
-        if (!project) return;
-        clearTimeout(soon);
-        soon = setTimeout(() => void refetch(), 2500);
-      } else if (Date.now() - updated.current > e.age) void refetch();
-    });
-    return () => {
-      off();
-      clearTimeout(soon);
-    };
-  }, [id, project, refetch]);
-  return query;
+  listenForChanges(useQueryClient());
+  return useQuery({
+    queryKey: chatCodeKey(id),
+    queryFn: ({ signal }) => api.request<ChatCode>(chatCodePath(id), { signal }),
+    enabled: on && !!id,
+    staleTime: 15_000,
+  });
+}
+
+// One listener per query client, however many tabs and labels read the state: a
+// burst of changes refreshes a chat's Git state once, after it settles, and the
+// query runs only while something on screen is reading it. Only a project chat's
+// workspace is a repository, so only its state changes.
+const listening = new WeakSet<QueryClient>();
+const settling = new Map<string, ReturnType<typeof setTimeout>>();
+function listenForChanges(client: QueryClient) {
+  if (listening.has(client)) return;
+  listening.add(client);
+  codeEvents.subscribe((e) => {
+    const queryKey = chatCodeKey(e.id);
+    const refresh = () => void client.invalidateQueries({ queryKey });
+    if (e.kind === "changed") {
+      if (!client.getQueryData<ChatCode>(queryKey)?.project) return;
+      clearTimeout(settling.get(e.id));
+      settling.set(
+        e.id,
+        setTimeout(() => {
+          settling.delete(e.id);
+          refresh();
+        }, SETTLE_MS),
+      );
+    } else if (Date.now() - (client.getQueryState(queryKey)?.dataUpdatedAt ?? 0) > e.age) refresh();
+  });
 }
 
 /** The Git tab's label, with how many files changed (amber while a sync is paused). */
@@ -71,7 +84,6 @@ function Pad({ children, className }: { children: React.ReactNode; className?: s
 
 export function CodePanel({ conversationId: id }: { conversationId: string }) {
   const store = useChat();
-  const handle = useChatStore();
   const query = useChatCode(id);
   const d = query.data;
   const [busy, setBusy] = useState("");
@@ -265,7 +277,7 @@ export function CodePanel({ conversationId: id }: { conversationId: string }) {
         <div className="grid gap-2 px-4">
           <div className="flex flex-wrap gap-1.5">
             {!!conflicts.length && (
-              <Button size="sm" disabled={!!busy} onClick={() => handle.send(resolvePrompt(conflicts))}>
+              <Button size="sm" disabled={!!busy} onClick={() => store.send(resolvePrompt(conflicts))}>
                 <Sparkles /> Resolve with the model
               </Button>
             )}
@@ -494,7 +506,7 @@ export function CodePanel({ conversationId: id }: { conversationId: string }) {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-md">{e.subject}</span>
                     <small className="block text-xs text-muted-foreground">
-                      {e.author} · {ago(e.time)}
+                      {e.author} · {ago(e.time, Date.now(), { seconds: true })}
                       {i < ahead ? " · not synced" : ""}
                     </small>
                   </span>

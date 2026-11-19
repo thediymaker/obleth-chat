@@ -3,8 +3,9 @@ use super::*;
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
+
+use crate::test_support::Database;
 
 const ORIGIN: &str = "http://localhost:8085";
 const PASSWORD: &str = "test admin password 42";
@@ -18,66 +19,6 @@ fn config() -> AuthConfig {
         oidc: None,
         login_rate_per_minute: 300,
         ..AuthConfig::default()
-    }
-}
-
-static VECTOR: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-struct Database {
-    pool: PgPool,
-    admin: PgPool,
-    schema: String,
-}
-impl Database {
-    async fn new() -> Option<Self> {
-        let Ok(url) = env::var("TEST_DATABASE_URL") else {
-            eprintln!("Skipping Postgres auth test: set TEST_DATABASE_URL to run");
-            return None;
-        };
-        let schema = format!("auth_test_{}", Uuid::new_v4().simple());
-        let admin = PgPool::connect(&url).await.unwrap();
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        // pgvector's types live in public; the extension is made once per database.
-        VECTOR
-            .get_or_init(|| async {
-                sqlx::query("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
-                    .execute(&admin)
-                    .await
-                    .unwrap();
-            })
-            .await;
-        let search_path = format!("SET search_path TO {schema}, public");
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .after_connect(move |conn, _| {
-                let statement = search_path.clone();
-                Box::pin(async move {
-                    sqlx::query(&statement).execute(conn).await?;
-                    Ok(())
-                })
-            })
-            .connect(&url)
-            .await
-            .unwrap();
-        // Every migration, so handlers that touch other features' tables (deleting a
-        // group clears its shares, for one) work as they do in production.
-        crate::MIGRATOR.run(&pool).await.unwrap();
-        Some(Self {
-            pool,
-            admin,
-            schema,
-        })
-    }
-    async fn close(self) {
-        self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await
-            .unwrap();
-        self.admin.close().await;
     }
 }
 
@@ -335,6 +276,22 @@ async fn local_auth_origin_csrf_and_account_isolation() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed["hasMore"], true);
     assert_eq!(listed["users"].as_array().unwrap().len(), 1);
+    // The next page continues after the cursor and never repeats an account.
+    let cursor = listed["nextCursor"].as_str().unwrap();
+    let (_, _, next) = call(
+        &app,
+        "GET",
+        &format!("/api/admin/users?limit=1&after={cursor}"),
+        None,
+        Some(&cookie),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(next["users"].as_array().unwrap().len(), 1);
+    assert_ne!(next["users"][0]["id"], listed["users"][0]["id"]);
+    assert_eq!(next["hasMore"], false);
+    assert!(next["nextCursor"].is_null());
     let (_, _, searched) = call(
         &app,
         "GET",
@@ -953,6 +910,85 @@ async fn fake_revoke(
     state.live.lock().await.remove(&form["token"]);
     state.revoked.lock().await.push(form["token"].clone());
     StatusCode::OK
+}
+
+/// A browser that followed the sign-in link lands back on the sign-in screen
+/// with the failure named, never on a page of JSON; a caller that reads JSON
+/// still gets the JSON error.
+#[tokio::test]
+async fn single_sign_on_failures_send_a_browser_back_to_the_sign_in_screen() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let (issuer, task) = FakeIssuer::start().await;
+    let mut cfg = config();
+    cfg.oidc = Some(OidcConfig {
+        issuer: issuer.origin.clone(),
+        client_id: "chat".into(),
+        client_secret: "secret".into(),
+        allow_signup: false,
+        provider_usernames: false,
+        scopes: parse_scopes(DEFAULT_OIDC_SCOPES).unwrap(),
+    });
+    let auth = Auth::new(db.pool.clone(), cfg).await.unwrap();
+    let app = auth.router();
+    // A stale or foreign state: back to the screen as "state_expired".
+    let stale = format!("/api/auth/oidc/callback?code=x&state={}", random_token());
+    assert_eq!(
+        navigate(&app, &stale, None).await,
+        "/?signin_error=state_expired"
+    );
+    // The same request from a JSON caller is the JSON error it always was.
+    let (status, _, body) = call(&app, "GET", &stale, None, None, None, Value::Null).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body["error"]["message"].is_string());
+    // The person did not complete it at the provider: back where they were going.
+    let (browser, path) = issuer
+        .flow_from(
+            &app,
+            "/api/auth/oidc/login?next=%2Fchat%2Fc1",
+            "valid",
+            "s1",
+        )
+        .await;
+    let cancelled = format!("{path}&error=access_denied");
+    assert_eq!(
+        navigate(&app, &cancelled, Some(&browser)).await,
+        "/chat/c1?signin_error=not_completed"
+    );
+    // An identity no administrator has provisioned.
+    let (browser, path) = issuer.flow(&app, "valid", "unknown-subject").await;
+    assert_eq!(
+        navigate(&app, &path, Some(&browser)).await,
+        "/?signin_error=not_provisioned"
+    );
+    task.abort();
+    db.close().await;
+}
+
+/// Follows `path` as a browser would (asking for HTML) and returns where the
+/// 303 sends it, checking that no JSON came with it.
+async fn navigate(app: &Router, path: &str, cookie: Option<&str>) -> String {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::ACCEPT, "text/html,application/xhtml+xml");
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, cookie);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty(), "a redirect carries no JSON: {body:?}");
+    location
 }
 
 #[tokio::test]
@@ -1816,7 +1852,7 @@ async fn groups_membership_and_audit_are_admin_only_and_paginated() {
     let second = call(
         &app,
         "GET",
-        &format!("/api/admin/audit?limit=2&before={cursor}"),
+        &format!("/api/admin/audit?limit=2&after={cursor}"),
         None,
         Some(&ac),
         None,

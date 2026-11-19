@@ -7,7 +7,7 @@ import { ArrowLeft, FileText, GitBranch, MessageSquare, Play, Terminal } from "l
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { Page } from "@/components/app-shell/page";
+import { Page, NotFound } from "@/components/app-shell/page";
 import { useChat } from "@/components/chat/chat-provider";
 import { CodePanel, CodeTabLabel } from "@/components/code/code-panel";
 import { Button } from "@/components/ui/button";
@@ -68,12 +68,7 @@ export function WorkspacePage({ conversationId }: { conversationId: string }) {
       </div>
       {missing ? (
         <Page>
-          <p className="text-sm text-muted-foreground">
-            This conversation has no workspace.{" "}
-            <Link href="/workspaces" className="underline underline-offset-2">
-              Back to your workspaces
-            </Link>
-          </p>
+          <NotFound what="workspace" to="/workspaces" back="your workspaces" />
         </Page>
       ) : (
         <>

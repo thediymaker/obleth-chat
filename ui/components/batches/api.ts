@@ -3,9 +3,10 @@
 // Batches: one prompt run over every row of a spreadsheet by the gateway, in the
 // background. Endpoints in api/src/batches.rs.
 
-import { type QueryClient, useQuery } from "@tanstack/react-query";
+import { type QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useSignedIn } from "@/lib/queries";
+import { durationWords } from "@/lib/format";
 
 export type BatchStatus = "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled";
 
@@ -38,6 +39,8 @@ export interface BatchList {
   batches: Batch[];
   /** Older batches exist beyond the ones listed. */
   more?: boolean;
+  /** Where the next page starts, when older batches exist. */
+  nextAfter?: string | null;
 }
 
 export interface NewBatch {
@@ -52,17 +55,56 @@ export interface NewBatch {
 }
 
 export const BATCHES_KEY = ["batches"] as const;
+export const ACTIVE_BATCHES_KEY = ["batches", "active"] as const;
 
 const ACTIVE: BatchStatus[] = ["validating", "in_progress", "finalizing", "cancelling"];
 export const isActive = (b: Pick<Batch, "status">) => ACTIVE.includes(b.status);
 
+/** The newest batches a page at a time, refreshed every 30 s, with `fetchNextPage` for
+ *  older ones; while any is running, its progress comes from `useActiveBatches` every
+ *  3 s and is laid over the list, so the full list is never polled fast. */
 export function useBatches() {
-  return useQuery({
+  const signedIn = useSignedIn();
+  const pages = useInfiniteQuery({
     queryKey: BATCHES_KEY,
-    queryFn: () => api.request<BatchList>("/api/batches"),
-    enabled: useSignedIn(),
-    refetchInterval: (q) => (q.state.data?.batches.some(isActive) ? 3_000 : 30_000),
+    initialPageParam: "",
+    queryFn: ({ pageParam }) => api.request<BatchList>(`/api/batches${pageParam ? `?after=${encodeURIComponent(pageParam)}` : ""}`),
+    getNextPageParam: (last) => last.nextAfter || undefined,
+    enabled: signedIn,
+    refetchInterval: 30_000,
   });
+  const listed = pages.data?.pages ?? [];
+  const seen = new Set<string>();
+  const batches: Batch[] = [];
+  for (const page of listed) for (const b of page.batches) if (!seen.has(b.id)) (seen.add(b.id), batches.push(b));
+  const active = useQuery({
+    queryKey: ACTIVE_BATCHES_KEY,
+    queryFn: () => api.request<BatchList>("/api/batches?status=active"),
+    enabled: signedIn && batches.some(isActive),
+    refetchInterval: 3_000,
+  });
+  const progress = new Map((active.data?.batches ?? []).map((b) => [b.id, b]));
+  const data = listed.length
+    ? { available: listed[0]!.available, batches: batches.map((b) => progress.get(b.id) ?? b), more: !!pages.hasNextPage }
+    : undefined;
+  return { ...pages, data, dataUpdatedAt: Math.max(pages.dataUpdatedAt, active.dataUpdatedAt) };
+}
+
+/** Puts a batch just started at the top of the cached list. */
+export function addBatch(client: QueryClient, batch: Batch) {
+  client.setQueryData<{ pages: BatchList[]; pageParams: unknown[] }>(BATCHES_KEY, (old) => {
+    const pages = old?.pages.map((p) => ({ ...p, batches: p.batches.filter((b) => b.id !== batch.id) })) ?? [{ available: true, batches: [] }];
+    const [first, ...rest] = pages;
+    return { pageParams: old?.pageParams ?? [""], pages: [{ ...first!, batches: [batch, ...first!.batches] }, ...rest] };
+  });
+}
+
+/** Puts changed batches into every cached page, and drops deleted ones. */
+export function patchBatches(client: QueryClient, changed: Batch[], removed: string[] = []) {
+  const next = new Map(changed.map((b) => [b.id, b]));
+  const patch = (list: BatchList) => ({ ...list, batches: list.batches.filter((b) => !removed.includes(b.id)).map((b) => next.get(b.id) ?? b) });
+  client.setQueryData<{ pages: BatchList[]; pageParams: unknown[] }>(BATCHES_KEY, (old) => (old ? { ...old, pages: old.pages.map(patch) } : old));
+  client.setQueryData<BatchList>(ACTIVE_BATCHES_KEY, (old) => (old ? patch(old) : old));
 }
 export const refreshBatches = (client: QueryClient) => client.invalidateQueries({ queryKey: BATCHES_KEY });
 
@@ -92,17 +134,6 @@ export function percentOf(b: Pick<Batch, "completed" | "failed" | "total">): num
 }
 
 /** A length of time in words: "45 seconds", "12 minutes", "3 hours 5 minutes", "2 days". */
-export function duration(secs: number): string {
-  const s = Math.max(0, Math.round(secs));
-  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
-  if (s < 60) return plural(s, "second");
-  const m = Math.round(s / 60);
-  if (m < 60) return plural(m, "minute");
-  const h = Math.floor(m / 60);
-  if (h < 24) return m % 60 ? `${plural(h, "hour")} ${plural(m % 60, "minute")}` : plural(h, "hour");
-  const d = Math.floor(h / 24);
-  return h % 24 ? `${plural(d, "day")} ${plural(h % 24, "hour")}` : plural(d, "day");
-}
 
 function secsSince(iso: string | null | undefined, now: number): number | null {
   if (!iso) return null;
@@ -133,11 +164,11 @@ export function stateOf(b: Batch, now: number): { label: string; tone: Tone; det
         return {
           label: "Waiting for the model",
           tone: "waiting",
-          detail: `It's busy with people chatting, and batches wait their turn.${idle != null ? ` Nothing has finished in ${duration(idle)}.` : ""}`,
+          detail: `It's busy with people chatting, and batches wait their turn.${idle != null ? ` Nothing has finished in ${durationWords(idle)}.` : ""}`,
         };
       }
       const eta = etaSecs(b, now);
-      return { label: "Running", tone: "running", detail: eta != null ? `About ${duration(eta)} left at this pace` : "Starting" };
+      return { label: "Running", tone: "running", detail: eta != null ? `About ${durationWords(eta)} left at this pace` : "Starting" };
     }
     case "finalizing":
       return { label: "Finishing up", tone: "running", detail: null };

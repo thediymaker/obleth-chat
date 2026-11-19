@@ -14,9 +14,9 @@ import { Button } from "@/components/ui/button";
 import { INPUT, Legend, OUTPUT, TimeBars } from "@/components/manage/bar-chart";
 import { CheckField, Chips, FormActions, FormDialog, FormError, Meter, Dropdown, Note, Pill, Quota, Section, TableWrap, TextField, Tiles, displayName, td, th, useSubmit } from "@/components/manage/kit";
 import { api } from "@/lib/api";
-import { when } from "@/lib/format";
+import { when, num, count, compact, PERIOD_DAYS } from "@/lib/format";
 import { ChangeNote, GroupPicker, KindBar, KindLegend } from "./parts";
-import { KINDS, change, num, percent, plural, share, tokens } from "./insights";
+import { KINDS, change, percent, share } from "./insights";
 import { SearchForm } from "./people-tab";
 import { useKept } from "./state";
 import { METRICS, PURPOSES, SORTS, USAGE_PERIODS, allowance, buckets, periodName, sortPeople, type Limits, type Metric, type Sort, type UsageOverview, type UsagePerson } from "./usage";
@@ -87,12 +87,12 @@ function Shares({ list, total, name, pick, current }: { list: (UsageOverview["by
                 <span className="truncate">{label}</span>
               )}
               <span className="shrink-0 tabular-nums">
-                <strong className="font-medium">{percent(share(t, total))}</strong> <span className="text-muted-foreground">{tokens(t)}</span>
+                <strong className="font-medium">{percent(share(t, total))}</strong> <span className="text-muted-foreground">{compact(t)}</span>
               </span>
             </div>
             <Meter value={t} max={max} />
             <small className="text-xs text-muted-foreground">
-              {plural(r.requests, "request", "requests")} · {plural(r.people, "person", "people")}
+              {count(r.requests, "request", "requests")} · {count(r.people, "person", "people")}
               {Number(r.errors) ? ` · ${percent(share(r.errors, r.requests))} errors` : ""}
             </small>
           </li>
@@ -118,7 +118,7 @@ function Mix({ data, days }: { data: UsageOverview; days: number }) {
     return (
       <Section {...head}>
         <Note>
-          This group has labelled chats from {plural(m.people, "person", "people")} in {periodName(days)}. Kinds of use show from {m.minPeople} people, so nobody can be singled out.
+          This group has labelled chats from {count(m.people, "person", "people")} in {periodName(days)}. Kinds of use show from {m.minPeople} people, so nobody can be singled out.
         </Note>
       </Section>
     );
@@ -140,12 +140,12 @@ function Mix({ data, days }: { data: UsageOverview; days: number }) {
   return (
     <Section {...head} actions={<KindLegend kinds={KINDS.filter(([id]) => (m.kinds || []).some((k) => k.name === id))} />}>
       <ul className="grid gap-3">
-        <Line label="All labelled chats" note={`${plural(m.sessions, "chat", "chats")} · ${plural(m.people, "person", "people")}`} kinds={m.kinds} />
+        <Line label="All labelled chats" note={`${count(m.sessions, "chat", "chats")} · ${count(m.people, "person", "people")}`} kinds={m.kinds} />
       </ul>
       <h3 className="text-md font-medium">By model</h3>
       <ul className="grid gap-3">
         {(m.byModel || []).map((r) => (
-          <Line key={r.model ?? "none"} label={r.model || "Unknown model"} note={`${plural(r.sessions, "chat", "chats")} · ${tokens(r.tokens)} tokens`} kinds={r.kinds} />
+          <Line key={r.model ?? "none"} label={r.model || "Unknown model"} note={`${count(r.sessions, "chat", "chats")} · ${compact(r.tokens)} tokens`} kinds={r.kinds} />
         ))}
       </ul>
       {m.heavy ? (
@@ -169,10 +169,10 @@ function Allowance({ person }: { person: UsagePerson }) {
   if (!a)
     return (
       <span className="grid gap-0.5">
-        {tokens(person.today?.totalTokens)} <small className="text-xs text-muted-foreground">No daily limit</small>
+        {compact(person.today?.totalTokens)} <small className="text-xs text-muted-foreground">No daily limit</small>
       </span>
     );
-  const show = (n: number) => (a.what === "tokens" ? tokens(n) : num(n));
+  const show = (n: number) => (a.what === "tokens" ? compact(n) : num(n));
   return (
     <span className="grid min-w-28 gap-1" data-level={a.level || undefined}>
       <Quota value={Math.min(a.used, a.limit)} max={a.limit} label={`Today’s ${a.what}`} />
@@ -188,7 +188,7 @@ function LimitsCard({ data, on }: { data: UsageOverview; on: Handlers }) {
   return (
     <Section
       title="Daily limits"
-      description={`Allowances reset at 00:00 UTC.${data.overrides ? ` ${plural(data.overrides, "person has", "people have")} their own limits.` : ""}`}
+      description={`Allowances reset at 00:00 UTC.${data.overrides ? ` ${count(data.overrides, "person has", "people have")} their own limits.` : ""}`}
       actions={
         <Button size="sm" variant="outline" onClick={() => on.editLimits()}>
           <Settings /> Edit defaults
@@ -273,7 +273,7 @@ function People({ data, state, on }: { data: UsageOverview; state: UsageState; o
                   <td className={td}>
                     <span className="grid min-w-28 gap-1">
                       <span>
-                        {tokens(p.totalTokens)} <small className="text-xs text-muted-foreground">{percent(share(p.totalTokens, total))}</small>
+                        {compact(p.totalTokens)} <small className="text-xs text-muted-foreground">{percent(share(p.totalTokens, total))}</small>
                       </span>
                       <Meter value={Number(p.totalTokens) || 0} max={max} />
                     </span>
@@ -311,23 +311,23 @@ export function UsageView({ data, state, on }: { data: UsageOverview; state: Usa
   const points = buckets(data.series, days, data.start);
   const total = Number(t.totalTokens) || 0;
   const value = (d: (typeof points)[number]) => (metric === "tokens" ? d.input + d.output : d[metric]);
-  const short = (v: number) => (metric === "tokens" ? tokens(Math.round(v)) : num(Math.round(v)));
+  const short = (v: number) => (metric === "tokens" ? compact(Math.round(v)) : num(Math.round(v)));
   const metricName = METRICS.find(([id]) => id === metric)?.[1] || "Tokens";
   return (
     <>
       <Note>
         {days === 1 ? "Today" : `The last ${days} days`}
         {model ? `, ${model} only` : ""}, as providers report it. Days run in UTC.
-        {t.incompleteUsage ? ` ${plural(t.incompleteUsage, "request", "requests")} did not report usage.` : ""}
+        {t.incompleteUsage ? ` ${count(t.incompleteUsage, "request", "requests")} did not report usage.` : ""}
       </Note>
       <Tiles
         tiles={[
           { label: "Requests", value: num(t.requests), note: <ChangeNote change={change(t.requests, p.requests, days)} /> },
-          { label: "Tokens", value: tokens(t.totalTokens), note: `${tokens(t.promptTokens)} in · ${tokens(t.completionTokens)} out` },
+          { label: "Tokens", value: compact(t.totalTokens), note: `${compact(t.promptTokens)} in · ${compact(t.completionTokens)} out` },
           { label: "People", value: num(t.people), note: <ChangeNote change={change(t.people, p.people, days)} /> },
           { label: "Errors", value: num(t.errors), note: t.requests ? `${percent(share(t.errors, t.requests))} of requests` : "" },
           { label: "Running now", value: num(t.activeGenerations), note: "Replies being written" },
-          { label: "At a daily limit", value: num(data.atLimit), note: data.nearLimit ? `${plural(data.nearLimit, "more person", "more people")} above 80%` : "Today, UTC" },
+          { label: "At a daily limit", value: num(data.atLimit), note: data.nearLimit ? `${count(data.nearLimit, "more person", "more people")} above 80%` : "Today, UTC" },
         ]}
       />
       <Section title={days === 1 ? "Today by hour" : "By day"} actions={<Chips label="Show" options={METRICS} value={metric} onChange={on.setMetric} />}>
@@ -352,7 +352,7 @@ export function UsageView({ data, state, on }: { data: UsageOverview; state: Usa
           format={short}
           label={`${metricName} per ${points.length === 24 ? "hour" : "day"}: ${short(points.reduce((s, d) => s + value(d), 0))} in all`}
           tip={(d) =>
-            `${d.label}: ${plural(d.requests, "request", "requests")} · ${tokens(d.input)} in · ${tokens(d.output)} out · ${plural(d.people, "person", "people")}${d.errors ? ` · ${plural(d.errors, "error", "errors")}` : ""}`
+            `${d.label}: ${count(d.requests, "request", "requests")} · ${compact(d.input)} in · ${compact(d.output)} out · ${count(d.people, "person", "people")}${d.errors ? ` · ${count(d.errors, "error", "errors")}` : ""}`
           }
         />
         <Note>Hover a bar for its requests, tokens and people. Times are UTC.</Note>
@@ -447,7 +447,7 @@ function LimitsDialog({ userId, person, data, onClose, onSaved }: { userId: stri
 
 export function UsageTab() {
   const queries = useQueryClient();
-  const [days, setDays] = useKept("usage.days", 28);
+  const [days, setDays] = useKept("usage.days", PERIOD_DAYS);
   const [group, setGroup] = useKept("usage.group", "");
   const [model, setModel] = useKept("usage.model", "");
   const [query, setQuery] = useKept("usage.query", "");

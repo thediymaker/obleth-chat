@@ -3,7 +3,8 @@
 // tool first needs it.
 
 import { ESPLoader, Transport, type IEspLoaderTerminal } from "esptool-js";
-import { formatBytes, type FlashOptions, type FlashPart, type Flasher, type Identity } from "./flashers";
+import { type FlashOptions, type FlashPart, type Flasher, type Identity } from "./flashers";
+import { bytes } from "@/lib/format";
 
 const ROM_BAUD = 115200;
 
@@ -59,7 +60,7 @@ export const espressif: Flasher = {
     const started = Date.now();
     const total = parts.reduce((n, p) => n + p.data.length, 0);
     return withLoader(port, baudrate, log, async (loader, chip) => {
-      progress(`Connected to ${chip}. Writing ${parts.length} image${parts.length === 1 ? "" : "s"}, ${formatBytes(total)}…`);
+      progress(`Connected to ${chip}. Writing ${parts.length} image${parts.length === 1 ? "" : "s"}, ${bytes(total)}…`);
       await loader.writeFlash({
         fileArray: parts.map((p) => ({ data: p.data, address: p.offset })),
         flashSize: "keep",
@@ -73,7 +74,7 @@ export const espressif: Flasher = {
         },
       });
       const seconds = ((Date.now() - started) / 1000).toFixed(1);
-      return `Wrote ${parts.length} image${parts.length === 1 ? "" : "s"} (${formatBytes(total)}) to ${chip} in ${seconds} s, then restarted the board.`;
+      return `Wrote ${parts.length} image${parts.length === 1 ? "" : "s"} (${bytes(total)}) to ${chip} in ${seconds} s, then restarted the board.`;
     });
   },
 

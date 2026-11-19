@@ -27,7 +27,7 @@ test("searching asks the server, and changing a role is confirmed first", async 
   const calls = mockApi((path, options) => (options.method === "PATCH" ? {} : { users, hasMore: path.includes("q=") }));
   renderPage(<PeopleTab />);
   await userEvent.type(await screen.findByLabelText("Search accounts"), "bo{Enter}");
-  expect(await screen.findByText(/Showing the first 1,000 matches/)).toBeInTheDocument();
+  await screen.findByText("Bo");
   expect(calls.some((c) => c.path === "/api/admin/users?q=bo")).toBe(true);
   const row = screen.getByText("bo").closest("tr")!;
   await userEvent.click(within(row).getByRole("button", { name: "Manage" }));
@@ -61,4 +61,16 @@ test("without passwords there is no invitation, password reset or initial passwo
   await userEvent.click(screen.getAllByRole("button", { name: "Manage" })[1]!);
   expect(screen.queryByRole("button", { name: "Reset password" })).toBeNull();
   expect(screen.getByRole("button", { name: "Link single sign-on" })).toBeInTheDocument();
+});
+
+test("the people tab loads the next page of accounts after the cursor", async () => {
+  forgetKept();
+  const more = [{ id: "u3", username: "cy", display_name: "Cy", role: "user", enabled: true, last_sign_in_at: null }];
+  const calls = mockApi((path) => (path.includes("after=") ? { users: more, hasMore: false, nextCursor: null } : { users, hasMore: true, nextCursor: "u2" }));
+  renderPage(<PeopleTab />);
+  expect(await screen.findByText("Bo")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Load more people" }));
+  expect(await screen.findByText("Cy")).toBeInTheDocument();
+  expect(calls.some((c) => c.path === "/api/admin/users?after=u2")).toBe(true);
+  expect(screen.queryByRole("button", { name: "Load more people" })).not.toBeInTheDocument();
 });

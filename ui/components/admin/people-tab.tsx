@@ -4,7 +4,7 @@
 // creating accounts and invitations, one-time links, password resets, single
 // sign-on identities, signing someone out, and turning an account off.
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { Link2, Plus, Search } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -55,11 +55,22 @@ const ROLES = [
 ] as const;
 
 export const usersKey = (query: string) => ["admin", "users", query] as const;
+/** The accounts a search matches, newest first, a page at a time: `data.users` holds
+ *  every page loaded so far and `data.hasMore` whether another can be loaded. */
 export function useAdminUsers(query: string) {
-  return useQuery({
+  const pages = useInfiniteQuery({
     queryKey: usersKey(query),
-    queryFn: () => api.request<{ users?: AdminUser[]; hasMore?: boolean }>(`/api/admin/users${query ? `?q=${encodeURIComponent(query)}` : ""}`),
+    initialPageParam: "",
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams();
+      if (query) params.set("q", query);
+      if (pageParam) params.set("after", pageParam);
+      return api.request<{ users?: AdminUser[]; hasMore?: boolean; nextCursor?: string | null }>(`/api/admin/users${params.size ? `?${params}` : ""}`);
+    },
+    getNextPageParam: (last) => last.nextCursor || undefined,
   });
+  const users = (pages.data?.pages ?? []).flatMap((p) => p.users ?? []);
+  return { ...pages, data: pages.data && { users, hasMore: pages.hasNextPage } };
 }
 
 /** A search box that applies on submit. */
@@ -194,7 +205,7 @@ export function PeopleTab() {
   const session = useSession();
   const queries = useQueryClient();
   const [query, setQuery] = useKept("users.query", "");
-  const { data, error, isLoading, refetch } = useAdminUsers(query);
+  const { data, error, isLoading, refetch, fetchNextPage, isFetchingNextPage } = useAdminUsers(query);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [link, setLink] = useState<AccessLink | null>(null);
   const confirm = useConfirm();
@@ -245,7 +256,6 @@ export function PeopleTab() {
           </Button>
         </div>
       </div>
-      {data?.hasMore && <Note>Showing the first 1,000 matches. Refine the search to find another account.</Note>}
       <ErrorBox error={error} onRetry={() => refetch()} />
       {isLoading ? (
         <Loading label="Loading administration…" />
@@ -298,6 +308,13 @@ export function PeopleTab() {
         </TableWrap>
       ) : (
         <EmptyState title="No accounts found" text="Try another search, or create an account for someone joining your workspace." />
+      )}
+      {data?.hasMore && (
+        <div>
+          <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+            Load more people
+          </Button>
+        </div>
       )}
 
       {(dialog?.type === "create" || dialog?.type === "invite") && (

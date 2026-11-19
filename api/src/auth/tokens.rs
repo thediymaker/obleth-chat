@@ -214,12 +214,11 @@ async fn create(
     .bind(session)
     .fetch_one(&mut *tx)
     .await?;
-    accounts::record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(user.id),
-        "api_token_created",
-        "api_token",
-        Some(&id.to_string()),
+        Action::API_TOKEN_CREATED,
+        Target::api_token(id),
         json!({"name":name,"scopes":scopes,"days":input.days}),
     )
     .await?;
@@ -245,12 +244,11 @@ async fn revoke(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(ApiError::not_found)?;
-    accounts::record_audit(
-        &mut tx,
+    audit::record(
+        &mut *tx,
         Some(user.id),
-        "api_token_revoked",
-        "api_token",
-        Some(&id.to_string()),
+        Action::API_TOKEN_REVOKED,
+        Target::api_token(id),
         json!({}),
     )
     .await?;

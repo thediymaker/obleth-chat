@@ -2,7 +2,8 @@ import { render, screen, within } from "@testing-library/react";
 import { vi } from "vitest";
 import { renderPage } from "@/components/manage/test-utils";
 import { InsightsSettingsDialog, InsightsView, type InsightsState } from "./insights-tab";
-import { percent, tokens, type Insights } from "./insights";
+import { percent, type Insights } from "./insights";
+import { compact as tokens } from "@/lib/format";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
 

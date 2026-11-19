@@ -18,7 +18,7 @@ import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useProjects } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { host, imageSize, KINDS, kindLabel, kindOf, type SavedItem, type SavedKind, useGeneratedImages, useSaved } from "./api";
+import { host, imageSize, KINDS, kindLabel, kindOf, type SavedItem, type SavedKind, useGeneratedImages, useSaved, SAVED_PAGE } from "./api";
 import { LibraryTabs, StorageMeter } from "./library-shell";
 import { useLibraryDialogs } from "./saved-dialogs";
 
@@ -108,7 +108,8 @@ function SavedView({ openId }: { openId?: string }) {
   const [kind, setKind] = useState<"" | SavedKind>("");
   const [tag, setTag] = useState("");
   const filters = { q: query, kind, tag, project };
-  const { data, error, isPending, refetch } = useSaved(filters);
+  const [shown, setShown] = useState(SAVED_PAGE);
+  const { data, error, isPending, refetch } = useSaved(filters, true, shown);
   const { data: projects } = useProjects();
   const dialogs = useLibraryDialogs(data?.items);
   const opened = useRef("");
@@ -259,7 +260,13 @@ function SavedView({ openId }: { openId?: string }) {
               <SavedCard key={item.id} item={item} onOpen={() => dialogs.open(item.id)} />
             ))}
           </div>
-          {data?.more && <p className="py-4 text-sm text-muted-foreground">Showing the newest 60. Search or filter to find older ones.</p>}
+          {data?.more && (
+            <div className="py-4">
+              <Button variant="outline" size="sm" onClick={() => setShown(shown + SAVED_PAGE)}>
+                Show more
+              </Button>
+            </div>
+          )}
         </>
       )}
       {dialogs.element}

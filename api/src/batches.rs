@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
@@ -279,13 +279,40 @@ async fn sources(
 }
 
 /// The person's batches, newest first, with their progress.
-async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListQuery {
+    /// `active`: one page of the batches still running, for the progress poll.
+    status: Option<String>,
+    /// The last batch of the previous page: the next page continues after it.
+    after: Option<String>,
+}
+
+async fn list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
     let user = state.auth.require(&headers, false).await?;
     let gw = gateway(&state)?;
+    let active_only = match query.status.as_deref() {
+        None => false,
+        Some("active") => true,
+        Some(_) => return Err(ApiError::bad("status can only be active")),
+    };
+    if query.after.as_deref().is_some_and(|after| !valid_id(after)) {
+        return Err(ApiError::bad("Unknown batch cursor"));
+    }
+    let pages = if active_only { 1 } else { LIST_PAGES };
     let mut list: Vec<Value> = Vec::new();
     let mut more = false;
-    for page in 0..LIST_PAGES {
-        let path = match list.last().and_then(|b| b["id"].as_str()) {
+    for page in 0..pages {
+        let after = list
+            .last()
+            .and_then(|b| b["id"].as_str())
+            .map(String::from)
+            .or_else(|| query.after.clone());
+        let path = match after {
             Some(after) => format!("v1/batches?limit=100&after={after}"),
             None => "v1/batches?limit=100".to_string(),
         };
@@ -312,6 +339,11 @@ async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<
             break;
         }
     }
+    if active_only {
+        list.retain(|b| is_active(b["status"].as_str()));
+        more = false;
+    }
+    let next_after = page_cursor(&list, more);
     let ids: Vec<String> = list
         .iter()
         .filter_map(|b| b["id"].as_str().map(String::from))
@@ -326,8 +358,24 @@ async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<
         })
         .collect();
     Ok(Json(
-        json!({"available": true, "batches": batches, "more": more}),
+        json!({"available": true, "batches": batches, "more": more, "nextAfter": next_after}),
     ))
+}
+
+/// A batch the gateway is still working on (or stopping).
+fn is_active(status: Option<&str>) -> bool {
+    matches!(
+        status,
+        Some("validating" | "in_progress" | "finalizing" | "cancelling")
+    )
+}
+
+/// Where the next page starts: the last batch listed, when more follow.
+fn page_cursor(list: &[Value], more: bool) -> Option<String> {
+    if !more {
+        return None;
+    }
+    list.last().and_then(|b| b["id"].as_str()).map(String::from)
 }
 
 #[derive(Deserialize)]
@@ -1469,6 +1517,31 @@ mod tests {
         .unwrap();
         assert_eq!(left, vec!["batch_new", "batch_new"]);
         db.close().await;
+    }
+
+    #[test]
+    fn the_list_keeps_active_batches_and_names_where_the_next_page_starts() {
+        let rows: Vec<Value> = [
+            "validating",
+            "in_progress",
+            "completed",
+            "cancelling",
+            "failed",
+            "finalizing",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, status)| json!({"id": format!("batch_{i}"), "status": status}))
+        .collect();
+        let active: Vec<&str> = rows
+            .iter()
+            .filter(|b| is_active(b["status"].as_str()))
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(active, ["batch_0", "batch_1", "batch_3", "batch_5"]);
+        assert_eq!(page_cursor(&rows, true).as_deref(), Some("batch_5"));
+        assert_eq!(page_cursor(&rows, false), None);
+        assert_eq!(page_cursor(&[], true), None);
     }
 
     #[tokio::test]

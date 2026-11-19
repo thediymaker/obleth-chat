@@ -86,8 +86,11 @@ export const savedQuery = (filters: SavedFilters) => {
   const q = new URLSearchParams(Object.entries(filters).filter(([, v]) => v) as [string, string][]);
   return `/api/saved${q.size ? `?${q}` : ""}`;
 };
-export function useSaved(filters: SavedFilters = {}, enabled = true) {
-  return useQuery({ queryKey: libraryKey(filters), queryFn: () => api.request<SavedList>(savedQuery(filters)), enabled });
+/** Items shown at first; "Show more" asks for another page. */
+export const SAVED_PAGE = 60;
+export function useSaved(filters: SavedFilters = {}, enabled = true, limit = SAVED_PAGE) {
+  const query = `${savedQuery(filters)}${limit > SAVED_PAGE ? `${savedQuery(filters).includes("?") ? "&" : "?"}limit=${limit}` : ""}`;
+  return useQuery({ queryKey: [...libraryKey(filters), limit], queryFn: () => api.request<SavedList>(query), enabled });
 }
 export const getSaved = async (id: string) => (await api.request<{ item: SavedItem }>(savedPath(id))).item;
 

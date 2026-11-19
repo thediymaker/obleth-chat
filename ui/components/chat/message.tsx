@@ -21,7 +21,7 @@ import type { Message as ChatMessage } from "@/lib/chat/types";
 import { initials } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
-import { useChatStore as useChat } from "./chat-provider";
+import { useChatStore } from "./chat-provider";
 import { NamedIcon } from "./icon";
 import { citeHtml, KnowledgeSources } from "@/components/knowledge/chat-knowledge";
 import { SavedNotes } from "@/components/library/saved-notes";
@@ -54,7 +54,7 @@ export function thinkingSummary(m: ChatMessage) {
 }
 
 function ThinkingPanel({ m, index }: { m: ChatMessage; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   const content = useRef<HTMLDivElement>(null);
   const key = m.id || `pending-${index}`;
   const [, redraw] = useState(0);
@@ -183,7 +183,7 @@ function MessageDetails({ m, id }: { m: ChatMessage; id: string }) {
 }
 
 function Versions({ m }: { m: ChatMessage }) {
-  const store = useChat();
+  const store = useChatStore();
   const versions = m.versions || [];
   if (versions.length < 2 || store.shared) return null;
   const index = m.versionIndex || versions.findIndex((v) => v.id === m.id) + 1;
@@ -206,7 +206,7 @@ function Versions({ m }: { m: ChatMessage }) {
 }
 
 function FollowUps({ m, index }: { m: ChatMessage; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   if (store.shared || m.role !== "assistant" || m.status !== "completed" || index !== (store.active?.messages?.length || 0) - 1) return null;
   const questions = (m.followUps || []).map((q, i) => ({ q, i })).filter(({ q }) => typeof q === "string" && q.trim());
   const heading = <div className="mb-1.5 text-2xs font-medium tracking-wider text-muted-foreground uppercase">Suggested follow-ups</div>;
@@ -244,7 +244,7 @@ function FollowUps({ m, index }: { m: ChatMessage; index: number }) {
 
 /** Under a reply that waits for a free slot, or that the gateway gave up on: why, and a model to switch to. */
 function LoadNotice({ m, index }: { m: ChatMessage; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   if (m.role !== "assistant" || store.shared) return null;
   const waiting = isPendingMessage(m) && !String(m.content || "").trim() && !m.reasoningContent && !(m.activity || []).length;
   const asked = store.active?.messages?.[index - 1];
@@ -293,7 +293,7 @@ function MessageFiles({ m }: { m: ChatMessage }) {
 }
 
 function AnswerContent({ m, index }: { m: ChatMessage; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   // A reply that ends by asking questions has no answer text on purpose.
   const thinkingOnly =
     m.role === "assistant" &&
@@ -357,7 +357,7 @@ export function messageSignature(store: ChatStore, m: ChatMessage, index: number
 
 export const MessageView = memo(
   function MessageView({ m, index }: { m: ChatMessage; index: number; signature: string; version: number }) {
-    const store = useChat();
+    const store = useChatStore();
     const branding = useBranding();
     const { user } = useSession();
     const [detailsOpen, setDetailsOpen] = useState(() => store.detailsOpen.has(m.id || `pending-${index}`));

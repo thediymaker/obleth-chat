@@ -10,7 +10,7 @@ import { ArrowLeft, Check, ChevronRight, Clock, Download, Folder, GitBranch, Inf
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useChat, useChatStore } from "@/components/chat/chat-provider";
+import { useChat } from "@/components/chat/chat-provider";
 import { Eyebrow } from "@/components/app-shell/page";
 import { useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
@@ -83,7 +83,6 @@ function Pad({ children, className }: { children: React.ReactNode; className?: s
 
 export function CodePanel({ conversationId: id }: { conversationId: string }) {
   const store = useChat();
-  const handle = useChatStore();
   const query = useChatCode(id);
   const d = query.data;
   const [busy, setBusy] = useState("");
@@ -277,7 +276,7 @@ export function CodePanel({ conversationId: id }: { conversationId: string }) {
         <div className="grid gap-2 px-4">
           <div className="flex flex-wrap gap-1.5">
             {!!conflicts.length && (
-              <Button size="sm" disabled={!!busy} onClick={() => handle.send(resolvePrompt(conflicts))}>
+              <Button size="sm" disabled={!!busy} onClick={() => store.send(resolvePrompt(conflicts))}>
                 <Sparkles /> Resolve with the model
               </Button>
             )}

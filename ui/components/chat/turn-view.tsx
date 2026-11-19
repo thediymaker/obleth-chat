@@ -35,7 +35,7 @@ import {
 } from "@/lib/chat/turn";
 import type { ActivityEntry, Message } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
-import { useChatStore as useChat } from "./chat-provider";
+import { useChatStore } from "./chat-provider";
 import { NamedIcon } from "./icon";
 import { Markdown } from "./markdown-view";
 
@@ -69,7 +69,7 @@ function Lines({ s }: { s: ActivityEntry }) {
 }
 
 function FileButton({ path }: { path: string }) {
-  const store = useChat();
+  const store = useChatStore();
   return (
     <button type="button" className="font-mono text-[12px] underline-offset-2 hover:underline" onClick={() => store.workspace.openFile(store.route.id, path)}>
       {path}
@@ -79,7 +79,7 @@ function FileButton({ path }: { path: string }) {
 
 /** A step in words: what it did, the file it wrote, the host it browsed. */
 function StepText({ s }: { s: ActivityEntry }) {
-  const store = useChat();
+  const store = useChatStore();
   if (s.tool === "delegate") {
     const model = s.workerModel || s.agents?.[0]?.model,
       getting = s.status === "running" && !s.agents && s.detail;
@@ -131,7 +131,7 @@ const DECISIONS: ["allow" | "chat" | "deny", (s: ActivityEntry) => string, boole
   ["deny", () => "Deny", false],
 ];
 function Decisions({ s }: { s: ActivityEntry }) {
-  const store = useChat();
+  const store = useChatStore();
   const [busy, setBusy] = useState(false);
   return (
     <>
@@ -168,7 +168,7 @@ function Approval({ s }: { s: ActivityEntry }) {
  * attaches the device when the call waits for it in this tab.
  */
 function DeviceStep({ s }: { s: ActivityEntry }) {
-  const store = useChat();
+  const store = useChatStore();
   const [, bump] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -304,7 +304,7 @@ const Pre = ({ text, className }: { text: string; className?: string }) => (
 );
 
 function TraceRow({ r }: { r: Row }) {
-  const store = useChat();
+  const store = useChatStore();
   if (r.type === "thought")
     return (
       <li className="flex gap-2.5 py-1" data-f="thinking">
@@ -727,7 +727,7 @@ function Target({ s, draft }: { s?: ActivityEntry; draft: unknown }) {
 const RAIL_TONE: Record<string, string> = { done: "bg-success", now: "bg-blue animate-pulse", ask: "bg-amber animate-pulse", next: "bg-line-strong" };
 
 function RunCard({ m, work }: { m: Message; work: Work }) {
-  const store = useChat();
+  const store = useChatStore();
   const now = useNow(true);
   const run = runState(m, work, now);
   const id = m.id || "live";
@@ -841,7 +841,7 @@ function RunCard({ m, work }: { m: Message; work: Work }) {
 }
 
 function ResultCard({ m, s }: { m: Message; s: Stats }) {
-  const store = useChat();
+  const store = useChatStore();
   if (!s.files.length) return null;
   const stopped = m.status !== "completed";
   const id = store.route.id;
@@ -913,7 +913,7 @@ function ResultCard({ m, s }: { m: Message; s: Stats }) {
 }
 
 function Checkpoints({ s }: { s: Stats }) {
-  const store = useChat();
+  const store = useChatStore();
   if (!s.checkpoints.length) return null;
   const list = s.checkpoints.slice(-6);
   return (
@@ -970,7 +970,7 @@ export function TurnAfter({ m }: { m: Message }) {
 }
 
 export function SteerForm({ m }: { m: Message }) {
-  const store = useChat();
+  const store = useChatStore();
   const [text, setText] = useState(steerDraft.text);
   const [busy, setBusy] = useState(false);
   return (

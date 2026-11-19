@@ -17,7 +17,7 @@ import { NewProjectDialog } from "@/components/projects/project-dialog";
 import type { ChatStore } from "@/lib/chat/store";
 import type { ActivityEntry, Message } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
-import { useChatStore as useChat } from "./chat-provider";
+import { useChatStore } from "./chat-provider";
 import { APP_STEP_TYPES, appsAllowed, startApp } from "./offers";
 
 interface Question {
@@ -92,7 +92,7 @@ function Offer({ icon: Icon, label, title, children, busy, busyLabel, acceptLabe
 }
 
 export function QuestionCard({ m, index }: { m: Message; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   const entry = questionEntry(m);
   const { forms } = stateOf(store);
   const [, redraw] = useState(0);
@@ -265,7 +265,7 @@ function useOffer(store: ChatStore, key: string): [string | undefined, (value: s
 }
 
 export function WorkspaceOffer({ m, index }: { m: Message; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   const entry = offerOf(m);
   const key = keyOf(m, index);
   const [offer, setOffer] = useOffer(store, key);
@@ -320,7 +320,7 @@ export function WorkspaceOffer({ m, index }: { m: Message; index: number }) {
 
 /** The offer of a certified model when a chat on one that is not starts tool work. */
 export function ModelOffer({ m, index }: { m: Message; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   const entry = modelOf(m);
   const key = `${keyOf(m, index)}-model`;
   const [offer, setOffer] = useOffer(store, key);
@@ -387,7 +387,7 @@ export function ModelOffer({ m, index }: { m: Message; index: number }) {
 }
 
 export function ResearchOffer({ m, index }: { m: Message; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   const entry = suggestionOf(m);
   const [offer, setOffer] = useOffer(store, keyOf(m, index));
   if (!entry) return null;
@@ -444,7 +444,7 @@ export function ResearchOffer({ m, index }: { m: Message; index: number }) {
 }
 
 export function AppOffer({ m, index }: { m: Message; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   const chatProject = useChatProjectId(store.active?.id ?? null);
   const entry = appOf(m);
   const key = keyOf(m, index);
@@ -522,7 +522,7 @@ export function AppOffer({ m, index }: { m: Message; index: number }) {
 }
 
 export function ProjectOffer({ m, index }: { m: Message; index: number }) {
-  const store = useChat();
+  const store = useChatStore();
   const id = store.active?.id ?? null;
   const current = useChatProject(id);
   const entry = projectOf(m);

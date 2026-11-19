@@ -329,3 +329,21 @@ describe("a new chat", () => {
     expect(t.store.draft).toBe("");
   });
 });
+
+describe("the content signal", () => {
+  it("reaches content subscribers only, while emit reaches everyone", () => {
+    const store = new ChatStore({ api: { request: vi.fn(), send: vi.fn() } as never, toast: vi.fn(), go: vi.fn(), chats: { upsert: vi.fn(), remove: vi.fn(), refresh: vi.fn(), find: vi.fn() } });
+    const plain = vi.fn();
+    const content = vi.fn();
+    store.subscribe(plain);
+    store.subscribeContent(content);
+    const version = store.version;
+    for (let i = 0; i < 50; i++) store.paint();
+    expect(plain).not.toHaveBeenCalled();
+    expect(content).toHaveBeenCalledTimes(50);
+    expect(store.version).toBe(version);
+    store.emit();
+    expect(plain).toHaveBeenCalledTimes(1);
+    expect(content).toHaveBeenCalledTimes(51);
+  });
+});

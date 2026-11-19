@@ -215,7 +215,10 @@ export class ChatStore {
   private timers: ReturnType<typeof setInterval>[] = [];
   private disposed = false;
   private listeners = new Set<() => void>();
+  /** Listeners of the transcript's content alone: the message list and its scroller. */
+  private contentListeners = new Set<() => void>();
   version = 0;
+  contentVersion = 0;
   private paintCost = 0;
   /** Set when the next render should show the end of the conversation. */
   wantsEnd = false;
@@ -243,11 +246,29 @@ export class ChatStore {
     };
   };
   getVersion = () => this.version;
+  /** A change of anything: every subscriber, content ones included. */
   emit() {
     if (this.disposed) return;
     this.syncStreamingState();
     this.version++;
+    this.contentVersion++;
     this.listeners.forEach((l) => l());
+    this.contentListeners.forEach((l) => l());
+  }
+  subscribeContent = (listener: () => void) => {
+    this.contentListeners.add(listener);
+    return () => {
+      this.contentListeners.delete(listener);
+    };
+  };
+  getContentVersion = () => this.contentVersion;
+  /** More of a reply arrived: only the transcript repaints, not the composer, side
+   *  pane, status bar and dialogs around it. State changes (a reply starting or
+   *  ending, an error) still go through emit(). */
+  paint() {
+    if (this.disposed) return;
+    this.contentVersion++;
+    this.contentListeners.forEach((l) => l());
   }
   /** How long the last render of the conversation took, to pace repaints while streaming. */
   reportPaint(ms: number) {
@@ -1092,7 +1113,7 @@ export class ChatStore {
       if (paintTimer) clearTimeout(paintTimer);
       paintTimer = null;
       if (!this.operationIsCurrent(op) || this.active !== op.conversation || this.route.page !== "chat" || !op.assistant) return;
-      this.emit();
+      this.paint();
     };
     const readEvents = this.options.readEvents || readEventsDefault;
     try {

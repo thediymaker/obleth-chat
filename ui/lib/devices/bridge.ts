@@ -247,6 +247,12 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
   }
 }
 
+/** The device's state, as one string: equal while nothing the chat shows has moved. */
+function deviceState(device: SerialDevice): string {
+  const s = device.status();
+  return `${s.open}|${device.busy}|${device.lastError}|${s.total > 0}`;
+}
+
 export function createDevicesBridge(ctx: Context): DevicesBridge {
   const serial = ctx.serial === undefined ? (typeof navigator !== "undefined" ? (navigator as Navigator & { serial?: Serial }).serial ?? null : null) : ctx.serial;
   const fetchBytes = ctx.fetchBytes ?? fetchBytesDefault;
@@ -271,7 +277,18 @@ export function createDevicesBridge(ctx: Context): DevicesBridge {
     if (old) old.device.close().catch(() => {});
     const info = portInfo(port);
     const a: Attached = { id: connection.id, device: new SerialDevice(port), ...info, user: connection.user, secret: connection.secret };
-    a.device.subscribe(changed);
+    // Every chunk the device prints reaches the bridge's own listeners (the devices
+    // page counts them), but the chat re-renders only when the device's state moves:
+    // open, closed, lent to a flasher, an error, or its first output.
+    let state = deviceState(a.device);
+    a.device.subscribe(() => {
+      for (const l of listeners) l();
+      const now = deviceState(a.device);
+      if (now !== state) {
+        state = now;
+        ctx.changed();
+      }
+    });
     attached.set(connection.id, a);
     changed();
     for (const w of [...waiting.values()]) if (w.connectionId === connection.id) void run(w);

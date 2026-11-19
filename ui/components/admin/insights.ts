@@ -2,8 +2,9 @@
 // keeps after a chat's first reply. Nothing here shows a chat, a message or a person.
 
 import { titleCase } from "@/components/manage/kit";
+import { PERIOD_DAYS } from "@/lib/format";
 
-export const INSIGHT_PERIODS = [7, 28, 90] as const;
+export const INSIGHT_PERIODS = [7, PERIOD_DAYS, 90] as const;
 /** Kinds of use, in a fixed order, each with its project color. */
 export const KINDS = [
   ["research", "Research", "green"],
@@ -52,15 +53,8 @@ export const FLAGS = [
 ] as const;
 
 export const nameOf = (group: string, id: string | null | undefined) => NAMES[group]?.[id || ""] || titleCase(id || "unknown");
-export const num = (n: number | null | undefined) => Number(n || 0).toLocaleString();
-/** 950, 48K, 1.3M. */
-export const tokens = (value: number | null | undefined) => {
-  const n = Number(value || 0);
-  return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}K` : n.toLocaleString();
-};
 export const share = (n: number | null | undefined, total: number | null | undefined) => (total ? Number(n || 0) / Number(total) : 0);
 export const percent = (x: number) => (x > 0 && x < 0.005 ? "<1%" : `${Math.round(x * 100)}%`);
-export const plural = (n: number | null | undefined, one: string, many: string) => `${num(n)} ${Number(n) === 1 ? one : many}`;
 
 export type Change = null | { same: true; word: string } | { same: false; up: boolean; amount: string; word: string };
 /** The change from the period before; null when there is nothing to compare. */

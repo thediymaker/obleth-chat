@@ -12,7 +12,7 @@ import { EmptyState } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { FormActions, FormDialog, Note, useConfirm } from "@/components/manage/kit";
 import { api } from "@/lib/api";
-import { when } from "@/lib/format";
+import { when, bytes } from "@/lib/format";
 
 export interface Attachment {
   id: string;
@@ -23,8 +23,6 @@ export interface Attachment {
   searched?: boolean;
   createdAt?: string;
 }
-const sizeLabel = (n: number) =>
-  n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(1)} GB`;
 const DOCUMENTS: Record<string, [string, typeof File, string]> = { pdf: ["PDF", FileText, "page"], docx: ["Word", FileText, ""], pptx: ["PowerPoint", Monitor, "slide"], xlsx: ["Excel", Sheet, "sheet"] };
 const extension = (name: string) => (name.match(/\.([^.]+)$/)?.[1] || "").toLowerCase();
 const ARCHIVES = [
@@ -45,13 +43,13 @@ export function describeFile(a: Attachment): { Icon: typeof File; detail: string
   if (a.kind === "file") {
     const type = ARCHIVES.find(([end]) => a.name.toLowerCase().endsWith(end!))?.[1];
     const entries = type && a.parts ? `${a.parts.toLocaleString()} file${a.parts === 1 ? "" : "s"}` : "";
-    return { Icon: type ? Archive : File, detail: [type || extension(a.name).toUpperCase(), entries, sizeLabel(a.size)].filter(Boolean).join(" · ") };
+    return { Icon: type ? Archive : File, detail: [type || extension(a.name).toUpperCase(), entries, bytes(a.size)].filter(Boolean).join(" · ") };
   }
   const doc = a.kind === "document" ? DOCUMENTS[extension(a.name)] : undefined;
-  if (!doc) return { Icon: a.kind === "image" ? ImageIcon : File, detail: sizeLabel(a.size) };
+  if (!doc) return { Icon: a.kind === "image" ? ImageIcon : File, detail: bytes(a.size) };
   const [type, Icon, unit] = doc;
   const parts = unit && a.parts ? `${a.parts.toLocaleString()} ${unit}${a.parts === 1 ? "" : "s"}` : "";
-  return { Icon, detail: [type, parts, sizeLabel(a.size)].filter(Boolean).join(" · ") };
+  return { Icon, detail: [type, parts, bytes(a.size)].filter(Boolean).join(" · ") };
 }
 
 const filesKey = ["settings", "files"] as const;

@@ -22,27 +22,9 @@ import { useFeature } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { DiffStat, DiffView } from "./diff-view";
 import { ExportDialog, ImportDialog, codeKeys } from "./export-dialog";
-import {
-  type BlameGroup,
-  type ChangedFile,
-  type ChatRef,
-  type CodeOverview,
-  type CodeRoute,
-  type CommitDetail,
-  type CommitEntry,
-  type CompareResult,
-  type LineVersion,
-  ago,
-  bytes,
-  codeHref,
-  codeRoute,
-  count,
-  initial,
-  projectCodePath,
-  short,
-  undoInChatPrompt,
-} from "./model";
+import { type BlameGroup, type ChangedFile, type ChatRef, type CodeOverview, type CodeRoute, type CommitDetail, type CommitEntry, type CompareResult, type LineVersion, codeHref, codeRoute, initial, projectCodePath, short, undoInChatPrompt } from "./model";
 import { useStartInProject } from "./start-chat";
+import { ago, bytes, count } from "@/lib/format";
 
 const card = "rounded-lg border bg-card p-4";
 const enc = encodeURIComponent;
@@ -80,7 +62,7 @@ function CommitRow({ projectId, e, selected = "" }: { projectId: string; e: Comm
         <span className="min-w-0 flex-1">
           <span className="block truncate text-md">{e.subject}</span>
           <small className="block truncate text-xs text-muted-foreground">
-            {e.author} · {ago(e.time)}
+            {e.author} · {ago(e.time, Date.now(), { seconds: true })}
             {e.chat ? ` · ${e.chat.readable ? e.chat.title || "chat" : `${e.chat.ownerName}’s chat`}` : ""}
           </small>
         </span>
@@ -509,7 +491,7 @@ function Blame({ projectId, path }: { projectId: string; path: string }) {
                   </Link>
                   <small className="text-xs text-muted-foreground">
                     {" "}
-                    · {e.author} · {ago(e.time)}
+                    · {e.author} · {ago(e.time, Date.now(), { seconds: true })}
                     {e.chat && (
                       <>
                         {" · "}
@@ -548,7 +530,7 @@ function Blame({ projectId, path }: { projectId: string; path: string }) {
                         {g.subject}
                       </Link>
                       <small className="block truncate text-xs text-muted-foreground">
-                        {g.author} · {ago(g.time)}
+                        {g.author} · {ago(g.time, Date.now(), { seconds: true })}
                         {g.chat && (
                           <>
                             {" · "}

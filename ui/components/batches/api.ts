@@ -6,6 +6,7 @@
 import { type QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useSignedIn } from "@/lib/queries";
+import { durationWords } from "@/lib/format";
 
 export type BatchStatus = "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled";
 
@@ -133,17 +134,6 @@ export function percentOf(b: Pick<Batch, "completed" | "failed" | "total">): num
 }
 
 /** A length of time in words: "45 seconds", "12 minutes", "3 hours 5 minutes", "2 days". */
-export function duration(secs: number): string {
-  const s = Math.max(0, Math.round(secs));
-  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
-  if (s < 60) return plural(s, "second");
-  const m = Math.round(s / 60);
-  if (m < 60) return plural(m, "minute");
-  const h = Math.floor(m / 60);
-  if (h < 24) return m % 60 ? `${plural(h, "hour")} ${plural(m % 60, "minute")}` : plural(h, "hour");
-  const d = Math.floor(h / 24);
-  return h % 24 ? `${plural(d, "day")} ${plural(h % 24, "hour")}` : plural(d, "day");
-}
 
 function secsSince(iso: string | null | undefined, now: number): number | null {
   if (!iso) return null;
@@ -174,11 +164,11 @@ export function stateOf(b: Batch, now: number): { label: string; tone: Tone; det
         return {
           label: "Waiting for the model",
           tone: "waiting",
-          detail: `It's busy with people chatting, and batches wait their turn.${idle != null ? ` Nothing has finished in ${duration(idle)}.` : ""}`,
+          detail: `It's busy with people chatting, and batches wait their turn.${idle != null ? ` Nothing has finished in ${durationWords(idle)}.` : ""}`,
         };
       }
       const eta = etaSecs(b, now);
-      return { label: "Running", tone: "running", detail: eta != null ? `About ${duration(eta)} left at this pace` : "Starting" };
+      return { label: "Running", tone: "running", detail: eta != null ? `About ${durationWords(eta)} left at this pace` : "Starting" };
     }
     case "finalizing":
       return { label: "Finishing up", tone: "running", detail: null };

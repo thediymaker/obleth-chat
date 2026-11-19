@@ -53,7 +53,6 @@ export const kindLabel = (item: Pick<SavedItem, "kind" | "language">) => {
   const label = kindOf(item.kind)[2];
   return item.kind === "code" && item.language ? `${label} · ${item.language}` : label;
 };
-export const imageSize = (n: number) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`);
 export const host = (url: string) => {
   try {
     return new URL(url).host;

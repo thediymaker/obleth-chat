@@ -9,6 +9,7 @@ import { INPUT, Legend, OUTPUT, TimeBars } from "@/components/manage/bar-chart";
 import { Eyebrow } from "@/components/app-shell/page";
 import { Meter, Note, Quota, Section, TableWrap, Tiles, td, th } from "@/components/manage/kit";
 import type { Model } from "@/lib/queries";
+import { compact, num } from "@/lib/format";
 
 export interface UsageCounts {
   requests?: number;
@@ -30,11 +31,6 @@ export interface OwnUsage {
 }
 
 /** 950, 9.5k, 48k, 1.3M. */
-export const short = (value: number | null | undefined) => {
-  const n = Number(value) || 0;
-  return n < 1000 ? String(n) : n < 1e4 ? `${(n / 1000).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`;
-};
-const num = (n: number | null | undefined) => Number(n || 0).toLocaleString();
 
 /** Every day of the period, ending today (UTC), with zeros where nothing was used. */
 export function usageDays(daily: OwnUsage["daily"], days: number, today = new Date()) {
@@ -83,8 +79,8 @@ export function UsageCard({ usage, models }: { usage: OwnUsage; models: Model[] 
       <Tiles
         tiles={[
           { label: "Requests", value: num(totals.requests) },
-          { label: "Tokens", value: short(totals.totalTokens), note: `${short(totals.promptTokens)} in · ${short(totals.completionTokens)} out` },
-          { label: "Today", value: num(today.requests), note: `${short(today.totalTokens)} tokens` },
+          { label: "Tokens", value: compact(totals.totalTokens), note: `${compact(totals.promptTokens)} in · ${compact(totals.completionTokens)} out` },
+          { label: "Today", value: num(today.requests), note: `${compact(today.totalTokens)} tokens` },
           { label: "Errors", value: num(totals.errors) },
         ]}
       />
@@ -106,10 +102,10 @@ export function UsageCard({ usage, models }: { usage: OwnUsage; models: Model[] 
               { key: "input", name: "Input", color: INPUT },
               { key: "output", name: "Output", color: OUTPUT },
             ]}
-            format={short}
+            format={compact}
             height={170}
-            label={`Tokens per day over the last ${days} days: ${short(total)} in all`}
-            tip={(d) => `${d.label}: ${d.requests} request${d.requests === 1 ? "" : "s"} · ${short(d.input)} in · ${short(d.output)} out`}
+            label={`Tokens per day over the last ${days} days: ${compact(total)} in all`}
+            tip={(d) => `${d.label}: ${d.requests} request${d.requests === 1 ? "" : "s"} · ${compact(d.input)} in · ${compact(d.output)} out`}
           />
         </div>
         <div className="grid content-start gap-3">
@@ -125,7 +121,7 @@ export function UsageCard({ usage, models }: { usage: OwnUsage; models: Model[] 
                         {name}
                       </span>
                       <span className="shrink-0 text-muted-foreground tabular-nums">
-                        {short(r.totalTokens)} · {num(r.requests)} req
+                        {compact(r.totalTokens)} · {num(r.requests)} req
                       </span>
                     </div>
                     <Meter value={Number(r.totalTokens) || 0} max={top} label={`${name} tokens`} />

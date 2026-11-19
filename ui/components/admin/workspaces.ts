@@ -2,19 +2,15 @@
 // a period their pod hours, the busiest moment against the slots, and starts that failed or
 // were turned away. Shows who and when, never what ran or which pages a browser had open.
 
-import { when } from "@/lib/format";
+import { when, num, count, PERIOD_DAYS } from "@/lib/format";
 
 export const WORKSPACE_PERIODS = [
   [1, "Today"],
   [7, "7 days"],
-  [28, "28 days"],
+  [PERIOD_DAYS, "30 days"],
   [90, "90 days"],
 ] as const;
 
-export const bytes = (value: number | null | undefined) => {
-  const n = Number(value || 0);
-  return n >= 2 ** 30 ? `${(n / 2 ** 30).toFixed(1)} GiB` : n >= 2 ** 20 ? `${Math.round(n / 2 ** 20)} MiB` : n >= 1024 ? `${Math.round(n / 1024)} KiB` : `${n} B`;
-};
 export const cores = (m: number | null | undefined) => (m == null ? "—" : Number(m) >= 1000 ? `${(Number(m) / 1000).toFixed(1)} cores` : `${Math.round(Number(m))}m`);
 export const hours = (value: number | null | undefined) => {
   const h = Number(value || 0);
@@ -89,8 +85,6 @@ export const pointLabel = (at: string, days: number) => {
   const d = new Date(at);
   return days === 1 ? `${String(d.getUTCHours()).padStart(2, "0")}:00` : d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
 };
-const count = (n: number | null | undefined) => Number(n || 0).toLocaleString();
-const plural = (n: number | null | undefined, one: string, many: string) => `${count(n)} ${Number(n) === 1 ? one : many}`;
 /** Everything about one bar of the period chart, in a sentence. */
 export const pointTip = (p: HistoryPoint, days: number) =>
-  `${pointLabel(p.at, days)}: ${hours(p.workspaceHours)} of workspaces, ${hours(p.browserHours)} of browsers, at most ${plural(p.peak, "pod", "pods")} at once, ${plural(p.starts, "start", "starts")}${p.failed ? `, ${count(p.failed)} failed` : ""}${p.refused ? `, ${count(p.refused)} turned away` : ""}`;
+  `${pointLabel(p.at, days)}: ${hours(p.workspaceHours)} of workspaces, ${hours(p.browserHours)} of browsers, at most ${count(p.peak, "pod", "pods")} at once, ${count(p.starts, "start", "starts")}${p.failed ? `, ${num(p.failed)} failed` : ""}${p.refused ? `, ${num(p.refused)} turned away` : ""}`;

@@ -22,7 +22,8 @@ import { DetailRow, FormActions, FormDialog, Pill } from "@/components/manage/ki
 import { api } from "@/lib/api";
 import { useCapabilities } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { KINDS, kindOf, plural, type Connection } from "./connections";
+import { KINDS, kindOf, type Connection } from "./connections";
+import { count } from "@/lib/format";
 
 export interface ChatTool {
   id: string;
@@ -159,7 +160,7 @@ export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | 
                 <h3 className="flex items-center gap-1.5 text-md font-medium">
                   {c.name} {c.shared && <Pill>Shared</Pill>}
                 </h3>
-                <p className="text-sm text-muted-foreground">{plural(c.tools, "tool")}</p>
+                <p className="text-sm text-muted-foreground">{count(c.tools, "tool")}</p>
               </div>
               <Switch checked={c.on} onCheckedChange={() => switchOne(c)} aria-label={`Use ${c.name} in this chat`} />
             </div>
@@ -226,7 +227,7 @@ export function ToolsContextSection({ chatId }: { chatId: string | null }) {
       {auto && <DetailRow label="Auto mode">Runs without asking</DetailRow>}
       {list.map((c) => (
         <DetailRow key={c.id} label={c.name}>
-          {c.on ? plural(c.tools, "tool") : "Off"}
+          {c.on ? count(c.tools, "tool") : "Off"}
         </DetailRow>
       ))}
       <Button size="sm" variant="outline" className="mt-1 w-fit" onClick={() => setOpen(true)}>

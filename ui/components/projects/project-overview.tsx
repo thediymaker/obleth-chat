@@ -13,12 +13,12 @@ import { kindLabel, kindOf, refreshSaved, savedPath } from "@/components/library
 import { useLibraryDialogs } from "@/components/library/saved-dialogs";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import { count, initials, when } from "@/lib/format";
+import { count, initials, when, bytes } from "@/lib/format";
 import { keys, useFeature } from "@/lib/queries";
 import { useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import type { SavedSummary } from "./api";
-import { ACCEPT, DEFAULT_MAX_FILE, refreshKnowledge, size, uploadDocument, useCollections } from "@/components/knowledge/api";
+import { ACCEPT, DEFAULT_MAX_FILE, refreshKnowledge, uploadDocument, useCollections } from "@/components/knowledge/api";
 import { CollectionsPicker, NewProjectCollection } from "./collections-picker";
 import { messageOf } from "./form-field";
 import { useProjectFrame } from "./project-frame";
@@ -251,7 +251,7 @@ function AddDocuments({ collection, projectId, maxFileBytes }: { collection: { i
     let added = 0;
     for (const file of files) {
       if (file.size > maxFileBytes) {
-        toast(`${file.name} is larger than ${size(maxFileBytes)}.`);
+        toast(`${file.name} is larger than ${bytes(maxFileBytes)}.`);
         continue;
       }
       try {

@@ -16,9 +16,9 @@ import { clock, effortLabel, NUDGE } from "@/lib/chat/composer";
 import { isPendingMessage, responseVersion } from "@/lib/chat/conversation-state";
 import { ratable } from "@/lib/chat/feedback";
 import type { ChatStore } from "@/lib/chat/store";
-import { appliesWork, duration, gist, isLive, latest } from "@/lib/chat/turn";
+import { appliesWork, gist, isLive, latest } from "@/lib/chat/turn";
 import type { Message as ChatMessage } from "@/lib/chat/types";
-import { initials } from "@/lib/format";
+import { initials, num, when, count, duration } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "./chat-provider";
@@ -116,7 +116,7 @@ function responseStatus(store: ChatStore, m: ChatMessage) {
             : "Waiting for the model…";
   const status = m.status || "completed",
     model = m.settings?.resolvedModel || m.settings?.model;
-  const usage = m.usage?.total_tokens ? `${Number(m.usage.total_tokens).toLocaleString()} tokens` : "";
+  const usage = m.usage?.total_tokens ? count(m.usage.total_tokens, "token") : "";
   const label = ({ completed: "", interrupted: "Stopped", cancelled: "Stopped", error: "Response failed" } as Record<string, string>)[status] ?? status;
   const chosen = model && model !== "auto" ? `${m.settings?.auto ? "Auto · " : ""}${store.modelName(model)}` : "";
   return [label, chosen, usage].filter(Boolean).join(" · ");
@@ -127,7 +127,7 @@ export function detailCells(m: ChatMessage): [string, string, boolean?][] {
   if (m.role !== "assistant" || (!m.settings && !m.createdAt)) return [];
   const p = m.settings || {},
     usage = m.usage || {},
-    count = (value: unknown) => (value != null ? Number(value).toLocaleString() : null);
+    count = (value: unknown) => (value != null ? num(Number(value)) : null);
   // Speed is output tokens over the time spent writing them; energy and CO₂ come from
   // the gateway when it measures them.
   const writing = Number(usage.generation_ms) || 0,
@@ -152,7 +152,7 @@ export function detailCells(m: ChatMessage): [string, string, boolean?][] {
     ["Energy", figure(usage.energy_wh, "Wh", 1000, "kWh")],
     ["CO₂", figure(usage.co2_g, "g", 1000, "kg")],
     ["Finish", m.finishReason],
-    ["Created", m.createdAt && new Date(m.createdAt).toLocaleString(), true],
+    ["Created", m.createdAt && when(m.createdAt), true],
     ["Request ID", m.requestId, true],
   ];
   return cells.filter(([, v]) => v != null && v !== "").map(([k, v, wide]) => [k, String(v), wide]);

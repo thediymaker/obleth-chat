@@ -12,10 +12,11 @@ import { KnowledgeContextSection } from "@/components/knowledge/chat-knowledge";
 import { ProjectContextSection } from "@/components/projects/chat-project";
 import { Button } from "@/components/ui/button";
 import { WorkspacePanel } from "@/components/workspace/workspace-panel";
-import { effortLabel, tokens } from "@/lib/chat/composer";
+import { effortLabel } from "@/lib/chat/composer";
 import { contextUse } from "@/lib/chat/context";
 import { cn } from "@/lib/utils";
 import { useChat } from "./chat-provider";
+import { compact } from "@/lib/format";
 
 const TABS: Record<string, [string, typeof Play]> = {
   preview: ["Preview", Play],
@@ -65,18 +66,18 @@ export function ChatDetails() {
         {use.used || use.unknown ? (
           <>
             <div className="mb-2.5 flex items-baseline gap-2">
-              <strong className="text-[26px] font-medium tabular-nums">{use.unknown ? "—" : tokens(use.used)}</strong>
-              <span className="text-sm text-muted-foreground">{use.windowSize ? `of ${tokens(use.windowSize)} tokens` : "tokens"}</span>
+              <strong className="text-[26px] font-medium tabular-nums">{use.unknown ? "—" : compact(use.used)}</strong>
+              <span className="text-sm text-muted-foreground">{use.windowSize ? `of ${compact(use.windowSize)} tokens` : "tokens"}</span>
             </div>
             {use.windowSize > 0 && !use.unknown && (
               <div className="mt-1.5 mb-1.5 h-1 overflow-hidden rounded bg-control" role="meter" aria-label="Context used" aria-valuemin={0} aria-valuemax={use.windowSize} aria-valuenow={Math.min(use.used, use.windowSize)}>
                 <div className={cn("h-full", use.share > 0.9 ? "bg-destructive" : use.share > 0.75 ? "bg-amber" : "bg-text-2")} style={{ width: `${use.share * 100}%` }} />
               </div>
             )}
-            <Row label="Messages">about {tokens(use.messages)}</Row>
-            {!use.unknown && <Row label="Tools, instructions and pages">about {tokens(use.rest)}</Row>}
+            <Row label="Messages">about {compact(use.messages)}</Row>
+            {!use.unknown && <Row label="Tools, instructions and pages">about {compact(use.rest)}</Row>}
             <Row label="Last reply">
-              {tokens(use.output)} out{use.steps > 1 ? ` · ${use.steps} steps` : ""}
+              {compact(use.output)} out{use.steps > 1 ? ` · ${use.steps} steps` : ""}
             </Row>
             {use.unknown && <p className={NOTE}>The size shows after the next reply.</p>}
           </>

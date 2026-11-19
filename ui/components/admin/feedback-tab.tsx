@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Chips, Note, Pill, Section, TableWrap, td, th } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { keys } from "@/lib/queries";
-import { when } from "@/lib/format";
+import { when, count, num } from "@/lib/format";
 import { useKept } from "./state";
 
 /** Why a reply was not good; the keys are what the server stores (feedback::REASONS). */
@@ -60,8 +60,8 @@ export function FeedbackView({ data: f, days }: { data: FeedbackSummary; days: n
                 <td className={td}>
                   <strong className="font-medium">{m.model}</strong>
                 </td>
-                <td className={td}>{Number(m.up).toLocaleString()}</td>
-                <td className={td}>{Number(m.down).toLocaleString()}</td>
+                <td className={td}>{num(m.up)}</td>
+                <td className={td}>{num(m.down)}</td>
                 <td className={td}>{Math.round(m.upShare * 100)}%</td>
               </tr>
             ))}
@@ -75,7 +75,7 @@ export function FeedbackView({ data: f, days }: { data: FeedbackSummary; days: n
               {f.reasons.map((r) => (
                 <li key={r.reason} className="flex justify-between gap-3 text-sm">
                   <span>{reasonLabel(r.reason)}</span>
-                  <strong className="font-medium tabular-nums">{Number(r.count).toLocaleString()}</strong>
+                  <strong className="font-medium tabular-nums">{num(r.count)}</strong>
                 </li>
               ))}
             </ul>
@@ -211,7 +211,7 @@ function SentFeedbackSection() {
       </div>
       {open && (
         <Note>
-          Open: {open.problem.toLocaleString()} {open.problem === 1 ? "problem" : "problems"}, {open.idea.toLocaleString()} {open.idea === 1 ? "idea" : "ideas"}, {open.other.toLocaleString()} other. A sender is named only when they said you may contact them.
+          Open: {count(open.problem, "problem")}, {count(open.idea, "idea")}, {num(open.other)} other. A sender is named only when they said you may contact them.
         </Note>
       )}
       <ErrorBox error={sent.error} onRetry={() => sent.refetch()} />

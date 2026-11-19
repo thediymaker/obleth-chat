@@ -23,7 +23,8 @@ import { DiffStat, DiffView } from "./diff-view";
 import { SETTLE_MS, codeEvents } from "./events";
 import { ExportDialog } from "./export-dialog";
 import { MoveToProjectDialog } from "@/components/projects/chat-project";
-import { type ChatCode, type ConflictRegion, LETTER, ago, chatCodePath, codeHref, conflictRegions, count, resolvePrompt, short, syncSays } from "./model";
+import { type ChatCode, type ConflictRegion, LETTER, chatCodePath, codeHref, conflictRegions, resolvePrompt, short, syncSays } from "./model";
+import { ago, count } from "@/lib/format";
 
 export const chatCodeKey = (id: string) => ["chat-code", id] as const;
 
@@ -505,7 +506,7 @@ export function CodePanel({ conversationId: id }: { conversationId: string }) {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-md">{e.subject}</span>
                     <small className="block text-xs text-muted-foreground">
-                      {e.author} · {ago(e.time)}
+                      {e.author} · {ago(e.time, Date.now(), { seconds: true })}
                       {i < ahead ? " · not synced" : ""}
                     </small>
                   </span>

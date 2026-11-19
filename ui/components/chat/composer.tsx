@@ -16,7 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { WorkspaceToggle } from "@/components/workspace/workspace-toggle";
 import { describe } from "@/lib/chat/attachments";
-import { pastesAsFile, PROMPT_LIMIT, promptCount, tokens } from "@/lib/chat/composer";
+import { pastesAsFile, PROMPT_LIMIT, promptCount } from "@/lib/chat/composer";
 import { contextUse } from "@/lib/chat/context";
 import { temporaryNoteText } from "@/lib/chat/temporary";
 import { cn } from "@/lib/utils";
@@ -24,6 +24,7 @@ import { useChat } from "./chat-provider";
 import { NamedIcon } from "./icon";
 import { ModelPicker } from "./model-picker";
 import { ToolsButton } from "@/components/connections/chat-tools";
+import { compact } from "@/lib/format";
 
 const composerFiles = (list?: FileList | null) => [...(list || [])].filter((file) => file.size > 0);
 
@@ -74,7 +75,7 @@ function SendButton() {
   const op = store.currentOperation();
   const round = 2 * Math.PI * 17,
     level = use.share > 0.9 ? "text-destructive-foreground" : use.share > 0.75 ? "text-amber" : "text-foreground";
-  const amount = use.unknown ? "—" : use.windowSize ? `${tokens(use.used)} / ${tokens(use.windowSize)}` : use.used ? tokens(use.used) : "—";
+  const amount = use.unknown ? "—" : use.windowSize ? `${compact(use.used)} / ${compact(use.windowSize)}` : use.used ? compact(use.used) : "—";
   const stopping = store.streaming;
   const disabled = stopping ? !!op?.stopRequested : store.switchingVersion || !store.available || store.attachments.busy();
   return (
@@ -112,18 +113,18 @@ function SendButton() {
           <div className="mt-2 grid gap-1 text-muted-foreground">
             <div className="flex justify-between">
               <span>Messages</span>
-              <span>about {tokens(use.messages)}</span>
+              <span>about {compact(use.messages)}</span>
             </div>
             {!use.unknown && (
               <div className="flex justify-between">
                 <span>Tools, instructions and pages</span>
-                <span>about {tokens(use.rest)}</span>
+                <span>about {compact(use.rest)}</span>
               </div>
             )}
             <div className="flex justify-between">
               <span>Last reply</span>
               <span>
-                {tokens(use.output)} out{use.steps > 1 ? ` · ${use.steps} steps` : ""}
+                {compact(use.output)} out{use.steps > 1 ? ` · ${use.steps} steps` : ""}
               </span>
             </div>
             {use.unknown ? <p>The size shows after the next reply.</p> : !use.windowSize && <p>This model does not report its window.</p>}

@@ -13,11 +13,11 @@ import { Button } from "@/components/ui/button";
 import { Legend, TimeBars } from "@/components/manage/bar-chart";
 import { CheckField, Chips, FormActions, FormDialog, FormError, Meter, Note, Pill, Section, TableWrap, TextField, Tiles, td, th, useSubmit } from "@/components/manage/kit";
 import { api } from "@/lib/api";
-import { when } from "@/lib/format";
+import { when, num, compact, PERIOD_DAYS } from "@/lib/format";
 import { useModels } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { ChangeNote, GroupPicker, KindBar, KindLegend } from "./parts";
-import { FLAGS, INSIGHT_PERIODS, KINDS, change, kindColor, nameOf, num, outlier, percent, share, tokens, type Insights, type InsightsSettings, type KindCount, type Workstream } from "./insights";
+import { FLAGS, INSIGHT_PERIODS, KINDS, change, kindColor, nameOf, outlier, percent, share, type Insights, type InsightsSettings, type KindCount, type Workstream } from "./insights";
 import { useKept } from "./state";
 
 export interface InsightsState {
@@ -164,7 +164,7 @@ function Detail({ stream, all, onShowAll }: { stream: Workstream; all: boolean; 
                 <td className={td}>{nameOf("output", r.output)}</td>
                 <td className={td}>{nameOf("field", r.field)}</td>
                 <td className={td}>{num(r.turns)}</td>
-                <td className={td}>{tokens(r.tokens)}</td>
+                <td className={td}>{compact(r.tokens)}</td>
               </tr>
             ))}
           </tbody>
@@ -220,7 +220,7 @@ function Workstreams({ data, state, on }: { data: Insights; state: InsightsState
       {failed}
       {big > 0 && (
         <p className="rounded-md border border-amber/40 bg-amber/10 px-3 py-2 text-sm text-amber">
-          One chat used {percent(big)} of this period’s tokens ({tokens(data.largestChat)}), so token shares mostly show that one chat. Compare by chats instead.
+          One chat used {percent(big)} of this period’s tokens ({compact(data.largestChat)}), so token shares mostly show that one chat. Compare by chats instead.
         </p>
       )}
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -264,7 +264,7 @@ function Workstreams({ data, state, on }: { data: Insights; state: InsightsState
                   </span>
                   <Meter value={tk} max={max} tone="gold" className="h-2.5" />
                   <span>
-                    <strong className="font-medium">{percent(tk)}</strong> {tokens(x.tokens)} tokens
+                    <strong className="font-medium">{percent(tk)}</strong> {compact(x.tokens)} tokens
                   </span>
                 </span>
               </button>
@@ -332,7 +332,7 @@ export function InsightsView({ data, state, on }: { data: Insights; state: Insig
         tiles={[
           { label: "Chats", value: num(data.sessions), note: <ChangeNote change={change(data.sessions, p.sessions, days)} /> },
           { label: "People", value: num(data.people), note: <ChangeNote change={change(data.people, p.people, days)} /> },
-          { label: "Tokens", value: tokens(data.tokens), note: big ? `One chat holds ${percent(big)}` : <ChangeNote change={change(data.tokens, p.tokens, days)} /> },
+          { label: "Tokens", value: compact(data.tokens), note: big ? `One chat holds ${percent(big)}` : <ChangeNote change={change(data.tokens, p.tokens, days)} /> },
           { label: "Research and learning", value: percent(share(studied, data.sessions)), note: `${num(studied)} chats` },
           { label: "Flags", value: num(flagged), note: flagged ? "Counted only, see below" : "Nothing flagged" },
         ]}
@@ -420,7 +420,7 @@ export function InsightsSettingsDialog({ settings, models, onClose, onSaved }: {
 export function InsightsTab() {
   const queries = useQueryClient();
   const { data: models = [] } = useModels();
-  const [days, setDays] = useKept("insights.days", 28);
+  const [days, setDays] = useKept("insights.days", PERIOD_DAYS);
   const [group, setGroup] = useKept("insights.group", "");
   const [sort, setSort] = useKept<"sessions" | "tokens">("insights.sort", "sessions");
   const [open, setOpen] = useState(new Set<string>());

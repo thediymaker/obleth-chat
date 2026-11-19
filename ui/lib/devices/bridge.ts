@@ -5,8 +5,9 @@
 // store (store.devices).
 
 import type { StreamEvent } from "@/lib/api";
-import { withFlasher, formatBytes, type FlashPart } from "./flashers";
+import { withFlasher, type FlashPart } from "./flashers";
 import { hexBytes, portInfo, SerialDevice, type OpenOptions } from "./serial";
+import { bytes } from "@/lib/format";
 
 export interface DeviceRequest {
   tool: string;
@@ -233,7 +234,7 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
         parts.push({ offset, path, data });
       }
       const total = parts.reduce((n, p) => n + p.data.length, 0);
-      progress(`Connecting to the chip (${formatBytes(total)} to write)…`);
+      progress(`Connecting to the chip (${bytes(total)} to write)…`);
       const summary = await device.lend((port) => withFlasher(a.vendorId, (f) => f.flash(port, parts, { eraseAll: !!args.eraseAll, baudRate: typeof args.baudRate === "number" ? args.baudRate : undefined }, progress, logLine)));
       return { ok: true, output: summary, detail: [summary, ...log.slice(-12)].join("\n") };
     }

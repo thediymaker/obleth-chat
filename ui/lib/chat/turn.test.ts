@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
-import { changeOf, duration, gist, latest, runState, stats, steerExample, steerPlaceholder, workOf } from "./turn";
+import { duration } from "@/lib/format";
+import { changeOf, gist, latest, runState, stats, steerExample, steerPlaceholder, workOf } from "./turn";
 import type { Message } from "./types";
 
 const t = (s: number) => new Date(Date.UTC(2026, 9, 19, 12, 0, s)).toISOString();

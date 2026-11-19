@@ -13,11 +13,11 @@ import { Button } from "@/components/ui/button";
 import { CheckField, Field, FormActions, FormDialog, FormError, Note, Pill, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { when } from "@/lib/format";
+import { when, count } from "@/lib/format";
 import { useCapabilities } from "@/lib/queries";
 import { useSession, useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
-import { KINDS, TOKEN_HELP, addedMessage, connectionBody, connectionsKey, credentialBody, kindOf, native, plural, type Connection, type ConnectionKind } from "./connections";
+import { KINDS, TOKEN_HELP, addedMessage, connectionBody, connectionsKey, credentialBody, kindOf, native, type Connection, type ConnectionKind } from "./connections";
 
 type Dialog = null | { type: "pick"; kinds: ConnectionKind[] } | { type: "edit"; connection: Connection | null; kind: ConnectionKind } | { type: "credential"; connection: Connection };
 
@@ -59,7 +59,7 @@ export function useConnectionManager({ onChange }: { onChange?: (item: Connectio
       run(async () => {
         const item = await api.request<Connection>(`${path(c.id)}/refresh`, { method: "POST" });
         replace(item);
-        toast(native(item) ? `${item.name} is reachable` : `${plural(item.tools.length, "tool")} found`);
+        toast(native(item) ? `${item.name} is reachable` : `${count(item.tools.length, "tool")} found`);
       }),
     remove: (c: Connection) =>
       confirm.ask({
@@ -407,7 +407,7 @@ function Tools({ c }: { c: Connection }) {
   return (
     <div className="grid gap-2">
       <button type="button" aria-expanded={open} onClick={() => setOpen((o) => !o)} className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-        <ChevronDown className={cn("size-3.5", open && "rotate-180")} /> {plural(list.length, "tool")}
+        <ChevronDown className={cn("size-3.5", open && "rotate-180")} /> {count(list.length, "tool")}
       </button>
       {open && (
         <ul className="grid gap-2 border-l pl-3">

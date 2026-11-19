@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ago, codeHref, codeRoute, conflictRegions, diffRows, resolvePrompt, slug, syncSays } from "./model";
+import { codeHref, codeRoute, conflictRegions, diffRows, resolvePrompt, slug, syncSays } from "./model";
+import { ago } from "@/lib/format";
 
 describe("diffRows", () => {
   it("numbers a diff's lines by the new file", () => {
@@ -45,11 +46,11 @@ describe("the Git tab's words", () => {
   });
   it("tells time from seconds or dates", () => {
     const now = Date.UTC(2026, 10, 3, 12);
-    expect(ago(now / 1000 - 20, now)).toBe("just now");
-    expect(ago(now / 1000 - 600, now)).toBe("10 min ago");
+    expect(ago(now / 1000 - 20, now, { seconds: true })).toBe("just now");
+    expect(ago(now / 1000 - 600, now, { seconds: true })).toBe("10 min ago");
     expect(ago(new Date(now - 3 * 3600_000).toISOString(), now)).toBe("3 h ago");
-    expect(ago(now / 1000 - 30 * 3600, now)).toBe("yesterday");
-    expect(ago(now / 1000 - 5 * 86400, now)).toBe("5 d ago");
+    expect(ago(now / 1000 - 30 * 3600, now, { seconds: true })).toBe("yesterday");
+    expect(ago(now / 1000 - 5 * 86400, now, { seconds: true })).toBe("5 days ago");
     expect(ago(null)).toBe("");
   });
   it("names a repository after the project", () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { host, imageSize, kindLabel, parseTags, savedQuery, suggestTags } from "./api";
+import { host, kindLabel, parseTags, savedQuery, suggestTags } from "./api";
+import { bytes as imageSize } from "@/lib/format";
 
 describe("library helpers", () => {
   it("reads tags the way people type them", () => {
@@ -24,7 +25,7 @@ describe("library helpers", () => {
     expect(kindLabel({ kind: "excerpt", language: "" })).toBe("Excerpt");
     expect(host("https://docs.vllm.ai/en/latest/")).toBe("docs.vllm.ai");
     expect(host("not a url")).toBe("not a url");
-    expect(imageSize(100)).toBe("1 KB");
+    expect(imageSize(100)).toBe("100 B");
     expect(imageSize(3 * 1048576)).toBe("3.0 MB");
   });
 });

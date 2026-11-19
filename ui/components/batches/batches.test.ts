@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deletable, doneOf, duration, etaSecs, groupCounts, groupOf, matches, percentOf, stateOf, tagCounts, type Batch } from "./api";
+import { durationWords as duration } from "@/lib/format";
+import { deletable, doneOf, etaSecs, groupCounts, groupOf, matches, percentOf, stateOf, tagCounts, type Batch } from "./api";
 import { detectDelimiter, parseCsv, renderPrompt, toSheet, unknownPlaceholders, usedColumns } from "./csv";
 import { EXAMPLE_CSV, EXAMPLE_TEMPLATE } from "./example";
 

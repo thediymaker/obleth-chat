@@ -16,10 +16,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import { when } from "@/lib/format";
+import { when, bytes } from "@/lib/format";
 import { useProjects } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { host, imageSize, KINDS, kindLabel, kindOf, type SavedItem, type SavedKind, useGeneratedImages, useSaved, SAVED_PAGE } from "./api";
+import { host, KINDS, kindLabel, kindOf, type SavedItem, type SavedKind, useGeneratedImages, useSaved, SAVED_PAGE } from "./api";
 import { LibraryTabs, StorageMeter } from "./library-shell";
 import { useLibraryDialogs } from "./saved-dialogs";
 
@@ -298,7 +298,7 @@ function GeneratedView() {
       {confirm.element}
       {data?.usage && (
         <div className="mb-4 flex justify-end">
-          <StorageMeter label="Generated images" used={data.usage.used} limit={data.usage.limit} format={imageSize} />
+          <StorageMeter label="Generated images" used={data.usage.used} limit={data.usage.limit} format={bytes} />
         </div>
       )}
       <ErrorBox error={error} onRetry={() => refetch()} />
@@ -316,7 +316,7 @@ function GeneratedView() {
                     {i.conversationTitle}
                   </Link>
                   <span className="text-xs text-faint">
-                    {when(i.createdAt)} · {imageSize(i.size)}
+                    {when(i.createdAt)} · {bytes(i.size)}
                   </span>
                 </div>
                 <DangerButton size="icon-sm" aria-label="Delete image" title="Delete" onClick={() => remove(i.id)}>

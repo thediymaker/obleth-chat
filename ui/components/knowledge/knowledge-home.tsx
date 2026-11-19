@@ -10,9 +10,9 @@ import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/ap
 import { LibraryTabs, StorageMeter } from "@/components/library/library-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { count } from "@/lib/format";
+import { count, bytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { type Collection, scopeLabel, size, useCollections } from "./api";
+import { type Collection, scopeLabel, useCollections } from "./api";
 import { CollectionDialog } from "./collection-dialog";
 
 function CollectionCard({ c }: { c: Collection }) {
@@ -83,7 +83,7 @@ export function KnowledgeHome() {
             {tabButton("mine", "Personal", mine.length)}
             {tabButton("shared", "Shared with me", shared.length)}
           </div>
-          {data?.usage && <StorageMeter label="Storage" used={data.usage.used} limit={data.usage.limit} format={size} />}
+          {data?.usage && <StorageMeter label="Storage" used={data.usage.used} limit={data.usage.limit} format={bytes} />}
         </div>
       )}
       {isPending ? (

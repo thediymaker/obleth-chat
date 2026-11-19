@@ -68,8 +68,6 @@ export interface SearchResult {
   saved?: boolean;
 }
 
-export const size = (n: number) =>
-  n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`;
 export const fileUrl = (id: string, page?: number | null) => `/api/knowledge/documents/${encodeURIComponent(id)}/file${page ? `#page=${page}` : ""}`;
 export const busy = (d: Pick<KnowledgeDocument, "status">) => d.status === "queued" || d.status === "processing";
 export const scopeLabel = (c: Pick<Collection, "scope" | "groupName">) => (c.scope === "everyone" ? "Everyone" : c.scope === "group" ? c.groupName || "Group" : "Personal");

@@ -20,10 +20,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
-import { count, when } from "@/lib/format";
+import { count, when, bytes as formatBytes } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
-import { ACCEPT, collectionPath, DEFAULT_MAX_FILE, DOCUMENTS_PAGE, fileUrl, knowledgeKeys, refreshKnowledge, scopeLabel, size, type CollectionDetail, type KnowledgeDocument, type Scope, type SearchResult, uploadDocument, useCollection, useCollections } from "./api";
+import { ACCEPT, collectionPath, DEFAULT_MAX_FILE, DOCUMENTS_PAGE, fileUrl, knowledgeKeys, refreshKnowledge, scopeLabel, type CollectionDetail, type KnowledgeDocument, type Scope, type SearchResult, uploadDocument, useCollection, useCollections } from "./api";
 import { CollectionDialog } from "./collection-dialog";
 
 function Status({ d }: { d: KnowledgeDocument }) {
@@ -207,7 +207,7 @@ function Documents({ detail, maxFileBytes, onMore }: { detail: CollectionDetail;
     if (!c.mine) return;
     for (const file of files) {
       if (file.size > maxFileBytes) {
-        toast(`${file.name} is larger than ${size(maxFileBytes)}.`);
+        toast(`${file.name} is larger than ${formatBytes(maxFileBytes)}.`);
         continue;
       }
       setUploading((u) => [...u, file.name]);
@@ -260,7 +260,7 @@ function Documents({ detail, maxFileBytes, onMore }: { detail: CollectionDetail;
           <span className="grid gap-0.5">
             <strong className="text-md font-medium">Drop files here or choose them</strong>
             <small className="text-xs text-muted-foreground">
-              PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code · up to {size(maxFileBytes)} each
+              PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code · up to {formatBytes(maxFileBytes)} each
             </small>
           </span>
           <input
@@ -310,7 +310,7 @@ function Documents({ detail, maxFileBytes, onMore }: { detail: CollectionDetail;
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">{d.pages ?? "—"}</TableCell>
                   <TableCell className="hidden sm:table-cell">{d.status === "ready" ? d.passages.toLocaleString() : "—"}</TableCell>
-                  <TableCell className="hidden md:table-cell">{size(d.size)}</TableCell>
+                  <TableCell className="hidden md:table-cell">{formatBytes(d.size)}</TableCell>
                   <TableCell>
                     <Status d={d} />
                   </TableCell>
@@ -408,7 +408,7 @@ export function CollectionPage({ id }: { id: string }) {
           <h1 className="text-[26px] leading-tight font-semibold tracking-tight">{c.name}</h1>
           {c.description && <p className="mt-1.5 text-sm text-muted-foreground">{c.description}</p>}
           <p className="mt-1 text-sm text-faint">
-            {count(docs.length, "document")} · {count(passages, "passage")} · {size(bytes)}
+            {count(docs.length, "document")} · {count(passages, "passage")} · {formatBytes(bytes)}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

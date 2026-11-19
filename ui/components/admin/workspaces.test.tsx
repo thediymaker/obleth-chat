@@ -2,7 +2,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { WorkspacesView } from "./workspaces-tab";
-import { bytes, cores, hours, pointTip, since, until, type WorkspacesOverview } from "./workspaces";
+import { cores, hours, pointTip, since, until, type WorkspacesOverview } from "./workspaces";
+import { bytes } from "@/lib/format";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
 
@@ -58,7 +59,7 @@ test("workspaces show pods now, who has them open and the period", async () => {
   expect(t).toContain("2 chats · 1 preview");
   expect(t).toContain("in 55 min");
   expect(t).toContain("250m");
-  expect(t).toContain("64 MiB");
+  expect(t).toContain("64.0 MB");
   expect(t).toContain("All browser and workspace slots are in use");
   expect(t).toMatch(/Turned away2/);
   expect(t).toContain("Ready in 14 s, typically");
@@ -80,7 +81,7 @@ test("workspaces explain when they are off or metrics cannot be read", () => {
 test("pod numbers read plainly, and each bar says what happened", () => {
   expect(pointTip(data.history!.series![0]!, 7)).toMatch(/3\.0 h of workspaces, 1\.0 h of browsers, at most 30 pods at once, 9 starts, 1 failed, 2 turned away/);
   expect(cores(2500)).toBe("2.5 cores");
-  expect(bytes(1536 * 2 ** 20)).toBe("1.5 GiB");
+  expect(bytes(1536 * 2 ** 20)).toBe("1.5 GB");
   expect(hours(0.25)).toBe("15 min");
   expect(until(new Date(now + 3 * 3600e3).toISOString(), now)).toBe("in 3 hours");
   expect(since(new Date(now - 90 * 60000).toISOString(), now)).toBe("2 h ago");

@@ -4,9 +4,10 @@
 export const USAGE_PERIODS = [
   [1, "Today"],
   [7, "7 days"],
-  [28, "28 days"],
+  [PERIOD_DAYS, "30 days"],
   [90, "90 days"],
 ] as const;
+import { PERIOD_DAYS } from "@/lib/format";
 export const PURPOSES: Record<string, string> = { chat: "Chat replies", follow_up: "Suggested follow-ups", agent: "Agents" };
 export const SORTS = [
   ["totalTokens", "Tokens"],

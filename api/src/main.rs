@@ -157,7 +157,11 @@ async fn main() -> Result<()> {
             "connections enabled"
         );
     }
-    if let Some(knowledge) = obleth_chat::knowledge::Knowledge::from_env(pool.clone(), objects)? {
+    if let Some(knowledge) = obleth_chat::knowledge::Knowledge::from_env(
+        pool.clone(),
+        objects,
+        config.knowledge_quota_mb,
+    )? {
         if let Some(gateway) = state.gateway.clone() {
             tokio::spawn(knowledge.clone().worker(gateway, state.shutdown.clone()));
         }

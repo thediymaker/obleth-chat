@@ -33,6 +33,8 @@ pub struct Config {
     pub file_quota_mb: Option<u32>,
     /// OBLETH_CHAT_MAX_FILES: how many files one person may keep.
     pub max_files: u32,
+    /// OBLETH_CHAT_KNOWLEDGE_USER_MB: one person's knowledge documents in all.
+    pub knowledge_quota_mb: u32,
 }
 /// OBLETH_CHAT_GATEWAY_AUTH: `sign` (the default) sends a token Chat signs with
 /// its gateway signing key; `forward` sends the access token the identity provider
@@ -182,6 +184,7 @@ impl Config {
                 .map(|_| number("OBLETH_CHAT_FILE_QUOTA_MB", 0, 1, 10_000_000))
                 .transpose()?,
             max_files: number("OBLETH_CHAT_MAX_FILES", 500, 1, 1_000_000)?,
+            knowledge_quota_mb: number("OBLETH_CHAT_KNOWLEDGE_USER_MB", 2048, 1, 10_000_000)?,
         })
     }
 }

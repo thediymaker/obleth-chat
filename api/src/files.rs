@@ -372,7 +372,80 @@ fn unavailable(error: anyhow::Error) -> ApiError {
 
 #[cfg(test)]
 mod tests {
+    use super::{empty_trash, Files};
     use super::{idle_pause, served_type};
+    use crate::knowledge::storage::stub;
+    use crate::test_support::Database;
+    use axum::http::Method;
+    use uuid::Uuid;
+
+    /// A knowledge object whose document row never commits (the server died in
+    /// between) is swept after the grace period; one whose row is written is claimed
+    /// by the row's trigger and kept.
+    #[tokio::test]
+    async fn an_object_whose_row_never_commits_is_swept_and_a_recorded_one_is_kept() {
+        let Some(db) = Database::new().await else {
+            return;
+        };
+        let (store, seen) = stub::bucket().await;
+        let files = Files::new(db.pool.clone(), Some(store.clone()));
+        let owner = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, role, password_hash) VALUES ($1, 'ana', 'Ana', 'user', 'x')")
+            .bind(owner).execute(&db.pool).await.unwrap();
+        let collection = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO knowledge_collections (id, owner_id, name) VALUES ($1, $2, 'Papers')",
+        )
+        .bind(collection)
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let lost = format!("knowledge/{owner}/lost");
+        let kept = format!("knowledge/{owner}/kept");
+        for key in [&lost, &kept] {
+            files
+                .place(key.clone(), b"hello".to_vec(), "text/plain")
+                .await
+                .unwrap();
+        }
+        let pending: Vec<String> = sqlx::query_scalar(
+            "SELECT object_key FROM object_trash WHERE pending ORDER BY object_key",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, vec![kept.clone(), lost.clone()]);
+
+        // The kept one's row is written: the trigger claims the object.
+        sqlx::query("INSERT INTO knowledge_documents (id, collection_id, owner_id, name, mime_type, size, object_key) VALUES ($1, $2, $3, 'kept.txt', 'text/plain', 5, $4)")
+            .bind(Uuid::new_v4()).bind(collection).bind(owner).bind(&kept).execute(&db.pool).await.unwrap();
+        // The lost one's row never comes; the grace period passes.
+        sqlx::query(
+            "UPDATE object_trash SET created_at = NOW() - INTERVAL '1 hour' WHERE object_key = $1",
+        )
+        .bind(&lost)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        empty_trash(&db.pool, &store).await;
+
+        let deleted: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| *m == Method::DELETE)
+            .map(|(_, k)| k.clone())
+            .collect();
+        assert_eq!(deleted, vec![lost.clone()]);
+        let left: Vec<String> = sqlx::query_scalar("SELECT object_key FROM object_trash")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+        assert!(left.is_empty(), "{left:?}");
+        db.close().await;
+    }
 
     #[test]
     fn idle_pause_backs_off_to_five_minutes() {

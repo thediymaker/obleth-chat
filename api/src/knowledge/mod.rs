@@ -13,6 +13,7 @@ pub mod extract;
 pub mod saved;
 pub mod storage;
 
+use crate::attachments::size_label;
 use crate::paging::{Page, PageQuery};
 use crate::{
     auth::{Identity, Role},
@@ -41,7 +42,6 @@ pub use storage::ObjectStore;
 /// keep their quality when shortened); shorter vectors are padded with zeros, which
 /// leaves their cosine distances unchanged.
 pub const DIMENSIONS: usize = 1024;
-pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 const MAX_DOCUMENTS: i64 = 2000;
 const EMBED_BATCH: usize = 16;
 pub use embedding::Prompts;
@@ -67,21 +67,21 @@ pub struct Knowledge {
 
 impl Knowledge {
     /// Enabled when object storage is configured.
-    pub fn from_env(pool: PgPool, store: Option<ObjectStore>) -> anyhow::Result<Option<Self>> {
+    pub fn from_env(
+        pool: PgPool,
+        store: Option<ObjectStore>,
+        user_mb: u32,
+    ) -> anyhow::Result<Option<Self>> {
         let Some(store) = store else {
             return Ok(None);
         };
         let var = |key: &str| env::var(key).ok().filter(|v| !v.trim().is_empty());
-        let user_mb: i64 = var("OBLETH_CHAT_KNOWLEDGE_USER_MB")
-            .map(|v| v.parse())
-            .transpose()?
-            .unwrap_or(2048);
         let mut knowledge = Self::new(
             pool,
             store,
             extract::Tools::from_env(),
             var("OBLETH_CHAT_EMBEDDING_MODEL").unwrap_or_else(|| "qwen3-embedding-8b".into()),
-            user_mb * 1024 * 1024,
+            i64::from(user_mb) * 1024 * 1024,
         );
         // Set but empty means no prefix.
         knowledge.env_prompts = (
@@ -332,15 +332,24 @@ impl Knowledge {
         Ok(())
     }
 
-    /// The bytes of the attached file a chat's own collection holds.
-    async fn attachment_bytes(&self, collection: Uuid) -> anyhow::Result<Vec<u8>> {
-        let (data, key): (Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+    /// Where the attached file a chat's own collection holds is kept: its row's
+    /// bytes, or its key in the bucket.
+    async fn attachment_row(
+        &self,
+        collection: Uuid,
+    ) -> anyhow::Result<(Option<Vec<u8>>, Option<String>)> {
+        sqlx::query_as(
             "SELECT a.data, a.object_key FROM knowledge_collections c JOIN attachments a ON a.id = c.attachment_id WHERE c.id = $1",
         )
         .bind(collection)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("The attached file is gone"))?;
+        .ok_or_else(|| anyhow::anyhow!("The attached file is gone"))
+    }
+
+    /// The bytes of the attached file a chat's own collection holds.
+    async fn attachment_bytes(&self, collection: Uuid) -> anyhow::Result<Vec<u8>> {
+        let (data, key) = self.attachment_row(collection).await?;
         crate::files::Files::new(self.pool.clone(), Some(self.store.clone()))
             .read(data, key, crate::attachments::MAX_FILE_BYTES)
             .await
@@ -615,7 +624,7 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     .await?;
     let groups = crate::groups::shareable(&k.pool, &user).await?;
     Ok(Json(
-        json!({"collections":collections,"usage":{"used":used,"limit":k.user_bytes},"groups":groups,"maxFileBytes":MAX_FILE_BYTES}),
+        json!({"collections":collections,"usage":{"used":used,"limit":k.user_bytes},"groups":groups,"maxFileBytes":s.store.limits.max_file_bytes}),
     ))
 }
 
@@ -856,18 +865,13 @@ async fn upload(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok())
         .or_else(|| axum::body::HttpBody::size_hint(&body).exact());
+    let limits = s.store.limits;
     let too_large = || {
         ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "Files must be 50 MB or smaller".into(),
-        )
-    };
-    let over_quota = |k: &Knowledge| {
-        ApiError(
-            StatusCode::PAYLOAD_TOO_LARGE,
             format!(
-                "This would go over your {} MB of knowledge storage",
-                k.user_bytes / 1024 / 1024
+                "Files can be at most {}. Choose a smaller file.",
+                size_label(limits.max_file_bytes)
             ),
         )
     };
@@ -886,38 +890,29 @@ async fn upload(
         let user = s.auth.require(&headers, true).await?;
         let k = knowledge(&s)?;
         owned(&k.pool, user.id, id).await?;
-        let name: String = q
-            .name
-            .trim()
-            .replace(['/', '\\'], "_")
-            .chars()
-            .take(255)
-            .collect();
-        if name.is_empty() || name.chars().any(char::is_control) {
-            return Err(bad("The file needs a name"));
-        }
+        let name = crate::attachments::clean_upload_name(&q.name)?;
         let kind = extract::kind(&name, given).ok_or_else(|| {
             bad("Chat can read PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code files")
         })?;
-        if declared.is_some_and(|size| size > MAX_FILE_BYTES as u64) {
+        if declared.is_some_and(|size| size > limits.max_file_bytes as u64) {
             return Err(too_large());
         }
         let row = usage(&k.pool, user.id).await?;
-        let (used, count): (i64, i64) = (row.get("used"), row.get("count"));
-        if used + declared.map_or(1, |size| size as i64) > k.user_bytes {
-            return Err(over_quota(k));
-        }
-        if count >= MAX_DOCUMENTS {
-            return Err(bad("You have reached the limit of 2,000 documents"));
-        }
+        room(
+            row.get("used"),
+            row.get("count"),
+            declared.map_or(1, |size| size as i64),
+            k.user_bytes,
+        )?;
         Ok::<_, ApiError>((user, k, name, kind))
     };
     let ((user, k, name, kind), body) = crate::error::admitted(body, allowed.await).await?;
     // Room in the memory uploads share, for the size the upload states or the most a
     // file may be, so many at once wait their turn instead of adding up.
     let _held =
-        crate::attachments::hold(declared.map_or(MAX_FILE_BYTES, |size| size as usize)).await?;
-    let body = crate::error::upload(body, MAX_FILE_BYTES, too_large().1).await?;
+        crate::attachments::hold(declared.map_or(limits.max_file_bytes, |size| size as usize))
+            .await?;
+    let body = crate::error::upload(body, limits.max_file_bytes, too_large().1).await?;
     if body.is_empty() {
         return Err(bad("The file is empty"));
     }
@@ -927,65 +922,72 @@ async fn upload(
     let size = body.len() as i64;
     // Checked again now the size is known, and once more with the owner locked when
     // recording.
-    let quota = |used: i64, count: i64| -> Result<(), ApiError> {
-        if used + size > k.user_bytes {
-            return Err(over_quota(k));
-        }
-        if count >= MAX_DOCUMENTS {
-            return Err(bad("You have reached the limit of 2,000 documents"));
-        }
-        Ok(())
-    };
     let row = usage(&k.pool, user.id).await?;
-    quota(row.get("used"), row.get("count"))?;
-    k.store.put(&key, body, &mime).await.map_err(|error| {
-        tracing::warn!("could not store a knowledge file: {error:#}");
-        ApiError(
-            StatusCode::BAD_GATEWAY,
-            "The file could not be stored. Try again.".into(),
+    room(row.get("used"), row.get("count"), size, k.user_bytes)?;
+    // The object goes to the bucket under the pending-trash protocol: its row claims
+    // it, and one whose row is never written is swept after the grace period.
+    let files = &s.store.files;
+    let placed = files.place(key.clone(), body, &mime).await?;
+    let recorded = async {
+        let mut tx = k.pool.begin().await?;
+        sqlx::query("SELECT 1 FROM users WHERE id=$1 FOR UPDATE")
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
+            .bind(user.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        room(row.get("used"), row.get("count"), size, k.user_bytes)?;
+        let row = sqlx::query(
+            "INSERT INTO knowledge_documents (id, collection_id, owner_id, name, mime_type, size, object_key) VALUES ($1,$2,$3,$4,$5,$6,$7)
+             RETURNING id, name, mime_type, size, status, stage, progress_done, progress_total, pages, passages, error, created_at",
         )
-    })?;
-    let mut tx = k.pool.begin().await?;
-    sqlx::query("SELECT 1 FROM users WHERE id=$1 FOR UPDATE")
+        .bind(doc)
+        .bind(id)
         .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
-    let row = sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
-        .bind(user.id)
+        .bind(&name)
+        .bind(&mime)
+        .bind(size)
+        .bind(&key)
         .fetch_one(&mut *tx)
         .await?;
-    if let Err(error) = quota(row.get("used"), row.get("count")) {
-        drop(tx);
-        let _ = k.store.delete(&key).await;
-        return Err(error);
+        tx.commit().await?;
+        Ok::<_, ApiError>(row)
     }
-    let inserted = sqlx::query(
-        "INSERT INTO knowledge_documents (id, collection_id, owner_id, name, mime_type, size, object_key) VALUES ($1,$2,$3,$4,$5,$6,$7)
-         RETURNING id, name, mime_type, size, status, stage, progress_done, progress_total, pages, passages, error, created_at",
-    )
-    .bind(doc)
-    .bind(id)
-    .bind(user.id)
-    .bind(&name)
-    .bind(&mime)
-    .bind(size)
-    .bind(&key)
-    .fetch_one(&mut *tx)
     .await;
-    match inserted {
-        Ok(row) => {
-            tx.commit().await?;
-            Ok((
-                StatusCode::CREATED,
-                Json(json!({"document":document_json(&row)})),
-            ))
-        }
+    match recorded {
+        Ok(row) => Ok((
+            StatusCode::CREATED,
+            Json(json!({"document":document_json(&row)})),
+        )),
         Err(error) => {
-            drop(tx);
-            let _ = k.store.delete(&key).await;
-            Err(error.into())
+            files.discard(&placed).await;
+            Err(error)
         }
     }
+}
+
+/// Whether one more document of `size` bytes fits in the person's knowledge
+/// storage. A full quota or document count is 409: the request was fine, the
+/// account is full.
+fn room(used: i64, count: i64, size: i64, quota: i64) -> Result<(), ApiError> {
+    if used + size > quota {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "This would go over your {} of knowledge storage",
+                size_label(quota as usize)
+            ),
+        ));
+    }
+    if count >= MAX_DOCUMENTS {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("You have reached the limit of {MAX_DOCUMENTS} documents"),
+        ));
+    }
+    Ok(())
 }
 
 /// A document the person may see, with its collection and whether they own it.
@@ -1065,29 +1067,26 @@ async fn file(
     let (key, name, mime): (Option<String>, String, String) =
         (row.get("object_key"), row.get("name"), row.get("mime_type"));
     // A document attached in a chat is the attachment itself.
+    let files = &s.store.files;
+    let most = crate::attachments::MAX_FILE_BYTES;
     let Some(key) = key else {
-        let bytes = k
-            .attachment_bytes(row.get("collection_id"))
+        let (data, key) = k
+            .attachment_row(row.get("collection_id"))
             .await
             .map_err(|error| {
                 tracing::warn!("could not read an attached document: {error:#}");
-                ApiError(
-                    StatusCode::BAD_GATEWAY,
-                    "The file could not be read. Try again.".into(),
-                )
+                ApiError::not_found()
             })?;
-        return crate::attachments::file_response(&name, &mime, bytes);
+        return crate::attachments::file_response(&name, &mime, files.body(data, key, most).await?);
     };
     let stored_safely = extract::kind(&name, &mime).map(extract::mime_for) == Some(mime.clone());
     if !stored_safely {
-        let bytes = k.store.get(&key, MAX_FILE_BYTES).await.map_err(|error| {
-            tracing::warn!("could not read a knowledge file: {error:#}");
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The file could not be read. Try again.".into(),
-            )
-        })?;
-        return crate::attachments::file_response(&name, &mime, bytes);
+        // Served by Chat with a safe type instead of the bucket's; streamed, not held.
+        return crate::attachments::file_response(
+            &name,
+            &mime,
+            files.body(None, Some(key), most).await?,
+        );
     }
     let url = k.store.presign_get(&key, 300, &name, &mime);
     let mut response = Redirect::to(url.as_str()).into_response();
@@ -1226,6 +1225,20 @@ pub async fn set_for_conversation(
 mod tests {
     use super::*;
     use crate::test_support::Database;
+
+    #[test]
+    fn a_full_account_is_a_conflict_not_a_bad_request() {
+        let mib = 1024 * 1024;
+        assert!(room(0, 0, mib, 10 * mib).is_ok());
+        let full = room(9 * mib, 0, 2 * mib, 10 * mib).unwrap_err();
+        assert_eq!(full.0, StatusCode::CONFLICT);
+        assert!(full.1.contains("10.0 MB"), "{}", full.1);
+        let many = room(0, MAX_DOCUMENTS, 1, 10 * mib).unwrap_err();
+        assert_eq!(
+            (many.0, many.1.contains("2000")),
+            (StatusCode::CONFLICT, true)
+        );
+    }
 
     #[tokio::test]
     async fn a_collection_lists_its_documents_a_page_at_a_time() {

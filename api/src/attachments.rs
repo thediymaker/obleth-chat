@@ -1057,19 +1057,8 @@ async fn validate_upload(
     searchable: bool,
     limits: &Limits,
 ) -> Result<Attachment, ApiError> {
-    let name = body.name.trim();
-    if name.is_empty()
-        || name.chars().count() > 200
-        || name == "."
-        || name == ".."
-        || name
-            .chars()
-            .any(|c| c.is_control() || c == '/' || c == '\\')
-    {
-        return Err(ApiError::bad(
-            "Use a filename of 1 to 200 characters without path separators",
-        ));
-    }
+    let name = clean_upload_name(&body.name)?;
+    let name = name.as_str();
     let data = body.data;
     if data.is_empty() {
         return Err(ApiError::bad("This file is empty"));
@@ -1250,7 +1239,23 @@ async fn document(
 }
 
 /// 76800 bytes as "75 KB".
-fn size_label(bytes: usize) -> String {
+/// One plain file name for an upload, on every path that takes one: trimmed, path
+/// separators rewritten to `_` (files dropped from a file manager often carry them),
+/// no control characters, at most 200 characters.
+pub(crate) fn clean_upload_name(name: &str) -> Result<String, ApiError> {
+    let name: String = name
+        .trim()
+        .replace(['/', '\\'], "_")
+        .chars()
+        .take(200)
+        .collect();
+    if name.is_empty() || name == "." || name == ".." || name.chars().any(char::is_control) {
+        return Err(ApiError::bad("Give the file a name of 1 to 200 characters"));
+    }
+    Ok(name)
+}
+
+pub(crate) fn size_label(bytes: usize) -> String {
     match bytes {
         b if b < 1024 * 1024 => format!("{} KB", b.div_ceil(1024)),
         b if b < 1024 * 1024 * 1024 => format!("{:.1} MB", b as f64 / 1024.0 / 1024.0),
@@ -1285,6 +1290,23 @@ fn valid_image_header(mime: &str, data: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::test_support::Database;
+
+    #[test]
+    fn upload_names_are_one_plain_name_on_every_path() {
+        assert_eq!(clean_upload_name("  notes.txt ").unwrap(), "notes.txt");
+        assert_eq!(clean_upload_name("a/b\\c.pdf").unwrap(), "a_b_c.pdf");
+        assert_eq!(
+            clean_upload_name(&"x".repeat(300)).unwrap().chars().count(),
+            200
+        );
+        for bad in ["", "   ", ".", "..", "a\u{7}b"] {
+            assert_eq!(
+                clean_upload_name(bad).unwrap_err().0,
+                StatusCode::BAD_REQUEST,
+                "{bad:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn the_file_list_pages_past_the_first_hundred() {

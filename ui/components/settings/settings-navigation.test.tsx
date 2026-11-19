@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { AdminPage, adminLocation } from "@/components/admin/admin-page";
@@ -24,6 +24,16 @@ test("ordinary Settings navigation omits Administration, and MCP servers needs c
   expect(settingsTabs(false, false).map((t) => t.label)).toEqual(["Personal"]);
   expect(settingsTabs(true, false).map((t) => t.href)).toEqual(["/settings", "/settings/admin"]);
   expect(settingsTabs(false, true).map((t) => t.label)).toEqual(["Personal", "MCP servers", "Secrets"]);
+});
+
+test("the Administration tabs are the shared section tabs, one link per section", () => {
+  mockApi(() => ({}));
+  renderPage(<AdminPage segments={["groups"]} />);
+  const nav = screen.getByRole("navigation", { name: "Administration sections" });
+  expect(nav.className).toContain("overflow-x-auto");
+  expect(within(nav).getByRole("link", { name: "Groups" })).toHaveAttribute("aria-current", "page");
+  expect(within(nav).getByRole("link", { name: "People" })).toHaveAttribute("href", "/settings/admin/users");
+  expect(within(nav).getAllByRole("link").length).toBeGreaterThan(5);
 });
 
 test("administration deep links stay denied without asking for administrator data", async () => {

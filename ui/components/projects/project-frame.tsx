@@ -90,7 +90,8 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   const facts = [p.description, count(p.chats, "chat"), knowledge ? count(p.saved, "saved item") : ""].filter(Boolean).join(" · ");
   const list = [
     { href: base, label: "Overview" },
-    ...(tabs.code ? [{ href: `${base}/code`, label: "Code" }] : []),
+    // History, Files and Compare live under /code and keep it highlighted.
+    ...(tabs.code ? [{ href: `${base}/code`, label: "Code", prefix: true }] : []),
     ...(tabs.research ? [{ href: `${base}/research`, label: "Research" }] : []),
     ...(tabs.app ? [{ href: `${base}/app`, label: "App" }] : []),
   ];

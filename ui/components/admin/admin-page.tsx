@@ -9,11 +9,11 @@ import { BarChart3, Box, Clock, Gauge, LayoutGrid, Server, Shield, Terminal, Thu
 import Link from "next/link";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState } from "@/components/app-shell/page";
+import { SectionTabs } from "@/components/app-shell/section-tabs";
 import { Button } from "@/components/ui/button";
 import { Pill } from "@/components/manage/kit";
 import { SectionHeading } from "@/components/settings/settings-frame";
 import { useSession } from "@/lib/session";
-import { cn } from "@/lib/utils";
 import { ActivityTab } from "./activity-tab";
 import { FeedbackTab } from "./feedback-tab";
 import { GroupsTab } from "./groups-tab";
@@ -65,22 +65,9 @@ export function AdminPage({ segments = [] }: { segments?: string[] }) {
   return (
     <div className="min-w-0">
       <SectionHeading title="Administration" description="Accounts, model access, and service activity." actions={<Pill tone="accent">Administrator</Pill>} />
-      <nav aria-label="Administration sections" className="-mx-4 mb-6 flex gap-1 overflow-x-auto px-4 shadow-[inset_0_-1px_0_var(--border)] [scrollbar-width:none] sm:mx-0 sm:px-0 [&::-webkit-scrollbar]:hidden">
-        {ADMIN_TABS.map(([id, Icon, label]) => (
-          <Link
-            key={id}
-            href={`/settings/admin/${id}`}
-            aria-current={id === section ? "page" : undefined}
-            className={cn(
-              "inline-flex shrink-0 items-center gap-1.5 border-b-2 border-transparent px-3 py-2 text-sm whitespace-nowrap text-muted-foreground hover:text-foreground",
-              id === section && "border-foreground text-foreground",
-            )}
-          >
-            <Icon className="size-4" />
-            {label}
-          </Link>
-        ))}
-      </nav>
+      <div className="mb-6">
+        <SectionTabs label="Administration sections" current={`/settings/admin/${section}`} tabs={ADMIN_TABS.map(([id, Icon, label]) => ({ href: `/settings/admin/${id}`, label, icon: Icon }))} />
+      </div>
       {section === "users" && <PeopleTab />}
       {section === "groups" && <GroupsTab groupId={groupId} />}
       {section === "models" && <ModelsTab />}

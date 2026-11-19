@@ -91,7 +91,7 @@ export function ModelPicker() {
           aria-label={`Model: ${name}${busy ? `. ${busy}` : ""}. Thinking effort: ${effortLabel(store.reasoningEffort)}`}
           title={`${name}${busy ? ` · ${busy}` : ""} · thinking ${effortLabel(store.reasoningEffort).toLowerCase()}`}
           disabled={!store.available || store.streaming}
-          className="inline-flex h-8 max-w-[min(320px,48vw)] min-w-0 shrink items-center gap-[7px] rounded-md border border-line-strong px-2.5 text-sm font-medium text-text-2 transition-colors hover:border-control-border hover:bg-secondary disabled:opacity-50"
+          className="inline-flex h-8 max-w-[min(320px,48vw)] min-w-0 shrink items-center gap-[7px] max-[480px]:max-w-[38vw] rounded-md border border-line-strong px-2.5 text-sm font-medium text-text-2 transition-colors hover:border-control-border hover:bg-secondary disabled:opacity-50"
         >
           <Box className={cn("size-4 shrink-0", TINT[store.load.tint(store.model)])} />
           <span className="min-w-0 truncate">{name}</span>

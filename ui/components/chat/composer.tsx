@@ -316,7 +316,8 @@ export function Composer({ home = false }: { home?: boolean }) {
               <Paperclip />
             </Button>
           )}
-          <div className="flex flex-wrap items-center gap-0.5" role="group" aria-label="What the model can use">
+          {/* Never wraps: on a phone the model button shrinks instead (model-picker). */}
+          <div className="flex shrink-0 flex-nowrap items-center gap-0.5" role="group" aria-label="What the model can use">
             <WorkspaceToggle />
             <BrowserToggle />
             <ToolsButton chatId={conversationId} disabled={store.streaming} />

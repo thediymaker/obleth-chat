@@ -518,7 +518,7 @@ async fn steps<S: Shell>(
         if resolved.capabilities.supports_reasoning != Some(false) {
             payload["reasoning_effort"] = json!("low");
         }
-        let (content, calls, reported) = request(ctx, payload).await?;
+        let (content, calls, reported) = request(ctx, &payload).await?;
         if let Some(reported) = reported {
             add_usage(usage, &reported);
         }
@@ -562,7 +562,7 @@ async fn steps<S: Shell>(
 /// One request to the gateway: the streamed text, the tool calls and the usage.
 async fn request<S: Shell>(
     ctx: &Ctx<'_, S>,
-    payload: Value,
+    payload: &Value,
 ) -> Result<(String, Vec<ToolCall>, Option<Value>), String> {
     let response = ctx
         .gateway

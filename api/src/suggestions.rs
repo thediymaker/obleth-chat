@@ -279,7 +279,7 @@ async fn generate(
         // This small housekeeping request must not consume a large thinking budget.
         payload["reasoning_effort"] = json!("none");
     }
-    let response = gateway.chat(user, conversation, payload).await?;
+    let response = gateway.chat(user, conversation, &payload).await?;
     let mut stream = response.bytes_stream();
     let mut decoder = Decoder::default();
     let mut output = String::new();

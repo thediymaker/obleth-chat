@@ -2003,7 +2003,7 @@ async fn run_generation(
             let response = loop {
                 match tokio::time::timeout(
                     Duration::from_secs(STALL_SECS),
-                    gateway.chat_escalating(&user, id, payload.clone(), escalate, own_system),
+                    gateway.chat_escalating(&user, id, &payload, escalate, own_system),
                 )
                 .await
                 {

@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
 use uuid::Uuid;
@@ -31,6 +32,27 @@ pub struct Gateway {
     signer: Option<Arc<Signer>>,
     /// People's provider tokens (OBLETH_CHAT_GATEWAY_AUTH=forward).
     grants: Option<Grants>,
+    /// Each person's model catalog for CATALOG_TTL, fetched once for everyone asking.
+    catalogs: Arc<Mutex<HashMap<Uuid, (Instant, Catalog)>>>,
+    /// Chat's signed token for each person, reused until it nears expiry.
+    tokens: Arc<Mutex<HashMap<Uuid, Token>>>,
+}
+
+/// How long a person's model catalog is reused. Models added or removed on the
+/// gateway reach Chat at most this late; the admin model list always asks afresh.
+const CATALOG_TTL: Duration = Duration::from_secs(15);
+/// How long Chat's signed tokens last, and how much of that is left when a cached
+/// one is replaced.
+const TOKEN_SECS: u64 = 300;
+const TOKEN_RENEW_SECS: u64 = 60;
+
+type Catalog = Arc<tokio::sync::OnceCell<Vec<DiscoveredModel>>>;
+
+/// A signed token and what it was signed for. It carries no per-request claims.
+struct Token {
+    username: String,
+    value: String,
+    expires: u64,
 }
 
 /// For Auto, a thinking effort other than the default tells the gateway's router how
@@ -127,6 +149,8 @@ impl Gateway {
             base,
             signer: None,
             grants: None,
+            catalogs: Arc::default(),
+            tokens: Arc::default(),
         })
     }
     /// Sends each person who signed in with the identity provider to the gateway
@@ -189,20 +213,24 @@ impl Gateway {
         })?;
         let mut value = reqwest::header::HeaderValue::from_str(&format!(
             "Bearer {}",
-            self.token(signer, user)?
+            self.token(signer, user, now()?)?
         ))
         .map_err(|_| ApiError::internal())?;
         value.set_sensitive(true);
         Ok(value)
     }
-    fn token(&self, signer: &Signer, user: &Identity) -> Result<String, ApiError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| ApiError::internal())?
-            .as_secs();
+    /// Chat's token for `user`: the cached one while it has more than
+    /// TOKEN_RENEW_SECS left, otherwise a newly signed one.
+    fn token(&self, signer: &Signer, user: &Identity, now: u64) -> Result<String, ApiError> {
+        if let Some(token) = self.tokens.lock().unwrap().get(&user.id) {
+            if token.username == user.username && token.expires > now + TOKEN_RENEW_SECS {
+                return Ok(token.value.clone());
+            }
+        }
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(signer.kid.clone());
-        jsonwebtoken::encode(
+        let expires = now + TOKEN_SECS;
+        let value = jsonwebtoken::encode(
             &header,
             &Claims {
                 iss: &signer.issuer,
@@ -211,12 +239,23 @@ impl Gateway {
                 username: &user.username,
                 iat: now,
                 nbf: now.saturating_sub(5),
-                exp: now + 300,
+                exp: expires,
                 jti: Uuid::new_v4().to_string(),
             },
             &signer.key,
         )
-        .map_err(|_| ApiError::internal())
+        .map_err(|_| ApiError::internal())?;
+        let mut tokens = self.tokens.lock().unwrap();
+        tokens.retain(|_, token| token.expires > now);
+        tokens.insert(
+            user.id,
+            Token {
+                username: user.username.clone(),
+                value: value.clone(),
+                expires,
+            },
+        );
+        Ok(value)
     }
     pub async fn models(&self, user: &Identity) -> Result<Value, ApiError> {
         let response = self
@@ -396,7 +435,7 @@ impl Gateway {
         &self,
         user: &Identity,
         conversation: Uuid,
-        body: Value,
+        body: &Value,
     ) -> Result<Response, ApiError> {
         self.chat_escalating(user, conversation, body, None, None)
             .await
@@ -410,11 +449,11 @@ impl Gateway {
         &self,
         user: &Identity,
         conversation: Uuid,
-        body: Value,
+        body: &Value,
         escalate: Option<&'static str>,
         own_system: Option<usize>,
     ) -> Result<Response, ApiError> {
-        let mut extra = effort_header(&body);
+        let mut extra = effort_header(body);
         if let Some(signal) = escalate.filter(|_| body["model"] == "auto") {
             extra.insert(
                 "x-obleth-auto-escalate",
@@ -433,7 +472,7 @@ impl Gateway {
             )
             .header("x-obleth-session-id", conversation.to_string())
             .headers(extra)
-            .json(&body)
+            .json(body)
             .send()
             .await
             .map_err(|_| unavailable())?;
@@ -491,7 +530,38 @@ impl Gateway {
         ))
     }
 
-    pub async fn discover_models(&self, user: &Identity) -> Result<Vec<DiscoveredModel>, ApiError> {
+    /// The chat models the gateway offers `user`, reused for CATALOG_TTL; concurrent
+    /// callers share one fetch. `fresh` asks the gateway again and keeps the answer.
+    pub async fn discover_models(
+        &self,
+        user: &Identity,
+        fresh: bool,
+    ) -> Result<Vec<DiscoveredModel>, ApiError> {
+        let catalog = {
+            let mut catalogs = self.catalogs.lock().unwrap();
+            let now = Instant::now();
+            catalogs.retain(|_, (at, _)| now.duration_since(*at) < CATALOG_TTL);
+            if fresh {
+                catalogs.remove(&user.id);
+            }
+            catalogs
+                .entry(user.id)
+                .or_insert_with(|| (now, Catalog::default()))
+                .1
+                .clone()
+        };
+        catalog
+            .get_or_try_init(|| self.fetch_models(user))
+            .await
+            .cloned()
+    }
+
+    /// Drops every cached model list, so the next request asks the gateway.
+    pub fn forget_models(&self) {
+        self.catalogs.lock().unwrap().clear();
+    }
+
+    async fn fetch_models(&self, user: &Identity) -> Result<Vec<DiscoveredModel>, ApiError> {
         let (catalog, details) = tokio::try_join!(
             self.discovery_json(user, "v1/models", false),
             self.discovery_json(user, "model/info", true),
@@ -643,6 +713,14 @@ impl Gateway {
         Ok(models)
     }
 }
+/// Seconds since the epoch.
+fn now() -> Result<u64, ApiError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ApiError::internal())?
+        .as_secs())
+}
+
 pub fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 160 && !model.chars().any(char::is_control)
 }
@@ -803,6 +881,86 @@ fn takes_images(info: Option<&Value>) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn person(username: &str) -> Identity {
+        Identity {
+            id: Uuid::from_u128(7),
+            username: username.into(),
+            display_name: "Test".into(),
+            role: crate::auth::Role::User,
+            session: None,
+        }
+    }
+
+    /// A gateway that signs, in front of a catalog that counts its requests.
+    async fn counted() -> (Gateway, Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::{routing::get, Json, Router};
+        let listed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = listed.clone();
+        let app = Router::new().route(
+            "/v1/models",
+            get(move || {
+                let count = count.clone();
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Json(json!({"data":[{"id":"fixture-model"}]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let pem = {
+            use rsa::pkcs8::EncodePrivateKey;
+            RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)
+                .unwrap()
+                .to_pkcs8_pem(Default::default())
+                .unwrap()
+        };
+        let gateway = Gateway::new(
+            base.parse().unwrap(),
+            pem.as_bytes(),
+            "http://chat".into(),
+            "obleth".into(),
+        )
+        .unwrap();
+        (gateway, listed)
+    }
+
+    #[tokio::test]
+    async fn the_catalog_is_fetched_once_per_person_within_its_lifetime() {
+        let (gateway, listed) = counted().await;
+        let user = person("ada");
+        let calls: Vec<_> = (0..6)
+            .map(|_| gateway.discover_models(&user, false))
+            .collect();
+        for found in futures_util::future::join_all(calls).await {
+            assert_eq!(found.unwrap()[0].id, "fixture-model");
+        }
+        gateway.discover_models(&user, false).await.unwrap();
+        assert_eq!(listed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The admin list asks again.
+        gateway.discover_models(&user, true).await.unwrap();
+        assert_eq!(listed.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_signed_token_is_reused_until_it_nears_expiry() {
+        let (gateway, _) = counted().await;
+        let signer = gateway.signer.clone().unwrap();
+        let user = person("ada");
+        let first = gateway.token(&signer, &user, 1_000).unwrap();
+        assert_eq!(gateway.token(&signer, &user, 1_200).unwrap(), first);
+        // Under a minute left: signed again.
+        let renewed = gateway.token(&signer, &user, 1_241).unwrap();
+        assert_ne!(renewed, first);
+        // A renamed account gets a token with its new name.
+        assert_ne!(
+            gateway.token(&signer, &person("grace"), 1_242).unwrap(),
+            renewed
+        );
+    }
 
     #[test]
     fn a_model_with_the_vision_boon_takes_images() {

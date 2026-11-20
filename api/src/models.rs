@@ -424,7 +424,8 @@ pub async fn effective_catalog(
     user: &Identity,
     include_unpublished: bool,
 ) -> Result<Vec<ModelView>, ApiError> {
-    let discovered = gateway.discover_models(user).await?;
+    // The admin list asks the gateway afresh, so a model just added there can be set up.
+    let discovered = gateway.discover_models(user, include_unpublished).await?;
     // Re-read authorization after network discovery: a role revocation or disable
     // during a slow gateway request must not retain an earlier administrator role.
     let (saved, group_ids, current_user, short_list) = tokio::try_join!(

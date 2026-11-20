@@ -238,6 +238,7 @@ async fn discovery_filters_nonchat_and_never_exposes_provider_credentials(pool: 
         assert!(!catalog.to_string().contains(forbidden));
     }
     f.fake.info_status.store(404, Ordering::SeqCst);
+    f.state.gateway.as_ref().unwrap().forget_models();
     assert_eq!(
         call(&f.app, &user, "GET", "/api/models", Value::Null)
             .await
@@ -245,6 +246,7 @@ async fn discovery_filters_nonchat_and_never_exposes_provider_credentials(pool: 
         StatusCode::OK
     );
     f.fake.info_status.store(403, Ordering::SeqCst);
+    f.state.gateway.as_ref().unwrap().forget_models();
     assert_eq!(
         call(&f.app, &user, "GET", "/api/models", Value::Null)
             .await
@@ -428,6 +430,7 @@ async fn unhealthy_models_are_visible_but_not_selected_and_output_fits_known_con
     profile(&f, &admin, "alpha", json!({"isDefault":true})).await;
     let gateway = f.state.gateway.as_ref().unwrap();
     f.fake.context_window.store(4096, Ordering::SeqCst);
+    f.state.gateway.as_ref().unwrap().forget_models();
     let too_large = ParameterOverrides {
         max_tokens: Some(8192),
         ..Default::default()
@@ -454,6 +457,7 @@ async fn unhealthy_models_are_visible_but_not_selected_and_output_fits_known_con
     .await
     .is_ok());
     f.fake.healthy.store(false, Ordering::SeqCst);
+    f.state.gateway.as_ref().unwrap().forget_models();
     let (status, catalog) = call(&f.app, &user, "GET", "/api/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     let alpha = catalog["models"]

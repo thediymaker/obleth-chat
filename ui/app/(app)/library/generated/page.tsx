@@ -1,8 +1,10 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { Suspense } from "react";
-import { LibraryPage } from "@/components/library/library-page";
-import { KnowledgeOnly } from "@/components/library/library-shell";
+
+const LibraryPage = dynamic(() => import("@/components/library/library-page").then((m) => m.LibraryPage));
+const KnowledgeOnly = dynamic(() => import("@/components/library/library-shell").then((m) => m.KnowledgeOnly));
 
 export default function Page() {
   return (

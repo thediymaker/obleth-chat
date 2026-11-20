@@ -1,8 +1,10 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useParams } from "next/navigation";
-import { CollectionPage } from "@/components/knowledge/collection-page";
-import { KnowledgeOnly } from "@/components/library/library-shell";
+
+const CollectionPage = dynamic(() => import("@/components/knowledge/collection-page").then((m) => m.CollectionPage));
+const KnowledgeOnly = dynamic(() => import("@/components/library/library-shell").then((m) => m.KnowledgeOnly));
 
 export default function Page() {
   const { id } = useParams<{ id: string }>();

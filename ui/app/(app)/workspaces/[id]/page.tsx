@@ -1,7 +1,9 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useParams } from "next/navigation";
-import { WorkspacePage } from "@/components/workspace/workspace-page";
+
+const WorkspacePage = dynamic(() => import("@/components/workspace/workspace-page").then((m) => m.WorkspacePage));
 
 export default function Page() {
   const { id } = useParams<{ id: string }>();

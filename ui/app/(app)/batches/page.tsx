@@ -1,7 +1,9 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { Suspense } from "react";
-import { BatchesPage } from "@/components/batches/batches-page";
+
+const BatchesPage = dynamic(() => import("@/components/batches/batches-page").then((m) => m.BatchesPage));
 
 export default function Page() {
   return (

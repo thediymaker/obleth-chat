@@ -1,7 +1,9 @@
 "use client";
 
-import { KnowledgeHome } from "@/components/knowledge/knowledge-home";
-import { KnowledgeOnly } from "@/components/library/library-shell";
+import dynamic from "next/dynamic";
+
+const KnowledgeHome = dynamic(() => import("@/components/knowledge/knowledge-home").then((m) => m.KnowledgeHome));
+const KnowledgeOnly = dynamic(() => import("@/components/library/library-shell").then((m) => m.KnowledgeOnly));
 
 export default function Page() {
   return (

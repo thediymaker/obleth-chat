@@ -1962,7 +1962,7 @@ async fn run_generation(
         record(&mut activity, &entry, true);
         emit(&mut tx, "tool", entry);
     }
-    if let Some(memory) = &memory_turn {
+    if let Some(memory) = memory_turn.as_ref().filter(|m| m.recalled()) {
         let entry = memory.entry();
         record(&mut activity, &entry, true);
         emit(&mut tx, "tool", entry);

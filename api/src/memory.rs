@@ -132,19 +132,36 @@ pub async fn choices(pool: &PgPool, user: Uuid, default_on: bool) -> Result<Choi
 // ---------------------------------------------------------------------------------
 // Recall: the memories a reply is given.
 
-/// The memories found for one reply.
+/// The memories found for one reply, and whether Chat learns from the chat.
 pub struct Recall {
     items: Vec<(Uuid, String, bool)>,
+    learns: bool,
 }
 
+/// What a reply is told when Chat reads its chat for memories: a request to remember
+/// or forget is acted on right after the reply, without a tool.
+const LEARNS_NOTE: &str = "When the person asks you to remember or forget something about themselves, Chat does it on its own within a minute of your reply, and they can check it on their Memory page. Tell them it will be remembered or forgotten; don't save it anywhere else, and don't say you can't.";
+
 impl Recall {
-    /// The system prompt section with the memories.
+    /// The system prompt section: the memories, and how remembering works.
     pub fn prompt(&self) -> String {
-        let mut text = String::from("# What you remember about the person\nChat keeps these memories from the person's earlier chats, and they can see and change them on their Memory page. Use them when they help, for example to fit an answer to their work, their tools or how they like answers. Don't list them, and don't say \"based on my memory\" or the like; just answer well. If one seems out of date, go by what the person says now.");
-        for (_, content, _) in &self.items {
-            text.push_str(&format!("\n- {content}"));
+        let mut text = String::from("# Memory");
+        if !self.items.is_empty() {
+            text.push_str("\nChat keeps these memories from the person's earlier chats, and they can see and change them on their Memory page. Use them when they help, for example to fit an answer to their work, their tools or how they like answers. Don't list them, and don't say \"based on my memory\" or the like; just answer well. If one seems out of date, go by what the person says now.");
+            for (_, content, _) in &self.items {
+                text.push_str(&format!("\n- {content}"));
+            }
+        }
+        if self.learns {
+            text.push('\n');
+            text.push_str(LEARNS_NOTE);
         }
         text
+    }
+
+    /// Whether the reply was given any memories, so the page shows what they were.
+    pub fn recalled(&self) -> bool {
+        !self.items.is_empty()
     }
 
     /// The activity entry the reply keeps, so the page can show what it was given.
@@ -163,8 +180,9 @@ fn count(n: usize) -> String {
     }
 }
 
-/// The memories for a person's message: pinned ones and the best matches. None when
-/// memory is off for them, for this server or for the chat, or nothing fits.
+/// The memories for a person's message: pinned ones and the best matches, and whether
+/// the chat is read for new ones. None when memory is off for them, for this server
+/// or for the chat, or nothing fits and the chat is not read.
 pub async fn recall(
     s: &AppState,
     gateway: &Gateway,
@@ -202,10 +220,9 @@ async fn find(
     if !settings.enabled {
         return Ok(None);
     }
-    if !choices(pool, user.id, settings.default_on)
-        .await?
-        .use_memory
-    {
+    let chosen = choices(pool, user.id, settings.default_on).await?;
+    let learns = chosen.learn && settings.model.is_some() && s.gateway.is_some();
+    if !chosen.use_memory && !learns {
         return Ok(None);
     }
     let temporary: bool =
@@ -217,6 +234,12 @@ async fn find(
             .unwrap_or(true);
     if temporary {
         return Ok(None);
+    }
+    if !chosen.use_memory {
+        return Ok(Some(Recall {
+            items: Vec::new(),
+            learns,
+        }));
     }
     let pinned: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, content FROM memories WHERE owner_id = $1 AND pinned ORDER BY updated_at DESC LIMIT $2",
@@ -264,14 +287,17 @@ async fn find(
         }
     }
     if items.is_empty() {
-        return Ok(None);
+        return Ok(learns.then(|| Recall {
+            items: Vec::new(),
+            learns,
+        }));
     }
     let ids: Vec<Uuid> = items.iter().map(|(id, _, _)| *id).collect();
     sqlx::query("UPDATE memories SET uses = uses + 1, used_at = NOW() WHERE id = ANY($1)")
         .bind(&ids)
         .execute(pool)
         .await?;
-    Ok(Some(Recall { items }))
+    Ok(Some(Recall { items, learns }))
 }
 
 /// The person's unpinned memories that best match `query`, by meaning (`vector`, the
@@ -1885,6 +1911,27 @@ async fn admin_save(
 mod tests {
     use super::*;
     use crate::test_support::Database;
+
+    #[test]
+    fn the_prompt_says_how_remembering_works_whenever_chat_learns() {
+        let learns_only = Recall {
+            items: Vec::new(),
+            learns: true,
+        };
+        assert!(!learns_only.recalled());
+        let text = learns_only.prompt();
+        assert!(text.contains(LEARNS_NOTE), "{text}");
+        assert!(!text.contains("earlier chats"), "{text}");
+
+        let recalled = Recall {
+            items: vec![(Uuid::nil(), "You use Sol".into(), false)],
+            learns: false,
+        };
+        assert!(recalled.recalled());
+        let text = recalled.prompt();
+        assert!(text.contains("\n- You use Sol"), "{text}");
+        assert!(!text.contains(LEARNS_NOTE), "{text}");
+    }
 
     #[tokio::test]
     async fn saving_the_settings_records_who_changed_them() {

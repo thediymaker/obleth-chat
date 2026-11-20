@@ -5,18 +5,14 @@
 // limits, the site's name and the keyboard shortcuts.
 
 import { useBranding } from "@/lib/branding-context";
+import { useUsage, type OwnUsage } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useChat } from "./chat-provider";
 import { compact, count } from "@/lib/format";
 
 
-interface DailyUsage {
-  today?: { requests?: number; totalTokens?: number };
-  limits?: { dailyRequests?: number; dailyTokens?: number };
-}
-
 /** "3 / 100 requests · 12K tokens", or "—" before the first count. */
-export function usageText(usage: DailyUsage | null | undefined) {
+export function usageText(usage: OwnUsage | null | undefined) {
   const today = usage?.today,
     limits = usage?.limits || {};
   if (!today) return "—";
@@ -42,12 +38,13 @@ function Metric({ label, value, optional }: { label: string; value: string; opti
 export function StatusBar() {
   const store = useChat();
   const branding = useBranding();
+  const { data: usage } = useUsage();
   return (
     <footer className="flex h-10 shrink-0 leading-[normal] items-center justify-between gap-4 border-t bg-sidebar px-6 text-sm text-muted-foreground max-[760px]:px-4">
       <div className="flex min-w-0 items-center gap-4">
         <Metric label="Models" value={modelsText(store)} />
         <span className="h-3.5 w-px shrink-0 bg-border max-[1000px]:hidden" />
-        <Metric label="Today" value={usageText(store.usage as DailyUsage | null)} optional />
+        <Metric label="Today" value={usageText(usage)} optional />
       </div>
       <div className="flex shrink-0 items-center gap-4 whitespace-nowrap max-[760px]:hidden">
         <span>{branding.siteName}</span>

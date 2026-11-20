@@ -80,12 +80,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     store.setRoute(routeOf(path));
   }, [store, path]);
 
+  // The store reads capabilities from the query; what shows them draws again when they load.
   const capabilities = useCapabilities().data;
   useEffect(() => {
-    if (capabilities) {
-      store.capabilities = capabilities;
-      store.emit();
-    }
+    if (capabilities) store.emit();
   }, [store, capabilities]);
 
   const models = useModels();

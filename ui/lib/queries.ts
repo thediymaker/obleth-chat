@@ -17,6 +17,7 @@ export const keys = {
   presets: ["presets"] as const,
   projects: ["projects"] as const,
   project: (id: string) => ["project", id] as const,
+  usage: ["usage"] as const,
 };
 
 export interface Capabilities {
@@ -56,6 +57,35 @@ export function useCapabilities() {
     staleTime: 60_000,
   });
 }
+export interface UsageCounts {
+  requests?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  errors?: number;
+  reservedTokens?: number;
+  activeGenerations?: number;
+  incompleteUsage?: number;
+}
+/** The person's own usage over the last days, and their limits. */
+export interface OwnUsage {
+  periodDays?: number;
+  today?: UsageCounts;
+  totals?: UsageCounts;
+  limits?: { dailyRequests?: number | null; dailyTokens?: number | null; concurrentRequests?: number | null };
+  daily?: (UsageCounts & { date: string })[];
+  byModel?: (UsageCounts & { model: string | null })[];
+}
+/** The status bar and Settings read the same copy; a finished reply refreshes it. */
+export function useUsage() {
+  return useQuery({
+    queryKey: keys.usage,
+    queryFn: () => api.request<OwnUsage>("/api/usage"),
+    enabled: useSignedIn(),
+    staleTime: 30_000,
+  });
+}
+
 /** One feature flag, false until capabilities load. */
 export function useFeature(name: keyof Capabilities["features"]): boolean {
   return !!useCapabilities().data?.features?.[name];

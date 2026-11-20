@@ -4,6 +4,8 @@ import { vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { PersonalSettings, shownPreferences } from "./personal-settings";
 import { usageDays } from "./usage-card";
+import { usageText } from "@/components/chat/status-bar";
+import { useUsage } from "@/lib/queries";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
 const push = vi.fn();
@@ -15,6 +17,11 @@ const models = [
   { id: "gemma", name: "Gemma" },
 ];
 const prefs = { preferences: { defaultModel: "glm", temperature: 0.9, topP: 1, maxTokens: 0, reasoningEffort: "medium", systemPrompt: "", density: "comfortable", focus: false, context: true, favorites: ["gemma"], agentInstructions: null }, overrides: { temperature: 0.9 }, defaultAgentInstructions: "Default agent text" };
+/** The status bar's count of today, which reads the same usage as Settings. */
+function Today() {
+  return <p>{usageText(useUsage().data)}</p>;
+}
+
 function page(features: Record<string, boolean> = {}) {
   const calls = mockApi((path, options) => {
     if (path === "/api/models") return { models };
@@ -25,7 +32,12 @@ function page(features: Record<string, boolean> = {}) {
     if (path === "/api/usage") return { periodDays: 30, today: { requests: 2, totalTokens: 900 }, totals: { requests: 5 }, limits: { dailyRequests: 100 }, daily: [], byModel: [{ model: "glm", totalTokens: 900, requests: 5 }] };
     return {};
   }, features);
-  renderPage(<PersonalSettings />);
+  renderPage(
+    <>
+      <PersonalSettings />
+      <Today />
+    </>,
+  );
   return calls;
 }
 
@@ -58,6 +70,13 @@ test("personal settings save defaults, appearance and favorites to the account",
   await userEvent.click(screen.getByRole("checkbox", { name: /^GLM/ }));
   await userEvent.click(screen.getByRole("button", { name: "Save favorites" }));
   await waitFor(() => expect(calls.filter((c) => c.method === "PATCH").at(-1)?.body).toEqual({ favorites: ["glm", "gemma"] }));
+});
+
+test("settings and the status bar share one usage request", async () => {
+  const calls = page();
+  expect(await screen.findByText("Your usage")).toBeInTheDocument();
+  expect(screen.getByText("2 / 100 requests · 900 tokens")).toBeInTheDocument();
+  expect(calls.filter((c) => c.path === "/api/usage")).toHaveLength(1);
 });
 
 test("signed-in devices can be revoked, but not this one", async () => {

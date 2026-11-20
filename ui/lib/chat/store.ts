@@ -19,6 +19,7 @@ import { EFFORTS } from "./composer";
 import { conversationBusy, isPendingMessage, mergeProgress, renderSignature, suggestionsPending } from "./conversation-state";
 import { applyToolsDraft, chatToolsKey, enableAuto, resetToolsDraft } from "@/components/connections/chat-tools";
 import { resetSteerDraft } from "@/lib/chat/steer-draft";
+import { keys, type Capabilities } from "@/lib/queries";
 import { nextRating } from "./feedback";
 import { createFollow, type Follow } from "./follow";
 import { generationKeys, generationValues, isLocked, type Generation } from "./generation";
@@ -100,17 +101,6 @@ export interface PaneState {
   before: string | null;
 }
 
-export interface Usage {
-  today?: { requests?: number; totalTokens?: number };
-  limits?: { dailyRequests?: number; dailyTokens?: number };
-  [key: string]: unknown;
-}
-
-export interface Capabilities {
-  features?: Record<string, boolean | undefined>;
-  [key: string]: unknown;
-}
-
 export interface StoreOptions {
   api: Pick<ApiClient, "request" | "send">;
   readEvents?: typeof readEventsDefault;
@@ -137,14 +127,12 @@ const unwrap = (data: any): Conversation => data.conversation || data;
 export class ChatStore {
   // ---- What the pages read ----
   route: Route = { page: "chat", id: "" };
-  capabilities: Capabilities = { features: {} };
   isAdmin = false;
   models: ModelInfo[] = [];
   modelsLoaded = false;
   preferences: Preferences | null = null;
   preferenceOverrides: Record<string, unknown> = {};
   presets: Preset[] = [];
-  usage: Usage | null = null;
   model = "";
   systemPrompt = "";
   temperature = 0.7;
@@ -303,7 +291,6 @@ export class ChatStore {
         this.load.refresh(55000);
       }, 60000),
     );
-    this.refreshUsage();
   }
 
   /** The person signed out or the page closed: stop everything this session started. */
@@ -503,16 +490,13 @@ export class ChatStore {
     this.dialog = null;
     this.emit();
   }
-  async refreshUsage() {
-    const epoch = this.epoch;
-    try {
-      const usage = await this.options.api.request<Usage>("/api/usage");
-      if (epoch !== this.epoch) return;
-      this.usage = usage;
-      this.emit();
-    } catch {
-      // The status bar keeps what it had.
-    }
+  /** A reply finished: the status bar's and Settings' usage is out of date. */
+  refreshUsage() {
+    this.options.queries?.invalidateQueries({ queryKey: keys.usage });
+  }
+  /** The installation's capabilities, from the shared query; no features until they load. */
+  get capabilities(): Pick<Capabilities, "features"> {
+    return this.options.queries?.getQueryData<Capabilities>(keys.capabilities) ?? { features: {} };
   }
 
   // ---- The side pane (details, workspace, browser) ----

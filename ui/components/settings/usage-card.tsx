@@ -9,7 +9,7 @@ import { useState } from "react";
 import { INPUT, Legend, OUTPUT } from "@/components/manage/chart-legend";
 import { Eyebrow } from "@/components/app-shell/page";
 import { Meter, Note, Quota, Section, TableWrap, Tiles, td, th } from "@/components/manage/kit";
-import type { Model } from "@/lib/queries";
+import type { Model, OwnUsage, UsageCounts } from "@/lib/queries";
 import { compact, num } from "@/lib/format";
 
 /** The chart's height, held by its placeholder while recharts loads. */
@@ -20,24 +20,6 @@ const TimeBars = dynamic(() => import("@/components/manage/bar-chart").then((m) 
   loading: () => <div style={{ height: CHART_HEIGHT }} aria-hidden />,
 }) as typeof import("@/components/manage/bar-chart").TimeBars;
 
-export interface UsageCounts {
-  requests?: number;
-  promptTokens?: number;
-  completionTokens?: number;
-  totalTokens?: number;
-  errors?: number;
-  reservedTokens?: number;
-  activeGenerations?: number;
-  incompleteUsage?: number;
-}
-export interface OwnUsage {
-  periodDays?: number;
-  today?: UsageCounts;
-  totals?: UsageCounts;
-  limits?: { dailyRequests?: number | null; dailyTokens?: number | null; concurrentRequests?: number | null };
-  daily?: (UsageCounts & { date: string })[];
-  byModel?: (UsageCounts & { model: string | null })[];
-}
 
 /** 950, 9.5k, 48k, 1.3M. */
 

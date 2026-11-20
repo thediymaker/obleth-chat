@@ -18,9 +18,9 @@ import { SecurityCard, TokensCard, type ApiToken, type DeviceSession } from "@/c
 import { BrowserCard } from "@/components/settings/browser-card";
 import { FilesDialog } from "@/components/settings/files-dialog";
 import { GenerationFields, describeGeneration, generationKeys, generationValues, modelOptions, readGeneration, type Generation, type PolicyModel } from "@/components/settings/generation";
-import { UsageCard, type OwnUsage } from "@/components/settings/usage-card";
+import { UsageCard } from "@/components/settings/usage-card";
 import { api } from "@/lib/api";
-import { keys, useFeature, useModels, usePreferences, usePresets, type Model } from "@/lib/queries";
+import { keys, useFeature, useModels, usePreferences, usePresets, useUsage, type Model } from "@/lib/queries";
 import { useSession, useUser } from "@/lib/session";
 
 export interface Preferences extends Generation {
@@ -82,14 +82,11 @@ export function PersonalSettings() {
   const account = useQuery({
     queryKey: accountKey,
     queryFn: async () => {
-      const [s, u, t] = await Promise.all([
-        api.request<{ sessions?: DeviceSession[] }>("/api/auth/sessions"),
-        api.request<OwnUsage>("/api/usage"),
-        api.request<{ tokens?: ApiToken[] }>("/api/auth/tokens"),
-      ]);
-      return { sessions: s.sessions ?? [], usage: u, tokens: t.tokens ?? [] };
+      const [s, t] = await Promise.all([api.request<{ sessions?: DeviceSession[] }>("/api/auth/sessions"), api.request<{ tokens?: ApiToken[] }>("/api/auth/tokens")]);
+      return { sessions: s.sessions ?? [], tokens: t.tokens ?? [] };
     },
   });
+  const { data: usage } = useUsage();
   const refresh = () => queries.invalidateQueries({ queryKey: accountKey });
   const [files, setFiles] = useState(false);
   const [preset, setPreset] = useState<Preset | "new" | null>(null);
@@ -117,7 +114,7 @@ export function PersonalSettings() {
   return (
     <div>
       <SectionHeading title="Personal settings" description="Your profile, defaults, and signed-in devices." />
-      {account.data?.usage && <UsageCard usage={account.data.usage} models={models} />}
+      {usage && <UsageCard usage={usage} models={models} />}
       {confirm.element}
       <FilesDialog open={files} onOpenChange={setFiles} />
       <PresetDialog key={preset === "new" ? "new" : preset?.id ?? "none"} preset={preset} onClose={() => setPreset(null)} models={models} values={p} />

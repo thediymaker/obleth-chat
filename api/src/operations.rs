@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgConnection, PgPool, Postgres, Transaction};
 use std::{collections::HashMap, time::Duration};
 use uuid::Uuid;
 
@@ -85,25 +85,23 @@ fn resolved(defaults: Value, overrides: Value) -> Result<Limits, ApiError> {
     merge(&mut value, &overrides);
     serde_json::from_value(value).map_err(|_| ApiError::internal())
 }
-async fn limits_in(tx: &mut Transaction<'_, Postgres>, owner: Uuid) -> Result<Limits, ApiError> {
-    let defaults: Value = sqlx::query_scalar("SELECT limits FROM site_limits WHERE id=TRUE")
-        .fetch_one(&mut **tx)
-        .await?;
-    let overrides = sqlx::query_scalar("SELECT limits FROM user_limit_overrides WHERE user_id=$1")
-        .bind(owner)
-        .fetch_optional(&mut **tx)
-        .await?
-        .unwrap_or_else(|| json!({}));
+async fn limits_in(db: &mut PgConnection, owner: Uuid) -> Result<Limits, ApiError> {
+    let (defaults, overrides): (Value, Option<Value>) = sqlx::query_as(
+        "SELECT s.limits, o.limits FROM site_limits s
+         LEFT JOIN user_limit_overrides o ON o.user_id=$1 WHERE s.id=TRUE",
+    )
+    .bind(owner)
+    .fetch_one(db)
+    .await?;
+    let overrides = overrides.unwrap_or_else(|| json!({}));
     resolved(defaults, overrides)
 }
 pub async fn effective_limits(pool: &PgPool, owner: Uuid) -> Result<Limits, ApiError> {
-    let mut tx = pool.begin().await?;
-    let limits = limits_in(&mut tx, owner).await?;
-    tx.commit().await?;
-    Ok(limits)
+    limits_in(&mut *pool.acquire().await?, owner).await
 }
-/// Call after recovering expired conversation leases, before setting the new
-/// active_generation. The caller must already hold its owner's users row lock.
+/// Call after recovering expired conversation leases (which also releases abandoned
+/// reservations), before setting the new active_generation. The caller must already
+/// hold its owner's users row lock.
 pub async fn reserve_in(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
@@ -143,6 +141,7 @@ pub async fn reserve_follow_up_in(
             "Follow-up output must be between 1 and 256 tokens",
         ));
     }
+    recover_in(tx, owner).await?;
     reserve_kind_in(
         tx,
         owner,
@@ -166,6 +165,7 @@ pub async fn reserve_agent_in(
     context_bytes: usize,
     lease_seconds: i64,
 ) -> Result<(), ApiError> {
+    recover_in(tx, owner).await?;
     reserve_kind_in(
         tx,
         owner,
@@ -200,13 +200,12 @@ async fn reserve_kind_in(
     };
     let context_bytes =
         i64::try_from(context_bytes).map_err(|_| ApiError::bad("Context size is too large"))?;
-    recover_in(tx, owner).await?;
     let limits = limits_in(tx, owner).await?;
     let active:i64=sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM conversations WHERE owner_id=$1 AND active_generation IS NOT NULL AND generation_expires>NOW()) + (SELECT COUNT(*) FROM generation_usage WHERE user_id=$1 AND status='reserved' AND purpose='follow_up' AND reservation_expires>NOW())").bind(owner).fetch_one(&mut **tx).await?;
     if active >= limits.concurrent_requests {
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS,format!("Your account allows {} responses at once. Stop or wait for a response before starting another.",limits.concurrent_requests)));
     }
-    let (requests,tokens,reserved):(i64,i64,i64)=sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(COALESCE(total_tokens,charged_tokens)),0)::bigint,COALESCE(SUM(CASE WHEN status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW())) THEN reserved_output_tokens ELSE 0 END),0)::bigint FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')").bind(owner).fetch_one(&mut **tx).await?;
+    let (requests,tokens,reserved):(i64,i64,i64)=sqlx::query_as(&format!("SELECT COUNT(*),COALESCE(SUM(COALESCE(total_tokens,charged_tokens)),0)::bigint,COALESCE(SUM(CASE WHEN status='reserved' AND {LIVE} THEN reserved_output_tokens ELSE 0 END),0)::bigint FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')")).bind(owner).fetch_one(&mut **tx).await?;
     if limits.daily_requests.is_some_and(|limit| requests >= limit) {
         return Err(ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -229,7 +228,7 @@ async fn reserve_kind_in(
 /// turns are charged an estimate from their last checkpointed output.
 pub async fn recover_in(tx: &mut Transaction<'_, Postgres>, owner: Uuid) -> Result<(), ApiError> {
     let charge = charge_estimate("SELECT OCTET_LENGTH(m.content)+OCTET_LENGTH(m.reasoning_content) FROM messages m WHERE m.generation_id=g.generation_id");
-    sqlx::query(&format!("UPDATE generation_usage g SET status='interrupted',finished_at=NOW(),usage_complete=FALSE,charged_tokens={charge} WHERE user_id=$1 AND status='reserved' AND NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW()))")).bind(owner).execute(&mut **tx).await?;
+    sqlx::query(&format!("UPDATE generation_usage g SET status='interrupted',finished_at=NOW(),usage_complete=FALSE,charged_tokens={charge} WHERE user_id=$1 AND status='reserved' AND NOT {LIVE}")).bind(owner).execute(&mut **tx).await?;
     Ok(())
 }
 /// Settle a turn whose streamed output size is unknown; without reported usage,
@@ -300,24 +299,45 @@ impl Counts {
         self.reserved_tokens += other.reserved_tokens;
     }
 }
+/// A reservation still held: a chat turn its conversation still leases, or a follow-up
+/// or worker request inside its own lease. Rows aliased `g` in `generation_usage`.
+macro_rules! live {
+    () => {
+        "((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW()))"
+    };
+}
+const LIVE: &str = live!();
 // Shared expressions keep daily, personal, and administrative totals consistent.
 // The active-generation lookup uses the partial index in migration 007.
-const AGGREGATES: &str = "
+const AGGREGATES: &str = concat!(
+    "
     COUNT(*) AS requests,
     COALESCE(SUM(prompt_tokens),0)::bigint AS prompt_tokens,
     COALESCE(SUM(completion_tokens),0)::bigint AS completion_tokens,
     COALESCE(SUM(total_tokens),0)::bigint AS total_tokens,
     COUNT(*) FILTER(WHERE status IN ('error','interrupted') OR
-        (status='reserved' AND NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW())))) AS errors,
-    COUNT(*) FILTER(WHERE status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW()))) AS active_generations,
+        (status='reserved' AND NOT ",
+    live!(),
+    ")) AS errors,
+    COUNT(*) FILTER(WHERE status='reserved' AND ",
+    live!(),
+    ") AS active_generations,
     COUNT(*) FILTER(WHERE NOT usage_complete AND (status<>'reserved' OR
-        NOT ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW())))) AS incomplete_usage,
-    COALESCE(SUM(CASE WHEN status='reserved' AND ((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW()))
-        THEN reserved_output_tokens ELSE 0 END),0)::bigint AS reserved_tokens";
+        NOT ",
+    live!(),
+    ")) AS incomplete_usage,
+    COALESCE(SUM(CASE WHEN status='reserved' AND ",
+    live!(),
+    "
+        THEN reserved_output_tokens ELSE 0 END),0)::bigint AS reserved_tokens"
+);
 #[derive(Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 struct Daily {
     date: String,
+    /// Today's UTC date, by the database's clock.
+    #[serde(skip)]
+    today: String,
     #[serde(flatten)]
     #[sqlx(flatten)]
     counts: Counts,
@@ -331,11 +351,9 @@ struct ByModel {
     #[sqlx(flatten)]
     counts: Counts,
 }
-async fn counts(pool: &PgPool, owner: Uuid, days: i32) -> Result<Counts, ApiError> {
-    Ok(sqlx::query_as::<_,Counts>(&format!("SELECT {AGGREGATES} FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') - make_interval(days => $2-1)")).bind(owner).bind(days).fetch_one(pool).await?)
-}
+/// The last 30 days by UTC day, oldest first.
 async fn daily(pool: &PgPool, owner: Uuid) -> Result<Vec<Daily>, ApiError> {
-    Ok(sqlx::query_as::<_,Daily>(&format!("SELECT to_char(g.created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS date,{AGGREGATES} FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')-INTERVAL '29 days' GROUP BY date ORDER BY date")).bind(owner).fetch_all(pool).await?)
+    Ok(sqlx::query_as::<_,Daily>(&format!("SELECT to_char(g.created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS date,to_char(NOW() AT TIME ZONE 'UTC','YYYY-MM-DD') AS today,{AGGREGATES} FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')-INTERVAL '29 days' GROUP BY date ORDER BY date")).bind(owner).fetch_all(pool).await?)
 }
 /// The last 30 days per model, most tokens first.
 async fn by_model(pool: &PgPool, owner: Uuid) -> Result<Vec<ByModel>, ApiError> {
@@ -363,13 +381,20 @@ async fn own_usage(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let user = state.auth.require(&headers, false).await?;
-    let (today, totals, daily, models, limits) = tokio::try_join!(
-        counts(&state.store.pool, user.id, 1),
-        counts(&state.store.pool, user.id, 30),
+    let (daily, models, limits) = tokio::try_join!(
         daily(&state.store.pool, user.id),
         by_model(&state.store.pool, user.id),
         effective_limits(&state.store.pool, user.id)
     )?;
+    let mut totals = Counts::default();
+    for day in &daily {
+        totals.add(&day.counts);
+    }
+    let today = daily
+        .last()
+        .filter(|day| day.date == day.today)
+        .map(|day| day.counts.clone())
+        .unwrap_or_default();
     Ok(Json(
         json!({"periodDays":30,"timezone":"UTC","quotaBasis":QUOTA_BASIS,"today":today,"totals":totals,"daily":daily,"byModel":models,"limits":limits}),
     ))

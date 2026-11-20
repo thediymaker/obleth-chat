@@ -5,6 +5,7 @@ dist/
 !.env.example
 *.tar.gz
 *.log
+!evals/certify/fixtures/cluster-home/certify-lab/runs/out.log
 test-results/
 .DS_Store
 target/

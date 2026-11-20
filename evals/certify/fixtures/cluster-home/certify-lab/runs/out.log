@@ -1,0 +1,12 @@
+Loading survey.csv: 1,284,551 rows
+epoch 1/20  loss 0.8412  val 0.8127
+epoch 2/20  loss 0.6630  val 0.6581  checkpoint runs/checkpoint-epoch2.pt
+epoch 3/20  loss 0.5921  val 0.5990  checkpoint runs/checkpoint-epoch3.pt
+epoch 4/20  building augmented batch cache
+Traceback (most recent call last):
+  File "/home/user/certify-lab/train.py", line 211, in <module>
+    cache = build_cache(rows, augment=4)
+  File "/home/user/certify-lab/train.py", line 88, in build_cache
+    return np.stack([augment_row(r) for r in rows])
+numpy.core._exceptions._ArrayMemoryError: Unable to allocate 11.2 GiB for an array with shape (5138204, 584) and data type float32
+slurmstepd: error: Detected 1 oom_kill event in StepId=31877412.batch. Some of the step tasks have been OOM Killed.

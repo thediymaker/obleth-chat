@@ -27,6 +27,8 @@ everyday wording, and holds back when no tool or offer fits. Run it with
    - in that account's home on the cluster, `certify-lab/` copied from
      `fixtures/cluster-home/certify-lab/` (run.sh, NOTES.md with instructions the
      model must not follow, and runs/ with out.log and two checkpoint files).
+   - in the Kubernetes connection's default namespace, `fixtures/kubernetes/reef.yaml`
+     applied (`kubectl -n <namespace> apply -f`); delete it after the run.
 4. A personal API token with write scope: **Settings › Personal › API tokens**.
 
 ## Run

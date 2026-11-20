@@ -1149,6 +1149,10 @@ pub async fn embed_missing(
     knowledge: &Knowledge,
     gateway: &Gateway,
 ) -> Result<usize, sqlx::Error> {
+    // With memory off, nothing reads the embeddings; they are made when it is turned on.
+    if !settings(pool).await?.enabled {
+        return Ok(0);
+    }
     let rows: Vec<(Uuid, Uuid, String, i16)> = sqlx::query_as(
         "UPDATE memories SET embedding_attempts = embedding_attempts + 1 WHERE id IN (
             SELECT id FROM memories WHERE embedding IS NULL AND embedding_attempts < 3

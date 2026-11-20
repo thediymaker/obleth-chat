@@ -296,7 +296,8 @@ impl Knowledge {
         .unwrap_or(false)
     }
 
-    /// Saved items that best match the query, by meaning and words, as ranked ids.
+    /// Saved items that best match the query, by meaning and words, as ranked ids. The
+    /// person's items are few enough (at most 5,000) to compare exactly, without an index.
     async fn rank_saved(
         &self,
         gateway: &Gateway,
@@ -317,10 +318,6 @@ impl Knowledge {
             .pop()
             .map(vector_literal)
             .ok_or_else(ApiError::internal)?;
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("SET LOCAL hnsw.iterative_scan = relaxed_order")
-            .execute(&mut *tx)
-            .await?;
         let rows = sqlx::query(
             "WITH mine AS (SELECT id, embedding, tsv FROM saved_items WHERE (owner_id = $1 OR ($6::uuid IS NOT NULL AND project_id = $6)) AND (searchable OR NOT $5)),
              vec AS (
@@ -341,9 +338,8 @@ impl Knowledge {
         .bind(limit as i64)
         .bind(only_searchable)
         .bind(project)
-        .fetch_all(&mut *tx)
+        .fetch_all(&self.pool)
         .await?;
-        tx.commit().await?;
         Ok(rows
             .iter()
             .map(|r| (r.get("id"), r.get("by_meaning"), r.get("by_words")))

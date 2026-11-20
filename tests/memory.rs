@@ -628,6 +628,62 @@ async fn a_turn_embeds_its_question_once_for_knowledge_and_memory(pool: PgPool) 
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn the_embedding_backlog_waits_while_memory_is_off_and_uses_its_index(pool: PgPool) {
+    let (state, _, _) = fixture(&pool).await;
+    let gateway = state.gateway.clone().unwrap();
+    let knowledge = state.knowledge.clone().unwrap();
+    let person = session(&pool, "user").await;
+    sqlx::query("INSERT INTO memories (id, owner_id, kind, content, origin) VALUES ($1, $2, 'about', 'You map river basins', 'added')")
+        .bind(Uuid::new_v4())
+        .bind(person.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let attempts = || async {
+        sqlx::query_scalar::<_, i16>("SELECT embedding_attempts FROM memories WHERE owner_id = $1")
+            .bind(person.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    // Memory is off: the worker leaves the backlog alone.
+    assert_eq!(
+        memory::embed_missing(&pool, &knowledge, &gateway)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(attempts().await, 0);
+    enable(&pool).await;
+    assert_eq!(
+        memory::embed_missing(&pool, &knowledge, &gateway)
+            .await
+            .unwrap(),
+        1
+    );
+    let embedded: bool =
+        sqlx::query_scalar("SELECT embedding IS NOT NULL FROM memories WHERE owner_id = $1")
+            .bind(person.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(embedded);
+    // The backlog query can use its partial index.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT id FROM memories WHERE embedding IS NULL AND embedding_attempts < 3 ORDER BY created_at LIMIT 16",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert!(plan.join("\n").contains("memories_pending_idx"), "{plan:?}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn people_see_change_and_delete_their_memories(pool: PgPool) {
     let (_, app, _) = fixture(&pool).await;
     let person = session(&pool, "user").await;

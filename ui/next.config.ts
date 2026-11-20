@@ -13,6 +13,10 @@ const nextConfig: NextConfig = {
   // next dev would otherwise write an AGENTS.md into the project.
   agentRules: false,
   outputFileTracingRoot: path.join(__dirname),
+  // The font keeps its name across releases, so it is kept a day and checked again after.
+  async headers() {
+    return [{ source: "/fonts/:path*", headers: [{ key: "Cache-Control", value: "public, max-age=86400, stale-while-revalidate=604800" }] }];
+  },
   async rewrites() {
     if (!api) return [];
     return ["/api/:path*", "/site.config.js", "/assets/:path*", "/.well-known/:path*"].map((source) => ({

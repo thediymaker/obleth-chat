@@ -11,7 +11,7 @@ use axum::{
     Router,
 };
 use std::{path::PathBuf, time::Duration};
-use tower_http::services::ServeDir;
+use tower_http::{compression::CompressionLayer, services::ServeDir};
 use url::Url;
 
 /// Tells the interface which origins its workspace previews use, for its
@@ -56,11 +56,13 @@ impl Ui {
         if !matches!(base.scheme(), "http" | "https") {
             anyhow::bail!("OBLETH_CHAT_UI_URL must be an http or https address");
         }
-        // No pooled connections: a pooled one can still point at an interface pod
-        // that is shutting down, while a new one goes only to a ready pod.
+        // Idle connections are dropped well inside an interface pod's 10 s shutdown
+        // delay, so a reused one rarely meets a pod that is going away; a page load
+        // that does is sent again on a new connection.
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .pool_max_idle_per_host(0)
+            .pool_max_idle_per_host(4)
+            .pool_idle_timeout(Duration::from_secs(3))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(60))
             .build()?;
@@ -175,6 +177,24 @@ pub fn branding(branding_dir: PathBuf) -> Router {
             tower_http::services::ServeFile::new(branding_dir.join("site.config.js")),
         )
         .nest_service("/assets", ServeDir::new(branding_dir.join("assets")))
+        .layer(axum::middleware::map_response(branding_cache))
+        // Branding is the same for everyone and holds no secrets, so it can be
+        // compressed; API answers are not (they carry tokens and people's own text).
+        .layer(CompressionLayer::new())
+}
+
+/// How long a browser may use branding before asking again. A replaced logo or
+/// site.config.js shows within this time; the files' dates answer the revalidation.
+const BRANDING_CACHE: &str = "public, max-age=300";
+
+async fn branding_cache(mut response: Response) -> Response {
+    if response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(BRANDING_CACHE),
+        );
+    }
+    response
 }
 
 /// A copy of the headers without the hop-by-hop ones, including any a Connection

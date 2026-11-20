@@ -230,8 +230,24 @@ async fn without_an_interface_server_branding_still_loads_and_pages_say_so(pool:
     let (app, _, _, task) = fixture(pool).await;
     let config = fetch(&app, "/site.config.js", &[]).await;
     assert_eq!(config.status(), StatusCode::OK);
+    // Branding is kept a few minutes and revalidated by date, and compressed.
+    assert_eq!(config.headers()["cache-control"], "public, max-age=300");
+    let modified = config.headers()["last-modified"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let again = fetch(&app, "/site.config.js", &[("if-modified-since", &modified)]).await;
+    assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(again.headers()["cache-control"], "public, max-age=300");
+    let packed = fetch(&app, "/site.config.js", &[("accept-encoding", "gzip")]).await;
+    assert_eq!(packed.headers()["content-encoding"], "gzip");
     let logo = fetch(&app, "/assets/obleth-ink.svg", &[]).await;
     assert_eq!(logo.status(), StatusCode::OK);
+    assert_eq!(logo.headers()["cache-control"], "public, max-age=300");
+    assert_eq!(
+        fetch(&app, "/assets/missing.svg", &[]).await.headers()["cache-control"],
+        "no-store"
+    );
     let page = fetch(&app, "/", &[]).await;
     assert_eq!(page.status(), StatusCode::SERVICE_UNAVAILABLE);
     let headers = page.headers().clone();

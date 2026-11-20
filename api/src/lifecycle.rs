@@ -109,14 +109,16 @@ async fn ended(
     })
 }
 
-/// Long responses checkpoint less often so total checkpoint writes stay near
-/// linear in response size: the first 32 KiB save on every tick, then only
-/// after 8 KiB of new text or 3 seconds.
+/// Long responses checkpoint less often so total checkpoint writes stay linear in
+/// response size: the first 32 KiB save on every tick; after that, once the new text
+/// is a quarter of what was saved, or after 3 seconds while under 128 KiB. A replica
+/// that dies mid-reply so loses at most that quarter of a long reply's newest text.
 pub fn checkpoint_due(total: usize, saved: usize, since_save: Duration) -> bool {
+    let new = total.saturating_sub(saved);
     total != saved
         && (total <= 32 * 1024
-            || total.saturating_sub(saved) >= 8 * 1024
-            || since_save >= Duration::from_secs(3))
+            || new >= saved / 4
+            || (total < 128 * 1024 && since_save >= Duration::from_secs(3)))
 }
 
 /// Save partial output without holding a transaction while waiting for a model.
@@ -132,7 +134,7 @@ pub async fn save_activity(
     activity: &[Value],
 ) -> Result<(), ApiError> {
     sqlx::query("UPDATE messages m SET activity=$4 FROM conversations c WHERE m.conversation_id=c.id AND c.id=$1 AND c.owner_id=$2 AND c.active_generation=$3 AND m.generation_id=$3 AND m.status='pending'")
-        .bind(id).bind(owner).bind(generation).bind(Value::Array(activity.to_vec())).execute(pool).await?;
+        .bind(id).bind(owner).bind(generation).bind(sqlx::types::Json(activity)).execute(pool).await?;
     Ok(())
 }
 pub async fn checkpoint(
@@ -148,12 +150,11 @@ pub async fn checkpoint(
         return Err(ApiError::bad("The response exceeded the storage limit"));
     }
     let mut tx = pool.begin().await?;
-    sqlx::query("SET LOCAL statement_timeout='5s'")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("SET LOCAL lock_timeout='500ms'")
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "SELECT set_config('statement_timeout','5s',true), set_config('lock_timeout','500ms',true)",
+    )
+    .execute(&mut *tx)
+    .await?;
     let changed=sqlx::query("UPDATE messages m SET content=$4,reasoning_content=$5,request_id=$6 FROM conversations c WHERE m.conversation_id=c.id AND c.id=$1 AND c.owner_id=$2 AND c.active_generation=$3 AND c.generation_expires>clock_timestamp() AND m.generation_id=$3 AND m.status='pending'")
         .bind(id).bind(owner).bind(generation).bind(content).bind(reasoning).bind(request_id).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {

@@ -360,11 +360,32 @@ fn long_responses_checkpoint_less_often() {
         Duration::from_secs(60)
     ));
     assert!(lifecycle::checkpoint_due(20_000, 19_999, tick));
-    assert!(!lifecycle::checkpoint_due(200_000, 199_000, tick));
+    assert!(!lifecycle::checkpoint_due(100_000, 99_000, tick));
     assert!(lifecycle::checkpoint_due(
-        200_000,
-        199_000,
+        100_000,
+        99_000,
         Duration::from_secs(3)
     ));
-    assert!(lifecycle::checkpoint_due(200_000, 190_000, tick));
+    // Past 128 KiB only a quarter more text saves, however long it took.
+    assert!(!lifecycle::checkpoint_due(
+        200_000,
+        190_000,
+        Duration::from_secs(60)
+    ));
+    assert!(lifecycle::checkpoint_due(250_000, 200_000, tick));
+}
+
+#[test]
+fn checkpoint_writes_stay_linear_in_the_reply_size() {
+    // A slow reply: 1 KiB per 750 ms tick, so the time rule is always met.
+    for total in [64 * 1024, 1024 * 1024, 8 * 1024 * 1024] {
+        let (mut saved, mut written) = (0usize, 0usize);
+        for size in (1024..=total).step_by(1024) {
+            if lifecycle::checkpoint_due(size, saved, Duration::from_secs(3)) {
+                written += size;
+                saved = size;
+            }
+        }
+        assert!(written <= 40 * total, "{total}: {written}");
+    }
 }

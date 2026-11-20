@@ -148,22 +148,33 @@ async fn read(
     let owner = readable(pool, user.id, id).await?;
     // A viewer that already has this version is told so without the transcript.
     let tag = version(pool, id).await?;
-    let fresh = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|sent| sent.split(',').any(|t| t.trim() == tag));
-    let mut response = if fresh {
+    let response = if unchanged(&headers, &tag) {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
         Json(shared(&s, &user, owner, id).await?).into_response()
     };
-    let headers = response.headers_mut();
-    headers.insert(
-        header::ETAG,
-        HeaderValue::from_str(&tag).map_err(|_| ApiError::internal())?,
-    );
+    let mut response = tagged(response, &tag)?;
     // Revalidated on every read; never served from a cache unasked.
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+/// Whether the request already has the version `tag` names (If-None-Match).
+pub(crate) fn unchanged(headers: &HeaderMap, tag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|sent| sent.split(',').any(|t| t.trim() == tag))
+}
+
+/// The response with its version's ETag.
+pub(crate) fn tagged(mut response: Response, tag: &str) -> Result<Response, ApiError> {
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(tag).map_err(|_| ApiError::internal())?,
+    );
     Ok(response)
 }
 

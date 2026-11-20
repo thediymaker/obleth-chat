@@ -4,11 +4,11 @@
 // leaving a temporary chat.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { StreamEvent } from "@/lib/api";
+import { NOT_MODIFIED, type StreamEvent, type Validator } from "@/lib/api";
 import { ChatStore, routeOf } from "./store";
 import type { Conversation, Message } from "./types";
 
-type Call = { path: string; method: string; body?: any };
+type Call = { path: string; method: string; body?: any; validator?: Validator };
 type Handler = (call: Call) => unknown;
 
 class HttpError extends Error {
@@ -46,7 +46,7 @@ function setup(handlers: Record<string, Handler>, stream = channel()) {
   const sent: string[] = [];
   const api = {
     request: vi.fn(async (path: string, opts: any = {}) => {
-      const call = { path, method: opts.method || "GET", body: opts.body };
+      const call = { path, method: opts.method || "GET", body: opts.body, validator: opts.validator };
       calls.push(call);
       const handler = handlers[`${call.method} ${path}`];
       if (!handler) throw new HttpError(`no handler for ${call.method} ${path}`, 500);
@@ -265,6 +265,60 @@ describe("an open chat", () => {
     store.model = "m1";
     store.setCatalog({ models: [{ id: "m1", name: "Model One" }, { id: "m2", name: "Model Two" }] as never });
     expect(store.model).toBe("m1");
+  });
+
+  it("leaves a watched chat alone while the server says it has not changed", async () => {
+    const writing = conversation({ activeGenerationId: "g1", messages: [done("")[0]!, { id: "a1", role: "assistant", content: "Half", status: "streaming" }] });
+    let saved = { tag: '"v1"', conversation: writing };
+    const t = setup({
+      "GET /api/conversations/c1": ({ validator }) => {
+        if (!validator) return { conversation: structuredClone(saved.conversation) };
+        if (validator.tag === saved.tag) return NOT_MODIFIED;
+        validator.tag = saved.tag;
+        return { conversation: structuredClone(saved.conversation) };
+      },
+    });
+    t.store.setRoute(routeOf("/chat/c1"));
+    await until(() => t.store.operations.has("c1"));
+    await t.store.reconcileConversation("c1");
+    let emits = 0;
+    t.store.subscribe(() => emits++);
+    await t.store.reconcileConversation("c1");
+    expect(t.calls.at(-1)!.validator!.tag).toBe('"v1"');
+    expect(emits).toBe(0);
+    expect(t.store.operations.has("c1")).toBe(true);
+    // The reply finished: a new version, shown at once.
+    saved = { tag: '"v2"', conversation: conversation({ messages: done("Whole") }) };
+    await t.store.reconcileConversation("c1");
+    expect(emits).toBeGreaterThan(0);
+    expect(t.store.operations.has("c1")).toBe(false);
+    expect(t.store.active!.messages[1]!.content).toBe("Whole");
+  });
+
+  it("backs off watching a shared chat while nothing changes", async () => {
+    vi.useFakeTimers();
+    const t = setup({
+      "GET /api/conversations/s1": () => {
+        throw new HttpError("Not found", 404);
+      },
+      "GET /api/shared/s1": ({ validator }) => {
+        if (validator?.tag === '"s1"') return NOT_MODIFIED;
+        if (validator) validator.tag = '"s1"';
+        return { conversation: conversation({ id: "s1", messages: done("Theirs") }), share: { scope: "link", ownerName: "Ana" } };
+      },
+    });
+    t.store.setRoute(routeOf("/chat/s1"));
+    await vi.waitFor(() => expect(t.store.shared).toBeTruthy());
+    const polls = () => t.calls.filter((c) => c.path === "/api/shared/s1" && c.validator).length;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(polls()).toBe(1);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(polls()).toBe(2);
+    // Not modified: the next look waits twice as long.
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(polls()).toBe(2);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(polls()).toBe(3);
   });
 
   it("keeps someone else's shared chat read-only", async () => {

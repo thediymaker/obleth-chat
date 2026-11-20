@@ -10,6 +10,14 @@ export class ApiError extends Error {
   }
 }
 
+/** What a GET with a validator returns while the caller's copy is still current. */
+export const NOT_MODIFIED = Symbol("not modified");
+
+/** The ETag of a copy the caller keeps: sent as If-None-Match, and set from each new answer. */
+export interface Validator {
+  tag: string;
+}
+
 export interface RequestOptions {
   method?: string;
   /** Sent as JSON. */
@@ -20,6 +28,8 @@ export interface RequestOptions {
   signal?: AbortSignal;
   /** Returns the Response of a text/event-stream instead of parsing JSON. */
   stream?: boolean;
+  /** Asks only for a newer copy than the one this names; see NOT_MODIFIED. */
+  validator?: Validator;
 }
 
 async function responseError(response: Response): Promise<ApiError> {
@@ -55,13 +65,15 @@ export class ApiClient {
   }
 
   request<T = any>(path: string, options: RequestOptions & { stream: true }): Promise<Response>;
+  request<T = any>(path: string, options: RequestOptions & { validator: Validator }): Promise<T | typeof NOT_MODIFIED>;
   request<T = any>(path: string, options?: RequestOptions): Promise<T>;
-  async request<T = any>(path: string, { method = "GET", body, raw, contentType, signal, stream = false }: RequestOptions = {}): Promise<T | Response> {
+  async request<T = any>(path: string, { method = "GET", body, raw, contentType, signal, stream = false, validator }: RequestOptions = {}): Promise<T | Response | typeof NOT_MODIFIED> {
     if (!path.startsWith("/api/")) throw new Error("API requests must use this origin.");
     const headers: Record<string, string> = { Accept: stream ? "text/event-stream" : "application/json" };
     if (raw !== undefined) headers["Content-Type"] = contentType || "application/octet-stream";
     else if (body !== undefined) headers["Content-Type"] = "application/json";
     if (!["GET", "HEAD"].includes(method) && this.csrfToken) headers["X-CSRF-Token"] = this.csrfToken;
+    if (validator?.tag) headers["If-None-Match"] = validator.tag;
     const sessionSignal = this.sessionAbort.signal;
     const signals = [sessionSignal, ...(signal ? [signal] : [])];
     if (!stream) signals.push(AbortSignal.timeout(raw !== undefined ? 600_000 : 30_000));
@@ -81,6 +93,7 @@ export class ApiClient {
       throw new ApiError("Connection lost. Your saved conversations will be here when the service returns.");
     }
     sessionSignal.throwIfAborted();
+    if (validator && response.status === 304) return NOT_MODIFIED;
     if (!response.ok) {
       const error = await responseError(response);
       sessionSignal.throwIfAborted();
@@ -101,6 +114,7 @@ export class ApiClient {
       throw new ApiError("The service returned an invalid response.");
     }
     sessionSignal.throwIfAborted();
+    if (validator) validator.tag = response.headers.get("etag") || "";
     return result;
   }
 

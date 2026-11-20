@@ -63,6 +63,7 @@ use gateway::{Decoder, Gateway};
 use metrics::Metrics;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::{
     convert::Infallible,
@@ -393,13 +394,23 @@ async fn create(
         ),
     ))
 }
+/// The chat as its owner reads it. The ETag hashes the whole answer, so a watcher that
+/// sends back the tag of its copy learns the chat is unchanged without the transcript.
 async fn detail(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let u = s.auth.require(&headers, false).await?;
-    Ok(Json(json!({"conversation":s.store.get(u.id,id).await?})))
+    let body = serde_json::to_vec(&json!({"conversation":s.store.get(u.id,id).await?}))
+        .map_err(|_| ApiError::internal())?;
+    let tag = format!("\"{:x}\"", Sha256::digest(&body));
+    let response = if shares::unchanged(&headers, &tag) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+    };
+    shares::tagged(response, &tag)
 }
 async fn rename(
     State(s): State<AppState>,

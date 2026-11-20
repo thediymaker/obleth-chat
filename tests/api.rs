@@ -1141,6 +1141,43 @@ async fn a_shared_chat_answers_not_modified_until_it_changes(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn an_owner_watching_a_chat_is_told_when_it_has_not_changed(pool: PgPool) {
+    let (app, _, _, task) = fixture(pool).await;
+    let (cookie, csrf, _) = login(&app, "test-admin").await;
+    let id = conversation(&app, &cookie, &csrf).await;
+    let path = format!("/api/conversations/{id}");
+    let first = fetch(&app, &path, &[("cookie", &cookie)]).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(first.headers()["cache-control"], "no-store");
+    let tag = first.headers()["etag"].to_str().unwrap().to_owned();
+    let again = fetch(&app, &path, &[("cookie", &cookie), ("if-none-match", &tag)]).await;
+    assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+    assert!(again
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .is_empty());
+    let renamed = app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &path,
+            json!({"title":"Renamed"}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let changed = fetch(&app, &path, &[("cookie", &cookie), ("if-none-match", &tag)]).await;
+    assert_eq!(changed.status(), StatusCode::OK);
+    assert_ne!(changed.headers()["etag"], tag.as_str());
+    task.abort();
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn reading_a_chat_does_not_wait_for_the_owners_lock(pool: PgPool) {
     let (app, state, _, task) = fixture(pool.clone()).await;
     let (cookie, csrf, session) = login(&app, "test-admin").await;

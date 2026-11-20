@@ -7,9 +7,9 @@
 // person looks at another page, and React components read it through useChat().
 
 import type { QueryClient } from "@tanstack/react-query";
-import type { ApiClient, StreamEvent } from "@/lib/api";
+import type { ApiClient, StreamEvent, Validator } from "@/lib/api";
 import { applyChatDraft, chatDraft } from "@/components/projects/chat-draft";
-import { readEvents as readEventsDefault } from "@/lib/api";
+import { NOT_MODIFIED, readEvents as readEventsDefault } from "@/lib/api";
 import { createBrowserBridge, type BrowserBridge } from "@/components/browser/bridge";
 import { createCodeBridge, type CodeBridge } from "@/components/code/bridge";
 import { createDevicesBridge, type DevicesBridge } from "@/lib/devices/bridge";
@@ -204,6 +204,8 @@ export class ChatStore {
   readonly operations = new Map<string, Operation>();
   private revisions = new Map<string, number>();
   private watches = new Map<string, ReturnType<typeof setTimeout>>();
+  /** The last saved copy of each watched chat and its ETag, so a watch can ask only for a newer one. */
+  private watched = new Map<string, { tag: string; saved: Conversation }>();
   private versionSelections = new Map<string, number>();
   private pendingEfforts = new Map<string, { value: string; sequence: number }>();
   private effortSaveQueue: Promise<unknown> = Promise.resolve();
@@ -214,6 +216,7 @@ export class ChatStore {
   private temporaryOpen: string | null = null;
   private switchAfterStop: { conversation: string; message: string } | null = null;
   private sharedSignature = "";
+  private sharedValidator: Validator = { tag: "" };
   private timers: ReturnType<typeof setInterval>[] = [];
   private disposed = false;
   private listeners = new Set<() => void>();
@@ -313,6 +316,7 @@ export class ChatStore {
     this.operations.clear();
     for (const timer of this.watches.values()) clearTimeout(timer);
     this.watches.clear();
+    this.watched.clear();
     this.timers.forEach(clearInterval);
     this.follow?.stop();
     this.attachments.clear();
@@ -718,22 +722,29 @@ export class ChatStore {
     this.chatError = "";
     this.chatMissing = false;
     this.sharedSignature = sharedSignatureOf(r.conversation);
+    this.sharedValidator = { tag: "" };
     this.watchShared(r.conversation.id, sequence);
   }
-  /** Fetched again while open, so it grows live. */
-  private watchShared(id: string, sequence: number) {
+  /**
+   * Fetched again while open, so it grows live: every 1.5 s while a reply is being
+   * written, else from 4 s, doubling up to 30 s while nothing changes.
+   */
+  private watchShared(id: string, sequence: number, idle = SHARED_IDLE) {
     const busy = (this.active?.messages || []).some(isPendingMessage);
     setTimeout(
       async () => {
         if (sequence !== this.loadSequence || !this.shared || this.active?.id !== id || this.disposed) return;
-        if (typeof document === "undefined" || !document.hidden) {
+        const shown = typeof document === "undefined" || !document.hidden;
+        let next = shown ? Math.min(idle * 2, SHARED_IDLE_MAX) : idle;
+        if (shown) {
           try {
-            const r = await this.options.api.request<any>(sharedPath(id));
+            const r = await this.options.api.request<any>(sharedPath(id), { validator: this.sharedValidator });
             if (sequence !== this.loadSequence || !this.shared) return;
-            const next = sharedSignatureOf(r.conversation);
-            if (next !== this.sharedSignature) {
+            const signature = r === NOT_MODIFIED ? this.sharedSignature : sharedSignatureOf(r.conversation);
+            if (signature !== this.sharedSignature) {
+              next = SHARED_IDLE;
               const follow = this.follow?.on() ?? true;
-              this.sharedSignature = next;
+              this.sharedSignature = signature;
               r.conversation.messages ||= [];
               this.active = r.conversation;
               this.shared = r.share;
@@ -750,9 +761,9 @@ export class ChatStore {
             }
           }
         }
-        this.watchShared(id, sequence);
+        this.watchShared(id, sequence, next);
       },
-      busy ? 1500 : 4000,
+      busy ? 1500 : idle,
     );
   }
   async forkShared() {
@@ -881,18 +892,35 @@ export class ChatStore {
     const epoch = this.epoch,
       revision = this.revisions.get(id) || 0,
       op = this.operations.get(id);
+    const kept = this.watched.get(id),
+      validator = { tag: kept?.tag ?? "" };
     try {
-      const saved = unwrap(await this.options.api.request(chatPath(id)));
+      const answer = await this.options.api.request(chatPath(id), { validator });
       if (epoch !== this.epoch || this.disposed) return;
+      const unchanged = answer === NOT_MODIFIED && !!kept;
+      const saved = unchanged ? structuredClone(kept.saved) : unwrap(answer);
       saved.messages ||= [];
       if (this.versionSelections.has(id) || (this.revisions.get(id) || 0) !== revision || (op && !this.operationIsCurrent(op))) {
         this.scheduleWatch(id);
         return;
       }
+      if (!unchanged && validator.tag) this.watched.set(id, { tag: validator.tag, saved: structuredClone(saved) });
       const errorBefore = this.error;
       if (this.error === "Connection interrupted. Reconnecting to the saved response…" && this.route.id === id) this.error = "";
       const ownMessage = op?.assistant?.id && saved.messages?.find((m) => m.id === op.assistant!.id);
       const authoritativeTerminal = ownMessage && !isPendingMessage(ownMessage);
+      // The saved chat is as the last look left it: unless something changed on this
+      // side, that look already showed it and decided when to look again.
+      if (unchanged && this.error === errorBefore) {
+        if (!op) {
+          this.observeConversation(saved);
+          return;
+        }
+        if (op.accepted && !op.transportActive && !op.terminal && !op.rejected && !op.stopRequested && !authoritativeTerminal && conversationBusy(saved)) {
+          this.scheduleWatch(id);
+          return;
+        }
+      }
       const unconfirmedTransport = op && !op.accepted && !op.transportActive;
       if (unconfirmedTransport && !op.rejected) {
         op.restoreDraft = saved.messages.every((m) => op.beforeMessageIds?.includes(m.id));
@@ -953,6 +981,8 @@ export class ChatStore {
         }
         this.scheduleWatch(id, 3000);
       }
+    } finally {
+      if (!this.watches.has(id)) this.watched.delete(id);
     }
   }
   private async requestStop(op: Operation) {
@@ -1442,5 +1472,7 @@ export class ChatStore {
   }
 }
 
+const SHARED_IDLE = 4000,
+  SHARED_IDLE_MAX = 30000;
 const sharedSignatureOf = (c: Conversation) =>
   JSON.stringify([c.title, (c.messages || []).map((m) => [m.id, m.status, m.content?.length, m.reasoningContent?.length, (m.activity || []).length])]);

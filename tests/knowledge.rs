@@ -240,6 +240,9 @@ async fn fixture(pool: PgPool) -> Fixture {
         "fixture-key".into(),
         "fixture-secret".into(),
     );
+    // As in main.rs: uploads are placed through the store's Files, which share
+    // Knowledge's bucket.
+    let files = obleth_chat::files::Files::new(pool.clone(), Some(store.clone()));
     let knowledge = Knowledge::new(
         pool.clone(),
         store,
@@ -255,6 +258,7 @@ async fn fixture(pool: PgPool) -> Fixture {
     let worker = CancellationToken::new();
     tokio::spawn(knowledge.clone().worker(gateway.clone(), worker.clone()));
     let mut state = AppState::new(auth, pool, Some(gateway), 4);
+    state.store = state.store.with_files(files);
     state.followups_enabled = false;
     state.knowledge = Some(knowledge);
     Fixture {

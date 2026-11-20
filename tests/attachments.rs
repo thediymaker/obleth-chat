@@ -176,7 +176,7 @@ async fn uploads_are_private_downloads_and_require_csrf(pool: PgPool) {
         StatusCode::NOT_FOUND
     );
     let (_, listed) = call(&app, &bob, "GET", "/api/attachments", Value::Null).await;
-    assert!(listed["attachments"].as_array().unwrap().is_empty());
+    assert!(listed["items"].as_array().unwrap().is_empty());
     let response = app
         .clone()
         .oneshot(
@@ -208,8 +208,18 @@ async fn uploads_are_private_downloads_and_require_csrf(pool: PgPool) {
 async fn file_types_signatures_sizes_and_names_are_validated(pool: PgPool) {
     let app = fixture(&pool).await;
     let alice = session(&pool).await;
-    let refused = [
+    // A path in the name is flattened, never followed: separators become `_`.
+    let (status, file) = call(
+        &app,
+        &alice,
+        "POST",
+        "/api/attachments",
         text_file("../escape.txt", b"ok"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{file}");
+    assert_eq!(file["name"], ".._escape.txt");
+    let refused = [
         text_file("x\r\nHeader.txt", b"ok"),
         text_file("file.pdf", b"%PDF-1.7"),
         text_file("empty.txt", b""),
@@ -577,7 +587,7 @@ async fn portable_archives_preserve_private_bytes_and_import_atomically(pool: Pg
         data_base64: STANDARD.encode(b"new"),
     };
     let bad = ArchivedAttachment {
-        name: "../bad.txt".into(),
+        name: "bad\r\n.txt".into(),
         mime_type: "text/plain".into(),
         data_base64: STANDARD.encode(b"bad"),
     };

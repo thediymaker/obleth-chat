@@ -1974,6 +1974,7 @@ async fn run_generation(
         let mut checkpoint = tokio::time::interval(Duration::from_millis(750));
         checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut saved_bytes = 0;
+        let mut saved_reasoning = 0;
         let mut saved_at = Instant::now();
         let mut drafted = Instant::now();
         let mut checkpoints = 0;
@@ -2058,8 +2059,9 @@ async fn run_generation(
                         }
                         let total=content.len()+reasoning_content.len();
                         if lifecycle::checkpoint_due(total,saved_bytes,saved_at.elapsed()) {
-                            match lifecycle::checkpoint(&s.store.pool,user.id,id,generation_id,&content,&reasoning_content,request_id.as_deref()).await {
-                                Ok(())=>{saved_bytes=total;saved_at=Instant::now();}
+                            let reasoning=(reasoning_content.len()!=saved_reasoning).then_some(reasoning_content.as_str());
+                            match lifecycle::checkpoint(&s.store.pool,user.id,id,generation_id,&content,reasoning,request_id.as_deref()).await {
+                                Ok(())=>{saved_bytes=total;saved_reasoning=reasoning_content.len();saved_at=Instant::now();}
                                 // A transient database error retries on a later tick; the
                                 // control loop bounds how long work runs without the database.
                                 Err(e) if e.0==StatusCode::INTERNAL_SERVER_ERROR=>tracing::warn!("could not checkpoint chat generation; retrying"),

@@ -32,7 +32,7 @@ async fn checkpoints_preserve_partial_output_and_index_only_when_terminal(pool: 
         chat.id,
         turn.generation_id,
         "partial searchable answer",
-        "private thinking",
+        Some("private thinking"),
         Some("request"),
     )
     .await
@@ -40,6 +40,24 @@ async fn checkpoints_preserve_partial_output_and_index_only_when_terminal(pool: 
     let saved = store.get(owner, chat.id).await.unwrap();
     assert_eq!(saved.messages[1].status, "pending");
     assert_eq!(saved.messages[1].content, "partial searchable answer");
+    assert_eq!(saved.messages[1].reasoning_content, "private thinking");
+    // Reasoning that did not grow is left as saved.
+    lifecycle::checkpoint(
+        &pool,
+        owner,
+        chat.id,
+        turn.generation_id,
+        "partial searchable answer, longer",
+        None,
+        Some("request"),
+    )
+    .await
+    .unwrap();
+    let saved = store.get(owner, chat.id).await.unwrap();
+    assert_eq!(
+        saved.messages[1].content,
+        "partial searchable answer, longer"
+    );
     assert_eq!(saved.messages[1].reasoning_content, "private thinking");
     let chunks: i64 =
         sqlx::query_scalar("SELECT count(*) FROM message_search_chunks WHERE message_id=$1")
@@ -80,7 +98,7 @@ async fn checkpoints_preserve_partial_output_and_index_only_when_terminal(pool: 
         chat.id,
         turn.generation_id,
         "late overwrite",
-        "",
+        None,
         None
     )
     .await
@@ -109,7 +127,7 @@ async fn abandoned_worker_cannot_renew_or_overwrite_replacement(pool: PgPool) {
         chat.id,
         old.generation_id,
         "saved before failure",
-        "",
+        None,
         None,
     )
     .await
@@ -141,7 +159,7 @@ async fn abandoned_worker_cannot_renew_or_overwrite_replacement(pool: PgPool) {
         chat.id,
         old.generation_id,
         "old worker",
-        "",
+        None,
         None
     )
     .await
@@ -158,7 +176,7 @@ async fn abandoned_worker_cannot_renew_or_overwrite_replacement(pool: PgPool) {
         chat.id,
         next.generation_id,
         "new worker",
-        "",
+        None,
         None,
     )
     .await
@@ -193,7 +211,7 @@ async fn checkpoint_does_not_wait_for_a_long_user_transaction(pool: PgPool) {
             chat.id,
             turn.generation_id,
             "progress",
-            "",
+            None,
             None,
         ),
     )
@@ -230,7 +248,7 @@ async fn checkpoint_lock_wait_is_a_transient_error(pool: PgPool) {
             chat.id,
             turn.generation_id,
             "progress",
-            "",
+            None,
             None,
         ),
     )
@@ -246,7 +264,7 @@ async fn checkpoint_lock_wait_is_a_transient_error(pool: PgPool) {
         chat.id,
         turn.generation_id,
         "progress",
-        "",
+        None,
         None,
     )
     .await

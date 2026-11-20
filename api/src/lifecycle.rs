@@ -152,10 +152,11 @@ pub async fn checkpoint(
     id: Uuid,
     generation: Uuid,
     content: &str,
-    reasoning: &str,
+    // None leaves the saved reasoning as it is: it has not grown since the last save.
+    reasoning: Option<&str>,
     request_id: Option<&str>,
 ) -> Result<(), ApiError> {
-    if content.len() + reasoning.len() > store::MAX_RESPONSE_BYTES {
+    if content.len() + reasoning.map_or(0, str::len) > store::MAX_RESPONSE_BYTES {
         return Err(ApiError::bad("The response exceeded the storage limit"));
     }
     let mut tx = pool.begin().await?;
@@ -164,7 +165,7 @@ pub async fn checkpoint(
     )
     .execute(&mut *tx)
     .await?;
-    let changed=sqlx::query("UPDATE messages m SET content=$4,reasoning_content=$5,request_id=$6 FROM conversations c WHERE m.conversation_id=c.id AND c.id=$1 AND c.owner_id=$2 AND c.active_generation=$3 AND c.generation_expires>clock_timestamp() AND m.generation_id=$3 AND m.status='pending'")
+    let changed=sqlx::query("UPDATE messages m SET content=$4,reasoning_content=COALESCE($5,m.reasoning_content),request_id=$6 FROM conversations c WHERE m.conversation_id=c.id AND c.id=$1 AND c.owner_id=$2 AND c.active_generation=$3 AND c.generation_expires>clock_timestamp() AND m.generation_id=$3 AND m.status='pending'")
         .bind(id).bind(owner).bind(generation).bind(content).bind(reasoning).bind(request_id).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
         return Err(ApiError(

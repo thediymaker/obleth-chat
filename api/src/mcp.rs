@@ -513,6 +513,9 @@ async fn stop_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Valu
         > 0;
     tx.commit().await?;
     if stopped {
+        s.wakeups
+            .send(&s.store.pool, &crate::lifecycle::stop_key(id))
+            .await;
         audit(s, token, Action::MCP_CHAT_STOPPED, id).await?;
     }
     Ok(json!({"id":id,"stopped":stopped}))

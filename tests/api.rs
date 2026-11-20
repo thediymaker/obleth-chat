@@ -464,6 +464,7 @@ async fn disconnect_keeps_running_explicit_stop_saves_partial_and_broken_stream_
         .await
         .unwrap();
     assert_eq!(stopped.status(), StatusCode::OK);
+    let asked = std::time::Instant::now();
     let saved = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let c = state
@@ -479,6 +480,12 @@ async fn disconnect_keeps_running_explicit_stop_saves_partial_and_broken_stream_
     })
     .await
     .unwrap();
+    // Stop wakes the reply at once rather than at its next check.
+    assert!(
+        asked.elapsed() < Duration::from_millis(700),
+        "{:?}",
+        asked.elapsed()
+    );
     assert_eq!(saved.messages[1].status, "interrupted");
     assert_eq!(saved.messages[1].content, "Partial answer");
     assert_eq!(saved.messages[1].reasoning_content, "Plan α then answer.");

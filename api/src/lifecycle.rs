@@ -51,13 +51,22 @@ pub async fn stop(
             .bind(id).bind(user.id).bind(active).execute(&mut *tx).await?;
     }
     tx.commit().await?;
+    if active.is_some() {
+        state.wakeups.send(&state.store.pool, &stop_key(id)).await;
+    }
     Ok(Json(
         json!({"conversation":state.store.get(user.id,id).await?}),
     ))
 }
 
-/// Workers renew their lease this often and run the read-only check in between;
-/// renewals rewrite the conversation row, and the 1 s poll only has to notice Stop.
+/// The wake-up key Stop sends for a chat's running reply, on every replica.
+pub fn stop_key(conversation: Uuid) -> String {
+    format!("stop:{conversation}")
+}
+
+/// Workers renew their lease this often, and otherwise wait for Stop's wake-up, which
+/// makes them check at once; renewals rewrite the conversation row and also notice a
+/// Stop whose wake-up was missed.
 pub const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(10);
 /// Workers tolerate database errors until their last renewal is this old, which
 /// still leaves time to save output before the 45-second lease expires.

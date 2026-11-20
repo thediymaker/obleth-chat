@@ -120,8 +120,9 @@ async fn main() -> Result<()> {
     if let Some(grants) = state.auth.grants() {
         tokio::spawn(grants.worker(state.shutdown.clone()));
     }
-    // Wake-ups reach waits on every replica: connection calls and queued knowledge work.
-    let wakeups = obleth_chat::connections::wakeups::Wakeups::default();
+    // Wake-ups reach waits on every replica: Stop, connection calls and queued knowledge
+    // work.
+    let wakeups = state.wakeups.clone();
     tokio::spawn(wakeups.clone().listen(pool.clone(), state.shutdown.clone()));
     // Connections need the gateway. Their tokens are sealed with the secret key when
     // one is set; tokens sealed with the key derived from the gateway signing key

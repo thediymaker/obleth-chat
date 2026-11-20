@@ -94,6 +94,8 @@ pub struct AppState {
     pub browsers: Option<browser::Browsers>,
     pub connections: Option<connections::Connections>,
     pub knowledge: Option<knowledge::Knowledge>,
+    /// Wakes waits on this replica, and on the others once its listener runs.
+    pub wakeups: connections::wakeups::Wakeups,
     pub decisions: decisions::Decisions,
 }
 impl AppState {
@@ -113,6 +115,7 @@ impl AppState {
             browsers: None,
             connections: None,
             knowledge: None,
+            wakeups: connections::wakeups::Wakeups::default(),
         }
     }
 }
@@ -518,6 +521,10 @@ async fn leave(
 ) -> Result<StatusCode, ApiError> {
     let u = s.auth.require(&headers, true).await?;
     s.store.leave_temporary(u.id, id).await?;
+    // A reply still running stops now, not at its next check.
+    s.wakeups
+        .send(&s.store.pool, &lifecycle::stop_key(id))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize)]
@@ -746,6 +753,8 @@ pub(crate) async fn launch_turn(
     });
     Ok(rx)
 }
+/// How often a running reply checks that the sign-in or token that started it is live.
+const SESSION_CHECK_EVERY: Duration = Duration::from_secs(15);
 /// How long the model may send nothing before a tool turn pauses. A tool turn has
 /// no step or time limit: it runs while the model keeps answering, until it is
 /// done or stopped.
@@ -3249,7 +3258,9 @@ async fn run_generation(
     let control = async {
         let mut ticks = 0u64;
         let mut renewed = Instant::now();
+        let mut session_checked: Option<Instant> = None;
         let mut recheck_session = false;
+        let stop = lifecycle::stop_key(id);
         loop {
             let renew = ticks == 0 || renewed.elapsed() >= lifecycle::LEASE_RENEW_INTERVAL;
             let state = if renew {
@@ -3269,7 +3280,11 @@ async fn run_generation(
             }
             // A turn in Auto mode outlives the browser session that started it, so
             // research keeps going overnight; Stop or disabling the account ends it.
-            let due = ticks.is_multiple_of(15) || recheck_session;
+            let due = recheck_session
+                || session_checked.is_none_or(|at| at.elapsed() >= SESSION_CHECK_EVERY);
+            if due {
+                session_checked = Some(Instant::now());
+            }
             let live = match &starter {
                 Started::Session(headers)
                     if due && (!unattended || !auto_mode(s.clone()).await) =>
@@ -3296,7 +3311,8 @@ async fn run_generation(
                 None => {}
             }
             ticks += 1;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Stop wakes this at once; otherwise it wakes to renew the lease.
+            s.wakeups.wait(&stop, lifecycle::LEASE_RENEW_INTERVAL).await;
         }
     };
     // A reply that only writes text is bounded; a tool turn runs until it is done,

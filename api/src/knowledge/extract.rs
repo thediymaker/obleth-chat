@@ -219,10 +219,13 @@ pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracte
             ))
         }
         Kind::Pdf => {
-            let out = run(
+            // Written out once for both tools.
+            let file = TempFile::new(bytes).await?;
+            let out = run_on(
                 &tools.pdftotext,
                 &["-enc", "UTF-8", "-q", "{file}", "-"],
-                bytes,
+                &file,
+                MAX_OUTPUT,
             )
             .await
             .context("this PDF could not be read")?;
@@ -240,13 +243,15 @@ pub async fn extract(tools: &Tools, kind: Kind, bytes: &[u8]) -> Result<Extracte
             }
             // Bookmarks are a bonus: a PDF without them, or a pdftohtml that fails, is
             // read without sections.
-            let outline = run(
+            let outline = run_on(
                 &tools.pdftohtml,
                 &["-xml", "-i", "-q", "-stdout", "{file}"],
-                bytes,
+                &file,
+                MAX_OUTPUT,
             )
             .await
             .ok();
+            drop(file);
             let pages = parsed(move || {
                 let outline = outline
                     .map(|xml| pdf_outline(&String::from_utf8_lossy(&xml)))
@@ -265,12 +270,6 @@ fn pdf_page_texts(text: &str) -> Vec<&str> {
         pages.pop();
     }
     pages
-}
-
-/// Runs a tool on the file, given as `{file}` in the arguments, and returns stdout.
-async fn run(program: &str, args: &[&str], bytes: &[u8]) -> Result<Vec<u8>> {
-    let file = TempFile::new(bytes).await?;
-    run_on(program, args, &file, MAX_OUTPUT).await
 }
 
 /// Runs a tool on a file already written out. Output is read as it comes and the tool
@@ -1522,6 +1521,12 @@ fn tail(text: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs a tool on the bytes, given as `{file}` in the arguments, and returns stdout.
+    async fn run(program: &str, args: &[&str], bytes: &[u8]) -> Result<Vec<u8>> {
+        let file = TempFile::new(bytes).await?;
+        run_on(program, args, &file, MAX_OUTPUT).await
+    }
 
     #[test]
     fn kinds_follow_the_file_name() {

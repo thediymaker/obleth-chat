@@ -211,3 +211,27 @@ async fn negation_punctuation_titles_and_page_totals_match_per_message(pool: PgP
     assert_eq!((past.conversations.len(), past.total), (0, 3));
     assert!(!past.has_more);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn multi_word_search_finds_only_the_searchers_chats(pool: PgPool) {
+    let alice = user(&pool).await;
+    let bob = user(&pool).await;
+    let store = Store::new(pool.clone());
+    let (alice_chat, _) = answer(&store, alice, "shared harbor notes").await;
+    let (bob_chat, _) = answer(&store, bob, "shared harbor and lighthouse notes").await;
+    // Bob's message holds every word; Alice's search must still not reach it.
+    assert!(matches(&store, alice, "harbor lighthouse").await.is_empty());
+    assert_eq!(
+        matches(&store, alice, "shared harbor").await,
+        vec![alice_chat]
+    );
+    assert_eq!(
+        matches(&store, alice, "harbor -lighthouse").await,
+        vec![alice_chat]
+    );
+    assert_eq!(
+        matches(&store, bob, "harbor lighthouse").await,
+        vec![bob_chat]
+    );
+    assert!(matches(&store, bob, "harbor -lighthouse").await.is_empty());
+}

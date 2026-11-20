@@ -6,6 +6,7 @@ Each release's section is also its GitHub Release notes.
 
 **Fixes**
 
+- **A search of several words reads only the searcher's own chats.** History search for two or more words looked each word up in every user's messages before narrowing to the searcher's, so a common word cost a scan of the whole instance's history. Each word is now looked up only in the searcher's own messages. On a test instance with 1,000 people and 200,000 messages sharing the same words, one person's search went from 538 ms to 13 ms; the results are the same.
 - **The benchmark keeps every run it finished.** `bench/run.py` wrote results in the order it started the runs, so finished runs waited unwritten behind a slow one and were lost if the benchmark was stopped. Each result is now written as soon as it finishes, as the certification runner already did; the results file is in finishing order.
 
 ## v1.6.0

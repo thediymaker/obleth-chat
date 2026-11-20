@@ -118,7 +118,9 @@ impl Store {
         // non-phrase Boolean queries, gather only matching query lexemes into a
         // bounded vector so AND/NOT still work when words lie in different chunks;
         // only messages with a lexeme hit can match unless an empty vector
-        // satisfies the query (pure negation). Lexeme-free queries match substrings.
+        // satisfies the query (pure negation). The lexemes are looked up in the
+        // searcher's own messages' chunks, by message id, never in every user's.
+        // Lexeme-free queries match substrings.
         let matching = "WITH owned AS (
               SELECT id FROM conversations WHERE owner_id=$1 AND NOT temporary AND ($3::boolean IS NULL OR archived=$3)
             ), hits AS (
@@ -134,9 +136,10 @@ impl Store {
               UNION ALL
               SELECT m.conversation_id FROM messages m JOIN owned o ON o.id=m.conversation_id
                 WHERE numnode(websearch_to_tsquery('simple',$2))>1 AND strpos($2,'\"')=0
-                  AND (''::tsvector @@ websearch_to_tsquery('simple',$2) OR m.id IN (
-                    SELECT s.message_id FROM unnest(tsvector_to_array(to_tsvector('simple',$2))) AS words(lexeme)
-                      JOIN message_search_chunks s ON s.document @@ plainto_tsquery('simple',words.lexeme)))
+                  AND (''::tsvector @@ websearch_to_tsquery('simple',$2) OR EXISTS(
+                    SELECT 1 FROM unnest(tsvector_to_array(to_tsvector('simple',$2))) AS words(lexeme)
+                      JOIN message_search_chunks s ON s.message_id=m.id
+                        AND s.document @@ plainto_tsquery('simple',words.lexeme)))
                   AND array_to_tsvector(ARRAY(
                     SELECT lexeme FROM unnest(tsvector_to_array(to_tsvector('simple',$2))) AS words(lexeme)
                     WHERE EXISTS(SELECT 1 FROM message_search_chunks s WHERE s.message_id=m.id

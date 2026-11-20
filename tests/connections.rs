@@ -2170,6 +2170,18 @@ async fn cluster_status_shows_what_the_persons_account_sees(pool: PgPool) {
     assert_eq!(again["status"]["totals"], *t);
     assert_eq!(cluster_requests(&f, "GET", "/slurm/v0.0.45/nodes").len(), 1);
     assert!(cluster_requests(&f, "GET", "/slurm/v0.0.45/partitions").len() >= 2);
+    // The week of ended jobs is listed once and kept for a few minutes; the active
+    // jobs are asked for again.
+    assert_eq!(again["status"]["recent"], s["recent"]);
+    let asked: Vec<String> = cluster_requests(&f, "GET", "/slurmdb/v0.0.45/jobs")
+        .iter()
+        .map(|r| r["query"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(asked.len(), 5, "{asked:?}");
+    assert_eq!(
+        asked.iter().filter(|q| q.contains("start_time=")).count(),
+        1
+    );
 
     let (_, kube) = call(&f.app, "POST", "/api/connections", json!({"kind":"kubernetes","name":"Kube","url":f.cluster_url,"token":KUBE_TOKEN,"options":{"namespace":"team"}}), &admin).await;
     let kube = kube["id"].as_str().unwrap().to_owned();

@@ -188,6 +188,16 @@ type Look = Arc<tokio::sync::Mutex<Option<Arc<Snapshot>>>>;
 /// Each cluster's latest look, by the cluster's address.
 static SNAPSHOTS: Mutex<BTreeMap<String, Look>> = Mutex::new(BTreeMap::new());
 
+/// How long an account's recently ended jobs serve the Clusters page. Listing them is a
+/// slow accounting query over a week, and the page asks for status every 30 s.
+const RECENT_FOR: Duration = Duration::from_secs(300);
+/// The most accounts' recent jobs kept at once.
+const RECENT_KEPT: usize = 1024;
+/// Recently ended jobs, by the cluster's address and the Slurm user, with when they
+/// were listed.
+type RecentKey = (String, String);
+static RECENT: Mutex<BTreeMap<RecentKey, (Instant, Vec<Value>)>> = Mutex::new(BTreeMap::new());
+
 /// A cluster's nodes and the queue's size, as one look at the scheduler saw them.
 struct Snapshot {
     at: Instant,
@@ -983,8 +993,51 @@ impl Client {
 
     pub async fn cancel(&mut self, id: i64) -> Result<(), String> {
         self.call_api(reqwest::Method::DELETE, &format!("job/{id}"), None)
-            .await
-            .map(|_| ())
+            .await?;
+        // The person ended a job: the next look lists recent ends again to show it.
+        RECENT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.recent_key());
+        Ok(())
+    }
+
+    fn recent_key(&self) -> RecentKey {
+        (self.base.to_string(), self.user.clone())
+    }
+
+    /// The person's latest ended jobs for the Clusters page, listed at most once every
+    /// RECENT_FOR. Recent ends are a convenience: none when accounting can't list them.
+    async fn recent(&mut self) -> Vec<Value> {
+        let key = self.recent_key();
+        let kept = RECENT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .filter(|(at, _)| at.elapsed() < RECENT_FOR)
+            .map(|(_, jobs)| jobs.clone());
+        if let Some(jobs) = kept {
+            return jobs;
+        }
+        let Ok(ended) = self.finished_jobs(RECENT_DAYS).await else {
+            return vec![];
+        };
+        let jobs: Vec<Value> = ended.iter().take(10).map(own_job).collect();
+        let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
+        if recent.len() >= RECENT_KEPT {
+            recent.retain(|_, (at, _)| at.elapsed() < RECENT_FOR);
+        }
+        if recent.len() >= RECENT_KEPT {
+            let oldest = recent
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                recent.remove(&oldest);
+            }
+        }
+        recent.insert(key, (Instant::now(), jobs.clone()));
+        jobs
     }
 
     /// The Slurm user the client acts as.
@@ -1000,15 +1053,7 @@ impl Client {
         let summary = self.summary().await?;
         let mine = self.own_jobs(&ACTIVE).await?;
         let mine: Vec<Value> = mine.iter().take(25).map(own_job).collect();
-        // Recent ends are a convenience: the page still shows if accounting can't list them.
-        let recent: Vec<Value> = self
-            .finished_jobs(RECENT_DAYS)
-            .await
-            .unwrap_or_default()
-            .iter()
-            .take(10)
-            .map(own_job)
-            .collect();
+        let recent = self.recent().await;
         let partitions: Vec<Value> = summary
             .partitions
             .iter()

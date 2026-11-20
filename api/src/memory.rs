@@ -22,6 +22,7 @@ use axum::{
     routing::{get, patch, put},
     Json, Router,
 };
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
@@ -53,6 +54,12 @@ const KNOWN_TOPICS: i64 = 40;
 const MAX_ADDS: usize = 5;
 const MAX_CHANGES: usize = 5;
 const CLAIM_SECS: f64 = 300.0;
+/// How long a chat stays quiet before memory reads its new messages, as insights waits;
+/// a message asking to remember or forget something is read right after its reply.
+pub const QUIET: Duration = Duration::from_secs(5 * 60);
+/// Quiet chats read in one pass of the worker, and at once.
+const QUIET_BATCH: i64 = 16;
+const QUIET_AT_ONCE: usize = 4;
 const MODEL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long finding a chat's memories may hold up the start of a reply.
 const RECALL_TIMEOUT: Duration = Duration::from_secs(4);
@@ -339,8 +346,10 @@ async fn embed(
 // ---------------------------------------------------------------------------------
 // Learning: reading new messages after a reply.
 
-/// When a reply finishes: reads the chat's new messages for memories in the background.
-/// Returns at once; true when a pass started, so the page looks again for what it learned.
+/// When a reply finishes: when the person asked to remember or forget something, reads
+/// the chat's new messages for memories in the background; other chats are read once
+/// they have been quiet for QUIET. Returns at once; true when a pass started, so the
+/// page looks again for what it learned.
 pub async fn after_reply(s: &AppState, user: &Identity, conversation: Uuid, reply: Uuid) -> bool {
     match tokio::time::timeout(Duration::from_secs(2), start(s, user, conversation, reply)).await {
         Ok(Ok(started)) => started,
@@ -358,16 +367,100 @@ async fn start(
     conversation: Uuid,
     reply: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let Some(gateway) = s.gateway.clone() else {
+    let latest: Option<String> = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE conversation_id = $1 AND role = 'user' ORDER BY ordinal DESC LIMIT 1",
+    )
+    .bind(conversation)
+    .fetch_optional(&s.store.pool)
+    .await?;
+    if !latest.as_deref().is_some_and(asks_to_remember) {
         return Ok(false);
+    }
+    let Some(pass) = claim(s, user, conversation).await? else {
+        return Ok(false);
+    };
+    tokio::spawn(pass.run(conversation, reply));
+    Ok(true)
+}
+
+/// Whether the person asked, in so many words, to remember or forget something.
+fn asks_to_remember(text: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric()).any(|word| {
+        ["remember", "forget", "memorize", "memorise"]
+            .iter()
+            .any(|w| word.eq_ignore_ascii_case(w))
+    })
+}
+
+/// Reads the chats whose new messages have waited `quiet` since the last one, as their
+/// owners. Returns how many it read.
+pub async fn read_quiet(s: &AppState, quiet: Duration) -> Result<usize, sqlx::Error> {
+    let pool = &s.store.pool;
+    let settings = settings(pool).await?;
+    if s.gateway.is_none() || !settings.enabled || settings.model.is_none() {
+        return Ok(0);
+    }
+    // Chats of the last day, so turning memory on does not read everyone's history.
+    let due: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT c.id, c.owner_id, reply.id FROM conversations c
+         LEFT JOIN memory_reads r ON r.conversation_id = c.id
+         CROSS JOIN LATERAL (SELECT m.id FROM messages m WHERE m.conversation_id = c.id AND m.role = 'assistant'
+                             ORDER BY m.ordinal DESC LIMIT 1) reply
+         WHERE NOT c.temporary AND c.active_generation IS NULL
+           AND c.last_message_at < NOW() - make_interval(secs => $1)
+           AND c.last_message_at > NOW() - INTERVAL '1 day'
+           AND COALESCE((SELECT learn FROM memory_choices WHERE user_id = c.owner_id), $2)
+           AND (r.claimed_until IS NULL OR r.claimed_until < NOW())
+           AND (r.failed_at IS NULL OR r.failed_at < NOW() - make_interval(mins => 5 * r.attempts))
+           AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user'
+                       AND m.ordinal > COALESCE(r.read_through, -1))
+         ORDER BY c.last_message_at LIMIT $3",
+    )
+    .bind(quiet.as_secs_f64())
+    .bind(settings.default_on)
+    .bind(QUIET_BATCH)
+    .fetch_all(pool)
+    .await?;
+    let read: Vec<Result<bool, sqlx::Error>> = futures_util::stream::iter(due)
+        .map(|(conversation, owner, reply)| async move {
+            let Some(user) = identity(pool, owner).await? else {
+                return Ok(false);
+            };
+            match claim(s, &user, conversation).await? {
+                Some(pass) => {
+                    pass.run(conversation, reply).await;
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        })
+        .buffer_unordered(QUIET_AT_ONCE)
+        .collect()
+        .await;
+    let mut count = 0;
+    for done in read {
+        count += usize::from(done?);
+    }
+    Ok(count)
+}
+
+/// Claims a chat for a memory pass as its owner, when memory is on for them and the
+/// chat, and the chat has messages from them not yet read. None otherwise.
+async fn claim(
+    s: &AppState,
+    user: &Identity,
+    conversation: Uuid,
+) -> Result<Option<Claimed>, sqlx::Error> {
+    let Some(gateway) = s.gateway.clone() else {
+        return Ok(None);
     };
     let pool = &s.store.pool;
     let settings = settings(pool).await?;
     let (true, Some(model)) = (settings.enabled, settings.model.clone()) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !choices(pool, user.id, settings.default_on).await?.learn {
-        return Ok(false);
+        return Ok(None);
     }
     let temporary: bool =
         sqlx::query_scalar("SELECT temporary FROM conversations WHERE id = $1 AND owner_id = $2")
@@ -377,7 +470,7 @@ async fn start(
             .await?
             .unwrap_or(true);
     if temporary {
-        return Ok(false);
+        return Ok(None);
     }
     // The claim, unless another pass holds it or the last one failed moments ago.
     let read_through: Option<i32> = sqlx::query_scalar(
@@ -395,7 +488,7 @@ async fn start(
     .fetch_optional(pool)
     .await?;
     let Some(read_through) = read_through else {
-        return Ok(false);
+        return Ok(None);
     };
     let new: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM messages WHERE conversation_id = $1 AND role = 'user' AND ordinal > $2)",
@@ -409,27 +502,46 @@ async fn start(
             .bind(conversation)
             .execute(pool)
             .await?;
-        return Ok(false);
+        return Ok(None);
     }
-    let pool = pool.clone();
-    let knowledge = s.knowledge.clone();
-    let decisions = s.decisions.clone();
-    let user = user.clone();
-    tokio::spawn(async move {
+    Ok(Some(Claimed {
+        pool: pool.clone(),
+        knowledge: s.knowledge.clone(),
+        decisions: s.decisions.clone(),
+        gateway,
+        model,
+        user: user.clone(),
+        read_through,
+    }))
+}
+
+/// A chat claimed for a memory pass, with what the pass needs.
+struct Claimed {
+    pool: PgPool,
+    knowledge: Option<Knowledge>,
+    decisions: Decisions,
+    gateway: Gateway,
+    model: String,
+    user: Identity,
+    read_through: i32,
+}
+
+impl Claimed {
+    /// Reads the chat's new messages and lets go of it; `reply` shows what was learned.
+    async fn run(self, conversation: Uuid, reply: Uuid) {
         let pass = Pass {
-            pool: &pool,
-            knowledge: knowledge.as_ref(),
-            decisions: &decisions,
-            gateway: &gateway,
-            model: &model,
-            user: &user,
+            pool: &self.pool,
+            knowledge: self.knowledge.as_ref(),
+            decisions: &self.decisions,
+            gateway: &self.gateway,
+            model: &self.model,
+            user: &self.user,
         };
-        let done = pass.learn(conversation, reply, read_through).await;
-        if let Err(error) = settle(&pool, conversation, done).await {
-            tracing::warn!(conversation = %conversation, "memory after a reply: {error}");
+        let done = pass.learn(conversation, reply, self.read_through).await;
+        if let Err(error) = settle(&self.pool, conversation, done).await {
+            tracing::warn!(conversation = %conversation, "memory pass: {error}");
         }
-    });
-    Ok(true)
+    }
 }
 
 enum Failure {
@@ -1126,7 +1238,7 @@ async fn tag(
 
 // ---------------------------------------------------------------------------------
 // The worker: embeddings for memories saved while the embedding model was busy, and
-// after the embedding settings change.
+// after the embedding settings change, and chats that went quiet with new messages.
 
 pub async fn worker(s: AppState, shutdown: CancellationToken) {
     loop {
@@ -1139,6 +1251,9 @@ pub async fn worker(s: AppState, shutdown: CancellationToken) {
         };
         if let Err(error) = embed_missing(&s.store.pool, knowledge, gateway).await {
             tracing::warn!("memory embeddings: {error}");
+        }
+        if let Err(error) = read_quiet(&s, QUIET).await {
+            tracing::warn!("memory: {error}");
         }
     }
 }
@@ -1808,6 +1923,15 @@ mod tests {
 
     fn answer(content: &str) -> Value {
         json!({"choices":[{"message":{"content":content}}]})
+    }
+
+    #[test]
+    fn only_a_request_in_so_many_words_is_read_at_once() {
+        assert!(asks_to_remember("Remember that I prefer short answers"));
+        assert!(asks_to_remember("please forget my old email."));
+        assert!(asks_to_remember("Memorise: I use Slurm"));
+        assert!(!asks_to_remember("I'm a PhD student in hydrology"));
+        assert!(!asks_to_remember("The rememberer pattern in Rust"));
     }
 
     #[test]

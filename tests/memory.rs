@@ -285,6 +285,11 @@ async fn exchange(pool: &PgPool, chat: Uuid, text: &str) -> Uuid {
     reply
 }
 
+/// Reads the chats that wait, as if they had been quiet long enough.
+async fn quiet(state: &AppState) -> usize {
+    memory::read_quiet(state, Duration::ZERO).await.unwrap()
+}
+
 /// Waits for a background pass to let go of the chat.
 async fn settled(pool: &PgPool, chat: Uuid) {
     for _ in 0..100 {
@@ -325,9 +330,11 @@ async fn replies_teach_memories_linked_to_topics(pool: PgPool) {
     .await;
     // Off on the server: nothing is read.
     assert!(!memory::after_reply(&state, &user, id, reply).await);
+    assert_eq!(quiet(&state).await, 0);
     enable(&pool).await;
-    assert!(memory::after_reply(&state, &user, id, reply).await);
-    settled(&pool, id).await;
+    // Nothing asked to be remembered: the chat is read once it is quiet.
+    assert!(!memory::after_reply(&state, &user, id, reply).await);
+    assert_eq!(quiet(&state).await, 1);
     // The repeat, written differently, is kept once; the file name was decided not to last.
     assert_eq!(
         contents(&pool, person.id).await,
@@ -381,7 +388,7 @@ async fn replies_teach_memories_linked_to_topics(pool: PgPool) {
         .unwrap()
         .contains("The person's newest messages"));
     // Nothing new since: no second pass.
-    assert!(!memory::after_reply(&state, &user, id, reply).await);
+    assert_eq!(quiet(&state).await, 0);
     let through: i32 =
         sqlx::query_scalar("SELECT read_through FROM memory_reads WHERE conversation_id = $1")
             .bind(id)
@@ -399,6 +406,31 @@ async fn replies_teach_memories_linked_to_topics(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_request_to_remember_is_read_at_once_and_other_chats_wait_until_quiet(pool: PgPool) {
+    let (state, _, seen) = fixture(&pool).await;
+    enable(&pool).await;
+    let person = session(&pool, "user").await;
+    let user = identity(&person);
+    let (asked, reply) = chat(
+        &pool,
+        person.id,
+        &["Remember that I study hydrology"],
+        false,
+    )
+    .await;
+    assert!(memory::after_reply(&state, &user, asked, reply).await);
+    settled(&pool, asked).await;
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    // An ordinary chat is not read after its reply, nor before it has been quiet.
+    let (id, reply) = chat(&pool, person.id, &["I study hydrology"], false).await;
+    assert!(!memory::after_reply(&state, &user, id, reply).await);
+    assert_eq!(memory::read_quiet(&state, memory::QUIET).await.unwrap(), 0);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(quiet(&state).await, 1);
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn without_the_memory_check_what_the_model_picks_is_kept(pool: PgPool) {
     let ((state, _, _), asked) = fixture_asked(&pool).await;
     enable(&pool).await;
@@ -407,9 +439,8 @@ async fn without_the_memory_check_what_the_model_picks_is_kept(pool: PgPool) {
         .await
         .unwrap();
     let person = session(&pool, "user").await;
-    let (id, reply) = chat(&pool, person.id, &["I study hydrology"], false).await;
-    assert!(memory::after_reply(&state, &identity(&person), id, reply).await);
-    settled(&pool, id).await;
+    chat(&pool, person.id, &["I study hydrology"], false).await;
+    assert_eq!(quiet(&state).await, 1);
     assert!(contents(&pool, person.id)
         .await
         .contains(&"You are using a file named floods.nc".to_owned()));
@@ -421,15 +452,14 @@ async fn without_a_decision_nothing_is_kept_and_the_chat_is_read_later(pool: PgP
     let (state, _, _) = fixture(&pool).await;
     enable(&pool).await;
     let person = session(&pool, "user").await;
-    let (id, reply) = chat(
+    let (id, _) = chat(
         &pool,
         person.id,
         &["I study hydrology; the cluster had an outage"],
         false,
     )
     .await;
-    assert!(memory::after_reply(&state, &identity(&person), id, reply).await);
-    settled(&pool, id).await;
+    assert_eq!(quiet(&state).await, 1);
     assert!(contents(&pool, person.id).await.is_empty());
     let (through, failed): (i32, bool) = sqlx::query_as(
         "SELECT read_through, failed_at IS NOT NULL FROM memory_reads WHERE conversation_id = $1",
@@ -447,8 +477,9 @@ async fn temporary_chats_and_people_who_turned_learning_off_are_not_read(pool: P
     enable(&pool).await;
     let person = session(&pool, "user").await;
     let user = identity(&person);
-    let (id, reply) = chat(&pool, person.id, &["I study hydrology"], true).await;
+    let (id, reply) = chat(&pool, person.id, &["Remember that I study hydrology"], true).await;
     assert!(!memory::after_reply(&state, &user, id, reply).await);
+    assert_eq!(quiet(&state).await, 0);
     let (status, _) = call(
         &app,
         &person,
@@ -458,8 +489,15 @@ async fn temporary_chats_and_people_who_turned_learning_off_are_not_read(pool: P
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (id, reply) = chat(&pool, person.id, &["I study hydrology"], false).await;
+    let (id, reply) = chat(
+        &pool,
+        person.id,
+        &["Remember that I study hydrology"],
+        false,
+    )
+    .await;
     assert!(!memory::after_reply(&state, &user, id, reply).await);
+    assert_eq!(quiet(&state).await, 0);
     assert!(contents(&pool, person.id).await.is_empty());
     // Off by default for everyone: the person who never chose is not read either.
     sqlx::query("UPDATE memory_settings SET default_on = FALSE WHERE id")
@@ -467,8 +505,9 @@ async fn temporary_chats_and_people_who_turned_learning_off_are_not_read(pool: P
         .await
         .unwrap();
     let other = session(&pool, "user").await;
-    let (id, reply) = chat(&pool, other.id, &["I study hydrology"], false).await;
+    let (id, reply) = chat(&pool, other.id, &["Remember that I study hydrology"], false).await;
     assert!(!memory::after_reply(&state, &identity(&other), id, reply).await);
+    assert_eq!(quiet(&state).await, 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -476,7 +515,6 @@ async fn new_messages_update_and_forget_but_pinned_memories_stay(pool: PgPool) {
     let (state, app, _) = fixture(&pool).await;
     enable(&pool).await;
     let person = session(&pool, "user").await;
-    let user = identity(&person);
     for (text, pinned) in [
         ("You use TensorFlow", false),
         ("Always answer in French", true),
@@ -491,9 +529,8 @@ async fn new_messages_update_and_forget_but_pinned_memories_stay(pool: PgPool) {
         .await;
         assert_eq!(status, StatusCode::CREATED);
     }
-    let (id, reply) = chat(&pool, person.id, &["I switched our lab to PyTorch"], false).await;
-    assert!(memory::after_reply(&state, &user, id, reply).await);
-    settled(&pool, id).await;
+    chat(&pool, person.id, &["I switched our lab to PyTorch"], false).await;
+    assert_eq!(quiet(&state).await, 1);
     assert_eq!(
         contents(&pool, person.id).await,
         vec!["Always answer in French", "You use PyTorch, not TensorFlow"]

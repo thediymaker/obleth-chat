@@ -59,7 +59,7 @@ export function MemoryCard({ memory: m, onSaved }: { memory: MemorySettings; onS
           autoComplete="off"
           placeholder="gemma4-31b-it"
           defaultValue={m.model || ""}
-          help="Reads each person's new messages after a reply and keeps their memories up to date. A fast model that follows instructions well is enough. Chat asks as each person, so the gateway counts the tokens as theirs."
+          help="Reads each person's new messages once a chat has been quiet for 5 minutes, or right after the reply when they ask to remember or forget something, and keeps their memories up to date: about one request to this model per chat, not one per reply. A fast model that follows instructions well is enough. Chat asks as each person, so the gateway counts the tokens as theirs."
         />
         <datalist id="memory-models">
           {(models.data || [])

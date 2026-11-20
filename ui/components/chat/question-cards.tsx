@@ -6,13 +6,15 @@
 // to make an app (suggest_app) and to start a project for the chat (suggest_project).
 // Only the newest reply's card can be answered.
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Box, Check, CircleHelp, FlaskConical, Folder, Sparkles, Terminal } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { researchAllowed, startResearch } from "@/components/research/start";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useChatProject, useChatProjectId } from "@/components/projects/chat-project";
+import { conversationProjectId } from "@/components/projects/api";
+import { useChatProject } from "@/components/projects/chat-project";
 import { NewProjectDialog } from "@/components/projects/project-dialog";
 import type { ChatStore } from "@/lib/chat/store";
 import type { ActivityEntry, Message } from "@/lib/chat/types";
@@ -445,7 +447,7 @@ export function ResearchOffer({ m, index }: { m: Message; index: number }) {
 
 export function AppOffer({ m, index }: { m: Message; index: number }) {
   const store = useChatStore();
-  const chatProject = useChatProjectId(store.active?.id ?? null);
+  const client = useQueryClient();
   const entry = appOf(m);
   const key = keyOf(m, index);
   const [offer, setOffer] = useOffer(store, key);
@@ -494,7 +496,7 @@ export function AppOffer({ m, index }: { m: Message; index: number }) {
           setOffer("busy");
           let result: { project: string; collection: string };
           try {
-            result = await startApp(store, id, entry, chatProject);
+            result = await startApp(store, id, entry, await conversationProjectId(client, id));
           } catch (error) {
             setOffer(null);
             throw error;
@@ -521,15 +523,17 @@ export function AppOffer({ m, index }: { m: Message; index: number }) {
   );
 }
 
-export function ProjectOffer({ m, index }: { m: Message; index: number }) {
+// Only a reply that offers a project watches which project the chat is in.
+export const ProjectOffer = ({ m, index }: { m: Message; index: number }) => (projectOf(m) ? <ProjectOfferCard m={m} index={index} /> : null);
+
+function ProjectOfferCard({ m, index }: { m: Message; index: number }) {
   const store = useChatStore();
   const id = store.active?.id ?? null;
   const current = useChatProject(id);
-  const entry = projectOf(m);
+  const entry = projectOf(m)!;
   const key = keyOf(m, index);
   const [offer, setOffer] = useOffer(store, key);
   const [editing, setEditing] = useState(false);
-  if (!entry) return null;
   const { made } = stateOf(store);
   const project = made.get(key);
   const isLast = index === (store.active?.messages?.length || 0) - 1;

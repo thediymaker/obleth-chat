@@ -111,3 +111,11 @@ test('once the highlighter loads, code is highlighted, with grammars loaded by n
   // Highlighted code still escapes what it shows.
   assert.doesNotMatch(markdown('```html\n<script>alert(1)</script>\n```'), /<script>/);
 });
+
+test('a code block a reply is still writing stays plain until its fence closes', async () => {
+  await loadHighlight([]);
+  const open = markdown('```python\nreturn 1');
+  assert.match(open, /<code>return 1\n?<\/code>/);
+  assert.doesNotMatch(open, /hljs|data-render/);
+  assert.match(markdown('```python\nreturn 1\n```'), /<code class="hljs">/);
+});

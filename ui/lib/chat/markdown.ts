@@ -45,13 +45,15 @@ parser.renderer.rules.image = (tokens, index, options, env, renderer) => {
   return `<a class="markdown-image-link" href="${escape(source)}" target="_blank" rel="noopener noreferrer">${svgIcon("external")}${label}</a>`;
 };
 
-const codeBlock = (code: string, info = "") => {
+const codeBlock = (code: string, info = "", open = false) => {
   const hint = info.trim().split(/\s+/)[0] || "";
   const language = /^[\w.+-]{1,40}$/.test(hint) ? hint : "text";
-  // Highlighted once the highlighter has loaded; until then the block asks for it.
+  // Highlighted once the highlighter has loaded; until then the block asks for it. A
+  // block a reply is still writing stays plain until its fence closes: highlighting it
+  // on every update would redo the whole block each time and fill the cache.
   const grammar = languageOf(language),
-    lit = highlight(code, grammar);
-  const waiting = grammar && lit === null ? ` data-render="code" data-language="${escape(grammar)}"` : "";
+    lit = open ? null : highlight(code, grammar);
+  const waiting = !open && grammar && lit === null ? ` data-render="code" data-language="${escape(grammar)}"` : "";
   return `<div class="code-block"${waiting}><div class="code-label"><span>${escape(language)}</span><span class="row"><button type="button" class="row" data-action="copy-code" aria-label="Copy code">${svgIcon("copy")} Copy</button><button type="button" class="row code-save" data-action="save-code" aria-label="Save code to Library">${svgIcon("bookmark")} Save</button></span></div><pre>${lit === null ? `<code>${escape(code)}</code>` : `<code class="hljs">${lit}</code>`}</pre></div>\n`;
 };
 // A block is drawn only once its closing fence has arrived, so a diagram a reply is
@@ -66,7 +68,7 @@ parser.renderer.rules.fence = (tokens, index, _options, env: Env | undefined) =>
     kind = (token.info.trim().split(/\s+/)[0] || "").toLowerCase();
   if (kind === "math" && closed(token, env) && token.content.trim()) return `${math(token.content.trim(), true, "$$", true)}\n`;
   if (Object.hasOwn(DRAWN, kind) && closed(token, env)) return drawn(kind, token.content);
-  return codeBlock(token.content, token.info);
+  return codeBlock(token.content, token.info, !closed(token, env));
 };
 parser.renderer.rules.code_block = (tokens, index) => codeBlock(tokens[index]!.content);
 parser.renderer.rules.table_open = () => '<div class="table-scroll" tabindex="0" role="region" aria-label="Table"><table>\n';

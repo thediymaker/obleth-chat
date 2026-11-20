@@ -56,13 +56,24 @@ export function useProjectDetail(id: string) {
   return useQuery({ queryKey: keys.project(id), queryFn: () => api.request<ProjectDetail>(projectPath(id)), enabled: !!id });
 }
 
+const conversationProject = (conversationId: string) => ({
+  queryKey: conversationProjectKey(conversationId),
+  queryFn: async () => (await api.request<{ project: Project | null }>(chatPath(conversationId))).project,
+});
+
 /** The project a chat is in, or null. */
 export function useConversationProject(conversationId: string | null | undefined) {
-  return useQuery({
-    queryKey: conversationProjectKey(conversationId || ""),
-    queryFn: async () => (await api.request<{ project: Project | null }>(chatPath(conversationId!))).project,
-    enabled: !!conversationId,
-  });
+  return useQuery({ ...conversationProject(conversationId || ""), enabled: !!conversationId });
+}
+
+/** The id of the project a saved chat is in, or "": from the cache when the chat page has it. */
+export async function conversationProjectId(client: QueryClient, conversationId: string | null): Promise<string> {
+  if (!conversationId) return "";
+  try {
+    return (await client.ensureQueryData(conversationProject(conversationId)))?.id ?? "";
+  } catch {
+    return "";
+  }
 }
 
 /** After a project changes: the list, the sidebar and that project's page. */

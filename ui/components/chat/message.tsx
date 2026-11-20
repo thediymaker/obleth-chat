@@ -2,6 +2,7 @@
 
 // One message of a conversation, with its attachments.
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Bookmark, ChevronDown, ChevronLeft, ChevronRight, Clock, Copy, ExternalLink, GitBranch, Info, Orbit, Pencil, Plus, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { BrandLogo } from "@/components/brand";
@@ -26,7 +27,7 @@ import { NamedIcon } from "./icon";
 import { citeHtml, KnowledgeSources } from "@/components/knowledge/chat-knowledge";
 import { SavedNotes } from "@/components/library/saved-notes";
 import { MemoryCards } from "@/components/memory/memory-cards";
-import { useChatProjectId } from "@/components/projects/chat-project";
+import { conversationProjectId } from "@/components/projects/api";
 import { codeTitle, Markdown } from "./markdown-view";
 import { AppOffer, ModelOffer, ProjectOffer, QuestionCard, ResearchOffer, WorkspaceOffer } from "./question-cards";
 import { SteerForm, TurnAfter, TurnBefore } from "./turn-view";
@@ -45,12 +46,16 @@ function IconButton({ label, onClick, children, pressed, disabled, ...rest }: { 
 }
 
 /** The thinking row, closed: while it thinks, its latest sentence; after, how long it took and where it ended up. */
+const SUMMARY_TAIL = 2000;
+
 export function thinkingSummary(m: ChatMessage) {
   const text = m.reasoningContent || "",
     now = m.status === "streaming" && !m.content;
   const ms = (m.activity || []).filter((e) => e.kind === "thought").reduce((t, e) => t + (e.durationMs || 0), 0);
-  const last = text.trim().split(/\n\s*\n/).at(-1) || text;
-  return { now, label: now ? "Thinking" : ms ? `Thought for ${duration(ms)}` : "Thought", line: now ? latest(text, 140) : gist(last, 140) };
+  // Only the end of the reasoning feeds the line, so a long chain costs the same each paint.
+  const tail = text.slice(-SUMMARY_TAIL),
+    last = tail.trim().split(/\n\s*\n/).at(-1) || tail;
+  return { now, label: now ? "Thinking" : ms ? `Thought for ${duration(ms)}` : "Thought", line: now ? latest(tail, 140) : gist(last, 140) };
 }
 
 function ThinkingPanel({ m, index }: { m: ChatMessage; index: number }) {
@@ -59,6 +64,7 @@ function ThinkingPanel({ m, index }: { m: ChatMessage; index: number }) {
   const key = m.id || `pending-${index}`;
   const [, redraw] = useState(0);
   const [now, setNow] = useState(() => Date.now());
+  const open = store.thinkingOpen.get(key) === true;
   const t = thinkingSummary(m);
   useEffect(() => {
     if (!t.now) return;
@@ -70,13 +76,13 @@ function ThinkingPanel({ m, index }: { m: ChatMessage; index: number }) {
   useEffect(() => {
     const el = content.current;
     if (el && atEnd.current) el.scrollTop = el.scrollHeight;
-  }, [m.reasoningContent]);
+  }, [m.reasoningContent, open]);
   if (!m.reasoningContent) return null;
   const since = Date.parse(m._began || m.createdAt || "");
   return (
     <details
       className="group/thinking mb-3 rounded-lg border"
-      open={store.thinkingOpen.get(key) === true}
+      open={open}
       onToggle={(e) => {
         store.thinkingOpen.set(key, (e.target as HTMLDetailsElement).open);
         redraw((n) => n + 1);
@@ -97,7 +103,7 @@ function ThinkingPanel({ m, index }: { m: ChatMessage; index: number }) {
         }}
         className="max-h-80 overflow-y-auto overscroll-contain border-t px-3 py-2 text-text-2"
       >
-        <Markdown text={m.reasoningContent} />
+        {open && <Markdown text={m.reasoningContent} />}
       </div>
     </details>
   );
@@ -302,13 +308,13 @@ function AnswerContent({ m, index }: { m: ChatMessage; index: number }) {
     !String(m.content || "").trim() &&
     !(m.activity || []).some((e) => ["question", "workspace", "research", "app", "project"].includes(e.kind || ""));
   const canSave = store.feature("knowledge") && !store.active?.temporary;
-  const project = useChatProjectId(store.shared ? null : (store.active?.id ?? null));
+  const client = useQueryClient();
   return (
     <div className="min-w-0" data-answer>
       <Markdown
         text={m.content}
         cite={m.role === "assistant" ? (html) => citeHtml(html, m) : undefined}
-        onSaveCode={canSave ? (item) => store.saveFromChat({ ...item, title: item.title || codeTitle(item.body) }, index, project) : undefined}
+        onSaveCode={canSave ? async (item) => store.saveFromChat({ ...item, title: item.title || codeTitle(item.body) }, index, await conversationProjectId(client, store.shared ? null : (store.active?.id ?? null))) : undefined}
         onCopy={(text) => store.copy(text)}
       />
       {m.finishReason === "length" && String(m.content || "").trim() && (
@@ -363,7 +369,7 @@ export const MessageView = memo(
     const [detailsOpen, setDetailsOpen] = useState(() => store.detailsOpen.has(m.id || `pending-${index}`));
     const key = m.id || `pending-${index}`;
     const shared = store.shared;
-    const project = useChatProjectId(shared ? null : (store.active?.id ?? null));
+    const client = useQueryClient();
     if (m.role === "user" && String(m.content || "").startsWith(NUDGE))
       return (
         <article className="flex items-center gap-2 py-2 text-sm text-muted-foreground" data-message={index}>
@@ -444,7 +450,7 @@ export const MessageView = memo(
                 <Copy />
               </IconButton>
               {m.id && store.feature("knowledge") && m.status === "completed" && !shared && !store.active?.temporary && (
-                <IconButton label="Save to Library" onClick={() => store.saveFromChat({ kind: "excerpt", body: m.content, title: store.active?.title }, index, project)}>
+                <IconButton label="Save to Library" onClick={async () => store.saveFromChat({ kind: "excerpt", body: m.content, title: store.active?.title }, index, await conversationProjectId(client, store.active?.id ?? null))}>
                   <Bookmark />
                 </IconButton>
               )}

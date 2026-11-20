@@ -15,6 +15,7 @@ pub mod storage;
 
 use crate::attachments::size_label;
 use crate::config::var;
+use crate::connections::wakeups::Wakeups;
 use crate::paging::{Page, PageQuery};
 use crate::{
     auth::{Identity, Role},
@@ -29,10 +30,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
-use std::{env, time::Duration};
+use std::{
+    env,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -45,6 +50,19 @@ pub use storage::ObjectStore;
 pub const DIMENSIONS: usize = 1024;
 const MAX_DOCUMENTS: i64 = 2000;
 const EMBED_BATCH: usize = 16;
+/// Batches of a document embedded at once; their passages are stored in order.
+const EMBED_CONCURRENCY: usize = 3;
+/// Tries of a batch the gateway refused for a reason that passes (busy, a gateway
+/// error, a timeout), with a doubling pause from EMBED_BACKOFF between them.
+const EMBED_TRIES: u32 = 3;
+const EMBED_BACKOFF: Duration = Duration::from_millis(500);
+/// The wake-up key for queued work: documents to index and items to embed.
+const QUEUE: &str = "knowledge-queue";
+/// How long the idle worker waits for a wake-up before looking for work anyway.
+const IDLE: Duration = Duration::from_secs(30);
+/// How often the worker checks that the embedding settings still match the vectors;
+/// saving the settings checks at once.
+const RECONCILE_EVERY: Duration = Duration::from_secs(60);
 pub use embedding::Prompts;
 
 /// Who may see a collection, as SQL over `c` with the person's id in `$1`.
@@ -64,6 +82,8 @@ pub struct Knowledge {
     /// The environment's prefixes for its model; unset ones follow the model's own.
     env_prompts: (Option<String>, Option<String>),
     user_bytes: i64,
+    /// Wakes the worker when work is queued, on every replica.
+    wakeups: Wakeups,
 }
 
 impl Knowledge {
@@ -105,7 +125,19 @@ impl Knowledge {
             env_prompts: (None, None),
             model,
             user_bytes,
+            wakeups: Wakeups::default(),
         }
+    }
+
+    /// Shares the replica's wake-ups, which reach the other replicas too.
+    pub fn with_wakeups(mut self, wakeups: Wakeups) -> Self {
+        self.wakeups = wakeups;
+        self
+    }
+
+    /// Tells the workers that work was queued.
+    pub(crate) async fn queued(&self) {
+        self.wakeups.send(&self.pool, QUEUE).await;
     }
 
     /// The tools documents are read with.
@@ -119,12 +151,16 @@ impl Knowledge {
         self
     }
 
-    /// Processes queued documents and removes deleted files from storage until shutdown.
+    /// Processes queued documents and embeds saved items until shutdown. Idle, it waits
+    /// for a wake-up, looking for work anyway every IDLE.
     pub async fn worker(self, gateway: Gateway, shutdown: CancellationToken) {
+        let mut reconciled: Option<Instant> = None;
         loop {
-            self.empty_trash().await;
-            if let Err(error) = self.reconcile().await {
-                tracing::warn!("could not check the embedding settings: {error:#}");
+            if reconciled.is_none_or(|at| at.elapsed() >= RECONCILE_EVERY) {
+                if let Err(error) = self.reconcile().await {
+                    tracing::warn!("could not check the embedding settings: {error:#}");
+                }
+                reconciled = Some(Instant::now());
             }
             let embedded = self.embed_saved(&gateway).await;
             let worked = embedded
@@ -162,16 +198,12 @@ impl Knowledge {
             if !worked {
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    _ = self.wakeups.wait(QUEUE, IDLE) => {}
                 }
             } else if shutdown.is_cancelled() {
                 return;
             }
         }
-    }
-
-    async fn empty_trash(&self) {
-        crate::files::empty_trash(&self.pool, &self.store).await;
     }
 
     /// Takes the oldest queued document, or one whose worker stopped mid-way. Documents
@@ -228,36 +260,55 @@ impl Knowledge {
         if passages.is_empty() {
             anyhow::bail!("No text was found in this file");
         }
-        sqlx::query("DELETE FROM knowledge_passages WHERE document_id=$1")
+        // A run that stopped part-way resumes after the passages it stored, when the
+        // file splits the same way; a change of embedding settings starts again at 0.
+        let (done, total): (i32, i32) = sqlx::query_as(
+            "SELECT progress_done, progress_total FROM knowledge_documents WHERE id=$1",
+        )
+        .bind(job.id)
+        .fetch_one(&self.pool)
+        .await?;
+        let from = if total as usize == passages.len() {
+            (done.max(0) as usize).min(passages.len())
+        } else {
+            0
+        };
+        sqlx::query("DELETE FROM knowledge_passages WHERE document_id=$1 AND ordinal >= $2")
             .bind(job.id)
+            .bind(from as i32)
             .execute(&self.pool)
             .await?;
-        let started = sqlx::query("UPDATE knowledge_documents SET stage='embedding', progress_done=0, progress_total=$2, pages=$3, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$4")
+        let started = sqlx::query("UPDATE knowledge_documents SET stage='embedding', progress_done=$5, progress_total=$2, pages=$3, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$4")
             .bind(job.id)
             .bind(passages.len() as i32)
             .bind(page_count)
             .bind(job.claimed)
+            .bind(from as i32)
             .execute(&self.pool)
             .await?;
         if started.rows_affected() == 0 {
             return Ok(());
         }
-        for (batch, chunk) in passages.chunks(EMBED_BATCH).enumerate() {
-            let input: Vec<String> = chunk.iter().map(|p| embedding.document(&p.text)).collect();
-            let vectors = gateway
-                .embeddings(&owner, &embedding.model, &input)
-                .await
-                .map_err(
-                    |e| match e.1.starts_with(crate::auth::grants::SIGN_IN_AGAIN) {
-                        // Retrying can't help until the owner signs in, so say that.
-                        true => anyhow::anyhow!(
-                            "{}: the file's owner must sign in before it can be indexed",
-                            crate::auth::grants::SIGN_IN_AGAIN
-                        ),
-                        false => anyhow::anyhow!("The embedding model is unavailable ({})", e.1),
-                    },
-                )?;
-            let start = batch * EMBED_BATCH;
+        // A few batches are embedded at once; each is stored in order as it is ready.
+        let inputs: Vec<(usize, Vec<String>)> = passages[from..]
+            .chunks(EMBED_BATCH)
+            .enumerate()
+            .map(|(batch, chunk)| {
+                let input = chunk.iter().map(|p| embedding.document(&p.text)).collect();
+                (from + batch * EMBED_BATCH, input)
+            })
+            .collect();
+        let (owner, model) = (&owner, &embedding.model);
+        let mut batches =
+            futures_util::stream::iter(inputs.into_iter().map(|(start, input)| async move {
+                embed_batch(gateway, owner, model, &input)
+                    .await
+                    .map(|vectors| (start, vectors))
+            }))
+            .buffered(EMBED_CONCURRENCY);
+        while let Some(embedded) = batches.next().await {
+            let (start, vectors) = embedded?;
+            let chunk = &passages[start..(start + EMBED_BATCH).min(passages.len())];
             let ordinals: Vec<i32> = (start..start + chunk.len()).map(|i| i as i32).collect();
             let pages: Vec<Option<i32>> = chunk.iter().map(|p| p.page).collect();
             let sections: Vec<Option<String>> = chunk
@@ -557,6 +608,39 @@ pub(crate) fn words(text: &str) -> String {
         }
     }
     seen.join(" | ")
+}
+
+/// One batch of a document's passages embedded as its owner, tried again after a
+/// refusal that passes. An owner who must sign in again stops it at once.
+async fn embed_batch(
+    gateway: &Gateway,
+    owner: &Identity,
+    model: &str,
+    input: &[String],
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    let mut tries = 1;
+    loop {
+        match gateway.embeddings(owner, model, input).await {
+            Ok(vectors) => return Ok(vectors),
+            Err(e) if e.1.starts_with(crate::auth::grants::SIGN_IN_AGAIN) => {
+                // Retrying can't help until the owner signs in, so say that.
+                anyhow::bail!(
+                    "{}: the file's owner must sign in before it can be indexed",
+                    crate::auth::grants::SIGN_IN_AGAIN
+                )
+            }
+            Err(e) if tries < EMBED_TRIES && passing(e.0) => {
+                tokio::time::sleep(EMBED_BACKOFF * 2u32.pow(tries - 1)).await;
+                tries += 1;
+            }
+            Err(e) => anyhow::bail!("The embedding model is unavailable ({})", e.1),
+        }
+    }
+}
+
+/// A gateway answer worth trying again: busy, a gateway error, or no answer in time.
+fn passing(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 async fn identity(pool: &PgPool, id: Uuid) -> anyhow::Result<Identity> {
@@ -990,10 +1074,13 @@ async fn upload(
     }
     .await;
     match recorded {
-        Ok(row) => Ok((
-            StatusCode::CREATED,
-            Json(json!({"document":document_json(&row)})),
-        )),
+        Ok(row) => {
+            k.queued().await;
+            Ok((
+                StatusCode::CREATED,
+                Json(json!({"document":document_json(&row)})),
+            ))
+        }
         Err(error) => {
             files.discard(&placed).await;
             Err(error)
@@ -1077,10 +1164,13 @@ async fn retry(
             "Only the collection's owner can retry documents".into(),
         ));
     }
-    sqlx::query("UPDATE knowledge_documents SET status='queued', attempts=0, error=NULL, updated_at=NOW() WHERE id=$1 AND status='failed'")
+    let queued = sqlx::query("UPDATE knowledge_documents SET status='queued', attempts=0, error=NULL, updated_at=NOW() WHERE id=$1 AND status='failed'")
         .bind(id)
         .execute(&k.pool)
         .await?;
+    if queued.rows_affected() > 0 {
+        k.queued().await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

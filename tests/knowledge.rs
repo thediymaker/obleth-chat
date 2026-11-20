@@ -74,7 +74,25 @@ fn embed(text: &str) -> Vec<f32> {
     v
 }
 
-async fn embeddings(State(seen): State<Seen>, Json(body): Json<Value>) -> Json<Value> {
+/// Words that make the embeddings fixture answer 503, with how many more times.
+static REFUSE: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+
+async fn embeddings(State(seen): State<Seen>, Json(body): Json<Value>) -> axum::response::Response {
+    let text = body["input"].to_string();
+    if let Some(left) = REFUSE
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|(word, left)| *left > 0 && text.contains(word.as_str()))
+        .map(|(_, left)| left)
+    {
+        *left -= 1;
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":{"message":"busy"}})),
+        )
+            .into_response();
+    }
     seen.lock().unwrap().push(body.clone());
     let data: Vec<Value> = body["input"]
         .as_array()
@@ -83,7 +101,7 @@ async fn embeddings(State(seen): State<Seen>, Json(body): Json<Value>) -> Json<V
         .enumerate()
         .map(|(i, text)| json!({"index":i,"embedding":embed(text.as_str().unwrap())}))
         .collect();
-    Json(json!({"data":data}))
+    Json(json!({"data":data})).into_response()
 }
 
 /// First round: search the knowledge; then answer citing the first source.
@@ -163,6 +181,9 @@ struct Fixture {
     embedded: Seen,
     chats: Seen,
     store_url: String,
+    /// The bucket, and the database, for the files worker's work.
+    store: ObjectStore,
+    pool: PgPool,
     _worker: CancellationToken,
 }
 
@@ -243,6 +264,7 @@ async fn fixture(pool: PgPool) -> Fixture {
     // As in main.rs: uploads are placed through the store's Files, which share
     // Knowledge's bucket.
     let files = obleth_chat::files::Files::new(pool.clone(), Some(store.clone()));
+    let store_for_files = store.clone();
     let knowledge = Knowledge::new(
         pool.clone(),
         store,
@@ -257,7 +279,7 @@ async fn fixture(pool: PgPool) -> Fixture {
     });
     let worker = CancellationToken::new();
     tokio::spawn(knowledge.clone().worker(gateway.clone(), worker.clone()));
-    let mut state = AppState::new(auth, pool, Some(gateway), 4);
+    let mut state = AppState::new(auth, pool.clone(), Some(gateway), 4);
     state.store = state.store.with_files(files);
     state.followups_enabled = false;
     state.knowledge = Some(knowledge);
@@ -267,6 +289,8 @@ async fn fixture(pool: PgPool) -> Fixture {
         embedded,
         chats,
         store_url,
+        store: store_for_files,
+        pool,
         _worker: worker,
     }
 }
@@ -509,6 +533,143 @@ async fn nothing_in_a_temporary_chat_is_saved_to_the_library(pool: PgPool) {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let (_, listed) = call(&f.app, "GET", "/api/saved", Value::Null, &admin).await;
     assert_eq!(listed["items"], json!([]));
+}
+
+/// A document of `n` passages; each begins with `{tag}{i:03}`.
+fn long_document(tag: &str, n: usize) -> Vec<u8> {
+    (0..n)
+        .map(|i| {
+            format!(
+                "{tag}{i:03} {}",
+                "entropy rises in a free expansion ".repeat(40)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .into_bytes()
+}
+
+/// The passage numbers embedded so far whose tag starts with `tag`, in order.
+fn embedded_passages(f: &Fixture, tag: &str) -> Vec<usize> {
+    f.embedded
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["input"].as_array().unwrap().clone())
+        .filter_map(|t| {
+            let text = t.as_str().unwrap().to_owned();
+            let at = text.find(tag)? + tag.len();
+            text[at..at + 3].parse().ok()
+        })
+        .collect()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn indexing_rides_out_a_busy_gateway_and_resumes_where_it_stopped(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, created) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/collections",
+        json!({"name":"Long"}),
+        &admin,
+    )
+    .await;
+    let collection = created["collection"]["id"].as_str().unwrap().to_owned();
+    // Busy once at the sixth batch: indexing goes on without starting again.
+    REFUSE.lock().unwrap().push(("onceq085".into(), 1));
+    let (status, _) = upload(
+        &f.app,
+        &collection,
+        "once.txt",
+        long_document("onceq", 120),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let documents = settled(&f.app, &collection, &admin).await;
+    assert_eq!(documents[0]["status"], "ready", "{}", documents[0]);
+    let once = embedded_passages(&f, "onceq");
+    assert_eq!(once.iter().filter(|&&i| i == 0).count(), 1);
+    assert_eq!(once.iter().filter(|&&i| i == 85).count(), 1);
+    // Refused for good at the sixth batch: the document fails, and Retry embeds only
+    // what is missing.
+    REFUSE.lock().unwrap().push(("stuckq085".into(), u32::MAX));
+    let (_, uploaded) = upload(
+        &f.app,
+        &collection,
+        "stuck.txt",
+        long_document("stuckq", 120),
+        &admin,
+    )
+    .await;
+    let id = uploaded["document"]["id"].as_str().unwrap().to_owned();
+    let documents = settled(&f.app, &collection, &admin).await;
+    let stuck = documents.iter().find(|d| d["id"] == id.as_str()).unwrap();
+    assert_eq!(stuck["status"], "failed", "{stuck}");
+    let before = embedded_passages(&f, "stuckq").len();
+    for (word, left) in REFUSE.lock().unwrap().iter_mut() {
+        if word == "stuckq085" {
+            *left = 0;
+        }
+    }
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("/api/knowledge/documents/{id}/retry"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let documents = settled(&f.app, &collection, &admin).await;
+    let stuck = documents.iter().find(|d| d["id"] == id.as_str()).unwrap();
+    assert_eq!(stuck["status"], "ready", "{stuck}");
+    let again = &embedded_passages(&f, "stuckq")[before..];
+    assert!(again.iter().all(|&i| i >= 80), "{again:?}");
+    assert!(again.contains(&80) && again.contains(&119), "{again:?}");
+    let stored: Vec<i32> = sqlx::query_scalar(
+        "SELECT ordinal FROM knowledge_passages WHERE document_id=$1::uuid ORDER BY ordinal",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, (0..120).collect::<Vec<i32>>());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_upload_wakes_the_idle_worker(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, created) = call(
+        &f.app,
+        "POST",
+        "/api/knowledge/collections",
+        json!({"name":"Quick"}),
+        &admin,
+    )
+    .await;
+    let collection = created["collection"]["id"].as_str().unwrap().to_owned();
+    // The worker has found nothing to do and waits.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let started = std::time::Instant::now();
+    upload(
+        &f.app,
+        &collection,
+        "notes.md",
+        NOTES.as_bytes().to_vec(),
+        &admin,
+    )
+    .await;
+    let documents = settled(&f.app, &collection, &admin).await;
+    assert_eq!(documents[0]["status"], "ready");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -791,12 +952,8 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
         .0,
         StatusCode::NO_CONTENT
     );
-    for _ in 0..50 {
-        if f.objects.lock().unwrap().len() < stored {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // The files worker's pass.
+    obleth_chat::files::empty_trash(&f.pool, &f.store).await;
     assert_eq!(f.objects.lock().unwrap().len(), stored - 1);
     let (_, found) = call(
         &f.app,

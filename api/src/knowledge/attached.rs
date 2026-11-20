@@ -64,6 +64,7 @@ impl Knowledge {
     ) -> Result<Vec<Uuid>, ApiError> {
         let mut tx = self.pool.begin().await?;
         let mut collections = Vec::new();
+        let mut staged = false;
         for attachment in attachments {
             let mine: Option<Uuid> = sqlx::query_scalar(
                 "SELECT id FROM knowledge_collections WHERE owner_id=$1 AND attachment_id=$2 AND conversation_id=$3",
@@ -89,11 +90,17 @@ impl Knowledge {
             };
             let id = match taken {
                 Some(id) => id,
-                None => stage(&mut tx, owner, *attachment, Some(conversation)).await?,
+                None => {
+                    staged = true;
+                    stage(&mut tx, owner, *attachment, Some(conversation)).await?
+                }
             };
             collections.push(id);
         }
         tx.commit().await?;
+        if staged {
+            self.queued().await;
+        }
         Ok(collections)
     }
 

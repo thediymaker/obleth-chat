@@ -192,6 +192,8 @@ impl Knowledge {
             }
             None => None,
         };
+        // Embedded later by the worker, which is told now.
+        let deferred = searchable && embedding.is_none();
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO saved_items (id, owner_id, kind, title, body, language, url, tags, searchable, source_conversation_id, source_message_id, embedding, project_id, pinned)
@@ -213,6 +215,9 @@ impl Knowledge {
         .bind(input.pinned.unwrap_or(false))
         .execute(&self.pool)
         .await?;
+        if deferred {
+            self.queued().await;
+        }
         self.item(user.id, id).await
     }
 

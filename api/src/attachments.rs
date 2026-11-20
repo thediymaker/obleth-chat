@@ -505,6 +505,11 @@ async fn upload(
         files.discard(&placed).await;
         return Err(error);
     }
+    if file.searched() {
+        if let Some(k) = &s.knowledge {
+            k.queued().await;
+        }
+    }
     Ok((StatusCode::CREATED, Json(file.meta)))
 }
 

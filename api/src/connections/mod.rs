@@ -293,12 +293,10 @@ impl Connections {
     pub fn wakeups(&self) -> wakeups::Wakeups {
         self.wakeups.clone()
     }
-    /// Delivers other replicas' wakeups here until shutdown.
-    pub fn wakeups_worker(
-        &self,
-        shutdown: tokio_util::sync::CancellationToken,
-    ) -> impl std::future::Future<Output = ()> + Send + 'static {
-        self.wakeups.clone().listen(self.pool.clone(), shutdown)
+    /// Shares the replica's wake-ups, whose listener delivers the other replicas'.
+    pub fn with_wakeups(mut self, wakeups: wakeups::Wakeups) -> Self {
+        self.wakeups = wakeups;
+        self
     }
 
     /// Which kinds the installation offers: a connection of a kind turned off is

@@ -120,6 +120,9 @@ async fn main() -> Result<()> {
     if let Some(grants) = state.auth.grants() {
         tokio::spawn(grants.worker(state.shutdown.clone()));
     }
+    // Wake-ups reach waits on every replica: connection calls and queued knowledge work.
+    let wakeups = obleth_chat::connections::wakeups::Wakeups::default();
+    tokio::spawn(wakeups.clone().listen(pool.clone(), state.shutdown.clone()));
     // Connections need the gateway. Their tokens are sealed with the secret key when
     // one is set; tokens sealed with the key derived from the gateway signing key
     // still open while that key is configured, and move to the secret key here.
@@ -141,8 +144,8 @@ async fn main() -> Result<()> {
         .devices(config.connections == ConnectionsMode::All)
         .auto_mode(config.auto_mode)
         .objects(objects.clone())
-        .origin(url::Url::parse(state.auth.origin()).ok());
-        tokio::spawn(connections.wakeups_worker(state.shutdown.clone()));
+        .origin(url::Url::parse(state.auth.origin()).ok())
+        .with_wakeups(wakeups.clone());
         match connections.reseal().await {
             Ok(0) => {}
             Ok(moved) => tracing::info!(moved, "connection tokens moved to the secret key"),
@@ -162,6 +165,7 @@ async fn main() -> Result<()> {
         objects,
         config.knowledge_quota_mb,
     )? {
+        let knowledge = knowledge.with_wakeups(wakeups);
         if let Some(gateway) = state.gateway.clone() {
             tokio::spawn(knowledge.clone().worker(gateway, state.shutdown.clone()));
         }

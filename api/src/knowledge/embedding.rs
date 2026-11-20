@@ -363,6 +363,9 @@ async fn save(
     )
     .await?;
     tx.commit().await?;
+    if reindexed {
+        k.queued().await;
+    }
     let mut out = document(&s, k, &user).await?;
     out["reindexed"] = json!(reindexed);
     Ok(Json(out))

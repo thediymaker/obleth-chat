@@ -541,6 +541,7 @@ async fn administrators_see_counts_and_workstreams_never_chats(pool: PgPool) {
     )
     .await;
     assert_eq!(none["workstreams"]["state"]["status"], "none", "{none}");
+    assert!(none["workstreams"]["stalled"].is_null(), "{none}");
     let (status, started) = call(
         &app,
         &admin,
@@ -654,4 +655,23 @@ async fn administrators_see_counts_and_workstreams_never_chats(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(audit, 2);
+    // With no administrator to run as, nothing can be placed, and the page says why.
+    sqlx::query("UPDATE insights SET run_as = NULL WHERE id")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE conversation_labels SET placed_at = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, stuck) = call(
+        &app,
+        &admin,
+        "GET",
+        "/api/admin/insights?days=28",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(stuck["workstreams"]["stalled"], "no-run-as", "{stuck}");
+    assert_eq!(stuck["workstreams"]["waiting"], 0);
 }

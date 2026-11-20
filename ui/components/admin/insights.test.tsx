@@ -94,6 +94,10 @@ test("insights explain when they are off, too small or still building", () => {
   expect(text({ ...data, workstreams: { ...empty, state: { status: "failed", building: false, error: "No list", runs: true } } })).toContain("No list");
   expect(text({ ...data, workstreams: { ...report, waiting: 3 } })).toContain("3 chats are still being placed");
   expect(text({ ...data, workstreams: { ...empty, state: { ...empty.state, runs: false } } })).toContain("Save the Insights settings");
+  // When chats cannot be placed, the page says why instead of waiting on them.
+  expect(text({ ...data, workstreams: { ...empty, stalled: "no-model" } })).toContain("Choose a labelling model");
+  expect(text({ ...data, workstreams: { ...empty, stalled: "no-model" } })).not.toContain("appears on its own");
+  expect(text({ ...data, workstreams: { ...report, stalled: "off" } })).toContain("Insights are off, so new chats are not placed");
   expect(text({ ...data, sessions: 0 })).toContain("No labelled chats yet");
 });
 

@@ -115,6 +115,8 @@ export interface Insights {
   workstreams?: {
     state?: { status?: string; building?: boolean; model?: string; foundAt?: string; error?: string; runs?: boolean };
     waiting?: number;
+    /** Why chats cannot be placed now; nothing then counts as waiting. */
+    stalled?: "no-gateway" | "off" | "no-model" | "no-run-as" | null;
     list?: Workstream[];
   };
 }

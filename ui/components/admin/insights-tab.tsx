@@ -181,6 +181,14 @@ function Detail({ stream, all, onShowAll }: { stream: Workstream; all: boolean; 
   );
 }
 
+/** What stops chats from being placed, in the page's words. */
+const STALLED = {
+  "no-gateway": "Chat has no gateway, so workstreams cannot be found or placed.",
+  off: "Insights are off, so new chats are not placed in workstreams.",
+  "no-model": "Choose a labelling model in the Insights settings to place chats in workstreams.",
+  "no-run-as": "Save the Insights settings to choose who finds and places workstreams; it runs as the administrator who saved them last.",
+} as const;
+
 function Workstreams({ data, state, on }: { data: Insights; state: InsightsState; on: Handlers }) {
   const w = data.workstreams || {};
   const s = w.state || {};
@@ -200,13 +208,14 @@ function Workstreams({ data, state, on }: { data: Insights; state: InsightsState
     </p>
   );
   const failed = !s.building && s.status === "failed" && <ErrorBox error={s.error || "Finding workstreams failed."} />;
+  const stalled = w.stalled && <Note>{STALLED[w.stalled]}</Note>;
   if (!listed.length)
     return (
       <Section {...head} aria-busy={s.building || undefined}>
         {building}
         {failed}
-        {s.runs === false && <Note>Save the Insights settings to choose who finds and places workstreams; it runs as the administrator who saved them last.</Note>}
-        {!s.building && !failed && <Note>The list appears on its own once about 20 chats have topic lines, or find it now.</Note>}
+        {stalled || (s.runs === false && <Note>{STALLED["no-run-as"]}</Note>)}
+        {!s.building && !failed && !stalled && <Note>The list appears on its own once about 20 chats have topic lines, or find it now.</Note>}
       </Section>
     );
   const streams = [...listed].sort((a, b) => b[state.sort] - a[state.sort] || b.sessions - a.sessions);
@@ -273,6 +282,7 @@ function Workstreams({ data, state, on }: { data: Insights; state: InsightsState
           );
         })}
       </div>
+      {stalled}
       <Note>
         {s.foundAt ? `Found by ${s.model || "a model"} on ${when(s.foundAt)}. ` : ""}
         {w.waiting ? ` ${num(w.waiting)} ${w.waiting === 1 ? "chat is" : "chats are"} still being placed and count under Everything else for now.` : ""}
@@ -431,7 +441,8 @@ export function InsightsTab() {
     queryKey: key,
     queryFn: () => api.request<Insights>(`/api/admin/insights?days=${days}${group ? `&group=${encodeURIComponent(group)}` : ""}`),
     placeholderData: (old) => old,
-    // While the workstream list is being found, or chats wait for a place, look again every few seconds.
+    // While the workstream list is being found, or chats wait for a place, look again every few
+    // seconds. Nothing waits while placing cannot run, so the page then stops looking.
     refetchInterval: (q) => {
       const w = q.state.data?.workstreams;
       return w?.state?.building ? 4000 : w?.waiting ? 15000 : false;

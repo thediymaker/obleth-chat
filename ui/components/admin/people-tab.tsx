@@ -57,7 +57,7 @@ const ROLES = [
 export const usersKey = (query: string) => ["admin", "users", query] as const;
 /** The accounts a search matches, newest first, a page at a time: `data.users` holds
  *  every page loaded so far and `data.hasMore` whether another can be loaded. */
-export function useAdminUsers(query: string) {
+function useAdminUsers(query: string) {
   const pages = useInfiniteQuery({
     queryKey: usersKey(query),
     initialPageParam: "",

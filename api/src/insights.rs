@@ -886,6 +886,7 @@ async fn streams_summary(
     pool: &PgPool,
     days: i32,
     group: Option<Uuid>,
+    stalled: Option<&str>,
 ) -> Result<Value, sqlx::Error> {
     let state: Streams =
         sqlx::query_as(&format!("SELECT {STREAMS_COLUMNS} FROM insights WHERE id"))
@@ -904,16 +905,20 @@ async fn streams_summary(
     .bind(group)
     .fetch_all(pool)
     .await?;
-    let waiting = rows
-        .iter()
-        .filter(|r| r.topic.is_some() && !r.placed)
-        .count();
+    // Nothing waits for a place that cannot be given.
+    let waiting = if stalled.is_some() {
+        0
+    } else {
+        rows.iter()
+            .filter(|r| r.topic.is_some() && !r.placed)
+            .count()
+    };
     let list = if streams.is_empty() {
         json!([])
     } else {
         workstreams(&rows, &streams)
     };
-    Ok(json!({"state": state, "waiting": waiting, "list": list}))
+    Ok(json!({"state": state, "waiting": waiting, "stalled": stalled, "list": list}))
 }
 
 /// Counts for a period and a group: chats, people, tokens, each label and each flag, and
@@ -979,7 +984,15 @@ async fn summary(
     .fetch_all(pool)
     .await?;
     out["flags"] = json!(flags.into_iter().collect::<BTreeMap<_, _>>());
-    out["workstreams"] = streams_summary(pool, days, group).await?;
+    let run_as: Option<Uuid> = sqlx::query_scalar("SELECT run_as FROM insights WHERE id")
+        .fetch_one(pool)
+        .await?;
+    let run_as = match run_as {
+        Some(id) => identity(pool, id).await?.is_some(),
+        None => false,
+    };
+    let stalled = stalled(s.gateway.is_some(), &settings, run_as);
+    out["workstreams"] = streams_summary(pool, days, group, stalled).await?;
     // The period before, for the change in chats, people and tokens.
     let (sessions, people, tokens): (i64, i64, i64) = sqlx::query_as(
         "SELECT COUNT(*), COUNT(DISTINCT l.owner_id), COALESCE(SUM(l.tokens), 0)::bigint FROM conversation_labels l
@@ -1311,14 +1324,11 @@ impl StreamsDue {
 /// Finds the workstream list when it is due, and places chats that wait for a place. Runs
 /// every minute while insights are on; a claim on the settings row keeps replicas apart.
 pub async fn workstreams_tick(s: &AppState) -> Result<(), sqlx::Error> {
-    let Some(gateway) = s.gateway.clone() else {
-        return Ok(());
-    };
     let pool = &s.store.pool;
     let settings = settings(pool).await?;
-    let (true, Some(model)) = (settings.enabled, settings.model.clone()) else {
+    if stalled(s.gateway.is_some(), &settings, true).is_some() {
         return Ok(());
-    };
+    }
     let tick: Tick = sqlx::query_as(
         "SELECT i.run_as, i.streams_requested AS requested,
            (i.streams_status = 'building' AND i.streams_claimed_until > NOW()) AS building,
@@ -1341,10 +1351,13 @@ pub async fn workstreams_tick(s: &AppState) -> Result<(), sqlx::Error> {
     .bind(STREAMS_DAYS)
     .fetch_one(pool)
     .await?;
-    let Some(user) = (match tick.run_as {
+    let user = match tick.run_as {
         Some(id) => identity(pool, id).await?,
         None => None,
-    }) else {
+    };
+    let (Some(gateway), Some(model), Some(user)) =
+        (s.gateway.clone(), settings.model.clone(), user)
+    else {
         return Ok(());
     };
     let due = tick.due;
@@ -1391,6 +1404,23 @@ pub async fn workstreams_tick(s: &AppState) -> Result<(), sqlx::Error> {
         return Ok(());
     }
     place(pool, &gateway, &user, &model).await
+}
+
+/// Why workstreams can be neither found nor placed now, as the admin page names it: no
+/// gateway, insights off, no labelling model, or no administrator to run as. None when
+/// they can. The workstreams tick and the summary both go by it.
+fn stalled(gateway: bool, settings: &Settings, run_as: bool) -> Option<&'static str> {
+    if !gateway {
+        Some("no-gateway")
+    } else if !settings.enabled {
+        Some("off")
+    } else if settings.model.is_none() {
+        Some("no-model")
+    } else if !run_as {
+        Some("no-run-as")
+    } else {
+        None
+    }
 }
 
 /// What one workstreams tick reads in one query.

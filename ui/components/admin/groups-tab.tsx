@@ -13,8 +13,11 @@ import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { Field, FormActions, FormDialog, FormError, Dropdown, Note, Section, TableWrap, TextAreaField, TextField, displayName, td, th, titleCase, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { api } from "@/lib/api";
-import { SearchForm, useAdminUsers } from "./people-tab";
+import { type AdminUser, SearchForm } from "./people-tab";
 import { useKept } from "./state";
+
+/** Accounts a member search offers at once. */
+const PICK = 25;
 
 export interface AdminGroup {
   id: string;
@@ -165,11 +168,22 @@ function GroupDetail({ id }: { id: string }) {
       api.request<{ group: AdminGroup; members?: Member[]; nextCursor?: string | null }>(`/api/admin/groups/${encodeURIComponent(id)}${pageParam ? `?after=${encodeURIComponent(pageParam)}` : ""}`),
     getNextPageParam: (last) => last.nextCursor || undefined,
   });
-  const users = useAdminUsers(query);
+  // Accounts to add come from a search, a page of PICK at a time, never the whole list.
+  const found = useQuery({
+    queryKey: ["admin", "users", "pick", query],
+    enabled: Boolean(query),
+    queryFn: () => api.request<{ users?: AdminUser[]; hasMore?: boolean }>(`/api/admin/users?q=${encodeURIComponent(query)}&limit=${PICK}`),
+  });
   const group = detail.data?.pages[0]?.group;
   const members: Member[] = [];
-  for (const page of detail.data?.pages ?? []) for (const m of page.members ?? []) if (!members.some((old) => old.id === m.id)) members.push(m);
-  const candidates = (users.data?.users ?? []).filter((u) => u.enabled !== false && !members.some((m) => m.id === u.id));
+  const memberIds = new Set<string>();
+  for (const page of detail.data?.pages ?? [])
+    for (const m of page.members ?? [])
+      if (!memberIds.has(m.id)) {
+        memberIds.add(m.id);
+        members.push(m);
+      }
+  const candidates = (found.data?.users ?? []).filter((u) => u.enabled !== false && !memberIds.has(u.id));
   const reload = () => {
     queries.invalidateQueries({ queryKey: key });
     queries.invalidateQueries({ queryKey: groupsKey });
@@ -221,7 +235,7 @@ function GroupDetail({ id }: { id: string }) {
           </DangerButton>
         </div>
       </div>
-      <ErrorBox error={detail.error || users.error} onRetry={() => detail.refetch()} />
+      <ErrorBox error={detail.error || found.error} onRetry={() => detail.refetch()} />
       <Section title="Add a member" headingLevel={3}>
         <SearchForm id="admin-member-query" label="Find an account" placeholder="Search name or username…" value={query} onSearch={setQuery} />
         <form onSubmit={add.onSubmit} className="flex flex-wrap items-end gap-2">
@@ -234,7 +248,7 @@ function GroupDetail({ id }: { id: string }) {
                   </option>
                 ))
               ) : (
-                <option value="">No matching accounts to add</option>
+                <option value="">{query ? "No matching accounts to add" : "Search for an account to add"}</option>
               )}
             </Dropdown>
           </Field>
@@ -243,7 +257,7 @@ function GroupDetail({ id }: { id: string }) {
           </Button>
         </form>
         <FormError message={add.error} />
-        {users.data?.hasMore && <Note>Refine your search to find accounts beyond the first 1,000 results.</Note>}
+        {found.data?.hasMore && <Note>Showing the first {PICK} matches. Refine your search to find others.</Note>}
       </Section>
       {members.length ? (
         <TableWrap>

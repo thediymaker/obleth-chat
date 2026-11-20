@@ -1,0 +1,118 @@
+name: sidecar-images
+
+# The workspace and browser images change far less often than Chat. Each is
+# built for amd64 and arm64 under a content tag, src-<tree>, where <tree> is the
+# git tree id of its source directory (deploy/sandbox or deploy/browser, which
+# hold everything their Dockerfiles copy), and only when no image with that tag
+# exists yet. A release (release.yml calls this workflow) then points its
+# :vX.Y.Z tag at the content tag's image instead of building again, so the
+# digests stay the same across releases until the sources change.
+#
+# A content tag is rebuilt from scratch, without the layer cache, on the 1st of
+# every month and when run by hand with force, so the packages these images
+# install (Chromium among them) still pick up security updates; the next
+# release then ships the rebuilt image.
+on:
+  push:
+    branches: [dev]
+    paths: ["deploy/sandbox/**", "deploy/browser/**", ".github/workflows/sidecar-images.yml"]
+  schedule:
+    - cron: "17 6 1 * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when an image of these sources exists
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      force:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io/thediymaker/obleth-chat
+  FORCE: ${{ github.event_name == 'schedule' || inputs.force == true }}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        image: [workspace, browser]
+        # Native runners for both architectures, as in release.yml.
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+          - image: workspace
+            dir: deploy/sandbox
+          - image: browser
+            dir: deploy/browser
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: content tag
+        run: echo "TAG=src-$(git rev-parse "HEAD:${{ matrix.dir }}" | cut -c1-12)" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: existing
+        name: image of these sources already built
+        run: |
+          ref="$REGISTRY/${{ matrix.image }}:$TAG-${{ matrix.arch }}"
+          if [ "$FORCE" != "true" ] && docker buildx imagetools inspect "$ref" > /dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "$ref exists; not building"
+          fi
+      - if: steps.existing.outputs.found != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ matrix.dir }}/Dockerfile
+          push: true
+          no-cache: ${{ env.FORCE == 'true' }}
+          tags: ${{ env.REGISTRY }}/${{ matrix.image }}:${{ env.TAG }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+
+  # One multi-arch content tag per image. Recreating it from unchanged per-arch
+  # images gives the same digest.
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: workspace
+            dir: deploy/sandbox
+          - image: browser
+            dir: deploy/browser
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: create multi-arch content tag
+        run: |
+          image="$REGISTRY/${{ matrix.image }}"
+          tag="src-$(git rev-parse "HEAD:${{ matrix.dir }}" | cut -c1-12)"
+          docker buildx imagetools create -t "$image:$tag" "$image:$tag-amd64" "$image:$tag-arm64"

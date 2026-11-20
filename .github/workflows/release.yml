@@ -5,10 +5,20 @@ name: release
 # with the version's CHANGELOG.md section. Prerelease tags (vX.Y.Z-rc.N) publish
 # images without moving :latest and mark the release as a prerelease. To publish a
 # tag whose push started nothing: gh workflow run release.yml --ref vX.Y.Z
+#
+# The workspace and browser images are built only when their sources changed
+# since the last build (sidecar-images.yml); otherwise this version's tags point
+# at the image already built from the same sources. Running this by hand with
+# rebuild_sidecars rebuilds them from scratch first.
 on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      rebuild_sidecars:
+        description: Rebuild the workspace and browser images even if their sources did not change
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,7 +46,7 @@ jobs:
     needs: verify
     strategy:
       matrix:
-        image: [chat, chat-ui, workspace, browser]
+        image: [chat, chat-ui]
         # Native runners for both architectures: Rust under emulation is far too slow.
         runner: [ubuntu-latest, ubuntu-24.04-arm]
         include:
@@ -48,10 +58,6 @@ jobs:
             file: deploy/Dockerfile.api
           - image: chat-ui
             file: deploy/Dockerfile.ui
-          - image: workspace
-            file: deploy/sandbox/Dockerfile
-          - image: browser
-            file: deploy/browser/Dockerfile
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -77,16 +83,37 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
 
-  # One multi-arch tag per image (:vX.Y.Z, plus :latest for stable releases).
+  # The workspace and browser images of this commit's sources, built only if
+  # missing (or when forced).
+  sidecars:
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/sidecar-images.yml
+    with:
+      force: ${{ inputs.rebuild_sidecars == true }}
+
+  # One multi-arch tag per image (:vX.Y.Z, plus :latest for stable releases):
+  # Chat and chat-ui from this release's per-arch builds, the workspace and
+  # browser from their content tags.
   manifest:
-    needs: build
+    needs: [build, sidecars]
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     strategy:
       matrix:
-        image: [chat, chat-ui, workspace, browser]
+        include:
+          - image: chat
+          - image: chat-ui
+          - image: workspace
+            dir: deploy/sandbox
+          - image: browser
+            dir: deploy/browser
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
@@ -100,9 +127,12 @@ jobs:
             *-*) ;;
             *) tags+=(-t "$image:latest") ;;
           esac
-          docker buildx imagetools create "${tags[@]}" \
-            "$image:$GITHUB_REF_NAME-amd64" \
-            "$image:$GITHUB_REF_NAME-arm64"
+          if [ -n "${{ matrix.dir }}" ]; then
+            sources=("$image:src-$(git rev-parse "HEAD:${{ matrix.dir }}" | cut -c1-12)")
+          else
+            sources=("$image:$GITHUB_REF_NAME-amd64" "$image:$GITHUB_REF_NAME-arm64")
+          fi
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
           docker buildx imagetools inspect "$image:$GITHUB_REF_NAME" --format '{{json .Manifest.Digest}}' \
             | tr -d '"' | sed "s|^|$image@|" >> "$RUNNER_TEMP/digest"
           echo "- \`$(cat "$RUNNER_TEMP/digest")\`" >> "$GITHUB_STEP_SUMMARY"

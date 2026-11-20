@@ -2,7 +2,8 @@ name: dev-images
 
 # Every push to dev publishes amd64 images of Chat and the web interface tagged
 # dev-<short sha> (and :dev), for the development deployment. Releases still come
-# only from version tags (release.yml).
+# only from version tags (release.yml). The workspace and browser images are built
+# by sidecar-images.yml, only when their sources change.
 on:
   push:
     branches: [dev]

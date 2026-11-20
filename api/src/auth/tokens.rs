@@ -40,6 +40,9 @@ struct TokenRow {
     window_calls: i32,
     #[sqlx(flatten)]
     user: Identity,
+    /// Whether the grant of the sign-in the token was made in has an expired access
+    /// token; None without one.
+    grant_expired: Option<bool>,
 }
 
 impl Auth {
@@ -87,7 +90,8 @@ impl Auth {
              AND u.id = t.user_id AND u.enabled AND NOT u.password_change_required \
              AND (t.single_sign_on OR $2) \
              RETURNING t.id AS token_id, t.scopes, t.window_calls, u.id, u.username, u.display_name, u.role, \
-             t.session_id AS session",
+             t.session_id AS session, \
+             (SELECT g.access_expires_at <= NOW() FROM oidc_grants g WHERE g.session_id = t.session_id) AS grant_expired",
         )
         .bind(digest(&format!("{MARKER}{secret}")))
         .bind(self.config.password_sign_in)
@@ -102,7 +106,8 @@ impl Auth {
         }
         // A token lasts no longer than the provider grant of the sign-in it was
         // made in, while that sign-in is live.
-        self.confirm_grant(row.user.session).await?;
+        self.confirm_grant(row.user.session, row.grant_expired)
+            .await?;
         Ok(TokenUser {
             id: row.token_id,
             user: row.user,

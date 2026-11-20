@@ -221,16 +221,8 @@ impl Grants {
         user: Uuid,
         session: Option<Uuid>,
     ) -> Result<Option<ProviderToken>, ApiError> {
-        let linked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM oidc_identities WHERE user_id = $1 AND issuer = $2)",
-        )
-        .bind(user)
-        .bind(&self.issuer)
-        .fetch_one(&self.pool)
-        .await?;
-        if !linked {
-            return Ok(None);
-        }
+        // The sign-in's own grant first: having one means the person has an identity
+        // here, which is never unlinked.
         if let Some(session) = session {
             let own = sqlx::query_as::<_, GrantRow>(&format!(
                 "SELECT {COLUMNS} FROM oidc_grants g JOIN auth_sessions s ON s.id = g.session_id \
@@ -248,6 +240,16 @@ impl Grants {
                     None => Err(sign_in_again()),
                 };
             }
+        }
+        let linked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM oidc_identities WHERE user_id = $1 AND issuer = $2)",
+        )
+        .bind(user)
+        .bind(&self.issuer)
+        .fetch_one(&self.pool)
+        .await?;
+        if !linked {
+            return Ok(None);
         }
         loop {
             let grant = sqlx::query_as::<_, GrantRow>(&format!(

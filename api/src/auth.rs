@@ -394,6 +394,7 @@ struct SessionIdentity {
     #[sqlx(flatten)]
     user: Identity,
     password_change_required: bool,
+    grant_expired: Option<bool>,
 }
 
 impl PasswordUser {
@@ -573,10 +574,10 @@ impl Auth {
         mutation: bool,
         allow_password_change: bool,
     ) -> Result<Identity, ApiError> {
-        let identity = self
-            .ending_session(headers, mutation, allow_password_change)
+        let (identity, grant_expired) = self
+            .session(headers, mutation, allow_password_change)
             .await?;
-        self.confirm_grant(identity.session).await?;
+        self.confirm_grant(identity.session, grant_expired).await?;
         Ok(identity)
     }
 
@@ -589,6 +590,20 @@ impl Auth {
         mutation: bool,
         allow_password_change: bool,
     ) -> Result<Identity, ApiError> {
+        Ok(self
+            .session(headers, mutation, allow_password_change)
+            .await?
+            .0)
+    }
+
+    /// The session's person, and whether the provider grant of its sign-in has an
+    /// expired access token (None without a grant), read in the same query.
+    async fn session(
+        &self,
+        headers: &HeaderMap,
+        mutation: bool,
+        allow_password_change: bool,
+    ) -> Result<(Identity, Option<bool>), ApiError> {
         if mutation {
             self.check_origin(headers)?;
         }
@@ -597,8 +612,9 @@ impl Auth {
             .ok_or_else(ApiError::unauthorized)?;
         // With passwords off, only sessions that began with single sign-on count.
         let identity = sqlx::query_as::<_, SessionIdentity>(
-            "SELECT u.id, u.username, u.display_name, u.role, s.id AS session, u.password_change_required FROM auth_sessions s \
-             JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 \
+            "SELECT u.id, u.username, u.display_name, u.role, s.id AS session, u.password_change_required, \
+             g.access_expires_at <= NOW() AS grant_expired FROM auth_sessions s \
+             JOIN users u ON u.id = s.user_id LEFT JOIN oidc_grants g ON g.session_id = s.id WHERE s.token_hash = $1 \
              AND s.expires_at > NOW() AND u.enabled = TRUE AND (s.single_sign_on OR $2)",
         )
         .bind(digest(&token))
@@ -624,16 +640,22 @@ impl Auth {
                 "Change your password before continuing".into(),
             ));
         }
-        Ok(identity.user)
+        Ok((identity.user, identity.grant_expired))
     }
 
     /// In forward mode a sign-in lasts only as long as the provider keeps its grant:
     /// once the access token has expired, the next request refreshes it, and a
     /// refused grant ends the session (and the API tokens made in it) right away.
     /// Only activity refreshes, so the provider's idle expiry still applies.
-    pub(crate) async fn confirm_grant(&self, session: Option<Uuid>) -> Result<(), ApiError> {
-        match (&self.grants, session) {
-            (Some(grants), Some(session)) => {
+    /// `grant_expired` is what the identity query read: the provider is asked only
+    /// about a grant whose access token has expired.
+    pub(crate) async fn confirm_grant(
+        &self,
+        session: Option<Uuid>,
+        grant_expired: Option<bool>,
+    ) -> Result<(), ApiError> {
+        match (&self.grants, session, grant_expired) {
+            (Some(grants), Some(session), Some(true)) => {
                 if grants.confirm(session).await? {
                     Ok(())
                 } else {

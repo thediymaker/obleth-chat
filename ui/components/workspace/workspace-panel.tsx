@@ -157,6 +157,8 @@ function Preview({ id, space, bridge, shown }: { id: string; space: Space; bridg
 
 function FileView({ id, space, bridge }: { id: string; space: Space; bridge: WorkspaceBridge }) {
   const f = space.file!;
+  // Parsed once per file, not on every repaint while a reply streams.
+  const table = useMemo(() => (f.content != null && csvFile(f.path) ? csvTable(f.content, f.truncated) : null), [f.content, f.path, f.truncated]);
   const head = (
     <div className="flex h-10 shrink-0 items-center gap-2 border-b px-2">
       <Button variant="ghost" size="icon-xs" aria-label="Back to files" title="Back to files" onClick={() => bridge.closeFile(id)}>
@@ -180,8 +182,8 @@ function FileView({ id, space, bridge }: { id: string; space: Space; bridge: Wor
     );
   else if (f.content == null) body = <PaneLoading label="Opening…" />;
   else if (f.error) body = <p className="p-4 text-sm text-muted-foreground">{f.error}</p>;
-  else if (csvFile(f.path)) {
-    const t = csvTable(f.content, f.truncated);
+  else if (table) {
+    const t = table;
     body = (
       <>
         <div className="overflow-auto">
@@ -239,6 +241,39 @@ function Files({ id, space, bridge }: { id: string; space: Space; bridge: Worksp
   // A refreshed list may no longer hold what was ticked.
   const listed = useMemo(() => new Set((space.files || []).map((e) => e.path)), [space.files]);
   const asking = useMemo(() => pickedPaths(new Set([...picked].filter((p) => listed.has(p)))), [picked, listed]);
+  // The rows are built again only when the list or what is ticked changes, not on every
+  // repaint while a reply streams.
+  const rows = useMemo(() => {
+    const pick = (path: string, on: boolean) =>
+      setPicked((old) => {
+        const next = new Set(old);
+        if (on) next.add(path);
+        else next.delete(path);
+        return next;
+      });
+    return (space.files || []).map((e) => {
+      const { depth, name } = treeItem(e);
+      const pad = { paddingLeft: `${0.75 + depth * 1}rem` };
+      const within = pickedAbove(picked, e.path);
+      const box = <Checkbox aria-label={`Select ${e.path}`} checked={within || picked.has(e.path)} disabled={within} onCheckedChange={(on) => pick(e.path, on === true)} />;
+      return e.type === "directory" ? (
+        <li key={e.path} className="flex items-center gap-2 py-1 pr-3 text-text-2" style={pad}>
+          {box}
+          <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate">{name}</span>
+        </li>
+      ) : (
+        <li key={e.path} className="flex items-center gap-2 pr-3 hover:bg-accent" style={pad}>
+          {box}
+          <button type="button" className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left" onClick={() => bridge.showFile(id, e.path)}>
+            <File className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate">{name}</span>
+            <small className="shrink-0 text-xs text-faint">{bytes(e.size)}</small>
+          </button>
+        </li>
+      );
+    });
+  }, [space.files, picked, bridge, id]);
   if (space.file) return <FileView id={id} space={space} bridge={bridge} />;
   if (!running)
     return (
@@ -253,13 +288,6 @@ function Files({ id, space, bridge }: { id: string; space: Space; bridge: Worksp
         {space.filesError || "Files the assistant creates appear here."}
       </PaneNote>
     );
-  const pick = (path: string, on: boolean) =>
-    setPicked((old) => {
-      const next = new Set(old);
-      if (on) next.add(path);
-      else next.delete(path);
-      return next;
-    });
   const top = space.files.filter((e) => !e.path.includes("/")).map((e) => e.path);
   const all = top.length > 0 && top.every((p) => picked.has(p));
   const href = downloadUrl(id, asking);
@@ -287,28 +315,7 @@ function Files({ id, space, bridge }: { id: string; space: Space; bridge: Worksp
         )}
       </div>
       <ul className="min-h-0 flex-1 overflow-auto py-1 text-md" aria-label="Files">
-        {space.files.map((e) => {
-          const { depth, name } = treeItem(e);
-          const pad = { paddingLeft: `${0.75 + depth * 1}rem` };
-          const within = pickedAbove(picked, e.path);
-          const box = <Checkbox aria-label={`Select ${e.path}`} checked={within || picked.has(e.path)} disabled={within} onCheckedChange={(on) => pick(e.path, on === true)} />;
-          return e.type === "directory" ? (
-            <li key={e.path} className="flex items-center gap-2 py-1 pr-3 text-text-2" style={pad}>
-              {box}
-              <Folder className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate">{name}</span>
-            </li>
-          ) : (
-            <li key={e.path} className="flex items-center gap-2 pr-3 hover:bg-accent" style={pad}>
-              {box}
-              <button type="button" className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left" onClick={() => bridge.showFile(id, e.path)}>
-                <File className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate">{name}</span>
-                <small className="shrink-0 text-xs text-faint">{bytes(e.size)}</small>
-              </button>
-            </li>
-          );
-        })}
+        {rows}
       </ul>
     </div>
   );

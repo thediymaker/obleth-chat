@@ -11,7 +11,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import { useChat, useChatStore } from "@/components/chat/chat-provider";
+import { useChatStore } from "@/components/chat/chat-provider";
 import { Pill, Quota, useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -53,7 +53,7 @@ export function WorkspacesPage() {
   const previews = caps.data?.features?.previews === true;
   const list = useWorkspaceList();
   const queries = useQueryClient();
-  const store = useChat();
+  const store = useChatStore();
   const confirm = useConfirm();
   const start = useStartBuilding();
   if (caps.data && !on)

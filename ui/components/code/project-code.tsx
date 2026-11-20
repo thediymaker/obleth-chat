@@ -10,7 +10,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftRight, ChevronDown, ChevronRight, Download, File as FileIcon, GitBranch, GitCompare, Plus, Undo2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ErrorBox, Eyebrow } from "@/components/app-shell/page";
 import { Dropdown, Pill, Quota, useConfirm } from "@/components/manage/kit";
@@ -55,6 +55,7 @@ function CommitRow({ projectId, e, selected = "" }: { projectId: string; e: Comm
     <li>
       <Link
         href={codeHref(projectId, { view: "history", sha: e.sha })}
+        prefetch={false}
         aria-current={selected === e.sha ? "page" : undefined}
         className={cn("flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-accent", selected === e.sha && "bg-secondary")}
       >
@@ -561,6 +562,24 @@ function Blame({ projectId, path }: { projectId: string; path: string }) {
   );
 }
 
+/** One file of the project's list; picking another file draws only the two rows that change. */
+const FileRow = memo(function FileRow({ projectId, file, selected }: { projectId: string; file: { path: string; size?: number }; selected: boolean }) {
+  return (
+    <li>
+      <Link
+        href={codeHref(projectId, { view: "files", path: file.path })}
+        prefetch={false}
+        aria-current={selected ? "page" : undefined}
+        className={cn("flex items-center gap-2 rounded-md px-2 py-1 hover:bg-accent", selected && "bg-secondary")}
+      >
+        <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate font-mono text-xs">{file.path}</span>
+        <small className="shrink-0 text-xs text-faint">{bytes(file.size)}</small>
+      </Link>
+    </li>
+  );
+});
+
 function Files({ projectId, path }: { projectId: string; path: string }) {
   const q = useCode<{ files: { path: string; size?: number }[] }>(projectId, ["files"], `${projectCodePath(projectId)}/files`);
   if (!q.data) return q.error ? <ErrorBox error={q.error} onRetry={() => q.refetch()} /> : <p className="text-sm text-muted-foreground">Loading files…</p>;
@@ -569,17 +588,7 @@ function Files({ projectId, path }: { projectId: string; path: string }) {
       list={
         <ul>
           {q.data.files.map((f) => (
-            <li key={f.path}>
-              <Link
-                href={codeHref(projectId, { view: "files", path: f.path })}
-                aria-current={f.path === path ? "page" : undefined}
-                className={cn("flex items-center gap-2 rounded-md px-2 py-1 hover:bg-accent", f.path === path && "bg-secondary")}
-              >
-                <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate font-mono text-xs">{f.path}</span>
-                <small className="shrink-0 text-xs text-faint">{bytes(f.size)}</small>
-              </Link>
-            </li>
+            <FileRow key={f.path} projectId={projectId} file={f} selected={f.path === path} />
           ))}
         </ul>
       }

@@ -1,11 +1,13 @@
 // A unified diff drawn as rows numbered by the new file, and
 // the +added −removed counts beside a file.
 
+import { memo, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { diffRows } from "./model";
 
-export function DiffView({ text, className }: { text: string | null | undefined; className?: string }) {
-  const rows = diffRows(text);
+/** Drawn again only when its text changes, not on every repaint of the pane around it. */
+export const DiffView = memo(function DiffView({ text, className }: { text: string | null | undefined; className?: string }) {
+  const rows = useMemo(() => diffRows(text), [text]);
   if (!rows.length) return <p className="p-3 text-sm text-muted-foreground">No line changes.</p>;
   return (
     <div role="table" aria-label="Changes" className={cn("overflow-x-auto bg-code font-mono text-[12px] leading-[1.55]", className)}>
@@ -24,7 +26,7 @@ export function DiffView({ text, className }: { text: string | null | undefined;
       )}
     </div>
   );
-}
+});
 
 export function DiffStat({ added, removed }: { added?: number | null; removed?: number | null }) {
   return (

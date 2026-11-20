@@ -1,6 +1,6 @@
 //! read_paper: a paper, or any web page with headings, read by section. The page is
 //! fetched in the workspace, as the person's own commands would fetch it, and kept
-//! there, so reading more of it later costs nothing. When the chat says what it is
+//! there, so reading more of it later fetches nothing; each read parses it again. When the chat says what it is
 //! looking for, one pick-one decision over the outline ranks the sections, as in
 //! table-of-contents retrieval, and the likeliest come back in full.
 

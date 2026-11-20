@@ -12,6 +12,9 @@ pub mod tools;
 
 use std::{collections::BTreeMap, time::Duration};
 
+use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
+
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -373,7 +376,8 @@ pub async fn check(pool: &PgPool, sb: &Sandboxes, run: Uuid) -> bool {
     let log = tail(log, LOG_TAIL);
     match state.trim() {
         "running" => {
-            let _ = sqlx::query("UPDATE research_runs SET log_tail=$2, metrics=$3 WHERE id=$1")
+            // Written only when the log moved on, so a quiet run costs no write.
+            let _ = sqlx::query("UPDATE research_runs SET log_tail=$2, metrics=$3 WHERE id=$1 AND (log_tail IS DISTINCT FROM $2 OR metrics IS DISTINCT FROM $3)")
                 .bind(run)
                 .bind(&log)
                 .bind(json!(parse_metrics(&log)))
@@ -496,18 +500,49 @@ pub async fn cancel(pool: &PgPool, sb: &Sandboxes, research: &Research, run: Uui
     true
 }
 
+/// Runs looked at at once, and at most in one pass.
+const CHECKS_AT_ONCE: usize = 4;
+const CHECKS_PER_PASS: usize = 20;
+
+/// How often a running run is looked at: every few seconds while it starts, then less
+/// often as it goes on.
+pub fn poll_every(age: chrono::Duration) -> chrono::Duration {
+    if age < chrono::Duration::minutes(1) {
+        chrono::Duration::seconds(5)
+    } else if age < chrono::Duration::minutes(10) {
+        chrono::Duration::seconds(15)
+    } else {
+        chrono::Duration::seconds(30)
+    }
+}
+
 /// Watches running experiments on every replica; `check` keeps them from doubling up.
 pub async fn worker(pool: PgPool, sb: Sandboxes, shutdown: CancellationToken) {
     loop {
-        let due: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM research_runs WHERE status='running' AND (checked_at IS NULL OR checked_at < NOW() - INTERVAL '10 seconds') ORDER BY checked_at NULLS FIRST LIMIT 20")
-            .fetch_all(&pool)
-            .await
-            .unwrap_or_default();
-        for run in due {
-            check(&pool, &sb, run).await;
-        }
+        let running: Vec<(Uuid, DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT id, started_at, checked_at FROM research_runs WHERE status='running' ORDER BY checked_at NULLS FIRST",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+        let now = Utc::now();
+        let due = running
+            .into_iter()
+            .filter(|(_, started, checked)| {
+                checked.is_none_or(|checked| now - checked >= poll_every(now - *started))
+            })
+            .map(|(run, _, _)| run)
+            .take(CHECKS_PER_PASS);
+        futures_util::stream::iter(due)
+            .for_each_concurrent(CHECKS_AT_ONCE, |run| {
+                let (pool, sb) = (&pool, &sb);
+                async move {
+                    check(pool, sb, run).await;
+                }
+            })
+            .await;
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             _ = shutdown.cancelled() => break,
         }
     }
@@ -639,7 +674,14 @@ async fn cancel_run(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_metrics;
+    use super::{parse_metrics, poll_every};
+    use chrono::Duration;
+
+    #[test]
+    fn a_run_is_looked_at_less_often_as_it_goes_on() {
+        let every = |minutes| poll_every(Duration::minutes(minutes)).num_seconds();
+        assert_eq!([every(0), every(5), every(60)], [5, 15, 30]);
+    }
 
     #[test]
     fn reads_the_last_value_of_each_metric() {

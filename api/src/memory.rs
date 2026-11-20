@@ -163,6 +163,10 @@ impl Recall {
     pub fn recalled(&self) -> bool {
         !self.items.is_empty()
     }
+    /// Whether Chat learns from this chat, so a request to remember is Memory's.
+    pub fn learns(&self) -> bool {
+        self.learns
+    }
 
     /// The activity entry the reply keeps, so the page can show what it was given.
     pub fn entry(&self) -> Value {

@@ -1816,9 +1816,10 @@ async fn run_generation(
     if offers_project {
         preamble.push(questions::PROJECT_PROMPT.into());
     }
+    let memory_learns = memory_turn.as_ref().is_some_and(|m| m.learns());
     if let Some(prompt) = knowledge_turn
         .as_ref()
-        .map(|k| k.prompt())
+        .map(|k| k.prompt(memory_learns))
         .filter(|p| !p.is_empty())
     {
         preamble.push(prompt);
@@ -1893,7 +1894,7 @@ async fn run_generation(
         tools.push(knowledge::chat::definition());
     }
     if knowledge_turn.as_ref().is_some_and(|t| t.library) {
-        tools.push(knowledge::chat::save_definition());
+        tools.push(knowledge::chat::save_definition(memory_learns));
     }
     if asks {
         tools.push(questions::definition());

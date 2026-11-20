@@ -220,11 +220,16 @@ impl Turn {
         self.sources.len()
     }
 
-    /// The system prompt section with the passages found for the message.
-    pub fn prompt(&self) -> String {
+    /// The system prompt section with the passages found for the message. When
+    /// `memory_learns`, a fact about the person is Memory's to keep, not the library's.
+    pub fn prompt(&self, memory_learns: bool) -> String {
         let mut text = String::new();
         if self.library {
-            text.push_str(&format!("# The person's library\nWhen the person asks you to remember, keep or save something (a function, a fact, a link, a decision), call {SAVE_TOOL} with a clear title, the content and a few tags. Only save what they ask for."));
+            if memory_learns {
+                text.push_str(&format!("# The person's library\nWhen the person asks you to keep or save something (a function, a link, a decision, a passage), call {SAVE_TOOL} with a clear title, the content and a few tags. Only save what they ask for. A fact about themselves that they ask you to remember is for Memory, not the library: don't save it."));
+            } else {
+                text.push_str(&format!("# The person's library\nWhen the person asks you to remember, keep or save something (a function, a fact, a link, a decision), call {SAVE_TOOL} with a clear title, the content and a few tags. Only save what they ask for."));
+            }
             if self.saved {
                 text.push_str(&format!(" They also keep saved items from earlier work; when they refer to something they saved, or to earlier work you cannot see, call {TOOL} to find it. Don't search them for anything else."));
             }
@@ -273,10 +278,16 @@ pub fn definition() -> Value {
         "parameters":{"type":"object","properties":{"query":{"type":"string","description":"What to look for, in a few words or a short question"}},"required":["query"],"additionalProperties":false}}})
 }
 
-/// The save_item tool: what the model calls when the person says "remember this".
-pub fn save_definition() -> Value {
+/// The save_item tool: what the model calls when the person says "keep this". When
+/// `memory_learns`, facts about the person are left to Memory.
+pub fn save_definition(memory_learns: bool) -> Value {
+    let description = if memory_learns {
+        "Save something to the person's library when they ask you to keep or save it: a function, a link, a decision or a passage. Not for facts about themselves that they ask you to remember; Memory keeps those. They can find it later in Library, and chats can search it."
+    } else {
+        "Save something to the person's library when they ask you to remember or keep it: a function, a fact, a link or a decision. They can find it later in Library, and chats can search it."
+    };
     json!({"type":"function","function":{"name":SAVE_TOOL,
-        "description":"Save something to the person's library when they ask you to remember or keep it: a function, a fact, a link or a decision. They can find it later in Library, and chats can search it.",
+        "description":description,
         "parameters":{"type":"object","properties":{
             "title":{"type":"string","description":"A short title that says what it is"},
             "kind":{"type":"string","enum":["code","note","link","excerpt"],"description":"code for a function or command, note for a fact or decision, link for a web address, excerpt for a passage of your answer"},
@@ -469,8 +480,34 @@ mod tests {
         assert_eq!(turn.number(hit(2)), 2);
         assert_eq!(turn.number(hit(1)), 1);
         assert!(turn
-            .prompt()
+            .prompt(false)
             .contains("[2] Notes.pdf, page 2, “2 Method › 2.1 Schedule”\ntext 2"));
         assert_eq!(turn.entry()["items"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_library_leaves_facts_about_the_person_to_memory_when_chat_learns() {
+        let turn = Turn {
+            collections: vec![],
+            names: vec![],
+            searches: 0,
+            sources: vec![],
+            queries: vec![],
+            tool: false,
+            saved: false,
+            library: true,
+            project: None,
+        };
+        let description = |learns| {
+            save_definition(learns)["function"]["description"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(turn.prompt(true).contains("is for Memory, not the library"));
+        assert!(!turn.prompt(true).contains("remember, keep or save"));
+        assert!(description(true).contains("Memory keeps those"));
+        assert!(turn.prompt(false).contains("remember, keep or save"));
+        assert!(description(false).contains("remember or keep it"));
     }
 }

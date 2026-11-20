@@ -46,7 +46,7 @@ impl Knowledge {
         user: &Identity,
         conversation: Uuid,
         attached: &[Uuid],
-        messages: &[(String, String)],
+        question: &Question,
         tools: bool,
         library: bool,
         project: Option<&crate::projects::Context>,
@@ -72,10 +72,10 @@ impl Knowledge {
         let query = if collections.is_empty() {
             String::new()
         } else {
-            question(messages)
+            question.text.clone()
         };
         let sources = match self
-            .search(gateway, user, &collections, &query, FIRST)
+            .search_question(gateway, user, &collections, question, FIRST)
             .await
         {
             Ok(hits) => hits,
@@ -357,9 +357,54 @@ fn label(hit: &Hit) -> String {
     label
 }
 
+/// A turn's question, embedded at most once for knowledge and memory to share: both
+/// search with the knowledge embedding model and its query prefix.
+pub struct Question {
+    pub text: String,
+    vector: tokio::sync::OnceCell<Option<String>>,
+}
+
+impl Question {
+    pub fn new(messages: &[(String, String)]) -> Self {
+        Self {
+            text: question(messages),
+            vector: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// The question as a vector literal, embedded as the person on first use. None when
+    /// there is no question, or the embedding model is not set up or did not answer.
+    pub async fn vector(
+        &self,
+        knowledge: &Knowledge,
+        gateway: &Gateway,
+        user: &Identity,
+    ) -> Option<&str> {
+        if self.text.is_empty() {
+            return None;
+        }
+        self.vector
+            .get_or_init(|| async {
+                let embedding = knowledge.embedding().await.ok()?;
+                match gateway
+                    .embeddings(user, &embedding.model, &[embedding.query(&self.text)])
+                    .await
+                {
+                    Ok(mut vectors) => vectors.pop().map(super::vector_literal),
+                    Err(error) => {
+                        tracing::warn!("question embedding failed: {}", error.1);
+                        None
+                    }
+                }
+            })
+            .await
+            .as_deref()
+    }
+}
+
 /// What to search for: the latest message, with the one before it when the latest is
 /// a short follow-up such as "why?" or "and the second one?".
-fn question(messages: &[(String, String)]) -> String {
+pub(crate) fn question(messages: &[(String, String)]) -> String {
     let mut users = messages
         .iter()
         .rev()

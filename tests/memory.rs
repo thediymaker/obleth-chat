@@ -14,7 +14,7 @@ use http_body_util::BodyExt;
 use obleth_chat::{
     auth::{Auth, AuthConfig, Identity, Role},
     gateway::Gateway,
-    knowledge::{extract::Tools, Knowledge, ObjectStore},
+    knowledge::{chat::Question, extract::Tools, Knowledge, ObjectStore},
     memory, AppState,
 };
 use rsa::{pkcs8::EncodePrivateKey, RsaPrivateKey};
@@ -30,6 +30,8 @@ use uuid::Uuid;
 
 const ORIGIN: &str = "http://localhost:8085";
 type Seen = Arc<Mutex<Vec<Value>>>;
+/// Every text the embeddings fixture was asked for, across the tests in this file.
+static EMBEDDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 struct Session {
     id: Uuid,
@@ -82,9 +84,12 @@ fn embed(text: &str) -> Vec<f32> {
 }
 
 async fn embeddings(Json(body): Json<Value>) -> Json<Value> {
-    let data: Vec<Value> = body["input"]
-        .as_array()
+    let input = body["input"].as_array().unwrap();
+    EMBEDDED
+        .lock()
         .unwrap()
+        .extend(input.iter().map(|t| t.as_str().unwrap().to_owned()));
+    let data: Vec<Value> = input
         .iter()
         .enumerate()
         .map(|(i, t)| json!({"index":i,"embedding":embed(t.as_str().unwrap())}))
@@ -517,11 +522,11 @@ async fn replies_get_pinned_memories_and_the_ones_that_fit(pool: PgPool) {
     }
     let gateway = state.gateway.clone().unwrap();
     let (id, _) = chat(&pool, person.id, &[], false).await;
-    let messages = vec![(
+    let question = Question::new(&[(
         "user".to_owned(),
         "Which hydrology dataset should I start with?".to_owned(),
-    )];
-    let found = memory::recall(&state, &gateway, &user, id, &messages)
+    )]);
+    let found = memory::recall(&state, &gateway, &user, id, &question)
         .await
         .unwrap();
     let prompt = found.prompt();
@@ -540,7 +545,7 @@ async fn replies_get_pinned_memories_and_the_ones_that_fit(pool: PgPool) {
     // Not in a temporary chat, and not for a person who turned memory off.
     let (temporary, _) = chat(&pool, person.id, &[], true).await;
     assert!(
-        memory::recall(&state, &gateway, &user, temporary, &messages)
+        memory::recall(&state, &gateway, &user, temporary, &question)
             .await
             .is_none()
     );
@@ -552,9 +557,74 @@ async fn replies_get_pinned_memories_and_the_ones_that_fit(pool: PgPool) {
         json!({"useMemory": false, "learn": true}),
     )
     .await;
-    assert!(memory::recall(&state, &gateway, &user, id, &messages)
+    assert!(memory::recall(&state, &gateway, &user, id, &question)
         .await
         .is_none());
+}
+
+/// How many texts the embeddings fixture was asked for that contain `marker`.
+fn embedded(marker: &str) -> usize {
+    EMBEDDED
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(marker))
+        .count()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_turn_embeds_its_question_once_for_knowledge_and_memory(pool: PgPool) {
+    let (state, app, _) = fixture(&pool).await;
+    enable(&pool).await;
+    let gateway = state.gateway.clone().unwrap();
+    let knowledge = state.knowledge.clone().unwrap();
+    // Without memories or collections, nothing is embedded.
+    let newcomer = session(&pool, "user").await;
+    let (empty, _) = chat(&pool, newcomer.id, &[], false).await;
+    let marker = format!("watershed-{}", Uuid::new_v4().simple());
+    let question = Question::new(&[("user".to_owned(), format!("Which {marker} model?"))]);
+    let user = identity(&newcomer);
+    let (turn, recalled) = tokio::join!(
+        knowledge.prepare(&gateway, &user, empty, &[], &question, true, false, None),
+        memory::recall(&state, &gateway, &user, empty, &question)
+    );
+    assert!(turn.is_none() && recalled.is_none());
+    assert_eq!(embedded(&marker), 0);
+    // With both, the question is embedded once and both use it.
+    let person = session(&pool, "user").await;
+    call(
+        &app,
+        &person,
+        "POST",
+        "/api/memory",
+        json!({"content": "You study the hydrology of a watershed", "kind": "about", "pinned": false, "topics": []}),
+    )
+    .await;
+    let collection = Uuid::new_v4();
+    sqlx::query("INSERT INTO knowledge_collections (id, owner_id, name) VALUES ($1, $2, 'Papers')")
+        .bind(collection)
+        .bind(person.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (id, _) = chat(&pool, person.id, &[], false).await;
+    let marker = format!("watershed-{}", Uuid::new_v4().simple());
+    let question = Question::new(&[(
+        "user".to_owned(),
+        format!("What changes the hydrology of a {marker} watershed?"),
+    )]);
+    let user = identity(&person);
+    let attached = [collection];
+    let (turn, recalled) = tokio::join!(
+        knowledge.prepare(&gateway, &user, id, &attached, &question, true, false, None),
+        memory::recall(&state, &gateway, &user, id, &question)
+    );
+    assert!(turn.is_some());
+    assert!(recalled
+        .unwrap()
+        .prompt()
+        .contains("hydrology of a watershed"));
+    assert_eq!(embedded(&marker), 1);
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -569,6 +569,10 @@ pub struct ResolvedRequest {
     /// With Auto, the gateway models this person may use: a tool round stays on the
     /// model that answered only when it is one of these.
     pub choices: Vec<String>,
+    /// How far the model is trusted with changes through connections.
+    pub actions: Actions,
+    /// The person wants Chat to suggest a better model for tool work.
+    pub model_suggestions: bool,
 }
 /// The gateway model behind a name an upstream reported. Upstreams often report
 /// their own name for a model, such as `qwen35-122b-a10b-fp8` for the gateway's
@@ -598,7 +602,12 @@ pub async fn resolve_request(
         effective_catalog(pool, gateway, user, false),
         raw_preferences(pool, user.id)
     )?;
-    resolve_from_catalog(&models, &preferences, requested_model, requested)
+    let mut resolved = resolve_from_catalog(&models, &preferences, requested_model, requested)?;
+    resolved.actions = actions_of(pool, &resolved.model).await;
+    resolved.model_suggestions = preferences_value(preferences)
+        .unwrap_or_default()
+        .model_suggestions;
+    Ok(resolved)
 }
 fn resolve_from_catalog(
     models: &[ModelView],
@@ -666,6 +675,8 @@ fn resolve_from_catalog(
         } else {
             vec![]
         },
+        actions: Actions::Provisional,
+        model_suggestions: true,
     })
 }
 

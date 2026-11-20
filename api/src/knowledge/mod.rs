@@ -404,7 +404,40 @@ impl Knowledge {
             .pop()
             .map(vector_literal)
             .ok_or_else(ApiError::internal)?;
-        let words = words(&text);
+        self.passages(&allowed, &vector, &words(&text), limit).await
+    }
+
+    /// `search` for a turn's question, whose vector memory may already have made.
+    pub async fn search_question(
+        &self,
+        gateway: &Gateway,
+        user: &Identity,
+        collections: &[Uuid],
+        question: &chat::Question,
+        limit: usize,
+    ) -> Result<Vec<Hit>, ApiError> {
+        if question.text.is_empty() || collections.is_empty() {
+            return Ok(vec![]);
+        }
+        let allowed = self.visible(user.id, collections).await?;
+        if allowed.is_empty() {
+            return Ok(vec![]);
+        }
+        let Some(vector) = question.vector(self, gateway, user).await else {
+            return Ok(vec![]);
+        };
+        self.passages(&allowed, vector, &words(&question.text), limit)
+            .await
+    }
+
+    /// Passages in `allowed` collections nearest `vector` and best for `words`.
+    async fn passages(
+        &self,
+        allowed: &[Uuid],
+        vector: &str,
+        words: &str,
+        limit: usize,
+    ) -> Result<Vec<Hit>, ApiError> {
         let mut tx = self.pool.begin().await?;
         // Keep scanning the vector index until enough rows pass the collection filter.
         sqlx::query("SET LOCAL hnsw.iterative_scan = relaxed_order")
@@ -429,9 +462,9 @@ impl Knowledge {
              FROM fused f JOIN knowledge_passages p ON p.id = f.id JOIN knowledge_documents d ON d.id = p.document_id
              ORDER BY f.score DESC LIMIT $4",
         )
-        .bind(&allowed)
-        .bind(&vector)
-        .bind(&words)
+        .bind(allowed)
+        .bind(vector)
+        .bind(words)
         .bind(limit as i64)
         .fetch_all(&mut *tx)
         .await?;

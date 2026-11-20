@@ -13,7 +13,7 @@ use crate::{
     decisions::{self, Decisions},
     error::ApiError,
     gateway::{valid_model, Gateway},
-    knowledge::Knowledge,
+    knowledge::{chat::Question, Knowledge},
     AppState,
 };
 use axum::{
@@ -163,11 +163,11 @@ pub async fn recall(
     gateway: &Gateway,
     user: &Identity,
     conversation: Uuid,
-    messages: &[(String, String)],
+    question: &Question,
 ) -> Option<Recall> {
     match tokio::time::timeout(
         RECALL_TIMEOUT,
-        find(s, gateway, user, conversation, messages),
+        find(s, gateway, user, conversation, question),
     )
     .await
     {
@@ -188,7 +188,7 @@ async fn find(
     gateway: &Gateway,
     user: &Identity,
     conversation: Uuid,
-    messages: &[(String, String)],
+    question: &Question,
 ) -> Result<Option<Recall>, sqlx::Error> {
     let pool = &s.store.pool;
     let settings = settings(pool).await?;
@@ -218,16 +218,24 @@ async fn find(
     .bind(PINNED)
     .fetch_all(pool)
     .await?;
-    let query = question(messages);
     let mut items: Vec<(Uuid, String, bool)> =
         pinned.into_iter().map(|(id, c)| (id, c, true)).collect();
-    if !query.is_empty() {
+    let unpinned: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM memories WHERE owner_id = $1 AND NOT pinned)",
+    )
+    .bind(user.id)
+    .fetch_one(pool)
+    .await?;
+    if unpinned && !question.text.is_empty() {
+        let vector = match &s.knowledge {
+            Some(k) => question.vector(k, gateway, user).await,
+            None => None,
+        };
         let ranked = rank(
             pool,
-            s.knowledge.as_ref(),
-            gateway,
-            user,
-            &query,
+            user.id,
+            vector,
+            &question.text,
             RELEVANT,
             Some(FIT_DISTANCE),
         )
@@ -259,23 +267,16 @@ async fn find(
     Ok(Some(Recall { items }))
 }
 
-/// The person's unpinned memories that best match `query`, by meaning and by words,
-/// best first. `fit` drops matches by meaning that are further away than it.
+/// The person's unpinned memories that best match `query`, by meaning (`vector`, the
+/// query embedded) and by words, best first. `fit` drops matches by meaning that are further away than it.
 async fn rank(
     pool: &PgPool,
-    knowledge: Option<&Knowledge>,
-    gateway: &Gateway,
-    user: &Identity,
+    owner: Uuid,
+    vector: Option<&str>,
     query: &str,
     limit: i64,
     fit: Option<f64>,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    let vector = match knowledge {
-        Some(k) => embed(k, gateway, user, &[query.to_owned()], true)
-            .await
-            .and_then(|mut v| v.pop()),
-        None => None,
-    };
     let rows: Vec<(Uuid,)> = sqlx::query_as(
         "WITH mine AS (SELECT id, embedding, tsv FROM memories WHERE owner_id = $1 AND NOT pinned),
          vec AS (
@@ -291,8 +292,8 @@ async fn rank(
          SELECT id FROM (SELECT id, r FROM vec UNION ALL SELECT id, r FROM kw) u
          GROUP BY id ORDER BY SUM(1.0 / (60 + r)) DESC LIMIT $4",
     )
-    .bind(user.id)
-    .bind(&vector)
+    .bind(owner)
+    .bind(vector)
     .bind(crate::knowledge::words(query))
     .bind(limit)
     .bind(fit.unwrap_or(2.0))
@@ -333,26 +334,6 @@ async fn embed(
             None
         }
     }
-}
-
-/// What to match memories against: the latest message, with the one before it when the
-/// latest is a short follow-up.
-fn question(messages: &[(String, String)]) -> String {
-    let mut users = messages
-        .iter()
-        .rev()
-        .filter(|(role, _)| role == "user")
-        .map(|(_, c)| c.trim());
-    let last = users.next().unwrap_or("");
-    let text = if last.chars().count() < 60 {
-        match users.next() {
-            Some(previous) => format!("{previous}\n{last}"),
-            None => last.to_owned(),
-        }
-    } else {
-        last.to_owned()
-    };
-    text.chars().take(1500).collect()
 }
 
 // ---------------------------------------------------------------------------------
@@ -708,11 +689,16 @@ impl Pass<'_> {
             .fetch_all(self.pool)
             .await?
         } else {
+            let vector = match self.knowledge {
+                Some(k) => embed(k, self.gateway, self.user, &[text.to_owned()], true)
+                    .await
+                    .and_then(|mut v| v.pop()),
+                None => None,
+            };
             let mut ids = rank(
                 self.pool,
-                self.knowledge,
-                self.gateway,
-                self.user,
+                self.user.id,
+                vector.as_deref(),
                 text,
                 KNOWN,
                 None,
@@ -1868,21 +1854,5 @@ mod tests {
     fn topic_names_are_trimmed() {
         assert_eq!(topic_name("  #Kimi   port. "), Some("Kimi port".into()));
         assert_eq!(topic_name("  "), None);
-    }
-
-    #[test]
-    fn short_follow_ups_match_with_the_message_before() {
-        let messages = vec![
-            (
-                "user".to_owned(),
-                "Help me tune the Gaudi kernel for MXFP4".to_owned(),
-            ),
-            ("assistant".to_owned(), "Sure.".to_owned()),
-            ("user".to_owned(), "and faster?".to_owned()),
-        ];
-        assert_eq!(
-            question(&messages),
-            "Help me tune the Gaudi kernel for MXFP4\nand faster?"
-        );
     }
 }

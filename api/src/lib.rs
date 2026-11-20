@@ -669,6 +669,13 @@ pub(crate) async fn launch_turn(
         overrides,
         variant,
     } = launch;
+    // A send Chat has no room for is refused before any catalog or tool discovery.
+    let permit = s.slots.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Chat is at capacity. Try again shortly.".into(),
+        )
+    })?;
     let resolved =
         models::resolve_request(&s.store.pool, &gateway, &user, &model, overrides).await?;
     let parameters = &resolved.parameters;
@@ -680,12 +687,11 @@ pub(crate) async fn launch_turn(
         _ => None,
     };
     // Connection tools go to every chat whose model may call tools.
-    let model_actions = models::actions_of(&s.store.pool, &resolved.model).await;
     // Without any tool to offer, the model is still told about connections the person
     // has that this chat cannot use yet, so it can say what is missing.
     let (toolset, unready) = match &s.connections {
         Some(c) if resolved.capabilities.supports_function_calling != Some(false) => {
-            let set = c.toolset(user.id, id).await.with_actions(model_actions);
+            let set = c.toolset(user.id, id).await.with_actions(resolved.actions);
             if set.is_empty() {
                 (None, set.unready_prompt())
             } else {
@@ -694,12 +700,6 @@ pub(crate) async fn launch_turn(
         }
         _ => (None, None),
     };
-    let permit = s.slots.clone().try_acquire_owned().map_err(|_| {
-        ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Chat is at capacity. Try again shortly.".into(),
-        )
-    })?;
     let turn = if let Some((message, mode)) = variant {
         s.store
             .start_variant_turn(
@@ -1570,40 +1570,37 @@ async fn run_generation(
     let workspace_turn = workspace.is_some();
     // The chat's project: instructions, and collections and saved items it also searches.
     let project = projects::for_conversation(&s.store.pool, user.id, id).await;
-    // Passages from the chat's knowledge collections, found before the model starts.
-    let mut knowledge_turn = match &s.knowledge {
-        Some(k) => {
-            let attached = attached_documents(&s, k, &user, id, &turn).await;
-            let messages: Vec<(String, String)> = turn
-                .messages
-                .iter()
-                .map(|m| (m.role.clone(), m.content.clone()))
-                .collect();
-            let tools = resolved.capabilities.supports_function_calling != Some(false);
-            let library = resolved.capabilities.supports_function_calling == Some(true);
-            k.prepare(
-                &gateway,
-                &user,
-                id,
-                &attached,
-                &messages,
-                tools,
-                library,
-                project.as_ref(),
-            )
-            .await
-        }
-        None => None,
-    };
-    // What Chat remembers about the person that fits this message.
-    let memory_turn = {
-        let messages: Vec<(String, String)> = turn
+    // Passages from the chat's knowledge collections, and what Chat remembers about the
+    // person that fits this message, found together before the model starts. Both
+    // search for the same question, which is embedded once.
+    let question = knowledge::chat::Question::new(
+        &turn
             .messages
             .iter()
             .map(|m| (m.role.clone(), m.content.clone()))
-            .collect();
-        memory::recall(&s, &gateway, &user, id, &messages).await
+            .collect::<Vec<_>>(),
+    );
+    let knowledge_search = async {
+        let k = s.knowledge.as_ref()?;
+        let attached = attached_documents(&s, k, &user, id, &turn).await;
+        let tools = resolved.capabilities.supports_function_calling != Some(false);
+        let library = resolved.capabilities.supports_function_calling == Some(true);
+        k.prepare(
+            &gateway,
+            &user,
+            id,
+            &attached,
+            &question,
+            tools,
+            library,
+            project.as_ref(),
+        )
+        .await
     };
+    let (mut knowledge_turn, memory_turn) = tokio::join!(
+        knowledge_search,
+        memory::recall(&s, &gateway, &user, id, &question)
+    );
     // Models with tools may ask the person to choose before going on.
     let asks = resolved.capabilities.supports_function_calling == Some(true);
     // A chat with the browser on gets the browser tools and its owner's search engine.
@@ -2440,12 +2437,7 @@ async fn run_generation(
             {
                 model_offered = true;
                 let current = served.as_deref().unwrap_or(&resolved.model).to_owned();
-                if models::actions_of(&s.store.pool, &resolved.model).await
-                    != models::Actions::Certified
-                    && models::preferences(&s.store.pool, user.id)
-                        .await
-                        .model_suggestions
-                {
+                if resolved.actions != models::Actions::Certified && resolved.model_suggestions {
                     if let Some(better) =
                         models::suggest(&s.store.pool, &gateway, &user, &current).await
                     {
@@ -3450,30 +3442,30 @@ async fn run_generation(
         ["question", "workspace", "research", "app", "project"]
             .contains(&e["kind"].as_str().unwrap_or(""))
     });
-    let followups = if status == "completed" && !content.is_empty() && !asked && s.followups_enabled
-    {
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            suggestions::schedule(
-                s.clone(),
-                user.clone(),
-                id,
-                turn.assistant_id,
-                resolved.model.clone(),
-            ),
-        )
-        .await
-        .unwrap_or(false)
-    } else {
-        false
+    // Follow-ups, labels and a better title, and memories from what the person said,
+    // each when it is on, are scheduled together before `done`.
+    let replied = status == "completed" && !content.is_empty();
+    let followups = async {
+        if replied && !asked && s.followups_enabled {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                suggestions::schedule(
+                    s.clone(),
+                    user.clone(),
+                    id,
+                    turn.assistant_id,
+                    resolved.model.clone(),
+                ),
+            )
+            .await
+            .unwrap_or(false)
+        } else {
+            false
+        }
     };
-    // Labels and a better title for a chat whose reply just finished, when they are on.
-    let title_pending =
-        status == "completed" && !content.is_empty() && insights::after_reply(&s, &user, id).await;
-    // What the person said is read for memories, when memory is on for them.
-    let memory_pending = status == "completed"
-        && !content.is_empty()
-        && memory::after_reply(&s, &user, id, turn.assistant_id).await;
+    let title = async { replied && insights::after_reply(&s, &user, id).await };
+    let memory = async { replied && memory::after_reply(&s, &user, id, turn.assistant_id).await };
+    let (followups, title_pending, memory_pending) = tokio::join!(followups, title, memory);
     if persisted.is_err() {
         emit(
             &mut tx,

@@ -31,6 +31,8 @@ const PASSWORD: &str = "fixture-only-password-42";
 struct Fake {
     jwks: Value,
     seen: Arc<Mutex<Vec<Value>>>,
+    /// Model catalog requests.
+    listed: Arc<Mutex<usize>>,
 }
 fn verify(headers: &HeaderMap, f: &Fake) -> Value {
     let raw = headers
@@ -58,6 +60,7 @@ fn verify(headers: &HeaderMap, f: &Fake) -> Value {
 }
 async fn fake_models(State(f): State<Fake>, headers: HeaderMap) -> Json<Value> {
     let _ = verify(&headers, &f);
+    *f.listed.lock().unwrap() += 1;
     Json(json!({"data":[{"id":"fixture-model"}]}))
 }
 async fn fake_chat(
@@ -125,6 +128,7 @@ async fn fixture(pool: PgPool) -> (Router, AppState, Fake, tokio::task::JoinHand
     let fake = Fake {
         jwks: gateway.jwks(),
         seen: Arc::new(Mutex::new(vec![])),
+        listed: Arc::default(),
     };
     let r = Router::new()
         .route("/v1/models", get(fake_models))
@@ -1047,5 +1051,33 @@ async fn import_route_takes_another_apps_export_past_the_old_size_limit(pool: Pg
     let summary = value(response).await;
     assert_eq!(summary["source"], "open-webui");
     assert_eq!(summary["imported"], 1);
+    task.abort();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_send_at_capacity_is_refused_before_any_discovery(pool: PgPool) {
+    let (app, state, fake, task) = fixture(pool).await;
+    let (cookie, csrf, _) = login(&app, "test-admin").await;
+    let id = conversation(&app, &cookie, &csrf).await;
+    let _full = state
+        .slots
+        .clone()
+        .try_acquire_many_owned(4)
+        .expect("every slot is free");
+    let listed = *fake.listed.lock().unwrap();
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            json!({"content":"hello","model":"fixture-model"}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(*fake.listed.lock().unwrap(), listed);
+    assert!(fake.seen.lock().unwrap().is_empty());
     task.abort();
 }

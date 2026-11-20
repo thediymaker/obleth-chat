@@ -89,15 +89,15 @@ pub async fn tick(s: &AppState) -> Result<(), sqlx::Error> {
     {
         return Ok(());
     }
-    // A worker that died leaves an expired lease; reading the chat recovers it.
-    let expired: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, owner_id FROM conversations WHERE auto_approve AND active_generation IS NOT NULL \
+    // A worker that died leaves an expired lease, which is recovered here.
+    let expired: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT owner_id FROM conversations WHERE auto_approve AND active_generation IS NOT NULL \
          AND generation_expires <= NOW() LIMIT 20",
     )
     .fetch_all(&s.store.pool)
     .await?;
-    for (id, owner) in expired {
-        let _ = s.store.get(owner, id).await;
+    for owner in expired {
+        let _ = s.store.recover_expired(owner).await;
     }
     // Each nudge waits longer after the chat last changed: 1, 2, 4, 8, 16, then 30 minutes.
     let rows = sqlx::query(

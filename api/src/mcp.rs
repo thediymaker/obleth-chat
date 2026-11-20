@@ -489,12 +489,18 @@ async fn begin(
 async fn stop_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Value, ApiError> {
     let id = chat_id(args)?;
     let user = &token.user;
-    s.store.get(user.id, id).await?;
+    s.store.recover_expired(user.id).await?;
     let mut tx = s.store.pool.begin().await?;
     sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("SELECT 1 FROM conversations WHERE id=$1 AND owner_id=$2 FOR UPDATE")
+        .bind(id)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let stopped = sqlx::query(
         "UPDATE conversations SET generation_cancel_requested=TRUE \
          WHERE id=$1 AND owner_id=$2 AND active_generation IS NOT NULL",

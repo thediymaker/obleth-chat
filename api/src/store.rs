@@ -297,9 +297,35 @@ impl Store {
         Ok(conversation)
     }
 
+    /// The chat as one consistent snapshot, read without the owner's lock. A chat whose
+    /// reply lease has expired, or whose imported messages are not linked yet, is put
+    /// right first, under the lock.
     pub async fn get(&self, owner: Uuid, id: Uuid) -> Result<Conversation, ApiError> {
-        let mut tx = self.owner_transaction(owner).await?;
-        recover_expired_in(&mut tx, owner).await?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        let (enabled, repair): (bool, bool) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $2 AND enabled),
+                    EXISTS(SELECT 1 FROM conversations c WHERE c.id = $1 AND c.owner_id = $2
+             AND ((c.active_generation IS NOT NULL AND c.generation_expires <= clock_timestamp())
+                  OR (c.selected_leaf_id IS NULL AND EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id = c.id))))",
+        )
+        .bind(id)
+        .bind(owner)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !enabled {
+            return Err(ApiError::unauthorized());
+        }
+        if repair {
+            tx.rollback().await?;
+            let mut tx = self.owner_transaction(owner).await?;
+            recover_expired_in(&mut tx, owner).await?;
+            let conversation = read_conversation(&mut tx, owner, id).await?;
+            tx.commit().await?;
+            return Ok(conversation);
+        }
         let conversation = read_conversation(&mut tx, owner, id).await?;
         tx.commit().await?;
         Ok(conversation)

@@ -26,7 +26,7 @@ pub async fn stop(
 ) -> Result<Json<Value>, ApiError> {
     let user = state.auth.require(&headers, true).await?;
     // Recover an already-expired lease before comparing the requested generation.
-    state.store.get(user.id, id).await?;
+    state.store.recover_expired(user.id).await?;
     let mut tx = state.store.pool.begin().await?;
     sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
         .bind(user.id)

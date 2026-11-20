@@ -217,7 +217,7 @@ pub(super) async fn initialize_path_in(
     id: Uuid,
 ) -> Result<(), ApiError> {
     let uninitialized: bool =
-        sqlx::query_scalar("SELECT selected_leaf_id IS NULL FROM conversations WHERE id=$1")
+        sqlx::query_scalar("SELECT selected_leaf_id IS NULL AND EXISTS(SELECT 1 FROM messages WHERE conversation_id=$1) FROM conversations WHERE id=$1")
             .bind(id)
             .fetch_one(&mut **tx)
             .await?;

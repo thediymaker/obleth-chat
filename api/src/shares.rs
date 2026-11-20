@@ -11,8 +11,8 @@ use crate::{
 };
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
-    response::Response,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -142,10 +142,51 @@ async fn read(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let user = s.auth.require(&headers, false).await?;
     let pool = &s.store.pool;
     let owner = readable(pool, user.id, id).await?;
+    // A viewer that already has this version is told so without the transcript.
+    let tag = version(pool, id).await?;
+    let fresh = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|sent| sent.split(',').any(|t| t.trim() == tag));
+    let mut response = if fresh {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        Json(shared(&s, &user, owner, id).await?).into_response()
+    };
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&tag).map_err(|_| ApiError::internal())?,
+    );
+    // Revalidated on every read; never served from a cache unasked.
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+/// A validator for everything the shared view shows: the chat's row, its sharing, its
+/// owner's and group's names, and each message's state and sizes. Reads no message text.
+async fn version(pool: &PgPool, id: Uuid) -> Result<String, ApiError> {
+    let digest: String = sqlx::query_scalar(
+        "SELECT md5(concat_ws('|', c.updated_at, c.title, c.active_generation, c.generation_cancel_requested,
+                c.share_scope, c.share_group_id, c.selected_leaf_id, g.name, u.display_name,
+                (SELECT string_agg(concat_ws(':', m.id, m.status, octet_length(m.content),
+                        octet_length(m.reasoning_content), pg_column_size(m.activity)), ',' ORDER BY m.ordinal)
+                 FROM messages m WHERE m.conversation_id = c.id)))
+         FROM conversations c JOIN users u ON u.id = c.owner_id
+         LEFT JOIN user_groups g ON g.id = c.share_group_id WHERE c.id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    Ok(format!("\"{digest}\""))
+}
+
+async fn shared(s: &AppState, user: &Identity, owner: Uuid, id: Uuid) -> Result<Value, ApiError> {
+    let pool = &s.store.pool;
     let conversation = s.store.read_shared(owner, id).await?;
     let mut value = serde_json::to_value(conversation).map_err(|_| ApiError::internal())?;
     if let Some(c) = value.as_object_mut() {
@@ -172,9 +213,7 @@ async fn read(
             }
         }
     }
-    Ok(Json(
-        json!({"conversation":value,"share":share_json(pool, id).await?,"mine":owner == user.id}),
-    ))
+    Ok(json!({"conversation":value,"share":share_json(pool, id).await?,"mine":owner == user.id}))
 }
 
 async fn fork(

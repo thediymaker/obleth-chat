@@ -1081,3 +1081,102 @@ async fn a_send_at_capacity_is_refused_before_any_discovery(pool: PgPool) {
     assert!(fake.seen.lock().unwrap().is_empty());
     task.abort();
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_shared_chat_answers_not_modified_until_it_changes(pool: PgPool) {
+    let (app, _, _, task) = fixture(pool).await;
+    let (cookie, csrf, _) = login(&app, "test-admin").await;
+    let id = conversation(&app, &cookie, &csrf).await;
+    let share = app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/api/conversations/{id}/share"),
+            json!({"scope":"signed_in"}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(share.status(), StatusCode::OK);
+    let path = format!("/api/shared/{id}");
+    let first = fetch(&app, &path, &[("cookie", &cookie)]).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(first.headers()["cache-control"], "no-cache");
+    let tag = first.headers()["etag"].to_str().unwrap().to_owned();
+    let again = fetch(&app, &path, &[("cookie", &cookie), ("if-none-match", &tag)]).await;
+    assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(again.headers()["etag"], tag.as_str());
+    assert!(again
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .is_empty());
+    // A new title is a new version.
+    let renamed = app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/api/conversations/{id}"),
+            json!({"title":"Renamed"}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let changed = fetch(&app, &path, &[("cookie", &cookie), ("if-none-match", &tag)]).await;
+    assert_eq!(changed.status(), StatusCode::OK);
+    assert_ne!(changed.headers()["etag"], tag.as_str());
+    task.abort();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn reading_a_chat_does_not_wait_for_the_owners_lock(pool: PgPool) {
+    let (app, state, _, task) = fixture(pool.clone()).await;
+    let (cookie, csrf, session) = login(&app, "test-admin").await;
+    let id = conversation(&app, &cookie, &csrf).await;
+    let owner: Uuid = session["user"]["id"].as_str().unwrap().parse().unwrap();
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+        .bind(owner)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let read = tokio::time::timeout(
+        Duration::from_secs(2),
+        fetch(
+            &app,
+            &format!("/api/conversations/{id}"),
+            &[("cookie", &cookie)],
+        ),
+    )
+    .await
+    .expect("the read waited for the owner's lock");
+    assert_eq!(read.status(), StatusCode::OK);
+    held.rollback().await.unwrap();
+    // A chat whose reply lease expired is still recovered when read.
+    let chat: Uuid = id.parse().unwrap();
+    let turn = state
+        .store
+        .start_turn(owner, chat, "Question", "fixture-model", "", 0.7, 128)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE conversations SET generation_expires=NOW()-INTERVAL '1 second' WHERE id=$1",
+    )
+    .bind(chat)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let recovered = state.store.get(owner, chat).await.unwrap();
+    let reply = recovered
+        .messages
+        .iter()
+        .find(|m| m.id == turn.assistant_id)
+        .unwrap();
+    assert_eq!(reply.status, "interrupted");
+    task.abort();
+}

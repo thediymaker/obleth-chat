@@ -31,7 +31,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
-    image: ghcr.io/thediymaker/obleth-chat/chat:v1.6.0
+    image: ghcr.io/thediymaker/obleth-chat/chat:v1.7.0
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,7 +109,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.ui
-    image: ghcr.io/thediymaker/obleth-chat/chat-ui:v1.6.0
+    image: ghcr.io/thediymaker/obleth-chat/chat-ui:v1.7.0
     environment:
       NODE_OPTIONS: --max-old-space-size=384
     networks:

@@ -3,7 +3,7 @@
 // The home screen with its composer, a conversation, and someone else's chat shared
 // with the viewer.
 
-import { ChevronRight, GitBranch, Link2, LockKeyhole, MessageSquare, MoreHorizontal, PanelLeftClose, PanelRight, Plus, RefreshCw, Server } from "lucide-react";
+import { ChevronRight, GitBranch, Link2, LockKeyhole, MessageSquare, MoreHorizontal, PanelRight, Plus, RefreshCw, Server } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -23,6 +23,7 @@ import { useConversations } from "@/lib/queries";
 import { ChatMenuItems } from "./chat-menu";
 import { NEW_CHAT_EVENT, OPEN_SEARCH_EVENT, useChat, useChatContent, useChatSelect, useChatStore } from "./chat-provider";
 import { Composer, TemporaryNote } from "./composer";
+import { FocusToggle } from "./focus-toggle";
 import { NamedIcon } from "./icon";
 import { MessageView, messageSignature } from "./message";
 import { SelectionBar } from "./selection-bar";
@@ -226,16 +227,6 @@ export function ChatHome() {
 }
 
 /** The top bar's Focus mode button: hides the main navigation, saved to the account. */
-export function FocusToggle() {
-  const store = useChatStore();
-  const focus = useChatSelect((s) => s.focus);
-  return (
-    <Button variant="ghost" size="sm" className="max-[760px]:hidden" aria-pressed={focus} onClick={() => store.run(() => store.savePreference({ focus: !store.focus }))}>
-      <PanelLeftClose /> <span className="max-[1000px]:hidden">Focus mode</span>
-    </Button>
-  );
-}
-
 function HeaderButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
   return (
     <Tooltip>

@@ -4,12 +4,21 @@
 // by day and by model, and today's allowance.
 
 import { ChevronDown } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useState } from "react";
-import { INPUT, Legend, OUTPUT, TimeBars } from "@/components/manage/bar-chart";
+import { INPUT, Legend, OUTPUT } from "@/components/manage/chart-legend";
 import { Eyebrow } from "@/components/app-shell/page";
 import { Meter, Note, Quota, Section, TableWrap, Tiles, td, th } from "@/components/manage/kit";
 import type { Model } from "@/lib/queries";
 import { compact, num } from "@/lib/format";
+
+/** The chart's height, held by its placeholder while recharts loads. */
+const CHART_HEIGHT = 170;
+// Recharts is loaded only when the chart shows, not with every settings page.
+const TimeBars = dynamic(() => import("@/components/manage/bar-chart").then((m) => m.TimeBars), {
+  ssr: false,
+  loading: () => <div style={{ height: CHART_HEIGHT }} aria-hidden />,
+}) as typeof import("@/components/manage/bar-chart").TimeBars;
 
 export interface UsageCounts {
   requests?: number;
@@ -103,7 +112,7 @@ export function UsageCard({ usage, models }: { usage: OwnUsage; models: Model[] 
               { key: "output", name: "Output", color: OUTPUT },
             ]}
             format={compact}
-            height={170}
+            height={CHART_HEIGHT}
             label={`Tokens per day over the last ${days} days: ${compact(total)} in all`}
             tip={(d) => `${d.label}: ${d.requests} request${d.requests === 1 ? "" : "s"} · ${compact(d.input)} in · ${compact(d.output)} out`}
           />

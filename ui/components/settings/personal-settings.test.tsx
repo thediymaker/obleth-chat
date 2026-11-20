@@ -45,6 +45,8 @@ test("thirty days are drawn, ending today, with zeros where nothing was used", (
 test("personal settings save defaults, appearance and favorites to the account", async () => {
   const calls = page();
   expect(await screen.findByText("Your usage")).toBeInTheDocument();
+  // The chart loads on its own, after the page.
+  expect(await screen.findByRole("img", { name: /^Tokens per day/ })).toBeInTheDocument();
   expect(screen.getAllByText("GLM").length).toBeGreaterThan(0);
   await waitFor(() => expect(screen.getByLabelText("Default model")).toHaveTextContent("GLM"));
   await userEvent.click(screen.getByRole("button", { name: "Save defaults" }));

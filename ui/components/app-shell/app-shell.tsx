@@ -10,7 +10,7 @@ import { ChatDialogs } from "@/components/chat/chat-dialogs";
 import { NEW_CHAT_EVENT, OPEN_SEARCH_EVENT } from "@/components/chat/chat-provider";
 import { SearchDialog } from "@/components/chat/search-dialog";
 import { StatusBar } from "@/components/chat/status-bar";
-import { FocusToggle } from "@/components/chat/chat-view";
+import { FocusToggle } from "@/components/chat/focus-toggle";
 import { SiteBanner } from "@/components/site-banner";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";

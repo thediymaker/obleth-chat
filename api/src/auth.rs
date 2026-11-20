@@ -272,7 +272,7 @@ const ACCOUNT_FAILURES: i32 = 50;
 const ACCOUNT_FIRST_TRIES: i32 = 50;
 /// How long, in one-minute windows, a client's unrefunded attempt on an account
 /// marks it as failing there. Throttle rows are kept this long too.
-const FAILING_WINDOWS: i64 = 10;
+pub(crate) const FAILING_WINDOWS: i64 = 10;
 
 #[derive(Clone)]
 pub struct Auth {
@@ -870,10 +870,6 @@ impl Auth {
     ) -> Result<(), ApiError> {
         let mut tx = self.pool.begin().await?;
         let window = throttle_window(&mut tx).await?;
-        sqlx::query("DELETE FROM login_throttles WHERE window_start < $1")
-            .bind(window - FAILING_WINDOWS)
-            .execute(&mut *tx)
-            .await?;
         let requests = throttle_count(&mut tx, &format!("{scope}:{}", client.0), window).await?;
         let mut allowed = requests <= self.config.login_rate_per_minute as i32;
         if let (true, Some(account)) = (allowed, account) {
@@ -942,9 +938,6 @@ impl Auth {
         headers: &HeaderMap,
         single_sign_on: bool,
     ) -> Result<Uuid, ApiError> {
-        sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= NOW()")
-            .execute(&mut **tx)
-            .await?;
         sqlx::query("DELETE FROM auth_sessions WHERE id IN (SELECT id FROM auth_sessions WHERE user_id=$1 ORDER BY created_at DESC,id DESC OFFSET 31)")
             .bind(user_id).execute(&mut **tx).await?;
         let user_agent = headers

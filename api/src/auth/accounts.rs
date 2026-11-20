@@ -585,7 +585,7 @@ async fn new_link(
 ) -> Result<Value, ApiError> {
     let token = random_token();
     let expires_at = Utc::now() + chrono::Duration::hours(hours);
-    sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1 OR expires_at<=NOW()")
+    sqlx::query("DELETE FROM account_access_tokens WHERE user_id=$1")
         .bind(user_id)
         .execute(&mut **tx)
         .await?;

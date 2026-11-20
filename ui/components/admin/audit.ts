@@ -59,6 +59,7 @@ export function auditSentence(e: AuditEvent): Part[] {
       ["expiredSessions", "expired sign-in"],
       ["expiredAccessTokens", "expired sign-in link"],
       ["batchRows", "old batch"], // a spreadsheet's rows or labels kept past the batch retention
+      ["oldApiTokens", "old API token"],
     ] as [string, string, string?][]
   )
     .filter(([key]) => Number(m[key]) > 0)

@@ -32,7 +32,13 @@ pub struct RunReport {
     /// Batch spreadsheets and labels kept past the batch retention.
     #[serde(default)]
     pub batch_rows: u64,
+    /// API tokens revoked or expired more than API_TOKEN_DAYS ago.
+    #[serde(default)]
+    pub old_api_tokens: u64,
 }
+
+/// Days a revoked or expired API token stays in its owner's list before it goes.
+pub const API_TOKEN_DAYS: i32 = 30;
 fn validate(body: &Value) -> Result<(), ApiError> {
     let object = body
         .as_object()
@@ -162,6 +168,17 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
     }
     report.expired_sessions=sqlx::query("DELETE FROM auth_sessions WHERE token_hash IN(SELECT token_hash FROM auth_sessions WHERE expires_at<NOW() ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED)").execute(&mut *tx).await?.rows_affected();
     report.expired_access_tokens=sqlx::query("DELETE FROM account_access_tokens WHERE token_hash IN(SELECT token_hash FROM account_access_tokens WHERE expires_at<NOW() ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED)").execute(&mut *tx).await?.rows_affected();
+    report.old_api_tokens=sqlx::query("DELETE FROM api_tokens WHERE id IN(SELECT id FROM api_tokens WHERE COALESCE(revoked_at,expires_at)<NOW()-make_interval(days=>$1) AND (revoked_at IS NOT NULL OR expires_at<NOW()) ORDER BY id LIMIT 500 FOR UPDATE SKIP LOCKED)")
+        .bind(API_TOKEN_DAYS).execute(&mut *tx).await?.rows_affected();
+    // Sign-in housekeeping the sign-in paths no longer do as they go; reads already
+    // ignore these rows once they expire.
+    sqlx::query("DELETE FROM oidc_transactions WHERE expires_at <= NOW()")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM login_throttles WHERE window_start < FLOOR(EXTRACT(EPOCH FROM NOW()) / 60)::BIGINT - $1")
+        .bind(crate::auth::FAILING_WINDOWS)
+        .execute(&mut *tx)
+        .await?;
     report.batch_rows = crate::batches::expire(&mut tx).await?;
     report.at = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *tx)
@@ -180,6 +197,7 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
         + report.expired_sessions
         + report.expired_access_tokens
         + report.batch_rows
+        + report.old_api_tokens
         > 0
     {
         audit::record(

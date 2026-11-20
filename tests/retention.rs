@@ -134,6 +134,35 @@ async fn defaults_keep_user_data_forever_but_expired_authentication_is_pruned(po
             .await
             .unwrap();
     }
+    sqlx::query("INSERT INTO oidc_transactions(state_hash,browser_hash,nonce,pkce_verifier,return_to,expires_at)VALUES($1,$2,'n','v','/',NOW()-INTERVAL '1 minute')")
+        .bind(b"state".to_vec())
+        .bind(b"browser".to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO login_throttles(key,window_start,attempts)VALUES('old',FLOOR(EXTRACT(EPOCH FROM NOW())/60)::BIGINT-60,3),('now',FLOOR(EXTRACT(EPOCH FROM NOW())/60)::BIGINT,1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // API tokens: revoked or expired over 30 days ago go; recent ones stay.
+    for (name, revoked, expires) in [
+        ("revoked-long-ago", Some(40), 10),
+        ("expired-long-ago", None, -40),
+        ("revoked-lately", Some(5), 10),
+        ("expired-lately", None, -5),
+        ("live", None, 10),
+    ] {
+        sqlx::query("INSERT INTO api_tokens(id,user_id,name,token_hash,prefix,scopes,expires_at,revoked_at)VALUES($1,$2,$3,$4,'p',ARRAY['chats:read'],NOW()+make_interval(days=>$5),NOW()-make_interval(days=>$6))")
+            .bind(Uuid::new_v4())
+            .bind(admin.id)
+            .bind(name)
+            .bind(name.as_bytes().to_vec())
+            .bind(expires)
+            .bind(revoked)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     let (status, policy) = call(&app, &admin, "GET", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -141,6 +170,19 @@ async fn defaults_keep_user_data_forever_but_expired_authentication_is_pruned(po
         json!({"conversationDays":null,"unusedFileDays":null,"auditDays":null,"enabled":false,"lastRun":null})
     );
     let report = retention::run_once(&pool).await.unwrap().unwrap();
+    assert_eq!(report.old_api_tokens, 2);
+    let tokens: Vec<String> = sqlx::query_scalar("SELECT name FROM api_tokens ORDER BY name")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tokens, ["expired-lately", "live", "revoked-lately"]);
+    let left: (i64, Vec<String>) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM oidc_transactions), ARRAY(SELECT key FROM login_throttles)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, (0, vec!["now".to_owned()]));
     assert_eq!(report.conversations, 0);
     assert_eq!(report.unused_files, 0);
     assert_eq!(report.audit_events, 0);

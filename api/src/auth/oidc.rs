@@ -577,9 +577,6 @@ async fn start_sign_in(
         )
         .set_pkce_challenge(challenge)
         .url();
-    sqlx::query("DELETE FROM oidc_transactions WHERE expires_at <= NOW()")
-        .execute(&auth.pool)
-        .await?;
     sqlx::query("INSERT INTO oidc_transactions (state_hash, browser_hash, nonce, pkce_verifier, return_to, expires_at) VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '5 minutes')")
         .bind(digest(state.secret())).bind(digest(&browser)).bind(nonce.secret()).bind(verifier.secret()).bind(return_path(input.next)).execute(&auth.pool).await?;
     let mut response = Redirect::to(url.as_str()).into_response();

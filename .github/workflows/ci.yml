@@ -66,3 +66,14 @@ jobs:
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+
+  prometheus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: sample scrape config, alert rules and their tests
+        run: |
+          promtool() { docker run --rm -v "$PWD/deploy:/w:ro" -w /w --entrypoint promtool prom/prometheus:v3.5.0 "$@"; }
+          promtool check config prometheus.yaml
+          promtool check rules prometheus-alerts.yaml prometheus-alerts-backup.yaml
+          promtool test rules prometheus-alerts.test.yaml

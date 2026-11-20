@@ -3,11 +3,12 @@
 //! signed with AWS Signature Version 4. Works with S3, Cloudflare R2 and other
 //! S3-compatible stores using path-style addresses (`<endpoint>/<bucket>/<key>`).
 
+use crate::config::var;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use std::{env, time::Duration};
+use std::time::Duration;
 use url::Url;
 
 const UNSIGNED: &str = "UNSIGNED-PAYLOAD";
@@ -32,7 +33,6 @@ impl ObjectStore {
     /// Reads OBLETH_CHAT_S3_ENDPOINT, _BUCKET, _ACCESS_KEY_ID, _SECRET_ACCESS_KEY and
     /// _REGION (default `auto`, which R2 expects). None when no endpoint is set.
     pub fn from_env() -> Result<Option<Self>> {
-        let var = |key: &str| env::var(key).ok().filter(|v| !v.trim().is_empty());
         let Some(endpoint) = var("OBLETH_CHAT_S3_ENDPOINT") else {
             return Ok(None);
         };

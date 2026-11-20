@@ -16,3 +16,22 @@ scrape_configs:
       - targets: ["obleth-chat:8085"]
         labels:
           service: obleth-chat
+
+  # On Kubernetes, scrape every Chat pod instead of the one static target above
+  # (use this job in its place, with the same name, so the alerts still match).
+  # Prometheus needs RBAC to list pods in Chat's namespace.
+  # - job_name: obleth-chat
+  #   metrics_path: /metrics
+  #   scrape_timeout: 5s
+  #   kubernetes_sd_configs:
+  #     - role: pod
+  #       namespaces:
+  #         names: [obleth-chat]
+  #   relabel_configs:
+  #     - source_labels: [__meta_kubernetes_pod_label_app, __meta_kubernetes_pod_container_port_name]
+  #       regex: obleth-chat;http
+  #       action: keep
+  #     - source_labels: [__meta_kubernetes_pod_name]
+  #       target_label: pod
+  #     - target_label: service
+  #       replacement: obleth-chat

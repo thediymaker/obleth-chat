@@ -70,6 +70,9 @@ spec:
       containers:
         - name: postgres
           image: docker.io/pgvector/pgvector:0.8.7-pg17-trixie@sha256:7a7e9f22015b67edb4bef5c59daeebcd7e74bfa570df6ce60ae01237c8648a84
+          # Room for every Chat replica's pool during a roll (see
+          # OBLETH_CHAT_DB_CONNECTIONS in k8s.yaml), and a cache above the stock 128 MB.
+          args: [-c, max_connections=200, -c, shared_buffers=256MB]
           env:
             - name: POSTGRES_USER
               value: postgres
@@ -94,9 +97,10 @@ spec:
             - name: postgres
               containerPort: 5432
           resources:
+            # Covers shared_buffers plus the connections' own memory.
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: "2"
               memory: 2Gi

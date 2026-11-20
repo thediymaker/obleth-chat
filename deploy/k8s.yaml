@@ -44,6 +44,9 @@ data:
   # client. Check /api/admin/health -> client; see the Reverse proxies docs.
   # OBLETH_CHAT_TRUSTED_PROXY: 10.0.0.10,10.0.0.11
   OBLETH_CHAT_MAX_STREAMS: "128"
+  # Database connections per replica. During a roll (replicas + maxSurge) x this
+  # must stay under Postgres's max_connections (200 in k8s-postgres.yaml), with
+  # room left for backups and administrator sessions.
   OBLETH_CHAT_DB_CONNECTIONS: "20"
   RUST_LOG: obleth_chat=info
 ---
@@ -156,7 +159,8 @@ spec:
       # Its token is how Chat starts workspace and browser pods.
       serviceAccountName: obleth-chat
       automountServiceAccountToken: true
-      terminationGracePeriodSeconds: 45
+      # The 10 s preStop pause, then up to 45 s for running replies to finish.
+      terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -176,6 +180,12 @@ spec:
                 name: obleth-chat-config
             - secretRef:
                 name: obleth-chat-env
+          # Keep serving while the Service drops this pod, so a roll refuses no
+          # connection; Chat stops listening only after this.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
           resources:
             requests:
               cpu: 250m

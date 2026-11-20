@@ -1,0 +1,45 @@
+# promtool test rules deploy/prometheus-alerts.test.yaml
+rule_files:
+  - prometheus-alerts.yaml
+evaluation_interval: 1m
+tests:
+  # One of two pods stops answering: only that pod alerts.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="obleth-chat",instance="10.0.0.1:8085"}'
+        values: '1x10'
+      - series: 'up{job="obleth-chat",instance="10.0.0.2:8085"}'
+        values: '1 1 0x8'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OblethChatDown
+        exp_alerts:
+          - exp_labels: { severity: warning, service: obleth-chat, job: obleth-chat, instance: "10.0.0.2:8085" }
+            exp_annotations:
+              summary: "Obleth Chat at 10.0.0.2:8085 is not answering scrapes"
+              description: Check the process or pod, its readiness, and its database connection.
+      - eval_time: 6m
+        alertname: OblethChatMissing
+        exp_alerts: []
+  # A single static target that answers raises nothing.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="obleth-chat",instance="obleth-chat:8085"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OblethChatDown
+        exp_alerts: []
+  # Nothing is scraped at all.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="other",instance="x:1"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OblethChatMissing
+        exp_alerts:
+          - exp_labels: { severity: warning, service: obleth-chat, job: obleth-chat }
+            exp_annotations:
+              summary: Prometheus finds no Obleth Chat to scrape
+              description: No target has the obleth-chat job. Check the scrape configuration and, on Kubernetes, that the pods are running with the app=obleth-chat label.

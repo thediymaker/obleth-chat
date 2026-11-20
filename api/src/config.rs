@@ -46,12 +46,7 @@ pub enum GatewayAuth {
 }
 impl GatewayAuth {
     pub fn from_env() -> Result<Self> {
-        match env::var("OBLETH_CHAT_GATEWAY_AUTH")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
+        match var("OBLETH_CHAT_GATEWAY_AUTH").as_deref().map(str::trim) {
             None | Some("sign") => Ok(Self::Sign),
             Some("forward") => Ok(Self::Forward),
             Some(_) => bail!("OBLETH_CHAT_GATEWAY_AUTH must be sign or forward"),
@@ -66,11 +61,8 @@ pub enum ConnectionsMode {
 }
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let origin =
-            env::var("OBLETH_CHAT_ORIGIN").unwrap_or_else(|_| "http://localhost:8085".into());
-        let gateway_url = env::var("OBLETH_CHAT_GATEWAY_URL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
+        let origin = var("OBLETH_CHAT_ORIGIN").unwrap_or_else(|| "http://localhost:8085".into());
+        let gateway_url = var("OBLETH_CHAT_GATEWAY_URL")
             .map(|s| Url::parse(&s))
             .transpose()
             .context("Invalid gateway URL")?;
@@ -86,9 +78,7 @@ impl Config {
                 bail!("OBLETH_CHAT_GATEWAY_URL must be an http(s) service origin without credentials, path, query or fragment");
             }
         }
-        let admin_gateway_url = env::var("OBLETH_CHAT_ADMIN_GATEWAY_URL")
-            .ok()
-            .filter(|v| !v.is_empty());
+        let admin_gateway_url = var("OBLETH_CHAT_ADMIN_GATEWAY_URL");
         if let Some(value) = &admin_gateway_url {
             let url = Url::parse(value).context("Invalid admin gateway URL")?;
             if !matches!(url.scheme(), "http" | "https")
@@ -99,10 +89,7 @@ impl Config {
                 bail!("Admin gateway URL must be an http(s) URL without credentials");
             }
         }
-        let signing_key_file = env::var("OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
+        let signing_key_file = var("OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE").map(PathBuf::from);
         let gateway_auth = GatewayAuth::from_env()?;
         // Forwarding people's own tokens needs no signing key; one that is set still
         // signs for local accounts.
@@ -113,7 +100,7 @@ impl Config {
             }
             _ => bail!("Configure both OBLETH_CHAT_GATEWAY_URL and OBLETH_CHAT_GATEWAY_SIGNING_KEY_FILE, or neither"),
         }
-        let gateway_issuer = env::var("OBLETH_CHAT_GATEWAY_ISSUER").unwrap_or(origin);
+        let gateway_issuer = var("OBLETH_CHAT_GATEWAY_ISSUER").unwrap_or(origin);
         let issuer_url = Url::parse(&gateway_issuer).context("Invalid gateway issuer URL")?;
         if !["https", "http"].contains(&issuer_url.scheme())
             || issuer_url.query().is_some()
@@ -124,20 +111,17 @@ impl Config {
             bail!("Gateway issuer must be a credential-free http(s) URL");
         }
         let gateway_audience =
-            env::var("OBLETH_CHAT_GATEWAY_AUDIENCE").unwrap_or_else(|_| "obleth".into());
-        if gateway_audience.trim().is_empty() {
-            bail!("Gateway audience must not be empty");
-        }
+            var("OBLETH_CHAT_GATEWAY_AUDIENCE").unwrap_or_else(|| "obleth".into());
         Ok(Self {
-            database_url: env::var("OBLETH_CHAT_DATABASE_URL")
+            database_url: var("OBLETH_CHAT_DATABASE_URL")
                 .context("Set OBLETH_CHAT_DATABASE_URL to a Postgres database owned by Chat")?,
-            listen: env::var("OBLETH_CHAT_LISTEN")
-                .unwrap_or_else(|_| "127.0.0.1:8085".into())
+            listen: var("OBLETH_CHAT_LISTEN")
+                .unwrap_or_else(|| "127.0.0.1:8085".into())
                 .parse()
                 .context("Invalid OBLETH_CHAT_LISTEN")?,
-            branding_dir: env::var("OBLETH_CHAT_BRANDING_DIR")
+            branding_dir: var("OBLETH_CHAT_BRANDING_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("branding")),
+                .unwrap_or_else(|| PathBuf::from("branding")),
             gateway_url,
             admin_gateway_url,
             signing_key_file,
@@ -146,41 +130,23 @@ impl Config {
             gateway_audience,
             max_streams: number("OBLETH_CHAT_MAX_STREAMS", 128, 1, 4096)? as usize,
             db_connections: number("OBLETH_CHAT_DB_CONNECTIONS", 20, 2, 200)?,
-            backup_status_dir: env::var("OBLETH_CHAT_BACKUP_STATUS_DIR")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from),
-            metrics_token: env::var("OBLETH_CHAT_METRICS_TOKEN")
-                .ok()
-                .map(|v| v.trim().to_owned())
-                .filter(|v| !v.is_empty()),
-            connections_allow_private: env::var("OBLETH_CHAT_CONNECTIONS_ALLOW_PRIVATE")
-                .is_ok_and(|v| v == "true"),
-            connections: match env::var("OBLETH_CHAT_CONNECTIONS")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .as_deref()
-                .map(str::trim)
-            {
+            backup_status_dir: var("OBLETH_CHAT_BACKUP_STATUS_DIR").map(PathBuf::from),
+            metrics_token: var("OBLETH_CHAT_METRICS_TOKEN").map(|v| v.trim().to_owned()),
+            connections_allow_private: var("OBLETH_CHAT_CONNECTIONS_ALLOW_PRIVATE")
+                .is_some_and(|v| v.trim() == "true"),
+            connections: match var("OBLETH_CHAT_CONNECTIONS").as_deref().map(str::trim) {
                 None | Some("all") => ConnectionsMode::All,
                 Some("mcp") => ConnectionsMode::Mcp,
                 Some("off") => ConnectionsMode::Off,
                 Some(_) => bail!("OBLETH_CHAT_CONNECTIONS must be all, mcp or off"),
             },
-            auto_mode: match env::var("OBLETH_CHAT_AUTO_MODE")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .as_deref()
-                .map(str::trim)
-            {
+            auto_mode: match var("OBLETH_CHAT_AUTO_MODE").as_deref().map(str::trim) {
                 None | Some("allowed") => true,
                 Some("off") => false,
                 Some(_) => bail!("OBLETH_CHAT_AUTO_MODE must be allowed or off"),
             },
             max_file_mb: number("OBLETH_CHAT_MAX_FILE_MB", 50, 1, 2000)?,
-            file_quota_mb: env::var("OBLETH_CHAT_FILE_QUOTA_MB")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
+            file_quota_mb: var("OBLETH_CHAT_FILE_QUOTA_MB")
                 .map(|_| number("OBLETH_CHAT_FILE_QUOTA_MB", 0, 1, 10_000_000))
                 .transpose()?,
             max_files: number("OBLETH_CHAT_MAX_FILES", 500, 1, 1_000_000)?,
@@ -188,10 +154,16 @@ impl Config {
         })
     }
 }
+/// A setting from the environment. Blank is the same as unset, so a deployment
+/// can pass every setting through (Compose's `${KEY:-}`) and leave most empty.
+/// The value is returned as set, untrimmed.
+pub fn var(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
 fn number(key: &str, default: u32, min: u32, max: u32) -> Result<u32> {
-    let n = env::var(key)
-        .ok()
-        .map(|s| s.parse::<u32>())
+    let n = var(key)
+        .map(|s| s.trim().parse::<u32>())
         .transpose()
         .with_context(|| format!("Invalid {key}"))?
         .unwrap_or(default);
@@ -199,4 +171,45 @@ fn number(key: &str, default: u32, min: u32, max: u32) -> Result<u32> {
         bail!("{key} must be between {min} and {max}");
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Each test owns its keys: the environment is shared by every test thread.
+    #[test]
+    fn a_blank_setting_is_unset() {
+        env::set_var("OBLETH_CHAT_TEST_VAR_EMPTY", "");
+        env::set_var("OBLETH_CHAT_TEST_VAR_SPACES", "  ");
+        env::set_var("OBLETH_CHAT_TEST_VAR_SET", " query: ");
+        assert_eq!(var("OBLETH_CHAT_TEST_VAR_EMPTY"), None);
+        assert_eq!(var("OBLETH_CHAT_TEST_VAR_SPACES"), None);
+        assert_eq!(var("OBLETH_CHAT_TEST_VAR_UNSET"), None);
+        // A value is kept as written: a prefix may end in a space.
+        assert_eq!(var("OBLETH_CHAT_TEST_VAR_SET").as_deref(), Some(" query: "));
+    }
+
+    #[test]
+    fn numbers_take_the_default_when_blank_and_refuse_bad_values() {
+        env::set_var("OBLETH_CHAT_TEST_NUMBER_EMPTY", "");
+        env::set_var("OBLETH_CHAT_TEST_NUMBER_SET", " 40 ");
+        env::set_var("OBLETH_CHAT_TEST_NUMBER_HIGH", "500");
+        env::set_var("OBLETH_CHAT_TEST_NUMBER_WORD", "lots");
+        assert_eq!(
+            number("OBLETH_CHAT_TEST_NUMBER_EMPTY", 20, 2, 200).unwrap(),
+            20
+        );
+        assert_eq!(
+            number("OBLETH_CHAT_TEST_NUMBER_UNSET", 20, 2, 200).unwrap(),
+            20
+        );
+        assert_eq!(
+            number("OBLETH_CHAT_TEST_NUMBER_SET", 20, 2, 200).unwrap(),
+            40
+        );
+        let high = number("OBLETH_CHAT_TEST_NUMBER_HIGH", 20, 2, 200).unwrap_err();
+        assert!(high.to_string().contains("between 2 and 200"), "{high}");
+        assert!(number("OBLETH_CHAT_TEST_NUMBER_WORD", 20, 2, 200).is_err());
+    }
 }

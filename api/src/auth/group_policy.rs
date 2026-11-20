@@ -13,9 +13,9 @@ pub(super) struct GroupPolicy {
 impl GroupPolicy {
     pub(super) fn from_env(oidc: bool) -> anyhow::Result<Self> {
         Self::parse(
-            optional_env("OBLETH_CHAT_DEFAULT_GROUP_IDS").as_deref(),
-            optional_env("OBLETH_CHAT_OIDC_GROUP_CLAIM").as_deref(),
-            optional_env("OBLETH_CHAT_OIDC_GROUP_MAP").as_deref(),
+            var("OBLETH_CHAT_DEFAULT_GROUP_IDS").as_deref(),
+            var("OBLETH_CHAT_OIDC_GROUP_CLAIM").as_deref(),
+            var("OBLETH_CHAT_OIDC_GROUP_MAP").as_deref(),
             oidc,
         )
     }

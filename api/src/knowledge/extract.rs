@@ -10,6 +10,7 @@
 //! Markdown `#` lines, Word heading styles, PDF bookmarks, slides and sheets. A passage
 //! never spans two sections, so a citation names one.
 
+use crate::config::var;
 use anyhow::{bail, Context, Result};
 use std::{
     collections::HashMap,
@@ -154,16 +155,11 @@ pub struct Tools {
 
 impl Tools {
     pub fn from_env() -> Self {
-        let var = |key: &str, default: &str| {
-            std::env::var(key)
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or_else(|| default.into())
-        };
+        let tool = |key: &str, default: &str| var(key).unwrap_or_else(|| default.into());
         Self {
-            pdftotext: var("OBLETH_CHAT_PDFTOTEXT", "pdftotext"),
-            pdftohtml: var("OBLETH_CHAT_PDFTOHTML", "pdftohtml"),
-            unzip: var("OBLETH_CHAT_UNZIP", "unzip"),
+            pdftotext: tool("OBLETH_CHAT_PDFTOTEXT", "pdftotext"),
+            pdftohtml: tool("OBLETH_CHAT_PDFTOHTML", "pdftohtml"),
+            unzip: tool("OBLETH_CHAT_UNZIP", "unzip"),
         }
     }
 }

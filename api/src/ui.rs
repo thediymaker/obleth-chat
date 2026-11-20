@@ -44,7 +44,7 @@ pub struct Ui {
 impl Ui {
     /// The interface server from OBLETH_CHAT_UI_URL, if one is set.
     pub fn from_env(previews: Option<String>) -> anyhow::Result<Option<Self>> {
-        let Ok(raw) = std::env::var("OBLETH_CHAT_UI_URL") else {
+        let Some(raw) = crate::config::var("OBLETH_CHAT_UI_URL") else {
             return Ok(None);
         };
         let raw = raw.trim();

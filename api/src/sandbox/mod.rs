@@ -7,6 +7,7 @@ pub mod preview;
 pub mod terminal;
 pub mod tools;
 
+use crate::config::var;
 use crate::{auth::Identity, error::ApiError, AppState};
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -64,7 +65,6 @@ impl SandboxConfig {
     /// service account token, or in OBLETH_CHAT_SANDBOX_NAMESPACE, unless
     /// OBLETH_CHAT_WORKSPACES=off. `Ok(Err(reason))` says why they are off.
     pub fn from_env() -> Result<Result<Self, String>> {
-        let var = |key: &str| env::var(key).ok().filter(|v| !v.trim().is_empty());
         match var("OBLETH_CHAT_WORKSPACES").as_deref().map(str::trim) {
             None | Some("auto") => {}
             Some("off") => return Ok(Err("Turned off with OBLETH_CHAT_WORKSPACES=off".into())),

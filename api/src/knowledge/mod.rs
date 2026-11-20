@@ -14,6 +14,7 @@ pub mod saved;
 pub mod storage;
 
 use crate::attachments::size_label;
+use crate::config::var;
 use crate::paging::{Page, PageQuery};
 use crate::{
     auth::{Identity, Role},
@@ -75,7 +76,6 @@ impl Knowledge {
         let Some(store) = store else {
             return Ok(None);
         };
-        let var = |key: &str| env::var(key).ok().filter(|v| !v.trim().is_empty());
         let mut knowledge = Self::new(
             pool,
             store,

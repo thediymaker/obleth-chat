@@ -7,6 +7,7 @@ pub mod cdp;
 pub mod live;
 pub mod tools;
 
+use crate::config::var;
 use crate::{
     auth::Identity,
     error::ApiError,
@@ -29,7 +30,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
-use std::{env, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -51,7 +52,6 @@ impl BrowserConfig {
     /// The browser comes with workspaces unless OBLETH_CHAT_BROWSER=off. Its image
     /// defaults to this release's.
     pub fn from_env() -> Result<Option<Self>> {
-        let var = |key: &str| env::var(key).ok().filter(|v| !v.trim().is_empty());
         match var("OBLETH_CHAT_BROWSER").as_deref().map(str::trim) {
             None | Some("on") => {}
             Some("off") => return Ok(None),
@@ -142,9 +142,7 @@ impl Browsers {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .build()?;
-        let fixed = env::var("OBLETH_CHAT_BROWSER_ADDRESS")
-            .ok()
-            .filter(|v| !v.is_empty());
+        let fixed = var("OBLETH_CHAT_BROWSER_ADDRESS");
         Ok(Self {
             inner: Arc::new(Inner {
                 config,

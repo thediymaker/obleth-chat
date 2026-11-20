@@ -1,6 +1,7 @@
 //! Minimal Kubernetes REST client for one namespace: create, read, list and delete
 //! objects, and exec over the v5 WebSocket channel protocol. The service account
 //! token is re-read on every call because projected tokens rotate.
+use crate::config::var;
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Method, StatusCode};
@@ -43,7 +44,6 @@ impl Kube {
     /// In-cluster configuration, overridable for local development with
     /// OBLETH_CHAT_KUBE_API, OBLETH_CHAT_KUBE_TOKEN_FILE and OBLETH_CHAT_KUBE_CA_FILE.
     pub fn from_env(namespace: String) -> Result<Self> {
-        let var = |key: &str| env::var(key).ok().filter(|v| !v.is_empty());
         let base = match var("OBLETH_CHAT_KUBE_API") {
             Some(url) => url,
             None => format!(

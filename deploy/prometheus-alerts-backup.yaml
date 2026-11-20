@@ -1,0 +1,15 @@
+# Optional: load this only where a backup job publishes Chat's backup status
+# files (OBLETH_CHAT_BACKUP_STATUS_DIR, see the Operations docs). Without them the
+# rule fires two hours after Chat starts.
+groups:
+  - name: obleth-chat-backup
+    rules:
+      - alert: OblethChatBackupStale
+        expr: time() - max(obleth_chat_backup_last_success_timestamp_seconds{job="obleth-chat"}) > 36 * 3600 or (absent_over_time(obleth_chat_backup_last_success_timestamp_seconds{job="obleth-chat"}[2h]) and on() sum(up{job="obleth-chat"}) > 0)
+        for: 10m
+        labels:
+          severity: warning
+          service: obleth-chat
+        annotations:
+          summary: Obleth Chat has no recent complete backup
+          description: The newest complete backup is over 36 hours old, or the running app has reported none for two hours. Check the backup job and the status files it writes.

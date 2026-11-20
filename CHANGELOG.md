@@ -4,6 +4,12 @@ Each release's section is also its GitHub Release notes.
 
 ## Unreleased
 
+**Changes**
+
+- **Compose passes every setting it supports, and blank means unset.** `deploy/compose.yaml` passed a fixed list of settings into Chat, so most of what `.env.example` documents (object storage, connections, Auto mode, file limits, the embedding model, group mapping) was silently ignored there. It now passes all of them, and Chat treats a blank value as unset everywhere, so an empty one in `.env` takes the default instead of stopping startup (an empty `OBLETH_CHAT_MAX_FILE_MB` did). `.env.example` documents those settings and marks the ones Compose cannot use: the branding and secret-key files it does not mount, workspaces and the browser, which need Kubernetes, and the embedding prefixes, which it cannot leave unset (choose them in Settings › Knowledge instead).
+- **The Chat pod drains before it stops, and the bundled Postgres fits the pools.** The Chat container now pauses 10 seconds after it is told to stop, as the interface already did, so the Service stops sending it requests before it closes its listener; the grace period is 60 seconds to match. The bundled Postgres, in Compose and `k8s-postgres.yaml`, starts with `max_connections=200` (was 100) and `shared_buffers=256MB` (was 128 MB), with a 512 MiB memory request, and the manifests say that every replica's pool during a roll must fit under it. The bundled Postgres restarts once.
+- **The sample alerts fit the sample scrape config.** `OblethChatReplicaUnavailable` wanted two healthy targets, so it always fired against the shipped single-target scrape config. It is replaced by `OblethChatDown`, one alert per scraped process (`up == 0`), and `OblethChatMissing`, when nothing is scraped at all; `prometheus.yaml` adds a Kubernetes pod-discovery job to use instead of the static target. `OblethChatBackupStale` moves to `prometheus-alerts-backup.yaml`, to load only where a backup job writes the status files. Silences and routes on the old alert names need updating. CI checks the samples and tests the rules with promtool.
+
 **Fixes**
 
 - **A search of several words reads only the searcher's own chats.** History search for two or more words looked each word up in every user's messages before narrowing to the searcher's, so a common word cost a scan of the whole instance's history. Each word is now looked up only in the searcher's own messages. On a test instance with 1,000 people and 200,000 messages sharing the same words, one person's search went from 538 ms to 13 ms; the results are the same.

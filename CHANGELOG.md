@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Fixes**
+
+- **The benchmark keeps every run it finished.** `bench/run.py` wrote results in the order it started the runs, so finished runs waited unwritten behind a slow one and were lost if the benchmark was stopped. Each result is now written as soon as it finishes, as the certification runner already did; the results file is in finishing order.
+
 ## v1.6.0
 
 **New**

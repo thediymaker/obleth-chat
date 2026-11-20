@@ -200,7 +200,11 @@ def main():
 
     def drain(client, queue):
         with concurrent.futures.ThreadPoolExecutor(args.concurrency) as pool:
-            for record in pool.map(lambda job: run(client, job[0], job[1], args), queue):
+            futures = [pool.submit(run, client, task, model, args) for task, model in queue]
+            # Each result is written as it finishes, so one slow run never holds
+            # back the others and a stopped benchmark keeps everything it finished.
+            for future in concurrent.futures.as_completed(futures):
+                record = future.result()
                 with write:
                     with open(args.out, "a") as out:
                         out.write(json.dumps(record) + "\n")

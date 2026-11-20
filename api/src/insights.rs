@@ -287,17 +287,16 @@ pub async fn tick(s: &AppState) -> Result<usize, sqlx::Error> {
     // A chat whose last message is newer than its labels, quiet for a while, not running
     // a reply and not temporary. A failed chat waits an hour more for each failure.
     let due: Vec<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT c.id, c.owner_id, last.at FROM conversations c
-         CROSS JOIN LATERAL (SELECT MAX(m.created_at) AS at FROM messages m WHERE m.conversation_id = c.id) last
+        "SELECT c.id, c.owner_id, c.last_message_at FROM conversations c
          LEFT JOIN conversation_labels l ON l.conversation_id = c.id
          WHERE NOT c.temporary AND c.active_generation IS NULL
            AND c.updated_at > NOW() - make_interval(days => $2)
-           AND last.at < NOW() - make_interval(secs => $1)
+           AND c.last_message_at < NOW() - make_interval(secs => $1)
            AND (l.conversation_id IS NULL OR (
-             (l.labeled_through IS NULL OR l.labeled_through < last.at)
+             (l.labeled_through IS NULL OR l.labeled_through < c.last_message_at)
              AND (l.claimed_until IS NULL OR l.claimed_until < NOW())
              AND (l.failed_at IS NULL OR l.failed_at < NOW() - make_interval(hours => LEAST(l.attempts, 24)))))
-         ORDER BY last.at LIMIT $3",
+         ORDER BY c.last_message_at LIMIT $3",
     )
     .bind(QUIET_SECS)
     .bind(LOOKBACK_DAYS)
@@ -1320,32 +1319,35 @@ pub async fn workstreams_tick(s: &AppState) -> Result<(), sqlx::Error> {
     let (true, Some(model)) = (settings.enabled, settings.model.clone()) else {
         return Ok(());
     };
-    let run_as: Option<Uuid> = sqlx::query_scalar("SELECT run_as FROM insights WHERE id")
-        .fetch_one(pool)
-        .await?;
-    let Some(user) = (match run_as {
-        Some(id) => identity(pool, id).await?,
-        None => None,
-    }) else {
-        return Ok(());
-    };
-    let due: StreamsDue = sqlx::query_as(
-        "SELECT i.streams_requested AS requested,
+    let tick: Tick = sqlx::query_as(
+        "SELECT i.run_as, i.streams_requested AS requested,
            (i.streams_status = 'building' AND i.streams_claimed_until > NOW()) AS building,
            i.streams_status = 'failed' AS failed, i.streams_tried_at AS tried_at, i.streams_found_at AS found_at,
            (SELECT COUNT(*) FROM workstreams WHERE retired_at IS NULL) AS current,
            (SELECT COUNT(DISTINCT topic) FROM conversation_labels
-              WHERE topic IS NOT NULL AND labeled_through >= NOW() - make_interval(days => $1)) AS topics,
+              WHERE labeled_at IS NOT NULL AND topic IS NOT NULL
+                AND labeled_through >= NOW() - make_interval(days => $1)) AS topics,
            (SELECT COUNT(*) FROM conversation_labels
-              WHERE placed_at IS NOT NULL AND topic IS NOT NULL AND labeled_through >= NOW() - INTERVAL '30 days') AS placed,
+              WHERE labeled_at IS NOT NULL AND placed_at IS NOT NULL AND topic IS NOT NULL
+                AND labeled_through >= NOW() - INTERVAL '30 days') AS placed,
            (SELECT COUNT(*) FROM conversation_labels
-              WHERE placed_at IS NOT NULL AND topic IS NOT NULL AND workstream_id IS NULL
-                AND labeled_through >= NOW() - INTERVAL '30 days') AS other
+              WHERE labeled_at IS NOT NULL AND placed_at IS NOT NULL AND topic IS NOT NULL AND workstream_id IS NULL
+                AND labeled_through >= NOW() - INTERVAL '30 days') AS other,
+           EXISTS(SELECT 1 FROM conversation_labels
+              WHERE placed_at IS NULL AND topic IS NOT NULL AND labeled_at IS NOT NULL
+                AND labeled_through >= NOW() - make_interval(days => $1)) AS waiting
          FROM insights i WHERE i.id",
     )
     .bind(STREAMS_DAYS)
     .fetch_one(pool)
     .await?;
+    let Some(user) = (match tick.run_as {
+        Some(id) => identity(pool, id).await?,
+        None => None,
+    }) else {
+        return Ok(());
+    };
+    let due = tick.due;
     if due.due(Utc::now()) {
         let finder = settings
             .report_model
@@ -1385,11 +1387,24 @@ pub async fn workstreams_tick(s: &AppState) -> Result<(), sqlx::Error> {
             return Ok(());
         }
     }
+    if !tick.waiting {
+        return Ok(());
+    }
     place(pool, &gateway, &user, &model).await
 }
 
+/// What one workstreams tick reads in one query.
+#[derive(FromRow)]
+struct Tick {
+    run_as: Option<Uuid>,
+    /// Topic lines wait for a workstream.
+    waiting: bool,
+    #[sqlx(flatten)]
+    due: StreamsDue,
+}
+
 /// Asks the workstreams model for the list, keeping the current names that still fit, then
-/// saves it and sends every recent chat to be placed again.
+/// saves it and, when the list changed, sends every recent chat to be placed again.
 async fn find_workstreams(
     pool: &PgPool,
     gateway: &Gateway,
@@ -1453,6 +1468,13 @@ async fn find_workstreams(
     let streams = read_workstreams(text).ok_or(
         "The model did not answer with a list of workstreams. Try again, or choose another workstreams model.",
     )?;
+    // The same names and descriptions place chats the same way: their places stay.
+    let unchanged = streams.len() == current.len()
+        && streams.iter().all(|(name, description)| {
+            current
+                .iter()
+                .any(|(n, d)| n.eq_ignore_ascii_case(name) && d == description)
+        });
     let mut tx = pool.begin().await.map_err(failed)?;
     let mut kept: Vec<Uuid> = Vec::new();
     for (name, description) in &streams {
@@ -1486,11 +1508,13 @@ async fn find_workstreams(
     .execute(&mut *tx)
     .await
     .map_err(failed)?;
-    sqlx::query("UPDATE conversation_labels SET placed_at = NULL WHERE labeled_through >= NOW() - make_interval(days => $1)")
-        .bind(STREAMS_DAYS)
-        .execute(&mut *tx)
-        .await
-        .map_err(failed)?;
+    if !unchanged {
+        sqlx::query("UPDATE conversation_labels SET placed_at = NULL WHERE labeled_through >= NOW() - make_interval(days => $1)")
+            .bind(STREAMS_DAYS)
+            .execute(&mut *tx)
+            .await
+            .map_err(failed)?;
+    }
     sqlx::query(
         "UPDATE insights SET streams_status = 'ready', streams_found_at = NOW(), streams_claimed_until = NULL WHERE id",
     )

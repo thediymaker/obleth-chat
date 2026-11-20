@@ -603,6 +603,16 @@ async fn administrators_see_counts_and_workstreams_never_chats(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
+    let placements = || async {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT placed_at FROM conversation_labels WHERE topic IS NOT NULL ORDER BY conversation_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let placed = placements().await;
+    assert!(placed.iter().all(Option::is_some));
     call(
         &app,
         &admin,
@@ -636,6 +646,8 @@ async fn administrators_see_counts_and_workstreams_never_chats(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(kept, id);
+    // The same list places the same way: no chat was sent to be placed again.
+    assert_eq!(placements().await, placed);
     let audit: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE action = 'insights.report'")
             .fetch_one(&pool)

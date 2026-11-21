@@ -824,6 +824,8 @@ pub struct Outcome {
     pub ok: bool,
     pub output: String,
     pub detail: String,
+    /// What the tool found as data, for the page to draw as a card (a cluster job).
+    pub card: Option<Value>,
 }
 
 /// One turn's connection tools. Sessions open on first use and close with the turn.
@@ -1117,6 +1119,7 @@ impl Toolset {
                     ok: false,
                     output: error,
                     detail: "Invalid arguments".into(),
+                    card: None,
                 }
             }
         };
@@ -1128,6 +1131,7 @@ impl Toolset {
             (&self.pool, self.user, self.conversation, self.generation);
         let server = &mut self.servers[offered.server];
         let connection = server.id;
+        let mut card = None;
         let result = match &mut server.backend {
             Backend::Device => match (generation, pool) {
                 (Some(generation), Some(pool)) => {
@@ -1175,7 +1179,10 @@ impl Toolset {
                 }
                 result.map(|value| mcp::result_text(&value))
             }
-            Backend::Slurm(client, returns, reach) => match (name.as_str(), *returns, outputs) {
+            Backend::Slurm(client, returns, reach) => {
+                // Left over from an earlier call of this turn.
+                client.take_card();
+                let result = match (name.as_str(), *returns, outputs) {
                 (name, _, _) if name.starts_with("files_") => {
                     match (reach, files, generation) {
                         (Some(options), Some(files), Some(generation)) => {
@@ -1200,7 +1207,15 @@ impl Toolset {
                         .into(),
                 ),
                 _ => client.call(&name, &arguments).await,
-            },
+              };
+                // The card says which cluster it came from, so the page can follow the job.
+                card = client.take_card().map(|mut card| {
+                    card["connectionId"] = json!(connection);
+                    card["cluster"] = json!(server.name);
+                    card
+                });
+                result
+            }
             Backend::Kubernetes(client) => client.call(&name, &arguments).await,
         };
         match result {
@@ -1208,11 +1223,13 @@ impl Toolset {
                 ok,
                 detail: output::head(&text, output::DETAIL_OUTPUT),
                 output: output::head(&text, output::MODEL_OUTPUT),
+                card: card.filter(|_| ok),
             },
             Err(error) => Outcome {
                 ok: false,
                 output: format!("The {} connection failed: {error}", server.name),
                 detail: error,
+                card: None,
             },
         }
     }

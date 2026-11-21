@@ -41,12 +41,17 @@ export interface ClusterJob {
   state: string;
   /** Where it runs or why it waits: "gpu · 12:04 of 2:00:00", "Priority". */
   note: string;
+  elapsed?: string;
+  nodes?: string;
+  reason?: string;
 }
 
 export interface ClusterQueue {
   running: number;
   pending: number;
   jobs: ClusterJob[];
+  /** The person's jobs that ended lately, for a card that follows one to its end. */
+  recent: { id: string; state: string; ended?: number | null; exit?: number | null; elapsed?: string }[];
 }
 
 const RUNNING = /^(RUNNING|COMPLETING|Running|Active)$/;
@@ -62,10 +67,11 @@ export function clusterQueue(c: Pick<Connection, "id" | "name">, status: Cluster
     const note = PENDING.test(state)
       ? [j.partition, j.reason && j.reason !== "None" ? j.reason : ""].filter(Boolean).join(" · ")
       : [j.partition, j.elapsed ? (j.timeLimit ? `${j.elapsed} of ${j.timeLimit}` : j.elapsed) : j.age].filter(Boolean).join(" · ");
-    return { cluster: c.name, clusterId: c.id, id: String(j.id ?? j.name ?? ""), name: String(j.name ?? j.id ?? ""), state, note };
+    return { cluster: c.name, clusterId: c.id, id: String(j.id ?? j.name ?? ""), name: String(j.name ?? j.id ?? ""), state, note, elapsed: j.elapsed, nodes: (j as { nodes?: string }).nodes, reason: j.reason && j.reason !== "None" ? j.reason : "" };
   });
   const live = jobs.filter((j) => RUNNING.test(j.state) || PENDING.test(j.state));
-  return { running: live.filter((j) => RUNNING.test(j.state)).length, pending: live.filter((j) => PENDING.test(j.state)).length, jobs: live };
+  const recent = (s?.recent ?? []).map((j) => ({ id: String(j.id), state: String(j.state ?? ""), ended: j.ended, exit: j.exit, elapsed: j.elapsed }));
+  return { running: live.filter((j) => RUNNING.test(j.state)).length, pending: live.filter((j) => PENDING.test(j.state)).length, jobs: live, recent };
 }
 
 /** The clusters the person can use right now. */

@@ -2976,6 +2976,9 @@ async fn run_generation(
                     }
                     entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
                     entry["detail"] = json!(outcome.detail);
+                    if let Some(card) = outcome.card {
+                        entry["card"] = card;
+                    }
                     entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
                     record(&mut activity, &entry, false);
                     emit(&mut tx, "tool", entry);

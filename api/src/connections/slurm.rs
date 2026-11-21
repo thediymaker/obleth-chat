@@ -128,6 +128,9 @@ pub struct Client {
     version: Option<String>,
     /// Set on the cluster, so Chat uses it rather than looking for one.
     pinned: bool,
+    /// What the last tool call found, as data for a card beside its text: one job
+    /// (`slurm-job`) or the person's jobs (`slurm-jobs`).
+    card: Option<Value>,
 }
 
 /// An API version as slurmrestd names it, such as v0.0.45.
@@ -374,7 +377,13 @@ impl Client {
             token,
             pinned: version.is_some(),
             version,
+            card: None,
         }
+    }
+
+    /// The card of the tool call just made, if it left one.
+    pub fn take_card(&mut self) -> Option<Value> {
+        self.card.take()
     }
 
     async fn send(
@@ -525,6 +534,7 @@ impl Client {
     }
 
     pub async fn call(&mut self, tool: &str, args: &Value) -> Result<(bool, String), String> {
+        self.card = None;
         match tool {
             "cluster" => self.cluster(args).await.map(|t| (true, t)),
             "jobs" => self.jobs(args).await.map(|t| (true, t)),
@@ -725,12 +735,14 @@ impl Client {
             Some(s) => vec![s.as_str()],
             None => ACTIVE.to_vec(),
         };
-        let lines: Vec<String> = self
-            .own_jobs(&states)
-            .await?
+        let own: Vec<Value> = self.own_jobs(&states).await?.iter().map(own_job).collect();
+        if !own.is_empty() {
+            self.card =
+                Some(json!({"kind":"slurm-jobs","jobs":own.iter().take(25).collect::<Vec<_>>()}));
+        }
+        let lines: Vec<String> = own
             .iter()
-            .map(|j| {
-                let job = own_job(j);
+            .map(|job| {
                 format!(
                     "- {} {} [{}] partition {}, ran {} of {}, nodes {}{}",
                     job["id"],
@@ -799,7 +811,10 @@ impl Client {
             Ok(data) => data,
             Err(error) => {
                 return match self.accounted(id).await {
-                    Some(j) => Ok(finished_job(id, &j)),
+                    Some(j) => {
+                        self.card = Some(json!({"kind":"slurm-job","job":own_job(&j)}));
+                        Ok(finished_job(id, &j))
+                    }
                     None => Err(error),
                 }
             }
@@ -810,6 +825,7 @@ impl Client {
         let exit = num(&j["exit_code"]["return_code"])
             .map(|c| c.to_string())
             .unwrap_or_else(|| "-".into());
+        self.card = Some(json!({"kind":"slurm-job","job":live_job(id, j)}));
         Ok([
             format!("Job {id}: {} [{}]", text(&j["name"]), text(&j["job_state"])),
             format!(
@@ -953,6 +969,15 @@ impl Client {
             _ => script,
         };
         let (id, warnings) = self.submit_job(script, job.clone()).await?;
+        self.card = Some(json!({"kind":"slurm-job","job":{
+            "id": id,
+            "name": job["name"],
+            "state": "PENDING",
+            "partition": job["partition"].as_str().unwrap_or(""),
+            "timeLimit": minutes(&job["time_limit"]),
+            "limitMinutes": num(&job["time_limit"]),
+            "submitted": chrono::Utc::now().timestamp(),
+        }}));
         let text = format!(
             "Submitted job {id} as {} in {}.{}",
             self.user,
@@ -1228,6 +1253,26 @@ const FINISHED_LISTED: usize = 20;
 const RECENT_DAYS: i64 = 7;
 
 /// One of the person's jobs from the accounting database.
+/// One job as the scheduler describes it (GET job/{id}), in the shape of `own_job`.
+fn live_job(id: i64, j: &Value) -> Value {
+    let positive = |v: &Value| num(v).filter(|t| *t > 0);
+    json!({
+        "id": id,
+        "name": text(&j["name"]),
+        "state": text(&j["job_state"]),
+        "partition": text(&j["partition"]),
+        "timeLimit": minutes(&j["time_limit"]),
+        "limitMinutes": num(&j["time_limit"]),
+        "nodes": text(&j["nodes"]).replace("None assigned", ""),
+        "reason": j["state_reason"].as_str().filter(|r| *r != "None").unwrap_or(""),
+        "cpus": num(&j["cpus"]),
+        "submitted": positive(&j["submit_time"]),
+        "started": positive(&j["start_time"]),
+        "ended": positive(&j["end_time"]),
+        "exit": num(&j["exit_code"]["return_code"]),
+    })
+}
+
 fn own_job(j: &Value) -> Value {
     let state = text(&j["state"]["current"]);
     json!({
@@ -1237,9 +1282,11 @@ fn own_job(j: &Value) -> Value {
         "partition": text(&j["partition"]),
         "elapsed": if state.contains("PENDING") { "-".into() } else { duration(num(&j["time"]["elapsed"]).unwrap_or(0)) },
         "timeLimit": minutes(&j["time"]["limit"]),
+        "limitMinutes": num(&j["time"]["limit"]),
         "nodes": text(&j["nodes"]).replace("None assigned", ""),
         "reason": j["state"]["reason"].as_str().filter(|r| *r != "None").unwrap_or(""),
         "submitted": num(&j["time"]["submission"]),
+        "started": num(&j["time"]["start"]).filter(|t| *t > 0),
         "ended": num(&j["time"]["end"]).filter(|t| *t > 0),
         "exit": num(&j["exit_code"]["return_code"]),
     })
@@ -1338,6 +1385,63 @@ mod tests {
             .filter_map(|j| num(&j["job_id"]))
             .collect();
         assert_eq!(ids, vec![2, 4]);
+    }
+
+    #[test]
+    fn a_job_reads_the_same_for_a_card_from_the_scheduler_and_from_accounting() {
+        let live = json!({"name":"sweep-64","job_state":["RUNNING"],"partition":"gpu","nodes":"g042","cpus":{"set":true,"number":8},
+            "time_limit":{"set":true,"number":120},"state_reason":"None","submit_time":{"set":true,"number":1795000000},
+            "start_time":{"set":true,"number":1795000300},"end_time":{"set":true,"number":0},"exit_code":{"return_code":{"set":false}}});
+        assert_eq!(
+            live_job(4821968, &live),
+            json!({"id":4821968,"name":"sweep-64","state":"RUNNING","partition":"gpu","timeLimit":"2h00m","limitMinutes":120,
+                "nodes":"g042","reason":"","cpus":8,"submitted":1795000000,"started":1795000300,"ended":null,"exit":null})
+        );
+        let waiting = json!({"name":"sweep-256","job_state":"PENDING","partition":"gpu","nodes":"None assigned","state_reason":"Priority",
+            "time_limit":{"infinite":true},"submit_time":1795000000,"start_time":0});
+        let card = live_job(7, &waiting);
+        assert_eq!(
+            (
+                &card["state"],
+                &card["nodes"],
+                &card["reason"],
+                &card["timeLimit"],
+                &card["limitMinutes"],
+                &card["started"]
+            ),
+            (
+                &json!("PENDING"),
+                &json!(""),
+                &json!("Priority"),
+                &json!("unlimited"),
+                &Value::Null,
+                &Value::Null
+            )
+        );
+        let accounted = json!({"job_id":4821001,"name":"sweep-32","state":{"current":["COMPLETED"],"reason":"None"},"partition":"gpu","nodes":"g017",
+            "time":{"elapsed":754,"limit":{"set":true,"number":60},"submission":1794990000,"start":1794990100,"end":1794990854},
+            "exit_code":{"return_code":{"set":true,"number":0}}});
+        let card = own_job(&accounted);
+        assert_eq!(
+            (
+                &card["id"],
+                &card["state"],
+                &card["elapsed"],
+                &card["limitMinutes"],
+                &card["started"],
+                &card["ended"],
+                &card["exit"]
+            ),
+            (
+                &json!(4821001),
+                &json!("COMPLETED"),
+                &json!("12m34s"),
+                &json!(60),
+                &json!(1794990100),
+                &json!(1794990854),
+                &json!(0)
+            )
+        );
     }
 
     #[test]

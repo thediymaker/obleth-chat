@@ -19,6 +19,7 @@ import { useChatStore } from "./chat-provider";
 import { NamedIcon } from "./icon";
 import { Markdown } from "./markdown-view";
 import { duration, count, compact } from "@/lib/format";
+import { JobCards } from "./job-card";
 
 const MARK_TONE: Record<string, string> = {
   bad: "text-destructive-foreground",
@@ -1005,10 +1006,15 @@ function Checkpoints({ s }: { s: Stats }) {
   );
 }
 
-/** Above the answer: the live card, or the result card. */
+/** Above the answer: the live card, or the result card, and the cluster jobs the reply touched. */
 export function TurnBefore({ m }: { m: Message }) {
   const work = workOf(m);
-  return <div className="mb-3 grid gap-2">{isLive(m) ? <RunCard m={m} work={work} /> : <ResultCard m={m} s={statsOf(work)} />}</div>;
+  return (
+    <div className="mb-3 grid gap-2">
+      {isLive(m) ? <RunCard m={m} work={work} /> : <ResultCard m={m} s={statsOf(work)} />}
+      <JobCards m={m} />
+    </div>
+  );
 }
 
 /** Below the answer: checkpoints and the "Show work" trace. */

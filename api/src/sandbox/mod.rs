@@ -211,6 +211,9 @@ const POD_CHECK_GRACE: Duration = Duration::from_secs(60);
 /// Marks a pod record stopped when it still holds the address that went stale; a pod
 /// started since keeps its record. Its projects' dev servers went with the pod.
 const STOP_STALE: &str = "WITH p AS (UPDATE sandbox_pods SET status='stopped',pod_ip=NULL WHERE id=$1 AND status='running' AND pod_ip=$2 RETURNING id) UPDATE sandboxes SET preview_port=NULL WHERE pod_id IN (SELECT id FROM p)";
+/// Marks a pod stopped and its preview closed in one statement, so no reader sees one
+/// without the other.
+const STOPPED: &str = "WITH p AS (UPDATE sandbox_pods SET status='stopped',pod_ip=NULL WHERE id=$1 RETURNING id) UPDATE sandboxes SET preview_port=NULL WHERE pod_id IN (SELECT id FROM p)";
 
 #[derive(Clone)]
 pub struct Sandboxes {
@@ -298,11 +301,7 @@ impl Sandboxes {
             return Ok(false);
         };
         self.inner.kube.delete("pods", &pod_name(&slug)).await?;
-        sqlx::query("UPDATE sandbox_pods SET status='stopped',pod_ip=NULL WHERE id=$1")
-            .bind(id)
-            .execute(&self.inner.pool)
-            .await?;
-        sqlx::query("UPDATE sandboxes SET preview_port=NULL WHERE pod_id=$1")
+        sqlx::query(STOPPED)
             .bind(id)
             .execute(&self.inner.pool)
             .await?;
@@ -877,14 +876,7 @@ impl Sandboxes {
             .bind(idle).fetch_all(&mut *tx).await?;
         for (id, slug) in idle_pods {
             kube.delete("pods", &pod_name(&slug)).await?;
-            sqlx::query("UPDATE sandbox_pods SET status='stopped',pod_ip=NULL WHERE id=$1")
-                .bind(id)
-                .execute(pool)
-                .await?;
-            sqlx::query("UPDATE sandboxes SET preview_port=NULL WHERE pod_id=$1")
-                .bind(id)
-                .execute(pool)
-                .await?;
+            sqlx::query(STOPPED).bind(id).execute(pool).await?;
         }
         let idle_servers = sqlx::query_as::<_, Sandbox>(&format!("{SELECT} WHERE p.status='running' AND s.preview_port IS NOT NULL AND s.last_used_at<NOW()-make_interval(secs=>$1)"))
             .bind(SERVER_IDLE.as_secs() as f64).fetch_all(&mut *tx).await?;

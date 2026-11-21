@@ -594,9 +594,12 @@ async fn replies_get_pinned_memories_and_the_ones_that_fit(pool: PgPool) {
         json!({"useMemory": false, "learn": true}),
     )
     .await;
-    assert!(memory::recall(&state, &gateway, &user, id, &question)
+    // Chat still learns from the chat, so the reply is told how remembering works,
+    // with nothing recalled.
+    let recall = memory::recall(&state, &gateway, &user, id, &question)
         .await
-        .is_none());
+        .unwrap();
+    assert!(!recall.recalled());
 }
 
 /// How many texts the embeddings fixture was asked for that contain `marker`.
@@ -625,7 +628,7 @@ async fn a_turn_embeds_its_question_once_for_knowledge_and_memory(pool: PgPool) 
         knowledge.prepare(&gateway, &user, empty, &[], &question, true, false, None),
         memory::recall(&state, &gateway, &user, empty, &question)
     );
-    assert!(turn.is_none() && recalled.is_none());
+    assert!(turn.is_none() && !recalled.is_some_and(|r| r.recalled()));
     assert_eq!(embedded(&marker), 0);
     // With both, the question is embedded once and both use it.
     let person = session(&pool, "user").await;

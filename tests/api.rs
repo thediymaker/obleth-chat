@@ -131,8 +131,21 @@ async fn fake_chat(
         if mode=="background" {tokio::time::sleep(Duration::from_secs(2)).await;}
         if mode!="broken" && mode!="always-broken" {yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}).to_string()));yield Ok(Event::default().data("[DONE]"));}
     };
+    // The router says why it chose, as the gateway does for an auto request.
+    let why = if served.is_some() {
+        "topics=coding; difficulty=2; from=heuristic; needs=tools; candidates=3"
+    } else {
+        ""
+    };
     (
-        [("x-obleth-request-id", "fixture-request")],
+        [
+            ("x-obleth-request-id", "fixture-request"),
+            (
+                "x-obleth-auto-reason",
+                if served.is_some() { "fresh" } else { "" },
+            ),
+            ("x-obleth-auto-why", why),
+        ],
         Sse::new(stream),
     )
         .into_response()
@@ -687,7 +700,9 @@ async fn auto_goes_to_the_gateway_router_and_records_the_model_it_chose(pool: Pg
         )
         .unwrap();
         assert!(
-            body.contains("event: model") && body.contains("routed-model"),
+            body.contains("event: model")
+                && body.contains("routed-model")
+                && body.contains(r#""why":{"candidates":3"#),
             "{body}"
         );
         let seen = fake.seen.lock().unwrap().last().unwrap().clone();
@@ -707,6 +722,11 @@ async fn auto_goes_to_the_gateway_router_and_records_the_model_it_chose(pool: Pg
     let settings = reply.settings.clone().unwrap();
     assert_eq!(settings["model"], "routed-model");
     assert_eq!(settings["auto"], true);
+    // Why it chose that model is kept with the reply, as the gateway said it.
+    assert_eq!(
+        settings["autoWhy"],
+        json!({"reason":"fresh","topics":["coding"],"difficulty":2,"from":"heuristic","needs":["tools"],"candidates":3})
+    );
     task.abort();
 }
 

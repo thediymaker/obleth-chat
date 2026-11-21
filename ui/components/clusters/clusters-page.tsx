@@ -22,10 +22,9 @@ import { when } from "@/lib/format";
 import { useCapabilities } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { type ClusterStatus, type FileSession, type KubernetesStatus, type SlurmStatus, blocked, gib, number, quotaMeters, quotaName, tone } from "./model";
+import { type Cluster, clusterStatusKey, clusterStatusQuery, isCluster } from "./status";
 
-type Cluster = Connection & { needsCredential?: boolean };
-const isCluster = (c: Connection) => c.kind === "slurm" || c.kind === "kubernetes";
-export const clusterStatusKey = (id: string) => ["cluster-status", id] as const;
+export { clusterStatusKey };
 
 function State({ text }: { text?: string | null }) {
   const t = tone(text);
@@ -348,20 +347,7 @@ export function ClustersPage() {
     },
   });
   const statuses = useQueries({
-    queries: clusters.map((c) => ({
-      queryKey: clusterStatusKey(c.id),
-      queryFn: async (): Promise<ClusterStatus> => {
-        try {
-          return await api.request<ClusterStatus>(`/api/connections/${encodeURIComponent(c.id)}/status`);
-        } catch (e) {
-          if ((e as Error).name === "AbortError") throw e;
-          return { state: "error", error: (e as Error).message };
-        }
-      },
-      enabled: !c.needsCredential,
-      refetchInterval: 30_000,
-      staleTime: 10_000,
-    })),
+    queries: clusters.map((c) => ({ ...clusterStatusQuery(c), staleTime: 10_000 })),
   });
   const add = (
     <Button onClick={() => manager.pick(["slurm", "kubernetes"])}>

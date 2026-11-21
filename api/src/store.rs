@@ -26,7 +26,7 @@ mod tests;
 mod variants;
 mod workflows;
 pub use imports::ImportSummary;
-pub use variants::VariantContext;
+pub use variants::{ReplyVersion, VariantContext};
 pub use workflows::{
     ChatArchive, ConversationPatch, ForkResult, HistoryPage, HistoryQuery, ARCHIVE_BYTES,
 };
@@ -179,7 +179,24 @@ pub struct ConversationSummary {
     pub archived: bool,
     pub pinned: bool,
     pub parent_id: Option<Uuid>,
+    /// A reply is being written, here or in another window.
+    pub working: bool,
+    /// That reply has stopped to ask for a yes or no.
+    pub waiting: bool,
+    /// The tool it asks to run, when it waits.
+    pub waiting_tool: Option<String>,
 }
+
+/// The columns of a `ConversationSummary`, read `FROM conversations`.
+pub(crate) const SUMMARY: &str =
+    "id,title,model,reasoning_effort,updated_at,settings,archived,pinned,parent_id,
+     (active_generation IS NOT NULL AND generation_expires > clock_timestamp()) AS working,
+     (active_generation IS NOT NULL AND generation_expires > clock_timestamp() AND EXISTS(
+        SELECT 1 FROM tool_approvals a WHERE a.generation_id=conversations.active_generation
+          AND a.decision IS NULL)) AS waiting,
+     (SELECT a.tool_name FROM tool_approvals a WHERE a.generation_id=conversations.active_generation
+        AND a.decision IS NULL AND conversations.generation_expires > clock_timestamp()
+        ORDER BY a.created_at,a.call_id LIMIT 1) AS waiting_tool";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -879,15 +896,22 @@ impl Store {
         })
     }
 
-    /// Records the model the gateway's Auto router chose for a reply.
-    pub async fn set_served_model(&self, message: Uuid, model: &str) -> Result<(), ApiError> {
+    /// Records the model the gateway's Auto router chose for a reply, and why when
+    /// the gateway said.
+    pub async fn set_served_model(
+        &self,
+        message: Uuid,
+        model: &str,
+        why: Option<&Value>,
+    ) -> Result<(), ApiError> {
         validate_model(model)?;
         sqlx::query(
-            "WITH served AS (UPDATE messages SET settings = settings || jsonb_build_object('model', $2::text, 'auto', true) WHERE id = $1 RETURNING generation_id)
+            "WITH served AS (UPDATE messages SET settings = settings || jsonb_strip_nulls(jsonb_build_object('model', $2::text, 'auto', true, 'autoWhy', $3::jsonb)) WHERE id = $1 RETURNING generation_id)
              UPDATE generation_usage SET model = $2 WHERE generation_id IN (SELECT generation_id FROM served)",
         )
         .bind(message)
         .bind(model)
+        .bind(why)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1142,9 +1166,9 @@ async fn read_conversation(
     owner: Uuid,
     id: Uuid,
 ) -> Result<Conversation, ApiError> {
-    let row = sqlx::query_as::<_, ConversationSummary>(
-        "SELECT id, title, model, reasoning_effort, updated_at, settings, archived, pinned, parent_id FROM conversations WHERE id = $1 AND owner_id = $2",
-    )
+    let row = sqlx::query_as::<_, ConversationSummary>(&format!(
+        "SELECT {SUMMARY} FROM conversations WHERE id = $1 AND owner_id = $2"
+    ))
     .bind(id)
     .bind(owner)
     .fetch_optional(&mut **tx)

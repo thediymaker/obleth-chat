@@ -528,6 +528,113 @@ async fn previews_reach_only_the_pod_still_at_the_recorded_address(pool: PgPool)
     assert_eq!(pod_record(&pool).await, ("stopped".into(), None, None));
 }
 
+/// A page opened in Chat's frame gets the picker's script tag after it, so the
+/// person can point at an element; anything the app's own code fetches, and every
+/// answer that is not a whole HTML page, arrives exactly as the app sent it.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_page_in_the_frame_gets_the_picker_and_nothing_else_changes(pool: PgPool) {
+    const PAGE: &str = "<!doctype html><title>App</title><h1>Hello</h1>";
+    let kube = Arc::new(FakeKube::default());
+    kube.set_pod(Some("127.0.0.1"));
+    let (app, _) = app_with(pool.clone(), Some(DOMAIN), Some(kube.clone())).await;
+    let admin = login(&app).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let routes = Router::new()
+        .route(
+            "/",
+            get(|headers: axum::http::HeaderMap| async move {
+                // A page for the frame is asked for uncompressed, so the tag can
+                // follow it; the app's own fetch asks as the browser did.
+                let framed = headers.get("sec-fetch-dest").is_some_and(|d| d == "iframe");
+                assert_eq!(headers.get("accept-encoding").is_none(), framed);
+                ([("content-type", "text/html; charset=utf-8")], PAGE)
+            }),
+        )
+        .route(
+            "/data.json",
+            get(|| async { ([("content-type", "application/json")], "{\"a\":1}") }),
+        )
+        .route(
+            "/missing",
+            get(|| async {
+                (
+                    StatusCode::NOT_FOUND,
+                    [("content-type", "text/html")],
+                    "<p>none</p>",
+                )
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, routes).await.unwrap() });
+    let conversation = workspace(&pool, port, "running").await;
+    let cookie = enter_preview(&app, &admin, conversation).await;
+    let ask = |path: &'static str, dest: Option<&'static str>| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            let mut request = preview_request(path, Some(&cookie));
+            request
+                .headers_mut()
+                .insert("accept-encoding", "gzip, br".parse().unwrap());
+            if let Some(dest) = dest {
+                request
+                    .headers_mut()
+                    .insert("sec-fetch-dest", dest.parse().unwrap());
+            }
+            app.oneshot(request).await.unwrap()
+        }
+    };
+
+    let framed = ask("/", Some("iframe")).await;
+    assert_eq!(framed.status(), StatusCode::OK);
+    // Longer than the app said, so its length is not passed on.
+    assert!(framed.headers().get("content-length").is_none());
+    let body = text(framed).await;
+    assert!(body.starts_with(PAGE), "{body}");
+    assert!(
+        body.ends_with("<script src=\"/__obleth/pick.js\" defer data-obleth></script>"),
+        "{body}"
+    );
+
+    // The app's own fetch of the same address, data, and an error page: untouched.
+    for (path, dest, status, expect) in [
+        ("/", Some("empty"), StatusCode::OK, PAGE),
+        ("/", None, StatusCode::OK, PAGE),
+        ("/data.json", Some("iframe"), StatusCode::OK, "{\"a\":1}"),
+        (
+            "/missing",
+            Some("iframe"),
+            StatusCode::NOT_FOUND,
+            "<p>none</p>",
+        ),
+    ] {
+        let response = ask(path, dest).await;
+        assert_eq!(response.status(), status, "{path} {dest:?}");
+        assert_eq!(text(response).await, expect, "{path} {dest:?}");
+    }
+
+    // The script talks to this Chat's page only, and is Chat's to serve: the app
+    // is never asked for it, and it needs the preview's own sign-in.
+    let script = ask("/__obleth/pick.js", Some("script")).await;
+    assert_eq!(script.status(), StatusCode::OK);
+    assert_eq!(
+        script.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    let script = text(script).await;
+    assert!(
+        script.contains(&format!("const CHAT = \"{ORIGIN}\";")),
+        "{script}"
+    );
+    assert!(!script.contains("__CHAT_ORIGIN__"));
+    let response = app
+        .clone()
+        .oneshot(preview_request("/__obleth/pick.js", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn preview_access_ends_with_the_sign_in(pool: PgPool) {
     let kube = Arc::new(FakeKube::default());
@@ -1374,6 +1481,78 @@ async fn a_research_reply_is_checked_against_its_runs(pool: PgPool) {
     .unwrap();
     assert_eq!(entry["flagged"], false);
     assert_eq!(seen.lock().unwrap().len(), before);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn people_see_what_their_own_workspace_uses_and_when_it_sleeps(pool: PgPool) {
+    let kube = Arc::new(FakeKube::default());
+    let (app, _) = app_with(pool.clone(), Some(DOMAIN), Some(kube.clone())).await;
+    let session = login(&app).await;
+    let usage = || {
+        let app = app.clone();
+        let session = session.clone();
+        async move {
+            let response = app
+                .oneshot(req(
+                    "/api/workspaces/usage",
+                    "localhost:8085",
+                    &session,
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_str::<Value>(&text(response).await).unwrap()
+        }
+    };
+    // Before a workspace was ever started: what one may use, and nothing else.
+    let none = usage().await;
+    assert_eq!(none["status"], "none", "{none}");
+    assert!(none["limits"]["cpuMillis"].as_i64().unwrap() > 0, "{none}");
+    assert!(none["limits"]["memoryBytes"].as_i64().unwrap() > 0);
+    assert!(none.get("cpuMillis").is_none());
+
+    kube.set_pod(Some("127.0.0.1"));
+    workspace(&pool, 3000, "running").await;
+    sqlx::query("UPDATE sandbox_pods SET disk_bytes = 1500000")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let running = usage().await;
+    assert_eq!(running["status"], "running", "{running}");
+    assert_eq!(running["cpuMillis"], 250);
+    assert_eq!(running["memoryBytes"], 64 * 1024 * 1024);
+    assert_eq!(running["diskBytes"], 1500000);
+    let idle = running["idleMinutes"].as_i64().unwrap();
+    let last: chrono::DateTime<chrono::Utc> =
+        running["lastUsedAt"].as_str().unwrap().parse().unwrap();
+    let stops: chrono::DateTime<chrono::Utc> =
+        running["stopsAt"].as_str().unwrap().parse().unwrap();
+    assert_eq!((stops - last).num_minutes(), idle);
+
+    // Asleep: the files' size stays, the live numbers and the stop time go.
+    sqlx::query("UPDATE sandbox_pods SET status = 'stopped'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let asleep = usage().await;
+    assert_eq!(asleep["status"], "stopped");
+    assert_eq!(asleep["cpuMillis"], Value::Null);
+    assert_eq!(asleep["stopsAt"], Value::Null);
+    assert_eq!(asleep["diskBytes"], 1500000);
+
+    // Signed out, nothing is said.
+    let response = app
+        .clone()
+        .oneshot(req(
+            "/api/workspaces/usage",
+            "localhost:8085",
+            &(String::new(), String::new()),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[sqlx::test(migrations = "./migrations")]

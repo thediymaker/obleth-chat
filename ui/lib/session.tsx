@@ -7,6 +7,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
+import { siteAppearance } from "@/lib/site-appearance";
 
 export interface User {
   id: string;
@@ -31,6 +32,10 @@ interface SessionResponse {
   passwordSignIn?: boolean;
   passwordChangeRequired?: boolean;
   banner?: Banner | null;
+  /** The look an administrator set for the site; absent from a server that has none to give. */
+  appearance?: unknown;
+  /** The words, links, icons and images an administrator set, with the same rule. */
+  branding?: unknown;
 }
 
 export interface SessionState {
@@ -97,6 +102,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       const result = await api.request<SessionResponse>("/api/session");
       if (mine !== epoch.current) return;
       const base = { oidc: result.oidcEnabled ?? false, passwords: result.passwordSignIn ?? true, banner: result.banner ?? null };
+      if (result.appearance !== undefined) siteAppearance.set({ ...(result.appearance as object), branding: result.branding });
       if (!result.authenticated || !result.user) {
         setState((s) => ({ ...s, ...base, phase: "login", user: null }));
         return;

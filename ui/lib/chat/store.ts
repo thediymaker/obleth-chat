@@ -1272,7 +1272,7 @@ export class ChatStore {
         break;
       // Auto: the gateway says which model it chose once the reply starts.
       case "model":
-        assistant.settings = { ...assistant.settings, resolvedModel: data.model, auto: true };
+        assistant.settings = { ...assistant.settings, resolvedModel: data.model, auto: true, ...(data.why ? { autoWhy: data.why } : {}) };
         break;
       case "delta":
         assistant.content += data.content || "";
@@ -1369,6 +1369,11 @@ export class ChatStore {
     this.applyPreferences(this.preferences);
     this.dialog = null;
     this.emit();
+  }
+  /** A new chat, from wherever the person is. */
+  startNew() {
+    this.newChat();
+    if (this.route.page !== "chat" || this.route.id) this.options.go("/");
   }
   /** A starter on the home screen: its prompt in the box, and a workspace for building. */
   starter(prompt: string, workspace: boolean) {

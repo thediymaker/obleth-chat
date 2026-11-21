@@ -3,7 +3,7 @@
 // One message of a conversation, with its attachments.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Bookmark, ChevronDown, ChevronLeft, ChevronRight, Clock, Copy, ExternalLink, GitBranch, Info, Orbit, Pencil, Plus, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Bookmark, ChevronDown, ChevronLeft, ChevronRight, Clock, Columns2, Copy, ExternalLink, GitBranch, Info, Orbit, Pencil, Plus, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { BrandLogo } from "@/components/brand";
 import { BrowserCard } from "@/components/browser/browser-card";
@@ -14,6 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { copyText } from "@/lib/clipboard";
 import { useBranding } from "@/lib/branding-context";
 import { attachmentUrl, describe } from "@/lib/chat/attachments";
+import { autoWhyShort, autoWhyText } from "@/lib/chat/auto-why";
 import { clock, effortLabel, NUDGE } from "@/lib/chat/composer";
 import { isPendingMessage, responseVersion } from "@/lib/chat/conversation-state";
 import { ratable } from "@/lib/chat/feedback";
@@ -24,6 +25,7 @@ import { num, when, count, duration } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "./chat-provider";
+import { CompareDialog } from "./compare-dialog";
 import { NamedIcon } from "./icon";
 import { citeHtml, KnowledgeSources } from "@/components/knowledge/chat-knowledge";
 import { SavedNotes } from "@/components/library/saved-notes";
@@ -149,6 +151,7 @@ export function detailCells(m: ChatMessage): [string, string, boolean?][] {
   };
   const cells: [string, unknown, boolean?][] = [
     ["Model", p.resolvedModel || p.model],
+    ["Why Auto chose it", p.auto ? autoWhyText(p.autoWhy) : null, true],
     ["Effort", p.reasoningEffort && effortLabel(p.reasoningEffort)],
     ["Temperature", p.temperature],
     ["Top P", p.topP],
@@ -174,7 +177,7 @@ function MessageDetails({ m, id }: { m: ChatMessage; id: string }) {
         {cells.map(([k, v, wide]) => (
           <div key={k} className={cn("min-w-0", wide && "col-span-2")}>
             <span className="block text-xs text-muted-foreground">{k}</span>
-            <strong className="block truncate text-md font-medium" title={v}>
+            <strong className={cn("block text-md font-medium", k === "Why Auto chose it" ? "leading-snug" : "truncate")} title={v}>
               {v}
             </strong>
           </div>
@@ -193,6 +196,8 @@ function MessageDetails({ m, id }: { m: ChatMessage; id: string }) {
 function Versions({ m }: { m: ChatMessage }) {
   const store = useChatStore();
   const versions = m.versions || [];
+  const [comparing, setComparing] = useState(false);
+  const chatId = store.active?.id;
   if (versions.length < 2 || store.shared) return null;
   const index = m.versionIndex || versions.findIndex((v) => v.id === m.id) + 1;
   const previous = responseVersion(m, -1),
@@ -209,6 +214,14 @@ function Versions({ m }: { m: ChatMessage }) {
       <IconButton label="Next version" disabled={busy || !next} onClick={() => store.selectMessageVersion(next)}>
         <ChevronRight />
       </IconButton>
+      {m.role === "assistant" && m.id && chatId && (
+        <>
+          <IconButton label="Compare the versions side by side" onClick={() => setComparing(true)}>
+            <Columns2 />
+          </IconButton>
+          {comparing && <CompareDialog chatId={chatId} messageId={m.id} open onOpenChange={setComparing} />}
+        </>
+      )}
     </div>
   );
 }
@@ -315,6 +328,7 @@ function AnswerContent({ m, index }: { m: ChatMessage; index: number }) {
     <div className="min-w-0" data-answer>
       <Markdown
         text={m.content}
+        className={m.status === "streaming" && String(m.content || "").trim() ? "is-writing" : undefined}
         cite={m.role === "assistant" ? (html) => citeHtml(html, m) : undefined}
         onSaveCode={canSave ? async (item) => store.saveFromChat({ ...item, title: item.title || codeTitle(item.body) }, index, await conversationProjectId(client, store.shared ? null : (store.active?.id ?? null))) : undefined}
       />
@@ -354,6 +368,8 @@ export function messageSignature(store: ChatStore, m: ChatMessage, index: number
     store.switchingVersion,
     !!store.shared,
     m.settings?.resolvedModel,
+    m.settings?.autoWhy?.reason,
+    m.settings?.autoWhy?.difficulty,
     store.context,
   ]);
 }
@@ -496,6 +512,16 @@ export const MessageView = memo(
             >
               {responseStatus(store, m)}
             </span>
+          )}
+          {assistant && !isPendingMessage(m) && m.settings?.auto && autoWhyShort(m.settings.autoWhy) && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button type="button" className="text-xs text-muted-foreground hover:text-text-2" data-auto-why aria-label={`Why Auto chose this model: ${autoWhyText(m.settings.autoWhy)}`} onClick={details ? toggleDetails : undefined}>
+                  · <span className="underline decoration-dotted underline-offset-2">{autoWhyShort(m.settings.autoWhy)}</span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-80">{autoWhyText(m.settings.autoWhy)}</TooltipContent>
+            </Tooltip>
           )}
         </div>
         {details && detailsOpen && <MessageDetails m={m} id={`details-${key}`} />}

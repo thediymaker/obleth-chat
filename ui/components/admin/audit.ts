@@ -101,6 +101,10 @@ export function auditSentence(e: AuditEvent): Part[] {
     "workspaces.stop": () => [actor, " stopped ", target("a person"), `’s ${m.kind === "browser" ? "browser" : "workspace"}`],
     "insights.report": () => [actor, " asked to find the workstreams again"],
     "banner.update": () => [actor, " changed the banner"],
+    "appearance.update": () => {
+      const image = m.image === "favicon" ? "the tab icon" : m.image === "logo-dark" ? "the dark theme's logo" : m.image === "logo-light" ? "the light theme's logo" : "";
+      return [actor, image ? (m.removed ? ` removed ${image}` : ` set ${image}`) : " changed the branding"];
+    },
     "memory.update": () => [actor, m.enabled === false ? " turned memory off" : " changed the memory settings"],
     "feedback.button": () => [actor, m.mode === "off" ? " turned the Feedback button off" : m.mode === "sidebar" ? " put the Feedback button in the sidebar" : " highlighted the Feedback button"],
     "knowledge.embedding.update": () => [actor, " changed the knowledge search model"],

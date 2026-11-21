@@ -3,6 +3,7 @@
 
 import MarkdownIt from "markdown-it";
 import type { Token } from "markdown-it";
+import { captionHtml, figureHtml, figureOf, tableKey, tableView } from "@/lib/chat/figure";
 import { svgIcon } from "@/lib/chat/icon-svg";
 import { mathPlugin } from "@/lib/chat/math";
 import { DRAWN, drawn, highlight, languageOf, math } from "@/lib/chat/rendered";
@@ -71,8 +72,42 @@ parser.renderer.rules.fence = (tokens, index, _options, env: Env | undefined) =>
   return codeBlock(token.content, token.info, !closed(token, env));
 };
 parser.renderer.rules.code_block = (tokens, index) => codeBlock(tokens[index]!.content);
-parser.renderer.rules.table_open = () => '<div class="table-scroll" tabindex="0" role="region" aria-label="Table"><table>\n';
-parser.renderer.rules.table_close = () => "</table></div>\n";
+// A table. One that lists things with a number each can also show as a figure
+// (lib/chat/figure.ts): the bars, the table and a line to switch between them.
+const TABLE_OPEN = '<div class="table-scroll" tabindex="0" role="region" aria-label="Table"><table>\n';
+/** The text of each cell of the table that opens at `index`: its heading row, then its rows. */
+function tableCells(tokens: Token[], index: number) {
+  const head: string[] = [],
+    rows: string[][] = [];
+  let inHead = false;
+  for (let i = index + 1; i < tokens.length && tokens[i]!.type !== "table_close"; i++) {
+    const token = tokens[i]!;
+    if (token.type === "thead_open") inHead = true;
+    else if (token.type === "thead_close") inHead = false;
+    else if (token.type === "tr_open" && !inHead) rows.push([]);
+    else if (token.type === "inline" && (tokens[i - 1]?.type === "th_open" || tokens[i - 1]?.type === "td_open")) {
+      const text = (token.children || []).map((child) => (child.type === "text" || child.type === "code_inline" ? child.content : child.type === "softbreak" || child.type === "hardbreak" ? " " : "")).join("");
+      (inHead ? head : rows.at(-1))?.push(text);
+    }
+  }
+  return { head, rows };
+}
+parser.renderer.rules.table_open = (tokens, index, _options, env: Env | undefined) => {
+  const { head, rows } = tableCells(tokens, index);
+  const figure = figureOf(head, rows);
+  const stack = ((env ??= {}).figures ??= []) as string[];
+  if (!figure) {
+    stack.push("");
+    return TABLE_OPEN;
+  }
+  const view = tableView(head);
+  stack.push(captionHtml(head, figure, view, escape));
+  return `<div class="table-figure" data-view="${view}" data-key="${escape(tableKey(head))}">${figureHtml(head, rows, figure, escape)}${TABLE_OPEN}`;
+};
+parser.renderer.rules.table_close = (_tokens, _index, _options, env: Env | undefined) => {
+  const caption = ((env?.figures as string[] | undefined) || []).pop();
+  return caption ? `</table></div>${caption}</div>\n` : "</table></div>\n";
+};
 
 parser.use(mathPlugin, math);
 

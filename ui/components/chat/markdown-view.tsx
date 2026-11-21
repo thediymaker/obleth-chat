@@ -7,6 +7,7 @@
 import "katex/dist/katex.min.css";
 import "./chat-prose.css";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { setTableView, tableCsv } from "@/lib/chat/figure";
 import { copyText } from "@/lib/clipboard";
 import { markdown } from "@/lib/chat/markdown";
 import { downloadDrawing, hydrate, toggleDrawing } from "@/lib/chat/rendered";
@@ -81,9 +82,19 @@ export const Markdown = memo(function Markdown({ text, cite, className, onSaveCo
     (event: React.MouseEvent<HTMLDivElement>) => {
       const el = (event.target as HTMLElement).closest<HTMLElement>("[data-action]");
       if (!el || !ref.current?.contains(el)) return;
+      const action = el.dataset.action;
+      // A table that can show as a figure: switch its view, or copy its numbers.
+      const table = el.closest<HTMLElement>(".table-figure");
+      if (table && (action === "table-view" || action === "copy-table")) {
+        event.preventDefault();
+        if (action === "table-view") {
+          setTableView(table.dataset.key || "", el.dataset.view === "table" ? "table" : "figure");
+          setVersion((v) => v + 1);
+        } else void copyText(tableCsv([...table.querySelectorAll("tr")].map((row) => [...row.children].map((cell) => cell.textContent || ""))));
+        return;
+      }
       const block = el.closest<HTMLElement>(".code-block");
       if (!block) return;
-      const action = el.dataset.action;
       const code = block.querySelector("pre code")?.textContent ?? "";
       if (action === "copy-code") {
         event.preventDefault();

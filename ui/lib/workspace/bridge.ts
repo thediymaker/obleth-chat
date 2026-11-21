@@ -29,6 +29,8 @@ export interface Space {
   page: string;
   /** Bumped for every new preview link, so the frame loads it again. */
   frame: number;
+  /** The checkpoint the project was last restored to; "" once files change again. */
+  version: string;
   linking: boolean;
   waking: boolean;
   wakePolls: number;
@@ -154,7 +156,7 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
     if (!space)
       spaces.set(
         id,
-        (space = { workspace: null, loaded: false, files: null, filesStale: false, filesError: "", loadingFiles: false, file: null, url: "", origin: "", page: "", frame: 0, linking: false, waking: false, wakePolls: 0, command: null, terminal: 0 }),
+        (space = { workspace: null, loaded: false, files: null, filesStale: false, filesError: "", loadingFiles: false, file: null, url: "", origin: "", page: "", frame: 0, version: "", linking: false, waking: false, wakePolls: 0, command: null, terminal: 0 }),
       );
     return space;
   };
@@ -347,6 +349,7 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
     if (space) {
       space.files = null;
       space.file = null;
+      space.version = undo ? "" : sha;
     }
     void showPreview(d.id, true);
     if (undo) {
@@ -366,6 +369,11 @@ export function createWorkspaceBridge({ api, enabled, changed, showTab, toast = 
         const data = event.data || {};
         const space = spaces.get(id);
         if (FILE_TOOLS.has(data.tool) && data.status !== "running" && space?.files) filesChanged(id);
+        // Once files change, the project is no longer at the version it was restored to.
+        if (FILE_TOOLS.has(data.tool) && data.status !== "running" && space?.version) {
+          space.version = "";
+          changed();
+        }
         if (CODE_TOOLS.has(data.tool) && data.status !== "running") codeEvents.emit({ id, kind: "changed" });
         // A plain web server has no live reload, so reload the preview after each change.
         if (data.reload) {

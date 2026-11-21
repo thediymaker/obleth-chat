@@ -1,15 +1,26 @@
 "use client";
 
-// The strip under every signed-in page: how many
-// models this account can use, today's requests and tokens against any daily
+// The line under every signed-in page. In a chat it says what is happening now: a
+// reply at work and for how long (or that it waits for the person), the chat's
+// workspace (with what its container uses, and the whole card one click away), the
+// model and how much of its window the chat uses. Then the person's
+// jobs on their clusters, when any run or wait. After that, how many models this account can use, today's requests and tokens against any daily
 // limits, the site's name and the keyboard shortcuts.
 
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { useClusterQueues } from "@/components/clusters/status";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { SandboxCard, useSandboxUsage } from "@/components/workspace/sandbox-card";
+import { sandboxShort } from "@/lib/chat/sandbox";
+import { clock, effortLabel } from "@/lib/chat/composer";
+import { contextUse } from "@/lib/chat/context";
+import { isLive } from "@/lib/chat/turn";
 import { useBranding } from "@/lib/branding-context";
 import { useUsage, type OwnUsage } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useChat } from "./chat-provider";
 import { compact, count } from "@/lib/format";
-
 
 /** "3 / 100 requests · 12K tokens", or "—" before the first count. */
 export function usageText(usage: OwnUsage | null | undefined) {
@@ -25,33 +36,128 @@ export function modelsText(store: { catalogError: string; models: { id: string }
   return store.models.length ? `${store.models.filter((m) => m.id !== "auto").length} available` : "—";
 }
 
-function Metric({ label, value, optional }: { label: string; value: string; optional?: boolean }) {
+const WORKSPACE: Record<string, [string, string]> = {
+  running: ["Workspace awake", "bg-signal"],
+  starting: ["Workspace starting", "signal-breathe bg-signal"],
+  stopped: ["Workspace asleep", "bg-line-strong"],
+  error: ["Workspace error", "bg-destructive"],
+};
+
+/** What the reply being written is doing, for the line's first segment. */
+export function runText(status: { waiting: boolean; began: number; now: number }) {
+  if (status.waiting) return "Needs your say";
+  return Number.isFinite(status.began) ? `Working ${clock(status.now - status.began)}` : "Working";
+}
+
+/** "2 running · 1 waiting" across the person's clusters, or "" when none do. */
+export function jobsText(queues: { running: number; pending: number }[]) {
+  const running = queues.reduce((n, q) => n + q.running, 0),
+    pending = queues.reduce((n, q) => n + q.pending, 0);
+  return [running ? `${running} running` : "", pending ? `${pending} waiting` : ""].filter(Boolean).join(" · ");
+}
+
+const SEGMENT = "flex h-full shrink-0 items-center gap-2 border-r border-sidebar-border px-3.5 whitespace-nowrap";
+
+function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <span className={cn("flex items-baseline gap-1.5 whitespace-nowrap", optional && "max-[1000px]:hidden")} data-status={label.toLowerCase()}>
-      <span className="text-2xs font-medium tracking-[.08em] text-muted-foreground uppercase">{label}</span>
-      <span className="truncate text-sm font-medium text-foreground tabular-nums">{value}</span>
+    <span className={cn(SEGMENT, "max-[1200px]:hidden")} data-status={label.toLowerCase()}>
+      <span className="text-muted-foreground">{label.toLowerCase()}</span>
+      <span className="truncate text-text-2 tabular-nums">{value}</span>
     </span>
   );
 }
 
-/** 40px, on the sidebar's color. */
+/** The chat's workspace: its state, what the container uses now, and the whole card on a click. */
+function WorkspaceSegment({ label, dot }: { label: string; dot: string }) {
+  const { data: usage } = useSandboxUsage();
+  const short = sandboxShort(usage);
+  const state = (
+    <>
+      <span className={cn("size-1.5 rounded-full", dot)} aria-hidden="true" />
+      {label.toLowerCase()}
+      {short && <span className="text-muted-foreground tabular-nums max-[1200px]:hidden">· {short}</span>}
+    </>
+  );
+  if (!usage)
+    return (
+      <span className={cn(SEGMENT, "max-[760px]:hidden")} data-status="workspace">
+        {state}
+      </span>
+    );
+  return (
+    <Popover>
+      <PopoverTrigger className={cn(SEGMENT, "hover:text-foreground max-[760px]:hidden")} title="What your workspace uses now" data-status="workspace">
+        {state}
+      </PopoverTrigger>
+      <PopoverContent side="top" align="start" className="w-80 font-sans">
+        <SandboxCard usage={usage} />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** 32px, on the sidebar's color, in the monospace face. */
 export function StatusBar() {
   const store = useChat();
   const branding = useBranding();
   const { data: usage } = useUsage();
+  const queues = useClusterQueues();
+  const jobs = jobsText(queues);
+  const id = store.route.id;
+  const chat = id && store.active?.id === id ? store.active : null;
+  const last = chat?.messages?.at(-1);
+  const live = !!last && last.role === "assistant" && isLive(last) && store.streaming;
+  const waiting = live && (last.activity || []).some((step) => step.status === "awaiting");
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!live) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [live]);
+
+  const space = chat && store.workspace.enabled() && store.workspace.has(id) ? WORKSPACE[store.workspace.space(id).workspace?.status || ""] : undefined;
+  const use = chat ? contextUse(chat, { windowSize: Number(store.policyModel()?.metadata?.contextWindow) || 0, systemPrompt: store.systemPrompt, open: true }) : null;
+  const share = use && use.windowSize && !use.unknown && use.used ? Math.min(1, use.share) : null;
+  const effort = store.reasoningEffort && store.reasoningEffort !== "none" ? effortLabel(store.reasoningEffort) : "";
   return (
-    <footer className="flex h-10 shrink-0 leading-[normal] items-center justify-between gap-4 border-t bg-sidebar px-6 text-sm text-muted-foreground max-[760px]:px-4">
-      <div className="flex min-w-0 items-center gap-4">
-        <Metric label="Models" value={modelsText(store)} />
-        <span className="h-3.5 w-px shrink-0 bg-border max-[1000px]:hidden" />
-        <Metric label="Today" value={usageText(usage)} optional />
-      </div>
-      <div className="flex shrink-0 items-center gap-4 whitespace-nowrap max-[760px]:hidden">
-        <span>{branding.siteName}</span>
-        <button type="button" className="rounded-sm border px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground" aria-label="Keyboard shortcuts" onClick={() => store.openDialog({ kind: "shortcuts" })}>
+    <footer className="flex h-8 shrink-0 items-stretch overflow-hidden border-t border-sidebar-border bg-sidebar font-mono text-xs leading-[normal] text-text-2">
+      {live && (
+        <span role="status" className={cn("flex h-full shrink-0 items-center px-3.5 font-medium whitespace-nowrap", waiting ? "bg-amber text-background" : "bg-signal text-signal-foreground")} data-status="run">
+          {runText({ waiting, began: Date.parse(last._began || last.createdAt || ""), now })}
+        </span>
+      )}
+      {space && <WorkspaceSegment label={space[0]} dot={space[1]} />}
+      {chat && (
+        <span className={cn(SEGMENT, "max-[1000px]:hidden")} data-status="model">
+          <span className="max-w-56 truncate">{store.modelName(store.model || chat.model)}</span>
+          {effort && <span className="text-muted-foreground">· {effort.toLowerCase()}</span>}
+        </span>
+      )}
+      {share != null && (
+        <button type="button" className={cn(SEGMENT, "hover:text-foreground")} title="Chat details (⌘.)" data-status="context" onClick={() => store.toggleDetails(id)}>
+          <span className="text-muted-foreground">context</span>
+          <span className="h-1 w-14 overflow-hidden rounded-full bg-line-strong" aria-hidden="true">
+            <span className={cn("block h-full", share > 0.9 ? "bg-destructive" : share > 0.75 ? "bg-amber" : "bg-text-2")} style={{ width: `${share * 100}%` }} />
+          </span>
+          <span className="tabular-nums">{Math.round(share * 100)}%</span>
+        </button>
+      )}
+      {jobs && (
+        <Link href="/clusters" className={cn(SEGMENT, "hover:text-foreground max-[1000px]:hidden")} title="Your jobs on your clusters" data-status="jobs">
+          <span className={cn("size-1.5 rounded-full", queues.some((q) => q.running) ? "bg-signal" : "bg-line-strong")} aria-hidden="true" />
+          <span className="text-muted-foreground">jobs</span>
+          <span className="tabular-nums">{jobs}</span>
+        </Link>
+      )}
+      <Metric label="Models" value={modelsText(store)} />
+      <Metric label="Today" value={usageText(usage)} />
+      <span className="ml-auto flex shrink-0 items-center gap-3 px-3.5 whitespace-nowrap text-muted-foreground max-[760px]:hidden">
+        <span className="font-sans">{branding.siteName}</span>
+        <button type="button" className="rounded-sm border px-1.5 py-px text-2xs hover:text-foreground" aria-label="Keyboard shortcuts" onClick={() => store.openDialog({ kind: "shortcuts" })}>
           ⌘ K
         </button>
-      </div>
+      </span>
     </footer>
   );
 }

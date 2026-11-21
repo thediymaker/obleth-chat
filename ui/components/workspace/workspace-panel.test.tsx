@@ -104,6 +104,85 @@ describe("the workspace panel", () => {
   });
 });
 
+describe("the Build view over the preview", () => {
+  const ORIGIN = "https://abc.preview.example.org";
+  const checkpoint = (n: number) => ({ id: `checkpoint-${n}`, kind: "checkpoint", sha: `${n}`.repeat(8), summary: `Checkpoint ${n}`, stat: `${n} files changed` });
+  const open = async () => {
+    const store = fakeStore() as ReturnType<typeof fakeStore> & { draft: string; shared: unknown };
+    store.draft = "";
+    store.active.messages = [
+      { id: "m1", role: "assistant", createdAt: "2026-11-21T10:00:00Z", activity: [checkpoint(1), checkpoint(2)] },
+      { id: "m2", role: "assistant", createdAt: "2026-11-21T10:05:00Z", activity: [checkpoint(3)] },
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    const calls = mockApi(
+      (path, options) =>
+        path.endsWith("/workspace/preview")
+          ? { url: `${ORIGIN}/`, origin: ORIGIN, enter: `${ORIGIN}/__obleth/enter`, ticket: "t" }
+          : path.includes("/checkpoints/") && options.method === "POST"
+            ? { before: "f".repeat(8) }
+            : { workspace: { status: "running", previewPort: 3000 }, diskLimit: 10 * 2 ** 30 },
+      { workspaces: true, previews: true },
+    );
+    renderPage(<WorkspacePanel conversationId="c1" tab="preview" />);
+    const frame = (await screen.findByTitle("Workspace preview")) as HTMLIFrameElement;
+    const say = (data: unknown, origin = ORIGIN, source: unknown = frame.contentWindow) => fireEvent(window, new MessageEvent("message", { data, origin, source: source as MessageEventSource }));
+    return { store, frame, say, calls };
+  };
+
+  it("offers Point once the page's picker is there, and puts the clicked element in the message box", async () => {
+    const { store, frame, say } = await open();
+    expect(screen.queryByRole("button", { name: /Point/ })).toBeNull();
+    // Another page saying it is ready, or the right page from another origin, is not heard.
+    say({ source: "obleth-preview", type: "ready" }, "https://elsewhere.example.org");
+    say({ source: "obleth-preview", type: "ready" }, ORIGIN, window);
+    expect(screen.queryByRole("button", { name: /Point/ })).toBeNull();
+    say({ source: "obleth-preview", type: "ready" });
+    const post = vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(() => {});
+    fireEvent.click(await screen.findByRole("button", { name: /Point/ }));
+    expect(post).toHaveBeenCalledWith({ source: "obleth-chat", type: "pick-start" }, ORIGIN);
+    expect(screen.getByRole("button", { name: /Click an element/ })).toHaveAttribute("aria-pressed", "true");
+    store.draft = "make it bigger";
+    const drawn = store.getVersion();
+    say({ source: "obleth-preview", type: "picked", element: { tag: "button", selector: "#hero > button.cta", text: "Sign up", path: "/", width: 120, height: 40 } });
+    expect(store.draft).toBe("In the preview, the `button` “Sign up” (`#hero > button.cta`): make it bigger");
+    // The message box is told, so it shows what was put in it.
+    expect(store.getVersion()).toBeGreaterThan(drawn);
+    expect(await screen.findByRole("button", { name: /Point/ })).toHaveAttribute("aria-pressed", "false");
+    // Esc in Chat's own page ends a pick that was started.
+    fireEvent.click(screen.getByRole("button", { name: /Point/ }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(post).toHaveBeenLastCalledWith({ source: "obleth-chat", type: "pick-stop" }, ORIGIN);
+  });
+
+  it("steps through the chat's versions, marking where the project is", async () => {
+    const { store, calls } = await open();
+    const bar = document.querySelector("[data-versions]")!;
+    expect(bar.querySelector("[data-version-now]")?.textContent).toContain("Checkpoint 3 of 3");
+    expect(screen.getByRole("button", { name: "Checkpoint 3 (the project is here)" })).toHaveAttribute("aria-current", "step");
+    expect(screen.getByRole("button", { name: "Newer version" })).toBeDisabled();
+    // Going back asks first, through the restore dialog the chat page shows.
+    fireEvent.click(screen.getByRole("button", { name: "Older version" }));
+    expect(store.workspace.restoreDialog()).toMatchObject({ sha: "22222222", label: "Checkpoint 2", step: "confirm" });
+    await store.workspace.confirmRestore();
+    await waitFor(() => expect(calls.some((c) => c.path.endsWith("/workspace/checkpoints/22222222/restore") && c.method === "POST")).toBe(true));
+    expect(await screen.findByRole("button", { name: "Checkpoint 2 (the project is here)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Newer version" })).not.toBeDisabled();
+    // A change to the files makes a new state: the project is no longer at version 2.
+    store.workspace.onEvent({ event: "tool", data: { tool: "write_file", status: "completed" } } as never, {} as never, "c1");
+    expect(await screen.findByRole("button", { name: "Checkpoint 3 (the project is here)" })).toBeInTheDocument();
+  });
+
+  it("shows neither on the Compute page, where there is no message box", async () => {
+    const { store, say } = await open();
+    store.route = { page: "workspaces", id: "" };
+    store.emit();
+    say({ source: "obleth-preview", type: "ready" });
+    await waitFor(() => expect(document.querySelector("[data-versions]")).toBeNull());
+    expect(screen.queryByRole("button", { name: /Point/ })).toBeNull();
+  });
+});
+
 describe("Compute › Workspaces", () => {
   const list = {
     workspaces: [

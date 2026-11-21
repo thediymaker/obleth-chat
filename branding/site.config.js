@@ -49,6 +49,9 @@ window.OblethChatConfig = {
     footer: '',
   },
 
-  // 'system', 'light', or 'dark'. A person's saved preference takes priority.
-  appearance: { defaultTheme: 'system' },
+  // defaultTheme: 'system', 'light', or 'dark'. A person's saved choice takes priority.
+  // accent: the one color for what is alive (a reply being written, a running step),
+  // as '#rrggbb'; '' keeps Chat's own. Each theme shows a shade of it that stays readable.
+  // personalAccent: false hides the accent choice in Settings, so everyone sees the site's.
+  appearance: { defaultTheme: 'system', accent: '', personalAccent: true },
 };

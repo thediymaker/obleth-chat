@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod appearance;
 pub mod apps;
 pub mod attachments;
 pub mod audit;
@@ -143,6 +144,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let operations = operations::router(state.clone());
     let retention = retention::router(state.clone());
     let banner = banner::router(state.clone());
+    let appearance = appearance::router(state.clone());
     let attachments = attachments::router(state.clone());
     let images = images::router(state.clone());
     let projects = projects::router(state.clone());
@@ -196,6 +198,10 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
             "/api/conversations/{id}/messages/{message}/select",
             post(select_version),
         )
+        .route(
+            "/api/conversations/{id}/messages/{message}/versions",
+            get(reply_versions),
+        )
         .route("/api/{*rest}", any(|| async { ApiError::not_found() }))
         .with_state(state)
         .merge(auth)
@@ -203,6 +209,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(operations)
         .merge(retention)
         .merge(banner)
+        .merge(appearance)
         .merge(attachments)
         .merge(images)
         .merge(projects)
@@ -600,6 +607,17 @@ async fn select_version(
     let user = s.auth.require(&headers, true).await?;
     Ok(Json(
         json!({"conversation":s.store.select_version(user.id,id,message).await?}),
+    ))
+}
+/// A reply's versions with their text, for comparing them.
+async fn reply_versions(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path((id, message)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let user = s.auth.require(&headers, false).await?;
+    Ok(Json(
+        json!({"versions":s.store.reply_versions(user.id,id,message).await?}),
     ))
 }
 async fn send(
@@ -1099,6 +1117,8 @@ async fn run_generation(
     let mut request_id = None;
     // With Auto the gateway picks the model; the stream says which one it was.
     let mut served: Option<String> = None;
+    // Why Auto chose it, when the gateway says so with its answer.
+    let mut auto_why: Option<Value> = None;
     let mut finish_reason: Option<String> = None;
     let mut first = true;
     let generation_id = turn.generation_id;
@@ -1478,6 +1498,11 @@ async fn run_generation(
             {
                 request_id = Some(found.to_owned());
             }
+            // Auto's reason comes with the answer that chose the model; later rounds
+            // of the turn name that model and say nothing.
+            if payload["model"] == "auto" {
+                auto_why = gateway::auto_why(response.headers());
+            }
             emit(
                 &mut tx,
                 "meta",
@@ -1560,7 +1585,7 @@ async fn run_generation(
                                 // Keep the rest of this turn's tool rounds on the same model.
                                 payload["model"] = json!(model);
                             }
-                            emit(&mut tx, "model", json!({"model":model}));
+                            emit(&mut tx, "model", json!({"model":model,"why":auto_why}));
                         }
                     }
                     if let Some(u) = gateway::usage_of(&v) {
@@ -2331,6 +2356,9 @@ async fn run_generation(
                     }
                     entry["status"] = json!(if outcome.ok { "completed" } else { "error" });
                     entry["detail"] = json!(outcome.detail);
+                    if let Some(card) = outcome.card {
+                        entry["card"] = card;
+                    }
                     entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
                     record(&mut activity, &entry, false);
                     emit(&mut tx, "tool", entry);
@@ -2769,7 +2797,11 @@ async fn run_generation(
         status = "error";
         tracing::error!("could not persist completed chat generation");
     } else if let Some(model) = &served {
-        if let Err(error) = s.store.set_served_model(turn.assistant_id, model).await {
+        if let Err(error) = s
+            .store
+            .set_served_model(turn.assistant_id, model, auto_why.as_ref())
+            .await
+        {
             tracing::warn!("could not record the model Auto chose: {error:?}");
         }
     }
@@ -2840,6 +2872,9 @@ async fn run_generation(
         let mut done = json!({"status":status,"usage":usage,"requestId":request_id,"finishReason":finish_reason,"followUpsStatus":if followups {"pending"}else{"idle"}});
         if let Some(model) = &served {
             done["settings"] = json!({"model":model,"resolvedModel":model,"auto":true,"systemPrompt":parameters.system_prompt,"temperature":parameters.temperature,"topP":parameters.top_p,"maxTokens":parameters.max_tokens,"reasoningEffort":turn.reasoning_effort});
+            if let Some(why) = &auto_why {
+                done["settings"]["autoWhy"] = why.clone();
+            }
         }
         if let Some(text) = rewritten {
             done["content"] = json!(text);

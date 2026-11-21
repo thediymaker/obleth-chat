@@ -36,6 +36,8 @@ export interface MessageSettings {
   model?: string;
   resolvedModel?: string;
   auto?: boolean;
+  /** Why Auto chose the model, when the gateway said. */
+  autoWhy?: import("./auto-why").AutoWhy;
   systemPrompt?: string;
   temperature?: number;
   topP?: number;

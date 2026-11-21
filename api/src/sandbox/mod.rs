@@ -240,7 +240,16 @@ struct Inner {
     grants: std::sync::OnceLock<crate::auth::grants::Grants>,
     /// Whether sessions that began with a password still count.
     password_sessions: std::sync::atomic::AtomicBool,
+    /// The last reading of every pod's CPU and memory, kept a few seconds so that many
+    /// open pages ask the cluster once between them.
+    usage: tokio::sync::Mutex<Option<(Instant, PodUsage)>>,
 }
+
+/// CPU in millicores and memory in bytes, by pod name.
+type PodUsage = HashMap<String, (i64, i64)>;
+
+/// How long one reading of the pods' CPU and memory answers for.
+const USAGE_FRESH: Duration = Duration::from_secs(15);
 
 impl Sandboxes {
     pub fn new(config: SandboxConfig, pool: PgPool) -> Result<Self> {
@@ -261,6 +270,7 @@ impl Sandboxes {
                 sign_ins: Mutex::default(),
                 grants: std::sync::OnceLock::new(),
                 password_sessions: std::sync::atomic::AtomicBool::new(true),
+                usage: tokio::sync::Mutex::default(),
             }),
         })
     }
@@ -284,7 +294,16 @@ impl Sandboxes {
     }
     /// CPU and memory now for every pod in the namespace, by pod name; none when the
     /// cluster's metrics cannot be read.
-    pub async fn pod_usage(&self) -> Option<HashMap<String, (i64, i64)>> {
+    /// One pod's CPU in millicores and memory in bytes, from a reading at most a few
+    /// seconds old; none when the cluster's metrics cannot be read or do not know it yet.
+    pub async fn usage_of(&self, pod: &str) -> Option<(i64, i64)> {
+        let mut kept = self.inner.usage.lock().await;
+        if !matches!(&*kept, Some((at, _)) if at.elapsed() < USAGE_FRESH) {
+            *kept = Some((Instant::now(), self.pod_usage().await?));
+        }
+        kept.as_ref()?.1.get(pod).copied()
+    }
+    pub async fn pod_usage(&self) -> Option<PodUsage> {
         match self.inner.kube.pod_usage().await {
             Ok(usage) => Some(usage),
             Err(error) => {
@@ -1157,6 +1176,7 @@ async fn manager(
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/workspaces", get(list))
+        .route("/api/workspaces/usage", get(usage))
         .route(
             "/api/conversations/{id}/workspace",
             get(status).post(create).delete(remove),
@@ -1207,6 +1227,47 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     Ok(Json(json!({
         "workspaces": projects,
         "diskLimit": sandboxes.config().disk_limit,
+    })))
+}
+
+/// The person's own workspace pod now: whether it runs, the CPU and memory it uses
+/// against what it may, the disk its files take, and when it sleeps if left alone.
+/// Numbers are missing when the pod is not running or the cluster keeps no metrics.
+async fn usage(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    let (sandboxes, user) = manager(&s, &headers, false).await?;
+    let config = sandboxes.config();
+    let pod: Option<(String, String, chrono::DateTime<chrono::Utc>, Option<i64>)> = sqlx::query_as(
+        "SELECT slug, status, last_used_at, disk_bytes FROM sandbox_pods WHERE owner_id = $1",
+    )
+    .bind(user.id)
+    .fetch_optional(&s.store.pool)
+    .await?;
+    let limits = json!({
+        "cpuMillis": kube::cpu_millis(&config.cpu_limit),
+        "memoryBytes": quantity_bytes(&config.memory_limit),
+        "diskBytes": config.disk_limit,
+    });
+    let idle_minutes = config.idle.as_secs() / 60;
+    let Some((slug, status, last_used, disk)) = pod else {
+        return Ok(Json(
+            json!({"status": "none", "limits": limits, "idleMinutes": idle_minutes}),
+        ));
+    };
+    let running = status == "running";
+    let used = if running {
+        sandboxes.usage_of(&pod_name(&slug)).await
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "status": status,
+        "cpuMillis": used.map(|u| u.0),
+        "memoryBytes": used.map(|u| u.1),
+        "diskBytes": disk,
+        "limits": limits,
+        "idleMinutes": idle_minutes,
+        "lastUsedAt": last_used,
+        "stopsAt": running.then(|| last_used + chrono::Duration::from_std(config.idle).unwrap_or_default()),
     })))
 }
 

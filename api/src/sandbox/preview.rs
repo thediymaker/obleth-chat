@@ -40,6 +40,48 @@ const SIGN_IN_CHECK: Duration = Duration::from_secs(5);
 /// How often an open WebSocket checks that its sign-in is still live.
 const SOCKET_CHECK: Duration = Duration::from_secs(60);
 
+/// Where the preview's own origin serves Chat's picker script (see `pick.js`).
+const PICK_PATH: &str = "/__obleth/pick.js";
+/// Added after a page opened in Chat's frame, so the person can point at an element.
+/// A tag after the end of the document is still run, and adding it there keeps the
+/// page streaming as the app sends it.
+const PICK_TAG: &str = "\n<script src=\"/__obleth/pick.js\" defer data-obleth></script>";
+
+/// The picker script, set to talk to this Chat's page and no other.
+fn pick_script(sb: &Sandboxes) -> Response {
+    let origin = serde_json::to_string(&sb.config().chat_origin).unwrap_or_default();
+    let script = include_str!("pick.js").replace("\"__CHAT_ORIGIN__\"", &origin);
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "private, max-age=300"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        script,
+    )
+        .into_response()
+}
+
+/// Whether the browser asks for a page to show in a frame or a tab, not a fetch
+/// the app's own script makes (which must get exactly what the app sent).
+fn asks_for_page(method: &Method, headers: &HeaderMap) -> bool {
+    *method == Method::GET
+        && headers
+            .get("sec-fetch-dest")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|dest| dest == "iframe" || dest == "document")
+}
+
+/// Whether an answer is a whole HTML page as the app wrote it: not a part of one,
+/// not compressed.
+fn is_page(status: StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    let value = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+    status == StatusCode::OK
+        && value(header::CONTENT_TYPE)
+            .is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"))
+        && value(header::CONTENT_ENCODING).is_none_or(|e| e.eq_ignore_ascii_case("identity"))
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -428,6 +470,10 @@ async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response,
     if !signed_in(sb, grant).await? {
         return Err(signed_out());
     }
+    // Chat's own script for the frame; the app never sees this path.
+    if request.uri().path() == PICK_PATH {
+        return Ok(pick_script(sb));
+    }
     let sandbox = sb
         .by_slug(slug)
         .await?
@@ -497,8 +543,13 @@ async fn proxy(sb: &Sandboxes, target: &str, request: Request) -> Result<Respons
         .unwrap_or("/");
     let url = format!("http://{target}{path}");
     let mut upstream = sb.http().request(parts.method.clone(), url);
+    // A page for the frame gets the picker added, which needs it uncompressed.
+    let page = asks_for_page(&parts.method, &parts.headers);
     for (name, value) in &parts.headers {
-        if HOP.contains(&name.as_str()) || name == header::COOKIE {
+        if HOP.contains(&name.as_str())
+            || name == header::COOKIE
+            || (page && name == header::ACCEPT_ENCODING)
+        {
             continue;
         }
         upstream = upstream.header(name, value);
@@ -519,9 +570,11 @@ async fn proxy(sb: &Sandboxes, target: &str, request: Request) -> Result<Respons
                 "The preview server did not answer. Check the server logs in the conversation.",
             )
         })?;
+    let pick = page && is_page(response.status(), response.headers());
     let mut builder = Response::builder().status(response.status());
     for (name, value) in response.headers() {
-        if HOP.contains(&name.as_str()) {
+        // With the picker's tag after it, the page is longer than the app said.
+        if HOP.contains(&name.as_str()) || (pick && name == header::CONTENT_LENGTH) {
             continue;
         }
         if name == header::SET_COOKIE {
@@ -537,9 +590,14 @@ async fn proxy(sb: &Sandboxes, target: &str, request: Request) -> Result<Respons
         }
         builder = builder.header(name, value);
     }
-    let mut out = builder
-        .body(Body::from_stream(response.bytes_stream()))
-        .map_err(|_| ApiError::internal())?;
+    let body = if pick {
+        Body::from_stream(response.bytes_stream().chain(futures_util::stream::once(
+            std::future::ready(Ok(axum::body::Bytes::from_static(PICK_TAG.as_bytes()))),
+        )))
+    } else {
+        Body::from_stream(response.bytes_stream())
+    };
+    let mut out = builder.body(body).map_err(|_| ApiError::internal())?;
     frame_headers(out.headers_mut(), sb);
     Ok(out)
 }

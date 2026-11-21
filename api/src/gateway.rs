@@ -677,6 +677,87 @@ fn now() -> Result<u64, ApiError> {
         .as_secs())
 }
 
+/// Why the gateway's Auto router gave a request the model it did, from the answer's
+/// headers: `x-obleth-auto-reason` says what happened to the conversation's model
+/// (`fresh`, `kept`, `escalated:tool_loop`, …) and `x-obleth-auto-why` how the request
+/// was read (`topics=coding+math; difficulty=2; from=heuristic; needs=tools+vision;
+/// candidates=4`). Older gateways send only the first, or neither. Only words and
+/// numbers this function knows are kept, so nothing a gateway sends reaches a page as is.
+pub fn auto_why(headers: &reqwest::header::HeaderMap) -> Option<Value> {
+    const REASONS: [&str; 11] = [
+        "fresh",
+        "kept",
+        "harder",
+        "topic",
+        "returned",
+        "forced",
+        "escalated:regenerate",
+        "escalated:complaint",
+        "escalated:bad_output",
+        "escalated:tool_loop",
+        "escalated:tool_errors",
+    ];
+    const SOURCES: [&str; 4] = ["classifier", "heuristic", "header", "default"];
+    const NEEDS: [&str; 3] = ["tools", "vision", "schema"];
+    let text = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| v.len() <= 400)
+    };
+    let word = |w: &str| {
+        !w.is_empty()
+            && w.len() <= 40
+            && w.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    };
+    let mut why = serde_json::Map::new();
+    if let Some(reason) = text("x-obleth-auto-reason").filter(|r| REASONS.contains(r)) {
+        why.insert("reason".into(), json!(reason));
+    }
+    for part in text("x-obleth-auto-why").unwrap_or_default().split(';') {
+        let Some((key, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        let words = |allowed: Option<&[&str]>| -> Vec<&str> {
+            value
+                .split('+')
+                .filter(|w| word(w) && allowed.is_none_or(|a| a.contains(w)))
+                .take(6)
+                .collect()
+        };
+        match key {
+            "topics" => {
+                let topics = words(None);
+                if !topics.is_empty() {
+                    why.insert("topics".into(), json!(topics));
+                }
+            }
+            "needs" => {
+                let needs = words(Some(&NEEDS));
+                if !needs.is_empty() {
+                    why.insert("needs".into(), json!(needs));
+                }
+            }
+            "difficulty" => {
+                if let Some(level) = value.parse::<u8>().ok().filter(|n| (1..=9).contains(n)) {
+                    why.insert("difficulty".into(), json!(level));
+                }
+            }
+            "candidates" => {
+                if let Some(count) = value.parse::<u16>().ok().filter(|n| *n >= 1) {
+                    why.insert("candidates".into(), json!(count));
+                }
+            }
+            "from" if SOURCES.contains(&value) => {
+                why.insert("from".into(), json!(value));
+            }
+            _ => {}
+        }
+    }
+    (!why.is_empty()).then_some(Value::Object(why))
+}
+
 pub fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 160 && !model.chars().any(char::is_control)
 }
@@ -930,6 +1011,44 @@ fn takes_images(info: Option<&Value>) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autos_reason_keeps_only_what_is_known() {
+        let headers = |pairs: &[(&'static str, &str)]| {
+            let mut map = reqwest::header::HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(*name, value.parse().unwrap());
+            }
+            map
+        };
+        assert_eq!(auto_why(&headers(&[])), None);
+        assert_eq!(
+            auto_why(&headers(&[("x-obleth-auto-reason", "escalated:tool_loop")])),
+            Some(json!({"reason": "escalated:tool_loop"}))
+        );
+        assert_eq!(
+            auto_why(&headers(&[
+                ("x-obleth-auto-reason", "fresh"),
+                (
+                    "x-obleth-auto-why",
+                    "topics=coding+math; difficulty=3; from=heuristic; needs=tools+vision; candidates=4"
+                ),
+            ])),
+            Some(json!({"reason": "fresh", "topics": ["coding", "math"], "difficulty": 3,
+                "from": "heuristic", "needs": ["tools", "vision"], "candidates": 4}))
+        );
+        // Words it does not know, markup and numbers out of range are left out.
+        assert_eq!(
+            auto_why(&headers(&[
+                ("x-obleth-auto-reason", "because"),
+                (
+                    "x-obleth-auto-why",
+                    "topics=<b>+Code; difficulty=40; from=guess; needs=gpu; candidates=0; more=1"
+                ),
+            ])),
+            None
+        );
+    }
 
     fn person(username: &str) -> Identity {
         Identity {

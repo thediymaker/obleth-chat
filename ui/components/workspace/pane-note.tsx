@@ -10,9 +10,12 @@ export function PaneNote({
   action,
   status = false,
   spin = false,
+  mark,
   className,
 }: {
   icon: React.ComponentType<{ className?: string }>;
+  /** Shown in place of the icon, such as the logo while something starts. */
+  mark?: React.ReactNode;
   title: string;
   children?: React.ReactNode;
   action?: React.ReactNode;
@@ -23,9 +26,13 @@ export function PaneNote({
 }) {
   return (
     <div role={status ? "status" : undefined} className={cn("flex h-full min-h-48 flex-col items-center justify-center gap-2 p-6 text-center", className)}>
-      <span className="mb-1 grid size-9 place-items-center rounded-full border bg-card">
-        <Icon className={cn("size-4 text-muted-foreground", spin && "animate-spin [animation-duration:2.5s]")} />
-      </span>
+      {mark ? (
+        <span className="mb-2">{mark}</span>
+      ) : (
+        <span className="mb-1 grid size-9 place-items-center rounded-full border bg-card">
+          <Icon className={cn("size-4 text-muted-foreground", spin && "animate-spin [animation-duration:2.5s]")} />
+        </span>
+      )}
       <strong className="text-base font-medium">{title}</strong>
       {children && <div className="max-w-sm text-sm text-muted-foreground">{children}</div>}
       {action && <div className="mt-2 flex flex-wrap justify-center gap-2">{action}</div>}

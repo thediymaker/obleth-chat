@@ -95,13 +95,21 @@ export interface ConversationSummary {
   title: string;
   model: string;
   updatedAt: string;
+  /** A reply is being written, in this window or another. */
+  working?: boolean;
+  /** That reply has stopped to ask for a yes or no, and the tool it asks to run. */
+  waiting?: boolean;
+  waitingTool?: string | null;
   [key: string]: unknown;
 }
+/** How often the list is read again: closely while a chat works, now and then otherwise. */
+export const conversationsRefetch = (chats: ConversationSummary[] | undefined) => (chats?.some((c) => c.working) ? 5_000 : 60_000);
 export function useConversations() {
   return useQuery({
     queryKey: keys.conversations,
     queryFn: async () => (await api.request<{ conversations?: ConversationSummary[] }>("/api/conversations")).conversations ?? [],
     enabled: useSignedIn(),
+    refetchInterval: (query) => conversationsRefetch(query.state.data),
   });
 }
 

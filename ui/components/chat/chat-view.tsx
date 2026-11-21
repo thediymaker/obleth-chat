@@ -10,6 +10,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { Copy as BrandCopy } from "@/components/brand";
+import { useClusters } from "@/components/clusters/status";
 import { KnowledgePill } from "@/components/knowledge/chat-knowledge";
 import { ProjectPill } from "@/components/projects/chat-project";
 import { Button } from "@/components/ui/button";
@@ -17,12 +18,14 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuShortc
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { useBranding } from "@/lib/branding-context";
+import { type Intent, intents, shownIntent } from "@/lib/chat/home";
 import type { Attachment } from "@/lib/chat/types";
 import { useConversations } from "@/lib/queries";
 import { ChatMenuItems } from "./chat-menu";
 import { NEW_CHAT_EVENT, OPEN_SEARCH_EVENT, useChat, useChatContent, useChatSelect, useChatStore } from "./chat-provider";
 import { Composer, TemporaryNote } from "./composer";
 import { FocusToggle } from "./focus-toggle";
+import { IntentTabs, RunningNow } from "./home-parts";
 import { NamedIcon } from "./icon";
 import { MessageView, messageSignature } from "./message";
 import { SelectionBar } from "./selection-bar";
@@ -102,17 +105,6 @@ function Messages() {
   );
 }
 
-const STARTERS = (workspaces: boolean): [string, string, string, string, boolean][] => [
-  ...(workspaces
-    ? ([
-        ["terminal", "Build an app", "Describe it, then watch it run in a live preview.", "Build me a site for ", true],
-        ["branch", "Explore a repo", "Get a tour of a codebase, or a list of its issues.", "Explain this codebase to me: ", true],
-      ] as [string, string, string, string, boolean][])
-    : ([["code", "Build something", "Go from a question to working code.", "Help me plan a small coding project. Start by asking what I want to build.", false]] as [string, string, string, string, boolean][])),
-  ["chat", "Think it through", "Find a fresh way into a tricky problem.", "Help me think through a problem. Ask me what I am working on.", false],
-  ...(workspaces ? [] : ([["book", "Learn something", "Make a complex idea feel approachable.", "Help me learn something new. Ask what topic interests me.", false]] as [string, string, string, string, boolean][])),
-];
-
 /** Settings links here with ?attach=<file> (Your files' Attach) and ?preset=<id> (a preset's Use). */
 function useHomeParams() {
   const store = useChat();
@@ -143,7 +135,16 @@ export function ChatHome() {
   // The page re-renders with the chrome, so its actions stay the same element.
   usePageChrome("Chat", useMemo(() => <FocusToggle />, []));
   useHomeParams();
-  const workspaces = store.workspace.enabled();
+  const clusters = useClusters();
+  const offered = useMemo(() => intents({ workspaces: store.workspace.enabled(), clusters }), [store, clusters]);
+  // What the person chose; the tabs also follow the workspace switch in the box.
+  const [chosen, setChosen] = useState<Intent>("ask");
+  const intent = offered.find((i) => i.id === shownIntent(chosen, store.workspaceDraft, offered)) ?? offered[0]!;
+  const choose = (id: Intent) => {
+    setChosen(id);
+    const next = offered.find((i) => i.id === id);
+    if (next && next.workspace !== store.workspaceDraft) void store.toggleWorkspace();
+  };
   return (
     // 820px (900px from 1600px wide), 72px down (110px from 1600px, 56px up to 1200px).
     <div
@@ -172,25 +173,30 @@ export function ChatHome() {
       <div className="grid gap-2.5">
         <Alert message={store.catalogError || store.error} onRetry={() => store.reload()} />
         {store.temporaryDraftOn() && <TemporaryNote started={false} />}
-        <Composer home />
+        {offered.length > 1 && <IntentTabs intents={offered} value={intent.id} onChange={choose} />}
+        <Composer home placeholder={intent.placeholder} />
       </div>
-      <div className="mt-6 grid grid-cols-3 gap-3 max-[760px]:gap-2">
-        {STARTERS(workspaces).map(([icon, title, copy, prompt, space]) => (
+      {/* Three across; on a phone, one under the other with the icon beside the text. */}
+      <div className="mt-6 grid grid-cols-3 gap-3 max-[760px]:gap-2 max-[560px]:grid-cols-1">
+        {intent.starters.map(([icon, title, copy, prompt]) => (
           <button
             key={title}
             type="button"
             data-starter
-            onClick={() => store.starter(prompt, space)}
-            className="flex flex-col items-start rounded-lg border bg-card px-4 py-[18px] text-left transition-colors hover:border-line-strong hover:bg-raised max-[760px]:px-3 max-[760px]:py-3.5"
+            onClick={() => store.starter(prompt, intent.workspace)}
+            className="flex flex-col items-start rounded-lg border bg-card px-4 py-[18px] text-left transition-colors hover:border-line-strong hover:bg-raised max-[760px]:px-3 max-[760px]:py-3.5 max-[560px]:flex-row max-[560px]:items-center max-[560px]:gap-3 max-[560px]:py-3"
           >
-            <span className="mb-3.5 flex size-[30px] items-center justify-center rounded-md border bg-background text-text-2">
+            <span className="mb-3.5 flex size-[30px] shrink-0 items-center justify-center rounded-md border bg-background text-text-2 max-[560px]:mb-0">
               <NamedIcon name={icon} className="size-[18px]" />
             </span>
-            <h3 className="mb-1.5 text-base leading-[normal] font-medium">{title}</h3>
-            <p className="text-sm leading-[1.6] text-muted-foreground">{copy}</p>
+            <span className="min-w-0">
+              <h3 className="mb-1.5 text-base leading-[normal] font-medium max-[560px]:mb-0.5">{title}</h3>
+              <p className="text-sm leading-[1.6] text-muted-foreground max-[560px]:leading-normal">{copy}</p>
+            </span>
           </button>
         ))}
       </div>
+      <RunningNow />
       <section className="mt-12 max-[760px]:mt-[34px] min-[1600px]:mt-[60px]">
         <div className="mb-3.5 flex items-center justify-between gap-2">
           <h2 className="text-base leading-[normal] font-medium tracking-normal">{chats.length ? "Pick up where you left off" : "A fresh start, just for you."}</h2>

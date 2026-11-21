@@ -10,6 +10,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, Loading } from "@/components/app-shell/page";
+import { AccentPicker, useAccent } from "@/components/accent";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { CheckField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, SwitchField, TextAreaField, TextField, displayName, messageOf, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
@@ -254,6 +255,7 @@ function AppearanceCard({ values }: { values: Look }) {
   const save = useSavePreferences();
   const [look, setLook] = useState<Look>(values);
   const [saving, setSaving] = useState(false);
+  const accent = useAccent();
   async function change(next: Partial<Look>) {
     const before = look;
     setLook({ ...look, ...next });
@@ -274,6 +276,13 @@ function AppearanceCard({ values }: { values: Look }) {
         <ThemeToggle labels className="w-fit" />
         <Note>Saved in this browser. System follows your device.</Note>
       </div>
+      {accent.allowed && (
+        <div className="grid gap-1.5">
+          <h3 className="text-md font-medium">Accent</h3>
+          <AccentPicker />
+          <Note>The color of whatever is still working: a reply being written, a running step. Saved in this browser.</Note>
+        </div>
+      )}
       <Note>Layout preferences are saved to your account across devices as you change them.</Note>
       <div className="grid gap-3">
         <SwitchField id="appearance-compact" label="Compact spacing" description="Fit more messages on screen." checked={look.density === "compact"} disabled={saving} onCheckedChange={(on) => change({ density: on ? "compact" : "comfortable" })} />

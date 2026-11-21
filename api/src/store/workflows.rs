@@ -74,8 +74,6 @@ pub struct ArchivedMessage {
     pub finish_reason: Option<String>,
     pub error_message: Option<String>,
 }
-const SUMMARY: &str =
-    "id,title,model,reasoning_effort,updated_at,settings,archived,pinned,parent_id";
 pub const ARCHIVE_BYTES: usize = 10 * 1024 * 1024;
 /// Conversations per export, import, or bulk history action.
 pub const MAX_ARCHIVE_CONVERSATIONS: usize = 50;

@@ -9,7 +9,7 @@ import { Info, Lock, MessageSquare, Plus, RefreshCw, Server } from "lucide-react
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, Eyebrow, isFeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { useChatStore } from "@/components/chat/chat-provider";
 import { useConnectionManager } from "@/components/connections/connection-dialogs";
 import { type Connection, KINDS, useConnections } from "@/components/connections/connections";
@@ -405,7 +405,7 @@ export function ClustersPage() {
       <ComputeTabs />
     </PageHeader>
   );
-  if (caps.data && !on)
+  if ((caps.data && !on) || isFeatureOff(list.error))
     return (
       <Page>
         {head}

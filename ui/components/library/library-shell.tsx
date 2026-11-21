@@ -3,13 +3,10 @@
 // What Library's pages share: the section tabs (Saved, Collections, Generated) and
 // the page shown when the server has no knowledge feature.
 
-import { BookOpen, Bookmark, Image as ImageIcon, MessageSquare } from "lucide-react";
-import Link from "next/link";
+import { BookOpen, Bookmark, Image as ImageIcon } from "lucide-react";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { Loading, Page, PageHeader } from "@/components/app-shell/page";
+import { FeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { SectionTabs } from "@/components/app-shell/section-tabs";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { useCapabilities } from "@/lib/queries";
 
 export const LIBRARY_TABS = [
@@ -20,36 +17,26 @@ export const LIBRARY_TABS = [
 export const LibraryTabs = () => <SectionTabs label="Library" tabs={LIBRARY_TABS} />;
 
 const OFF = {
-  knowledge: { icon: BookOpen, heading: "Your knowledge, connected.", title: "Knowledge is not enabled.", text: "Document collections with citations need object storage and pgvector on this server." },
-  library: { icon: Bookmark, heading: "Everything worth keeping.", title: "The library is not enabled.", text: "Saved items and document collections need object storage and pgvector on this server." },
+  knowledge: { icon: BookOpen, what: "Collections", plural: true },
+  library: { icon: Bookmark, what: "The library", plural: false },
 };
 
-/** Renders `children` only when the server has knowledge; otherwise says it isn't set up. */
+/** Renders `children` only when the server has knowledge; otherwise says it is off. */
 export function KnowledgeOnly({ page, title, children }: { page: keyof typeof OFF; title: string; children: React.ReactNode }) {
   const { data, isPending } = useCapabilities();
   if (isPending) return <Loading />;
   if (data?.features?.knowledge) return <>{children}</>;
-  return <FeatureOff page={page} title={title} />;
+  return <LibraryOff page={page} title={title} />;
 }
 
-function FeatureOff({ page, title }: { page: keyof typeof OFF; title: string }) {
+function LibraryOff({ page, title }: { page: keyof typeof OFF; title: string }) {
   usePageChrome(title);
-  const copy = OFF[page];
-  const Icon = copy.icon;
   return (
     <Page>
-      <PageHeader title={copy.heading} description="Your models. Your knowledge. Your compute." />
-      <section className="flex flex-col items-center gap-3 rounded-lg border bg-card px-6 py-12 text-center">
-        <Icon className="size-6 text-muted-foreground" />
-        <Badge variant="outline">Not set up on this server</Badge>
-        <h2 className="text-lg font-semibold">{copy.title}</h2>
-        <p className="max-w-md text-sm text-muted-foreground">{copy.text}</p>
-        <Button asChild>
-          <Link href="/">
-            <MessageSquare /> Back to chat
-          </Link>
-        </Button>
-      </section>
+      <PageHeader title="Library">
+        <LibraryTabs />
+      </PageHeader>
+      <FeatureOff {...OFF[page]} />
     </Page>
   );
 }

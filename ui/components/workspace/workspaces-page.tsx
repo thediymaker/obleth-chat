@@ -10,7 +10,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, isFeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { useChatStore } from "@/components/chat/chat-provider";
 import { Pill, Quota, useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
@@ -56,7 +56,7 @@ export function WorkspacesPage() {
   const store = useChatStore();
   const confirm = useConfirm();
   const start = useStartBuilding();
-  if (caps.data && !on)
+  if ((caps.data && !on) || isFeatureOff(list.error))
     return (
       <Page>
         <PageHeader title="Compute">
@@ -95,18 +95,17 @@ export function WorkspacesPage() {
       {!items ? (
         list.isPending && <Loading label="Loading your workspaces…" />
       ) : !items.length ? (
-        <section className="flex flex-col items-center gap-3 rounded-lg border bg-card px-6 py-12 text-center">
-          <span className="grid size-10 place-items-center rounded-full border bg-background">
-            <Terminal className="size-5 text-muted-foreground" />
-          </span>
-          <h2 className="text-lg font-semibold">Describe it, then watch it run.</h2>
-          <p className="max-w-md text-sm text-muted-foreground">
-            Turn on Workspace in the composer and ask for something to build. The assistant writes the files, runs the commands and starts the app, and the live preview opens beside the chat.
-          </p>
-          <Button onClick={start}>
-            <Play /> Start building
-          </Button>
-        </section>
+        <EmptyState
+          variant="card"
+          icon={Terminal}
+          title="Describe it, then watch it run"
+          text="Turn on Workspace in the composer and ask for something to build. The assistant writes the files, runs the commands and starts the app, and the live preview opens beside the chat."
+          action={
+            <Button onClick={start}>
+              <Play /> Start building
+            </Button>
+          }
+        />
       ) : (
         <div className="grid gap-4">
           <section className="flex flex-wrap items-center gap-4 rounded-lg border bg-card p-4">

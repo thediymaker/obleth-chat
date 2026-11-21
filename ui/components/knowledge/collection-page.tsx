@@ -101,9 +101,7 @@ function TrySearch({ detail }: { detail: CollectionDetail }) {
       </form>
       {error && <p className="text-sm text-destructive-foreground">{error}</p>}
       {searching ? (
-        <p role="status" className="text-sm text-muted-foreground">
-          Searching…
-        </p>
+        <Loading compact label="Searching…" />
       ) : results && !results.length ? (
         <p className="text-sm text-muted-foreground">No passages matched. A chat would answer without this collection.</p>
       ) : results ? (
@@ -277,11 +275,7 @@ function Documents({ detail, maxFileBytes, onMore }: { detail: CollectionDetail;
           />
         </label>
       )}
-      {uploading.length > 0 && (
-        <p role="status" className="text-sm text-muted-foreground">
-          Uploading {uploading.join(", ")}…
-        </p>
-      )}
+      {uploading.length > 0 && <Loading compact label={`Uploading ${uploading.join(", ")}…`} />}
       {docs.length ? (
         <div className="overflow-hidden rounded-lg border bg-card">
           <Table>

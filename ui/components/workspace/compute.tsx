@@ -4,7 +4,7 @@
 // feature, Clusters with clusters) and what a page shows when its feature is off.
 
 import { Cpu, Server, Terminal } from "lucide-react";
-import { EmptyState } from "@/components/app-shell/page";
+import { FeatureOff } from "@/components/app-shell/page";
 import { SectionTabs, type SectionTab } from "@/components/app-shell/section-tabs";
 import { useCapabilities } from "@/lib/queries";
 
@@ -23,12 +23,12 @@ export function ComputeTabs() {
 }
 
 const OFF = {
-  workspaces: { icon: Terminal, title: "Workspaces are not enabled.", text: "Private Linux workspaces with a live preview appear here once Kubernetes is configured for this server." },
-  clusters: { icon: Server, title: "Clusters are not enabled.", text: "Slurm and Kubernetes clusters appear here once connections are configured for this server." },
-  devices: { icon: Cpu, title: "Devices are not enabled.", text: "Boards plugged into your computer appear here once connections are configured for this server." },
+  workspaces: { icon: Terminal, what: "Workspaces" },
+  clusters: { icon: Server, what: "Clusters" },
+  devices: { icon: Cpu, what: "Devices" },
 };
 
 export function ComputeOff({ page }: { page: keyof typeof OFF }) {
-  const { icon, title, text } = OFF[page];
-  return <EmptyState icon={icon} title={title} text={text} />;
+  const { icon, what } = OFF[page];
+  return <FeatureOff icon={icon} what={what} plural />;
 }

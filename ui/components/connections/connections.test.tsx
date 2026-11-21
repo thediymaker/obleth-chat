@@ -2,6 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
+import { ApiError } from "@/lib/api";
 import { ToolsButton, applyToolsDraft, resetToolsDraft, startAutoDraft } from "./chat-tools";
 import { addedMessage, connectionBody, type Connection } from "./connections";
 import { McpServersPage } from "./mcp-page";
@@ -80,6 +81,13 @@ test("MCP servers lists yours and shared ones, and turns one off", async () => {
   expect(await screen.findByRole("button", { name: "Use Research tools in my chats" })).toBeInTheDocument();
   await userEvent.click(screen.getAllByRole("button", { name: "2 tools" })[0]!);
   expect(screen.getByText("Asks first")).toBeInTheDocument();
+});
+
+test("the page says MCP servers are off when the server answers feature_off", async () => {
+  mockApi((path) => (path === "/api/connections" ? new ApiError("Connections are not configured", 503, "feature_off") : {}), { connections: true });
+  renderPage(<McpServersPage />);
+  expect(await screen.findByRole("heading", { name: "MCP servers are turned off on this server" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
 });
 
 test("removing a server is confirmed and says what is deleted", async () => {

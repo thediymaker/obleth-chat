@@ -10,7 +10,7 @@ import { KeyRound, Plus } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, FeatureOff, isFeatureOff, Loading } from "@/components/app-shell/page";
 import { FormActions, FormDialog, FormError, Note, TextField, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { SectionHeading } from "@/components/settings/settings-frame";
 import { Button } from "@/components/ui/button";
@@ -89,11 +89,11 @@ export function SecretsPage() {
         await queries.invalidateQueries({ queryKey: secretsKey });
       },
     });
-  if (capabilities.data && !enabled)
+  if ((capabilities.data && !enabled) || isFeatureOff(error))
     return (
       <div>
         <SectionHeading title="Secrets" />
-        <EmptyState icon={KeyRound} title="Not set up on this server" text="Secrets go with connections, which an administrator turns on where Chat runs." />
+        <FeatureOff icon={KeyRound} what="Secrets" plural />
       </div>
     );
   return (
@@ -113,7 +113,7 @@ export function SecretsPage() {
       ) : isLoading ? (
         <Loading />
       ) : !data?.length ? (
-        <EmptyState icon={KeyRound} title="No secrets yet." text="Add one here, or from a device's console sign-in under Compute › Devices." action={<Button onClick={() => setDialog({ secret: null })}>Add secret</Button>} />
+        <EmptyState icon={KeyRound} title="No secrets yet" text="Add one here, or from a device's console sign-in under Compute › Devices." action={<Button onClick={() => setDialog({ secret: null })}>Add secret</Button>} />
       ) : (
         <ul className="grid gap-2">
           {data.map((s) => (

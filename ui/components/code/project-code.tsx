@@ -12,7 +12,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { memo, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ErrorBox, Eyebrow } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, Eyebrow, Loading } from "@/components/app-shell/page";
 import { type SectionTab, SectionTabs } from "@/components/app-shell/section-tabs";
 import { Dropdown, Pill, Quota, useConfirm } from "@/components/manage/kit";
 import { useNewChatInProject, useProjectFrame } from "@/components/projects/project-frame";
@@ -669,28 +669,27 @@ export function ProjectCode({ projectId }: { projectId: string }) {
   );
 
   let content: React.ReactNode;
-  if (!o) content = overview.error ? null : <p role="status" className="text-sm text-muted-foreground">Loading the code…</p>;
+  if (!o) content = overview.error ? null : <Loading label="Loading the code…" />;
   else if (!o.main)
     content = (
-      <section className="flex flex-col items-center gap-3 rounded-lg border bg-card px-6 py-12 text-center">
-        <span className="grid size-10 place-items-center rounded-full border bg-background">
-          <GitBranch className="size-5 text-muted-foreground" />
-        </span>
-        <h2 className="text-lg font-semibold">No code yet</h2>
-        <p className="max-w-lg text-sm text-muted-foreground">
-          Each chat in this project can build in its own workspace. When someone presses Sync in a chat’s Git tab, its code lands here and the other chats bring it in with their next Sync. Every change remembers the chat that made it.
-        </p>
-        <div className="flex flex-wrap justify-center gap-2">
-          <Button size="sm" onClick={() => newChat(projectId)}>
-            <Plus /> New chat in project
-          </Button>
-          {p.mine && (
-            <Button size="sm" variant="outline" onClick={() => setImporting(true)}>
-              <GitBranch /> Start from a repository
+      <EmptyState
+        variant="card"
+        icon={GitBranch}
+        title="No code yet"
+        text="Each chat in this project can build in its own workspace. When someone presses Sync in a chat’s Git tab, its code lands here and the other chats bring it in with their next Sync. Every change remembers the chat that made it."
+        action={
+          <>
+            <Button size="sm" onClick={() => newChat(projectId)}>
+              <Plus /> New chat in project
             </Button>
-          )}
-        </div>
-      </section>
+            {p.mine && (
+              <Button size="sm" variant="outline" onClick={() => setImporting(true)}>
+                <GitBranch /> Start from a repository
+              </Button>
+            )}
+          </>
+        }
+      />
     );
   else if (route.view === "history") content = <History projectId={projectId} sha={route.sha} log={log.data?.commits} overview={o} onUndo={undo} />;
   else if (route.view === "files") content = <Files projectId={projectId} path={route.path} />;

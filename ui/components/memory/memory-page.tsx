@@ -10,7 +10,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, FeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
 import { messageOf } from "@/components/projects/form-field";
 import { Button } from "@/components/ui/button";
@@ -109,13 +109,11 @@ export function MemoryPage() {
         }
       />
       {!data.available ? (
-        <section className="mb-4 flex flex-col items-center gap-3 rounded-lg border bg-card px-6 py-12 text-center">
-          <Brain className="size-6 text-muted-foreground" />
-          <h2 className="text-lg font-semibold">Memory is not turned on for this server.</h2>
-          <p className="max-w-md text-sm text-muted-foreground">
-            An administrator can turn it on in Administration › System. {data.memories.length ? "Your memories from before are below; you can still delete them." : ""}
-          </p>
-        </section>
+        <div className="mb-4">
+          <FeatureOff icon={Brain} what="Memory">
+            {data.memories.length > 0 && <p className="max-w-lg text-sm text-muted-foreground">Your memories from before are below; you can still delete them.</p>}
+          </FeatureOff>
+        </div>
       ) : (
         <div className="mb-4 grid gap-3 rounded-lg border bg-card p-4 sm:grid-cols-2">
           <Choice
@@ -135,69 +133,67 @@ export function MemoryPage() {
           {paused && <p className="text-sm text-amber sm:col-span-2">Memory is paused. Chat neither uses nor learns memories until you turn one of these on.</p>}
         </div>
       )}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="relative min-w-52 flex-1 sm:max-w-80">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find a memory or topic" aria-label="Find a memory or topic" className="pl-8" />
-        </div>
-        <div role="group" aria-label="View" className="flex rounded-md border p-0.5">
-          {(
-            [
-              ["graph", "Graph", Network],
-              ["list", "List", List],
-            ] as const
-          ).map(([id, label, Icon]) => (
-            <button
-              key={id}
-              type="button"
-              aria-pressed={view === id}
-              onClick={() => setView(id)}
-              className={cn("flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-sm text-muted-foreground", view === id && "bg-accent text-foreground")}
-            >
-              <Icon className="size-3.5" /> {label}
-            </button>
-          ))}
-        </div>
-        <span className="ml-auto text-sm text-muted-foreground">
-          {data.memories.length} {data.memories.length === 1 ? "memory" : "memories"} · {data.topics.length} {data.topics.length === 1 ? "topic" : "topics"}
-          {data.memories.length >= data.max && <span className="text-amber"> · full</span>}
-        </span>
-      </div>
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="min-w-0">
-          {!data.memories.length ? (
-            <EmptyState
-              icon={Sparkles}
-              title="Nothing remembered yet"
-              text={
-                data.available
-                  ? "As you chat, Chat will remember your role, your projects, the tools you use and how you like answers, and draw them here. You can also add a memory yourself."
-                  : "Chat has no memories of you."
-              }
-              action={
-                data.available && (
-                  <Button variant="outline" onClick={() => setAdding(true)}>
-                    <Plus /> Add memory
-                  </Button>
-                )
-              }
-            />
-          ) : view === "graph" ? (
-            <MemoryGraph className="h-[min(640px,70vh)]" memories={data.memories} topics={data.topics} selected={selected} onSelect={select} query={query} initials={initials(name) || "You"} />
-          ) : (
-            <MemoryList data={data} query={query} selected={selected} onSelect={select} />
-          )}
-        </div>
-        <aside className="grid min-w-0 gap-4 lg:sticky lg:top-4">
-          {selected?.type === "memory" && data.memories.some((m) => m.id === selected.id) ? (
-            <MemoryDetail key={selected.id} memory={data.memories.find((m) => m.id === selected.id)!} data={data} onClose={() => select(null)} onSelect={select} />
-          ) : selected?.type === "topic" && data.topics.some((t) => t.id === selected.id) ? (
-            <TopicDetail key={selected.id} topic={data.topics.find((t) => t.id === selected.id)!} data={data} onClose={() => select(null)} onSelect={select} confirm={confirm.ask} />
-          ) : (
-            <Recent data={data} onSelect={select} />
-          )}
-        </aside>
-      </div>
+      {(data.available || data.memories.length > 0) && (
+        <>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="relative min-w-52 flex-1 sm:max-w-80">
+              <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find a memory or topic" aria-label="Find a memory or topic" className="pl-8" />
+            </div>
+            <div role="group" aria-label="View" className="flex rounded-md border p-0.5">
+              {(
+                [
+                  ["graph", "Graph", Network],
+                  ["list", "List", List],
+                ] as const
+              ).map(([id, label, Icon]) => (
+                <button
+                  key={id}
+                  type="button"
+                  aria-pressed={view === id}
+                  onClick={() => setView(id)}
+                  className={cn("flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-sm text-muted-foreground", view === id && "bg-accent text-foreground")}
+                >
+                  <Icon className="size-3.5" /> {label}
+                </button>
+              ))}
+            </div>
+            <span className="ml-auto text-sm text-muted-foreground">
+              {data.memories.length} {data.memories.length === 1 ? "memory" : "memories"} · {data.topics.length} {data.topics.length === 1 ? "topic" : "topics"}
+              {data.memories.length >= data.max && <span className="text-amber"> · full</span>}
+            </span>
+          </div>
+          <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="min-w-0">
+              {!data.memories.length ? (
+                <EmptyState
+                  icon={Sparkles}
+                  title="Nothing remembered yet"
+                  text="As you chat, Chat will remember your role, your projects, the tools you use and how you like answers, and draw them here. You can also add a memory yourself."
+                  action={
+                    <Button variant="outline" onClick={() => setAdding(true)}>
+                      <Plus /> Add memory
+                    </Button>
+                  }
+                />
+              ) : view === "graph" ? (
+                <MemoryGraph className="h-[min(640px,70vh)]" memories={data.memories} topics={data.topics} selected={selected} onSelect={select} query={query} initials={initials(name) || "You"} />
+              ) : (
+                <MemoryList data={data} query={query} selected={selected} onSelect={select} />
+              )}
+            </div>
+            <aside className="grid min-w-0 gap-4 lg:sticky lg:top-4">
+              {selected?.type === "memory" && data.memories.some((m) => m.id === selected.id) ? (
+                <MemoryDetail key={selected.id} memory={data.memories.find((m) => m.id === selected.id)!} data={data} onClose={() => select(null)} onSelect={select} />
+              ) : selected?.type === "topic" && data.topics.some((t) => t.id === selected.id) ? (
+                <TopicDetail key={selected.id} topic={data.topics.find((t) => t.id === selected.id)!} data={data} onClose={() => select(null)} onSelect={select} confirm={confirm.ask} />
+              ) : (
+                <Recent data={data} onSelect={select} />
+              )}
+            </aside>
+          </div>
+        </>
+      )}
       {adding && <AddMemory data={data} onClose={() => setAdding(false)} onAdded={(id) => select({ type: "memory", id })} />}
     </Page>
   );

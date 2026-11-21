@@ -6,7 +6,7 @@
 import { Link2, Plus } from "lucide-react";
 import Link from "next/link";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState, ErrorBox } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, FeatureOff, isFeatureOff, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { Note, Section } from "@/components/manage/kit";
 import { SectionHeading } from "@/components/settings/settings-frame";
@@ -26,11 +26,11 @@ export function McpServersPage() {
   const servers = (data ?? []).filter((c) => kindOf(c) === "mcp");
   const own = servers.filter((c) => !c.shared);
   const shared = servers.filter((c) => c.shared);
-  if (capabilities.data && !enabled)
+  if ((capabilities.data && !enabled) || isFeatureOff(error))
     return (
       <div>
         <SectionHeading title="MCP servers" />
-        <EmptyState icon={Link2} title="Not set up on this server" text="MCP servers give the model extra tools in chats. An administrator turns connections on where Chat runs." />
+        <FeatureOff icon={Link2} what="MCP servers" plural />
       </div>
     );
   return (
@@ -60,11 +60,7 @@ export function McpServersPage() {
         }
       />
       <ErrorBox error={error} onRetry={() => refetch()} />
-      {isLoading && (
-        <p role="status" className="mb-4 text-sm text-muted-foreground">
-          Loading…
-        </p>
-      )}
+      {isLoading && <Loading />}
       <div className="grid gap-6">
         <Section title="Yours">
           {own.length ? (

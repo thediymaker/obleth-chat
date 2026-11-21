@@ -111,6 +111,6 @@ describe("Compute › Clusters", () => {
   it("says when connections are off", async () => {
     mockApi(() => ({}), {});
     renderPage(<ClustersPage />);
-    await waitFor(() => expect(screen.getByText("Clusters are not enabled.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Clusters are turned off on this server")).toBeInTheDocument());
   });
 });

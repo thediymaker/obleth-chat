@@ -8,7 +8,7 @@ import { useState } from "react";
 import { Archive, File, FileText, Image as ImageIcon, Monitor, Sheet } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { EmptyState } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { FormActions, FormDialog, Note, useConfirm } from "@/components/manage/kit";
 import { api } from "@/lib/api";
@@ -75,11 +75,9 @@ export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChang
         workspace when it has one.
       </Note>
       {isLoading ? (
-        <p role="status" className="text-sm text-muted-foreground">
-          Loading files…
-        </p>
+        <Loading compact label="Loading files…" />
       ) : error ? (
-        <Note role="alert">{error.message}</Note>
+        <ErrorBox compact error={error} />
       ) : files.length ? (
         <ul className="grid max-h-[50dvh] gap-1 overflow-y-auto">
           {files.map((a) => {

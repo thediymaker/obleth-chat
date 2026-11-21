@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Lock, Plus, RefreshCw, Shield } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import { ErrorBox } from "@/components/app-shell/page";
+import { ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { CheckField, CopyField, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextField, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { api, ApiError } from "@/lib/api";
@@ -127,11 +127,9 @@ export function SecurityCard({ sessions, loading, error, onRefresh }: { sessions
           <RefreshCw /> Refresh
         </Button>
       </div>
-      <ErrorBox error={error} onRetry={onRefresh} />
+      <ErrorBox compact error={error} onRetry={onRefresh} />
       {loading ? (
-        <p role="status" className="text-sm text-muted-foreground">
-          Loading sessions…
-        </p>
+        <Loading compact label="Loading sessions…" />
       ) : sessions.length ? (
         <>
           <ul className="grid gap-2">

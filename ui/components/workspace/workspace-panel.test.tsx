@@ -89,7 +89,7 @@ describe("the workspace panel", () => {
   it("offers to wake an asleep workspace", async () => {
     const calls = mockApi((_path, options) => ({ workspace: { status: options.method === "POST" ? "starting" : "stopped" } }), { workspaces: true, previews: true });
     renderPage(<WorkspacePanel conversationId="c1" tab="preview" />);
-    expect(await screen.findByText("The workspace is asleep.")).toBeInTheDocument();
+    expect(await screen.findByText("The workspace is asleep")).toBeInTheDocument();
     expect(screen.getByText("Asleep")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Wake it up" }));
     await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
@@ -99,7 +99,7 @@ describe("the workspace panel", () => {
   it("says what went wrong when it could not start", async () => {
     mockApi(() => ({ workspace: { status: "error", errorMessage: "Quota exceeded" } }), { workspaces: true, previews: true });
     renderPage(<WorkspacePanel conversationId="c1" tab="preview" />);
-    expect(await screen.findByText("The workspace could not start.")).toBeInTheDocument();
+    expect(await screen.findByText("The workspace could not start")).toBeInTheDocument();
     expect(screen.getByText("Quota exceeded")).toBeInTheDocument();
   });
 });
@@ -144,6 +144,6 @@ describe("Compute › Workspaces", () => {
   it("says when workspaces are off", async () => {
     mockApi(() => ({}), {});
     renderPage(<WorkspacesPage />);
-    expect(await screen.findByText("Workspaces are not enabled.")).toBeInTheDocument();
+    expect(await screen.findByText("Workspaces are turned off on this server")).toBeInTheDocument();
   });
 });

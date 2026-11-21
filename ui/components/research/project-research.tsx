@@ -10,7 +10,7 @@ import { BarChart3, FlaskConical, Square, Terminal } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { toast } from "sonner";
-import { ErrorBox, Eyebrow } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, Eyebrow, Loading } from "@/components/app-shell/page";
 import { useStartInProject } from "@/components/code/start-chat";
 import { Pill } from "@/components/manage/kit";
 import { useProjectFrame } from "@/components/projects/project-frame";
@@ -36,25 +36,27 @@ function Start({ projectId, mine }: { projectId: string; mine: boolean }) {
   const startIn = useStartInProject();
   const can = mine && workspaces;
   return (
-    <section className={cn(card, "grid gap-6 p-6")}>
-      <div className="flex flex-col items-center gap-3 text-center">
-        <span className="grid size-10 place-items-center rounded-full border bg-background">
-          <FlaskConical className="size-5 text-muted-foreground" />
-        </span>
-        <h2 className="text-lg font-semibold">No research yet</h2>
-        <p className="max-w-lg text-sm text-muted-foreground">Research measures ideas against each other: every experiment is a branch of your code, run with the same command, and the best result carries into the next round.</p>
-        {can ? (
-          <>
-            <Button onClick={() => startIn(projectId, { auto: true, prompt: "Let’s set up research in this project. The goal: " })}>
-              <FlaskConical /> Start research in a chat
-            </Button>
-            <p className="max-w-lg text-sm text-muted-foreground">Already started one? It shows here once the chat has agreed the metric and run command with you and set up the baseline. Until then, follow it in the chat.</p>
-          </>
-        ) : (
-          <p className="text-sm text-muted-foreground">{mine ? "Research runs in a workspace, and workspaces are not enabled for your account." : "Only the project’s owner can start research in it."}</p>
-        )}
-      </div>
-      <ol className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <EmptyState
+      variant="card"
+      icon={FlaskConical}
+      title="No research yet"
+      text="Research measures ideas against each other: every experiment is a branch of your code, run with the same command, and the best result carries into the next round."
+      action={
+        can && (
+          <Button onClick={() => startIn(projectId, { auto: true, prompt: "Let’s set up research in this project. The goal: " })}>
+            <FlaskConical /> Start research in a chat
+          </Button>
+        )
+      }
+    >
+      <p className="max-w-lg text-sm text-muted-foreground">
+        {can
+          ? "Already started one? It shows here once the chat has agreed the metric and run command with you and set up the baseline. Until then, follow it in the chat."
+          : mine
+            ? "Research runs in a workspace, and workspaces are not enabled for your account."
+            : "Only the project’s owner can start research in it."}
+      </p>
+      <ol className="mt-3 grid w-full gap-3 text-left sm:grid-cols-2 lg:grid-cols-4">
         {STEPS.map(([title, text], i) => (
           <li key={title} className="grid content-start gap-1 rounded-md border bg-background p-3">
             <span className="grid size-6 place-items-center rounded-full bg-secondary text-xs font-semibold">{i + 1}</span>
@@ -63,7 +65,7 @@ function Start({ projectId, mine }: { projectId: string; mine: boolean }) {
           </li>
         ))}
       </ol>
-    </section>
+    </EmptyState>
   );
 }
 
@@ -372,7 +374,7 @@ export function ProjectResearch({ projectId }: { projectId: string }) {
   });
   const [selected, setSelected] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
-  if (q.isPending) return <p role="status" className="text-sm text-muted-foreground">Loading research…</p>;
+  if (q.isPending) return <Loading label="Loading research…" />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const data = q.data;
   if (!data) return <Start projectId={projectId} mine={!!detail.project.mine} />;

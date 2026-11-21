@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useChat, useChatStore } from "@/components/chat/chat-provider";
 import { Button } from "@/components/ui/button";
+import { PaneNote } from "@/components/workspace/pane-note";
 import { useBranding } from "@/lib/branding-context";
 import { cn } from "@/lib/utils";
 import { liveUrl } from "./bridge";
@@ -24,6 +25,9 @@ interface Live {
   closed: boolean;
   frames: number;
 }
+
+// The notes over the live view while it is not showing a page.
+const OVERLAY = "absolute inset-0 h-auto";
 
 export function BrowserPanel({ conversationId: id }: { conversationId: string }) {
   const store = useChat();
@@ -208,47 +212,51 @@ export function BrowserPanel({ conversationId: id }: { conversationId: string })
   const overlay =
     kind &&
     {
-      connecting: (
-        <>
-          <Orbit className="size-5 animate-spin text-muted-foreground [animation-duration:2.5s]" />
-          <strong className="font-medium">Connecting to the browser…</strong>
-        </>
-      ),
+      connecting: <PaneNote icon={Orbit} spin status title="Connecting to the browser…" className={OVERLAY} />,
       starting: (
-        <>
-          <Orbit className="size-5 animate-spin text-muted-foreground [animation-duration:2.5s]" />
-          <strong className="font-medium">Starting your browser…</strong>
-          <p className="text-sm text-muted-foreground">It takes a few seconds the first time.</p>
-        </>
+        <PaneNote icon={Orbit} spin status title="Starting your browser…" className={OVERLAY}>
+          It takes a few seconds the first time.
+        </PaneNote>
       ),
       closed: (
-        <>
-          <Globe className="size-5 text-muted-foreground" />
-          <strong className="font-medium">The live view closed.</strong>
-          <Button size="sm" variant="outline" onClick={wake}>
-            Reconnect
-          </Button>
-        </>
+        <PaneNote
+          icon={Globe}
+          title="The live view closed"
+          className={OVERLAY}
+          action={
+            <Button size="sm" variant="outline" onClick={wake}>
+              Reconnect
+            </Button>
+          }
+        />
       ),
       error: (
-        <>
-          <Info className="size-5 text-muted-foreground" />
-          <strong className="font-medium">The browser could not start.</strong>
-          <p className="text-sm text-muted-foreground">{c.errorMessage || "Try again in a moment."}</p>
-          <Button size="sm" variant="outline" onClick={wake}>
-            Try again
-          </Button>
-        </>
+        <PaneNote
+          icon={Info}
+          title="The browser could not start"
+          className={OVERLAY}
+          action={
+            <Button size="sm" variant="outline" onClick={wake}>
+              Try again
+            </Button>
+          }
+        >
+          {c.errorMessage || "Try again in a moment."}
+        </PaneNote>
       ),
       asleep: (
-        <>
-          <Globe className="size-5 text-muted-foreground" />
-          <strong className="font-medium">The browser is asleep.</strong>
-          <p className="text-sm text-muted-foreground">It wakes when {name} browses, or open it to look around yourself.</p>
-          <Button size="sm" variant="outline" onClick={wake}>
-            Open the browser
-          </Button>
-        </>
+        <PaneNote
+          icon={Globe}
+          title="The browser is asleep"
+          className={OVERLAY}
+          action={
+            <Button size="sm" variant="outline" onClick={wake}>
+              Open the browser
+            </Button>
+          }
+        >
+          It wakes when {name} browses, or open it to look around yourself.
+        </PaneNote>
       ),
     }[kind];
 
@@ -365,7 +373,7 @@ export function BrowserPanel({ conversationId: id }: { conversationId: string })
             if (text) send({ t: "text", text });
           }}
         />
-        {overlay && <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-6 text-center">{overlay}</div>}
+        {overlay}
       </div>
       <p className="truncate border-t px-3 py-1.5 text-xs text-faint">Chrome · yours · public internet only{c.title ? ` · ${c.title}` : ""}</p>
     </div>

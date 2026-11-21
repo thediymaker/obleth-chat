@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
+import { ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { DetailRow, Field, Dropdown, Note, Pill, Section, useConfirm, DangerButton } from "@/components/manage/kit";
 import { api } from "@/lib/api";
@@ -50,7 +51,7 @@ export function BrowserCard() {
   if (!d)
     return (
       <Section title="Browser">
-        <Note>{error ? error.message : "Loading…"}</Note>
+        {error ? <ErrorBox compact error={error} /> : <Loading compact />}
       </Section>
     );
   return (

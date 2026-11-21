@@ -87,7 +87,7 @@ function EmptyPreview({ id, space, bridge }: { id: string; space: Space; bridge:
     );
   if (w.status === "error")
     return (
-      <PaneNote icon={Info} title="The workspace could not start.">
+      <PaneNote icon={Info} title="The workspace could not start">
         {w.errorMessage || "Try again in a moment."}
       </PaneNote>
     );
@@ -95,7 +95,7 @@ function EmptyPreview({ id, space, bridge }: { id: string; space: Space; bridge:
     return (
       <PaneNote
         icon={Clock}
-        title="The workspace is asleep."
+        title="The workspace is asleep"
         action={
           <Button size="sm" variant="outline" disabled={space.waking} onClick={() => bridge.wake(id)}>
             <RefreshCw /> Wake it up
@@ -106,7 +106,7 @@ function EmptyPreview({ id, space, bridge }: { id: string; space: Space; bridge:
       </PaneNote>
     );
   return (
-    <PaneNote icon={TerminalIcon} title="Nothing to preview yet.">
+    <PaneNote icon={TerminalIcon} title="Nothing to preview yet">
       Ask for something to build, like “Build a site for my lab&apos;s reading group.” The running app appears here.
     </PaneNote>
   );
@@ -146,7 +146,7 @@ function Preview({ id, space, bridge, shown }: { id: string; space: Space; bridg
           </Button>
         </>
       ) : !previews ? (
-        <PaneNote icon={Info} title="Previews are not set up on this server.">
+        <PaneNote icon={Info} title="Previews are turned off on this server">
           Your workspace runs, but its apps can&apos;t be opened here. Use the Files and Terminal tabs, or download the project.
         </PaneNote>
       ) : (
@@ -337,7 +337,7 @@ export function WorkspacePanel({ conversationId, tab }: { conversationId: string
   useEffect(() => {
     if (on && !space.loaded) void bridge.load(conversationId);
   }, [on, space.loaded, bridge, conversationId]);
-  if (!space.workspace) return space.loaded || (caps && !caps.features?.workspaces) ? <PaneNote icon={TerminalIcon} title="This conversation has no workspace." /> : <PaneLoading />;
+  if (!space.workspace) return space.loaded || (caps && !caps.features?.workspaces) ? <PaneNote icon={TerminalIcon} title="This conversation has no workspace" /> : <PaneLoading />;
   return (
     <div className="flex h-full min-h-0 flex-col" data-conversation={conversationId}>
       <Bar id={conversationId} space={space} tab={tab} bridge={bridge} />

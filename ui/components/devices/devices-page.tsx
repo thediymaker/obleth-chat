@@ -11,7 +11,7 @@ import { Cpu, KeyRound, Plus, Unplug, Usb } from "lucide-react";
 import { useEffect, useReducer, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, Eyebrow, isFeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { useChatStore } from "@/components/chat/chat-provider";
 import { connectionsKey, isDevice, useConnections, type Connection } from "@/components/connections/connections";
 import { CheckField, FormActions, FormDialog, FormError, Note, Pill, SelectField, TextField, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
@@ -334,7 +334,7 @@ export function DevicesPage() {
         await queries.invalidateQueries({ queryKey: connectionsKey });
       },
     });
-  if (capabilities.data && !on)
+  if ((capabilities.data && !on) || isFeatureOff(error))
     return (
       <Page>
         <ComputeTabs />
@@ -360,7 +360,7 @@ export function DevicesPage() {
       ) : isPending ? (
         <Loading />
       ) : list.length === 0 ? (
-        <EmptyState icon={Cpu} title="No devices yet." text="Plug a board in over USB and add it. Espressif chips can be identified and flashed; any serial device can be read and sent to." action={<Button onClick={add} disabled={!devices.supported()}>Add a device</Button>} />
+        <EmptyState icon={Cpu} title="No devices yet" text="Plug a board in over USB and add it. Espressif chips can be identified and flashed; any serial device can be read and sent to." action={<Button onClick={add} disabled={!devices.supported()}>Add a device</Button>} />
       ) : (
         <div className="grid gap-3">
           {list.map((c) => (

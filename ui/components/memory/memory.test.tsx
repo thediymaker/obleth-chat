@@ -73,9 +73,13 @@ test("the list groups memories under their first topic and finds by words", asyn
   expect(within(list).queryByText("You train flood models with PyTorch")).toBeNull();
 });
 
-test("a server with memory off says so", async () => {
+test("a server with memory off and nothing remembered shows only the off state", async () => {
   page({ available: false, memories: [], topics: [] });
-  expect(await screen.findByText("Memory is not turned on for this server.")).toBeInTheDocument();
+  expect(await screen.findByText("Memory is turned off on this server")).toBeInTheDocument();
+  expect(screen.getByText("Ask an administrator to turn it on.")).toBeInTheDocument();
+  expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(1);
+  expect(screen.queryByText("Nothing remembered yet")).toBeNull();
+  expect(screen.queryByLabelText("Find a memory or topic")).toBeNull();
   expect(screen.queryByRole("button", { name: "Add memory" })).toBeNull();
 });
 

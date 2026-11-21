@@ -9,7 +9,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState } from "@/components/app-shell/page";
+import { EmptyState, Loading } from "@/components/app-shell/page";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { CheckField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, displayName, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
@@ -148,7 +148,7 @@ export function PersonalSettings() {
                 </FormActions>
               </form>
             ) : (
-              <Note role="status">Loading…</Note>
+              <Loading compact />
             )}
           </Section>
           {workspaces && preferenceData && <AgentCard data={preferenceData} />}

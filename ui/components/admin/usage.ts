@@ -4,7 +4,7 @@
 export const USAGE_PERIODS = [
   [1, "Today"],
   [7, "7 days"],
-  [PERIOD_DAYS, "30 days"],
+  [PERIOD_DAYS, `${PERIOD_DAYS} days`],
   [90, "90 days"],
 ] as const;
 import { PERIOD_DAYS } from "@/lib/format";

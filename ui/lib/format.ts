@@ -6,8 +6,9 @@
 /** What a missing value shows. */
 export const NONE = "—";
 
-/** The period pickers' default: the last 30 days. */
-export const PERIOD_DAYS = 30;
+/** The period pickers' default: the last 28 days, four whole weeks, which the API's
+ * usage and workspace periods (1, 7, 28 and 90 days) take. */
+export const PERIOD_DAYS = 28;
 
 /** "1,234". */
 export const num = (n: number | null | undefined) => Number(n || 0).toLocaleString();

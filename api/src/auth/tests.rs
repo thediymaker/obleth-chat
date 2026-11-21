@@ -4529,9 +4529,11 @@ async fn auto_mode_stops_when_its_owner_has_no_grant_left() {
     .await
     .unwrap();
 
-    // The provider ends the grant overnight.
+    // The provider ends the grant overnight. The watchdog runs a minute or more
+    // after the turn, when the model list it fetched is no longer reused.
     *issuer.refresh_mode.lock().await = "invalid_grant";
     expire_soon(&db.pool, "").await;
+    state.gateway.as_ref().unwrap().forget_models();
     crate::autopilot::tick(&state).await.unwrap();
     let nudges: i32 = sqlx::query_scalar("SELECT auto_nudges FROM conversations WHERE id=$1::uuid")
         .bind(&id)

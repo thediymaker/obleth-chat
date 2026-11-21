@@ -179,7 +179,24 @@ pub struct ConversationSummary {
     pub archived: bool,
     pub pinned: bool,
     pub parent_id: Option<Uuid>,
+    /// A reply is being written, here or in another window.
+    pub working: bool,
+    /// That reply has stopped to ask for a yes or no.
+    pub waiting: bool,
+    /// The tool it asks to run, when it waits.
+    pub waiting_tool: Option<String>,
 }
+
+/// The columns of a `ConversationSummary`, read `FROM conversations`.
+pub(crate) const SUMMARY: &str =
+    "id,title,model,reasoning_effort,updated_at,settings,archived,pinned,parent_id,
+     (active_generation IS NOT NULL AND generation_expires > clock_timestamp()) AS working,
+     (active_generation IS NOT NULL AND generation_expires > clock_timestamp() AND EXISTS(
+        SELECT 1 FROM tool_approvals a WHERE a.generation_id=conversations.active_generation
+          AND a.decision IS NULL)) AS waiting,
+     (SELECT a.tool_name FROM tool_approvals a WHERE a.generation_id=conversations.active_generation
+        AND a.decision IS NULL AND conversations.generation_expires > clock_timestamp()
+        ORDER BY a.created_at,a.call_id LIMIT 1) AS waiting_tool";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,10 +253,10 @@ impl Store {
     pub async fn list(&self, owner: Uuid) -> Result<Vec<ConversationSummary>, ApiError> {
         let mut tx = self.owner_transaction(owner).await?;
         recover_expired_in(&mut tx, owner).await?;
-        let rows = sqlx::query_as::<_, ConversationSummary>(
-            "SELECT id, title, model, reasoning_effort, updated_at, settings, archived, pinned, parent_id FROM conversations
-             WHERE owner_id = $1 AND NOT temporary ORDER BY updated_at DESC, id",
-        )
+        let rows = sqlx::query_as::<_, ConversationSummary>(&format!(
+            "SELECT {SUMMARY} FROM conversations
+             WHERE owner_id = $1 AND NOT temporary ORDER BY updated_at DESC, id"
+        ))
         .bind(owner)
         .fetch_all(&mut *tx)
         .await?;
@@ -1334,9 +1351,9 @@ async fn read_conversation(
     owner: Uuid,
     id: Uuid,
 ) -> Result<Conversation, ApiError> {
-    let row = sqlx::query_as::<_, ConversationSummary>(
-        "SELECT id, title, model, reasoning_effort, updated_at, settings, archived, pinned, parent_id FROM conversations WHERE id = $1 AND owner_id = $2",
-    )
+    let row = sqlx::query_as::<_, ConversationSummary>(&format!(
+        "SELECT {SUMMARY} FROM conversations WHERE id = $1 AND owner_id = $2"
+    ))
     .bind(id)
     .bind(owner)
     .fetch_optional(&mut **tx)

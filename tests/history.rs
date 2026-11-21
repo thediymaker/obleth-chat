@@ -284,3 +284,63 @@ async fn import_enforces_prompt_length_and_snapshot_settings(pool: PgPool) {
         assert_eq!(selected.model, "fixture");
     }
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_list_says_which_chats_are_working_and_which_wait_for_an_answer(pool: PgPool) {
+    let alice = user(&pool).await;
+    let s = Store::new(pool.clone());
+    let quiet = s.create(alice, "Quiet", "fixture").await.unwrap();
+    let busy = s.create(alice, "Busy", "fixture").await.unwrap();
+    let turn = s
+        .start_turn(alice, busy.id, "Run the sweep", "fixture", "", 0.7, 2048)
+        .await
+        .unwrap();
+    let flags = |id: Uuid| {
+        let s = &s;
+        async move {
+            let page = s.history(alice, HistoryQuery::default()).await.unwrap();
+            let chat = page.conversations.iter().find(|c| c.id == id).unwrap();
+            (chat.working, chat.waiting, chat.waiting_tool.clone())
+        }
+    };
+    let asked = Some("submit_job".to_owned());
+    assert_eq!(flags(quiet.id).await, (false, false, None));
+    assert_eq!(flags(busy.id).await, (true, false, None));
+
+    sqlx::query("INSERT INTO tool_approvals(generation_id,call_id,conversation_id,owner_id,tool_name) VALUES($1,'call-1',$2,$3,'submit_job')")
+        .bind(turn.generation_id)
+        .bind(busy.id)
+        .bind(alice)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(flags(busy.id).await, (true, true, asked));
+    sqlx::query("UPDATE tool_approvals SET decision='allow' WHERE generation_id=$1")
+        .bind(turn.generation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(flags(busy.id).await, (true, false, None));
+
+    // A question left over from a reply that has ended does not count.
+    sqlx::query("UPDATE tool_approvals SET decision=NULL WHERE generation_id=$1")
+        .bind(turn.generation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    s.finish_turn_detailed(
+        alice,
+        busy.id,
+        turn.generation_id,
+        "Done.",
+        "",
+        "completed",
+        None,
+        None,
+        Some("stop"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(flags(busy.id).await, (false, false, None));
+}

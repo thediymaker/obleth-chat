@@ -103,6 +103,19 @@ export const resetToolsDraft = () => setDraft({ off: new Set(), auto: false });
 /** A new chat that should start in Auto mode, such as research from a project. */
 export const startAutoDraft = () => setDraft({ auto: true });
 
+/** Turns one connection on or off for a chat, or for the new chat when it has no id yet. */
+export async function setChatTool(chatId: string | null, connectionId: string, on: boolean, queries?: QueryClient) {
+  if (!chatId) {
+    const off = new Set(draft.off);
+    if (on) off.delete(connectionId);
+    else off.add(connectionId);
+    setDraft({ off });
+    return;
+  }
+  await api.request(chatPath(chatId), { method: "PATCH", body: { connectionId, on } });
+  queries?.setQueryData<{ list: ChatTool[]; auto: boolean }>(chatToolsKey(chatId), (old) => (old ? { ...old, list: old.list.map((c) => (c.id === connectionId ? { ...c, on } : c)) } : old));
+}
+
 /** The dialog that switches each connection, and Auto mode, for this chat. */
 export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | null; open: boolean; onOpenChange: (open: boolean) => void }) {
   const queries = useQueryClient();
@@ -113,16 +126,8 @@ export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | 
   const patch = (fn: (old: { list: ChatTool[]; auto: boolean }) => { list: ChatTool[]; auto: boolean }) =>
     queries.setQueryData<{ list: ChatTool[]; auto: boolean }>(chatToolsKey(chatId), (old) => (old ? fn(old) : old));
   async function switchOne(item: ChatTool) {
-    const on = !item.on;
     try {
-      if (chatId) await api.request(chatPath(chatId), { method: "PATCH", body: { connectionId: item.id, on } });
-      else {
-        const off = new Set(draft.off);
-        if (on) off.delete(item.id);
-        else off.add(item.id);
-        setDraft({ off });
-      }
-      if (chatId) patch((old) => ({ ...old, list: old.list.map((c) => (c.id === item.id ? { ...c, on } : c)) }));
+      await setChatTool(chatId, item.id, !item.on, queries);
     } catch (e) {
       toast((e as Error).message);
     }

@@ -22,10 +22,11 @@ import { type Workspace, diskUsage, downloadUrl, statusLabel, statusTone } from 
 
 export const workspacesKey = ["compute-workspaces"] as const;
 
-export function useWorkspaceList() {
+export function useWorkspaceList(enabled = true) {
   const store = useChatStore();
   return useQuery({
     queryKey: workspacesKey,
+    enabled,
     queryFn: async () => {
       const r = await api.request<{ workspaces?: Workspace[]; diskLimit?: number }>("/api/workspaces");
       store.workspace.setDiskLimit(r.diskLimit);

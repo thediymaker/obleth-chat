@@ -40,7 +40,8 @@ export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () 
   const { data: capabilities } = useCapabilities();
   const { data: chats = [] } = useConversations();
   const { data: projects } = useProjects();
-  // The chat a reply is being written in, marked as alive in the list.
+  // The chat a reply is being written in here is marked as alive at once; the list
+  // says the same of chats at work in other windows, and which one waits for an answer.
   const working = useChatSelect((store) => store.streamChatId);
   const features = capabilities?.features ?? {};
   const section = sectionOf(path);
@@ -130,11 +131,15 @@ export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () 
               <div key={chat.id} className={cn("group my-px flex min-w-0 items-center gap-px rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground", chatId === chat.id && "bg-sidebar-accent text-sidebar-accent-foreground")}>
                 <Link href={`/chat/${encodeURIComponent(chat.id)}`} onClick={onNavigate} title={chat.title} className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-[7px] text-md">
                   <span className="min-w-0 flex-1 truncate">{chat.title}</span>
-                  {working === chat.id && (
-                    <span className="relative inline-flex size-2 shrink-0" role="img" aria-label="Still working">
-                      <span className="signal-pulse absolute inset-0 rounded-full bg-signal" />
-                      <span className="absolute inset-0 rounded-full bg-signal" />
-                    </span>
+                  {chat.waiting ? (
+                    <span className="size-2 shrink-0 rounded-full bg-amber" role="img" aria-label="Needs your say" title="Needs your say" />
+                  ) : (
+                    (working === chat.id || chat.working) && (
+                      <span className="relative inline-flex size-2 shrink-0" role="img" aria-label="Still working" title="Still working">
+                        <span className="signal-pulse absolute inset-0 rounded-full bg-signal" />
+                        <span className="absolute inset-0 rounded-full bg-signal" />
+                      </span>
+                    )
                   )}
                 </Link>
                 <DropdownMenu>

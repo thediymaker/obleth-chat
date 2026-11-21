@@ -345,6 +345,8 @@ export const SHORTCUTS: [string, string][] = [
   ["Chat details", "⌘ / Ctrl ."],
   ["Send a message", "Enter"],
   ["New line", "Shift Enter"],
+  ["Actions on the chat", "/ in an empty message"],
+  ["Point at a file, a job or a tool", "@ in a message"],
 ];
 function ShortcutsDialog({ close }: { close: () => void }) {
   return (

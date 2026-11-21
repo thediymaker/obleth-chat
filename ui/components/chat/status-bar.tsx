@@ -2,11 +2,13 @@
 
 // The line under every signed-in page. In a chat it says what is happening now: a
 // reply at work and for how long (or that it waits for the person), the chat's
-// workspace, the model and how much of its window the chat uses. After that, how
-// many models this account can use, today's requests and tokens against any daily
+// workspace, the model and how much of its window the chat uses. Then the person's
+// jobs on their clusters, when any run or wait. After that, how many models this account can use, today's requests and tokens against any daily
 // limits, the site's name and the keyboard shortcuts.
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useClusterQueues } from "@/components/clusters/status";
 import { clock, effortLabel } from "@/lib/chat/composer";
 import { contextUse } from "@/lib/chat/context";
 import { isLive } from "@/lib/chat/turn";
@@ -43,6 +45,13 @@ export function runText(status: { waiting: boolean; began: number; now: number }
   return Number.isFinite(status.began) ? `Working ${clock(status.now - status.began)}` : "Working";
 }
 
+/** "2 running · 1 waiting" across the person's clusters, or "" when none do. */
+export function jobsText(queues: { running: number; pending: number }[]) {
+  const running = queues.reduce((n, q) => n + q.running, 0),
+    pending = queues.reduce((n, q) => n + q.pending, 0);
+  return [running ? `${running} running` : "", pending ? `${pending} waiting` : ""].filter(Boolean).join(" · ");
+}
+
 const SEGMENT = "flex h-full shrink-0 items-center gap-2 border-r border-sidebar-border px-3.5 whitespace-nowrap";
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -59,6 +68,8 @@ export function StatusBar() {
   const store = useChat();
   const branding = useBranding();
   const { data: usage } = useUsage();
+  const queues = useClusterQueues();
+  const jobs = jobsText(queues);
   const id = store.route.id;
   const chat = id && store.active?.id === id ? store.active : null;
   const last = chat?.messages?.at(-1);
@@ -103,6 +114,13 @@ export function StatusBar() {
           </span>
           <span className="tabular-nums">{Math.round(share * 100)}%</span>
         </button>
+      )}
+      {jobs && (
+        <Link href="/clusters" className={cn(SEGMENT, "hover:text-foreground max-[1000px]:hidden")} title="Your jobs on your clusters" data-status="jobs">
+          <span className={cn("size-1.5 rounded-full", queues.some((q) => q.running) ? "bg-signal" : "bg-line-strong")} aria-hidden="true" />
+          <span className="text-muted-foreground">jobs</span>
+          <span className="tabular-nums">{jobs}</span>
+        </Link>
       )}
       <Metric label="Models" value={modelsText(store)} />
       <Metric label="Today" value={usageText(usage)} />

@@ -17,10 +17,12 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { WorkspaceToggle } from "@/components/workspace/workspace-toggle";
 import { describe } from "@/lib/chat/attachments";
 import { pastesAsFile, PROMPT_LIMIT, promptCount } from "@/lib/chat/composer";
+import { matchItems, menuTrigger, replaceTrigger } from "@/lib/chat/composer-menu";
 import { contextUse } from "@/lib/chat/context";
 import { temporaryNoteText } from "@/lib/chat/temporary";
 import { cn } from "@/lib/utils";
 import { useChat } from "./chat-provider";
+import { ComposerMenu, type MenuEntry, useCommands, useMentions } from "./composer-menu";
 import { NamedIcon } from "./icon";
 import { ModelPicker } from "./model-picker";
 import { ToolsButton } from "@/components/connections/chat-tools";
@@ -158,7 +160,9 @@ export function composerHint(store: ReturnType<typeof useChat>) {
     : "AI can make mistakes. Check important information.";
 }
 
-export function Composer({ home = false }: { home?: boolean }) {
+const IDLE_PLACEHOLDER = "Ask a question, write some code, follow an idea…";
+
+export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { home?: boolean; placeholder?: string }) {
   const store = useChat();
   const draft = useChatDraft();
   const box = useRef<HTMLTextAreaElement>(null);
@@ -166,10 +170,17 @@ export function Composer({ home = false }: { home?: boolean }) {
   const [text, setText] = useState(store.draft);
   const [dropping, setDropping] = useState(false);
   const [picker, setPicker] = useState(false);
+  // Where the caret is, which row of the open list is marked, and the text the list
+  // was closed on (it stays closed until the text changes).
+  const [caret, setCaret] = useState(store.draft.length);
+  const [marked, setMarked] = useState(0);
+  const [closedOn, setClosedOn] = useState<string | null>(null);
+  const [focused, setFocused] = useState(false);
   const revision = store.draftRevision;
   // A draft set elsewhere (a starter, a quote, a failed send) shows in the box.
   useEffect(() => {
     setText(store.draft);
+    setCaret(store.draft.length);
     const el = box.current;
     if (el && document.activeElement !== el && store.draft) {
       el.focus();
@@ -192,8 +203,35 @@ export function Composer({ home = false }: { home?: boolean }) {
   };
   const temporaryShown = home && !draft.project;
   const attachDisabled = store.streaming || store.attachments.full();
+
+  const trigger = focused && available && closedOn !== text ? menuTrigger(text, caret) : null;
+  const commands = useCommands({ home, attach: () => files.current?.click(), knowledge: knowledgeOn ? () => setPicker(true) : null });
+  const mentions = useMentions(conversationId, trigger?.kind === "mention");
+  const entries = trigger ? matchItems(trigger.kind === "command" ? commands : mentions, trigger.query) : [];
+  const menu = trigger && entries.length ? trigger : null;
+  const active = Math.min(marked, entries.length - 1);
+  const write = (value: string, at = value.length) => {
+    setText(value);
+    store.setDraft(value);
+    setCaret(at);
+    requestAnimationFrame(() => {
+      box.current?.focus();
+      box.current?.setSelectionRange(at, at);
+    });
+  };
+  const pick = (item: MenuEntry) => {
+    if (!menu) return;
+    // A command takes its own text out of the box; a mention leaves what it points at.
+    const said = item.run();
+    const next = replaceTrigger(text, menu, typeof said === "string" ? said : "");
+    setMarked(0);
+    write(next.text, next.caret);
+  };
   return (
-    <div>
+    <div className="relative">
+      {menu && (
+        <ComposerMenu id="composer-menu" label={menu.kind === "command" ? "Actions" : "Point at something"} items={entries} active={active} query={menu.query} below={home} onActive={setMarked} onPick={pick} />
+      )}
       {/* 12px corners, a strong line and a soft shadow. */}
       <form
         id="chat-form"
@@ -238,15 +276,43 @@ export function Composer({ home = false }: { home?: boolean }) {
           ref={box}
           aria-label="Message"
           rows={home ? 3 : 2}
-          placeholder={available ? "Ask a question, write some code, follow an idea…" : "Connect your gateway to start a conversation…"}
+          placeholder={available ? placeholder : "Connect your gateway to start a conversation…"}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={!!menu}
+          aria-controls={menu ? "composer-menu" : undefined}
+          aria-activedescendant={menu ? `composer-menu-${active}` : undefined}
           maxLength={PROMPT_LIMIT}
           disabled={!available}
           value={text}
           onChange={(e) => {
             setText(e.target.value);
             store.setDraft(e.target.value);
+            setCaret(e.target.selectionStart ?? e.target.value.length);
+            setMarked(0);
           }}
+          onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           onKeyDown={(e) => {
+            if (menu && !e.nativeEvent.isComposing) {
+              const step = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+              if (step) {
+                e.preventDefault();
+                setMarked((active + step + entries.length) % entries.length);
+                return;
+              }
+              if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+                e.preventDefault();
+                pick(entries[active]!);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setClosedOn(text);
+                return;
+              }
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               submit();
@@ -349,7 +415,15 @@ export function Composer({ home = false }: { home?: boolean }) {
           <SendButton />
         </div>
       </form>
-      <p className="mt-2 text-center text-xs leading-normal text-faint">{composerHint(store)}</p>
+      <p className="mt-2 text-center text-xs leading-normal text-faint">
+        {composerHint(store)}
+        {available && !store.streaming && !store.switchingVersion && (
+          <span className="max-[760px]:hidden">
+            {" "}
+            · <kbd className="font-mono">/</kbd> for actions · <kbd className="font-mono">@</kbd> to point at a file, a job or a tool
+          </span>
+        )}
+      </p>
       {knowledgeOn && <KnowledgePicker open={picker} onOpenChange={setPicker} conversationId={conversationId} />}
     </div>
   );

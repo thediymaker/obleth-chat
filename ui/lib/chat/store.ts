@@ -1366,6 +1366,11 @@ export class ChatStore {
     this.dialog = null;
     this.emit();
   }
+  /** A new chat, from wherever the person is. */
+  startNew() {
+    this.newChat();
+    if (this.route.page !== "chat" || this.route.id) this.options.go("/");
+  }
   /** A starter on the home screen: its prompt in the box, and a workspace for building. */
   starter(prompt: string, workspace: boolean) {
     this.draft = prompt;

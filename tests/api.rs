@@ -1325,3 +1325,85 @@ async fn reading_a_chat_does_not_wait_for_the_owners_lock(pool: PgPool) {
     assert_eq!(reply.status, "interrupted");
     task.abort();
 }
+
+/// Groups, projects and sharing answer with these exact bytes: the keys, their
+/// casing, nulls and order the web interface reads.
+#[sqlx::test(migrations = "./migrations")]
+async fn groups_projects_and_shares_answer_the_same_json(pool: PgPool) {
+    let (app, _, _, task) = fixture(pool.clone()).await;
+    let (cookie, _, _) = login(&app, "test-admin").await;
+    let admin: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = 'test-admin'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let id = |n: u128| Uuid::from_u128(n);
+    let at: chrono::DateTime<chrono::Utc> = "2026-11-21T10:00:00Z".parse().unwrap();
+    for statement in [
+        "INSERT INTO users (id, username, display_name, role, password_hash) VALUES ('00000000-0000-0000-0000-000000000001', 'bea', 'Bea', 'user', 'x')",
+        "INSERT INTO user_groups (id, name, description) VALUES ('00000000-0000-0000-0000-000000000011', 'Lab', 'Wet lab'), ('00000000-0000-0000-0000-000000000012', 'Alpha', '')",
+        "INSERT INTO user_group_members (group_id, user_id) VALUES ('00000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000001'), ('00000000-0000-0000-0000-000000000011', $1)",
+        "INSERT INTO projects (id, owner_id, name, description, instructions, color, scope, group_id, updated_at) VALUES ('00000000-0000-0000-0000-000000000021', $1, 'Thesis', 'Chapters', 'Be brief', 'gold', 'group', '00000000-0000-0000-0000-000000000011', $2), ('00000000-0000-0000-0000-000000000022', $1, 'Notes', '', '', 'blue', 'personal', NULL, $2)",
+        "INSERT INTO knowledge_collections (id, owner_id, name, scope, group_id) VALUES ('00000000-0000-0000-0000-000000000031', '00000000-0000-0000-0000-000000000001', 'Papers', 'group', '00000000-0000-0000-0000-000000000011')",
+        "INSERT INTO project_collections (project_id, collection_id) VALUES ('00000000-0000-0000-0000-000000000021', '00000000-0000-0000-0000-000000000031')",
+        "INSERT INTO conversations (id, owner_id, title, model, project_id, share_scope, share_group_id, updated_at) VALUES ('00000000-0000-0000-0000-000000000041', $1, 'Draft', 'm', '00000000-0000-0000-0000-000000000021', 'group', '00000000-0000-0000-0000-000000000011', $2), ('00000000-0000-0000-0000-000000000042', $1, 'Loose', 'm', NULL, 'none', NULL, $2), ('00000000-0000-0000-0000-000000000043', '00000000-0000-0000-0000-000000000001', 'Bea''s', 'm', NULL, 'group', '00000000-0000-0000-0000-000000000011', $2)",
+    ] {
+        let query = sqlx::query(statement);
+        let query = if statement.contains("$1") { query.bind(admin) } else { query };
+        let query = if statement.contains("$2") { query.bind(at) } else { query };
+        query.execute(&pool).await.unwrap();
+    }
+    let mut answers = String::new();
+    for path in [
+        "/api/groups".to_owned(),
+        format!("/api/groups/{}", id(0x11)),
+        "/api/projects".to_owned(),
+        format!("/api/projects/{}", id(0x21)),
+        format!("/api/projects/{}", id(0x22)),
+        format!("/api/conversations/{}/project", id(0x41)),
+        format!("/api/conversations/{}/project", id(0x42)),
+        format!("/api/conversations/{}/share", id(0x41)),
+        format!("/api/conversations/{}/share", id(0x42)),
+    ] {
+        let response = fetch(&app, &path, &[("cookie", &cookie)]).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        answers.push_str(&format!(
+            "{path}\n{}\n",
+            String::from_utf8(body.to_vec()).unwrap()
+        ));
+    }
+    let shared = fetch(
+        &app,
+        &format!("/api/shared/{}", id(0x43)),
+        &[("cookie", &cookie)],
+    )
+    .await;
+    answers.push_str(&format!("shared\n{}\n", value(shared).await["share"]));
+    let answers = answers
+        .replace(&admin.to_string(), "ADMIN")
+        .replace("00000000-0000-0000-0000-0000000000", "#");
+    assert_eq!(answers, ANSWERS);
+    task.abort();
+}
+
+const ANSWERS: &str = r##"/api/groups
+{"canManage":true,"groups":[{"chats":2,"collections":1,"description":"Wet lab","id":"#11","member":true,"members":2,"name":"Lab","projects":1},{"chats":0,"collections":0,"description":"","id":"#12","member":false,"members":0,"name":"Alpha","projects":0}]}
+/api/groups/#11
+{"canManage":true,"chats":[{"id":"#41","mine":true,"ownerName":"test-admin","title":"Draft","updatedAt":"2026-11-21T10:00:00Z"},{"id":"#43","mine":false,"ownerName":"Bea","title":"Bea's","updatedAt":"2026-11-21T10:00:00Z"}],"collections":[{"documents":0,"id":"#31","name":"Papers","ownerName":"Bea"}],"group":{"chats":2,"collections":1,"description":"Wet lab","id":"#11","member":true,"members":2,"name":"Lab","projects":1},"members":[{"displayName":"Bea","id":"#01","username":"bea"},{"displayName":"test-admin","id":"ADMIN","username":"test-admin"}],"moreChats":false,"moreMembers":false,"projects":[{"color":"gold","description":"Chapters","id":"#21","mine":true,"name":"Thesis","ownerName":"test-admin","saved":0}]}
+/api/projects
+{"groups":[{"id":"#12","name":"Alpha"},{"id":"#11","name":"Lab"}],"projects":[{"chats":0,"color":"blue","description":"","groupId":null,"groupName":null,"id":"#22","instructions":"","mine":true,"name":"Notes","ownerName":"test-admin","saved":0,"scope":"personal","updatedAt":"2026-11-21T10:00:00Z"},{"chats":1,"color":"gold","description":"Chapters","groupId":"#11","groupName":"Lab","id":"#21","instructions":"Be brief","mine":true,"name":"Thesis","ownerName":"test-admin","saved":0,"scope":"group","updatedAt":"2026-11-21T10:00:00Z"}]}
+/api/projects/#21
+{"app":null,"chats":[{"id":"#41","title":"Draft","updatedAt":"2026-11-21T10:00:00Z"}],"collections":[{"documents":0,"id":"#31","name":"Papers"}],"moreChats":false,"project":{"chats":1,"color":"gold","description":"Chapters","groupId":"#11","groupName":"Lab","id":"#21","instructions":"Be brief","mine":true,"name":"Thesis","ownerName":"test-admin","saved":0,"scope":"group","updatedAt":"2026-11-21T10:00:00Z"},"saved":[]}
+/api/projects/#22
+{"app":null,"chats":[],"collections":[],"moreChats":false,"project":{"chats":0,"color":"blue","description":"","groupId":null,"groupName":null,"id":"#22","instructions":"","mine":true,"name":"Notes","ownerName":"test-admin","saved":0,"scope":"personal","updatedAt":"2026-11-21T10:00:00Z"},"saved":[]}
+/api/conversations/#41/project
+{"project":{"chats":1,"color":"gold","description":"Chapters","groupId":"#11","groupName":"Lab","id":"#21","instructions":"Be brief","mine":true,"name":"Thesis","ownerName":"test-admin","saved":0,"scope":"group","updatedAt":"2026-11-21T10:00:00Z"}}
+/api/conversations/#42/project
+{"project":null}
+/api/conversations/#41/share
+{"groups":[{"id":"#12","name":"Alpha"},{"id":"#11","name":"Lab"}],"share":{"groupId":"#11","groupName":"Lab","ownerName":"test-admin","scope":"group"}}
+/api/conversations/#42/share
+{"groups":[{"id":"#12","name":"Alpha"},{"id":"#11","name":"Lab"}],"share":{"groupId":null,"groupName":null,"ownerName":"test-admin","scope":"none"}}
+shared
+{"groupId":"#11","groupName":"Lab","ownerName":"Bea","scope":"group"}
+"##;

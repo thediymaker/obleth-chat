@@ -16,9 +16,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 pub fn router(state: AppState) -> Router {
@@ -51,18 +51,24 @@ async fn readable(pool: &PgPool, viewer: Uuid, id: Uuid) -> Result<Uuid, ApiErro
     .ok_or_else(ApiError::not_found)
 }
 
-async fn share_json(pool: &PgPool, id: Uuid) -> Result<Value, ApiError> {
-    let row = sqlx::query(
-        "SELECT c.share_scope, c.share_group_id, g.name AS group_name, u.display_name AS owner_name
+/// Who a chat is shared with, and whose it is.
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct Share {
+    scope: String,
+    group_id: Option<Uuid>,
+    group_name: Option<String>,
+    owner_name: String,
+}
+
+async fn share(pool: &PgPool, id: Uuid) -> Result<Share, ApiError> {
+    Ok(sqlx::query_as(
+        "SELECT c.share_scope AS scope, c.share_group_id AS group_id, g.name AS group_name, u.display_name AS owner_name
          FROM conversations c JOIN users u ON u.id = c.owner_id LEFT JOIN user_groups g ON g.id = c.share_group_id WHERE c.id = $1",
     )
     .bind(id)
     .fetch_one(pool)
-    .await?;
-    Ok(
-        json!({"scope":row.get::<String,_>("share_scope"),"groupId":row.get::<Option<Uuid>,_>("share_group_id"),
-        "groupName":row.get::<Option<String>,_>("group_name"),"ownerName":row.get::<String,_>("owner_name")}),
-    )
+    .await?)
 }
 
 async fn owned(pool: &PgPool, user: &Identity, id: Uuid) -> Result<Option<Uuid>, ApiError> {
@@ -85,7 +91,7 @@ async fn sharing(
     let pool = &s.store.pool;
     owned(pool, &user, id).await?;
     Ok(Json(
-        json!({"share":share_json(pool, id).await?,"groups":shareable(pool, &user).await?}),
+        json!({"share":share(pool, id).await?,"groups":shareable(pool, &user).await?}),
     ))
 }
 
@@ -131,7 +137,7 @@ async fn set_sharing(
         .bind(group)
         .execute(pool)
         .await?;
-    Ok(Json(json!({"share":share_json(pool, id).await?})))
+    Ok(Json(json!({"share":share(pool, id).await?})))
 }
 
 /// The chat as a viewer reads it. Its own settings stay out, each reply shows only
@@ -224,7 +230,7 @@ async fn shared(s: &AppState, user: &Identity, owner: Uuid, id: Uuid) -> Result<
             }
         }
     }
-    Ok(json!({"conversation":value,"share":share_json(pool, id).await?,"mine":owner == user.id}))
+    Ok(json!({"conversation":value,"share":share(pool, id).await?,"mine":owner == user.id}))
 }
 
 async fn fork(

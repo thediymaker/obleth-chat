@@ -14,24 +14,30 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
+
+/// A group named in a list to share with.
+#[derive(Serialize, FromRow)]
+pub struct GroupName {
+    id: Uuid,
+    name: String,
+}
 
 /// Groups a person may share projects and collections with: the ones they are in, or
 /// every group for an administrator.
-pub async fn shareable(pool: &PgPool, user: &Identity) -> Result<Vec<Value>, ApiError> {
-    Ok(sqlx::query(
+pub async fn shareable(pool: &PgPool, user: &Identity) -> Result<Vec<GroupName>, ApiError> {
+    Ok(sqlx::query_as(
         "SELECT g.id, g.name FROM user_groups g
          WHERE $2 OR g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $1) ORDER BY g.name",
     )
     .bind(user.id)
     .bind(user.is_admin())
     .fetch_all(pool)
-    .await?
-    .iter()
-    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name")}))
-    .collect())
+    .await?)
 }
 
 /// Checks that a person may share with `group`. Keeping the group something is already
@@ -81,20 +87,71 @@ const MINE: &str = "SELECT g.id, g.name, g.description,
         (SELECT COUNT(*) FROM conversations v WHERE v.share_scope = 'group' AND v.share_group_id = g.id)::bigint AS chats
      FROM user_groups g WHERE $2 OR g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $1)";
 
-fn group_json(r: &sqlx::postgres::PgRow) -> Value {
-    json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"description":r.get::<String,_>("description"),
-        "member":r.get::<bool,_>("member"),"members":r.get::<i64,_>("members"),"projects":r.get::<i64,_>("projects"),"collections":r.get::<i64,_>("collections"),"chats":r.get::<i64,_>("chats")})
+/// A group as `MINE` reads it.
+#[derive(Serialize, FromRow)]
+struct Group {
+    id: Uuid,
+    name: String,
+    description: String,
+    member: bool,
+    members: i64,
+    projects: i64,
+    collections: i64,
+    chats: i64,
+}
+
+/// A project shared with a group.
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct GroupProject {
+    id: Uuid,
+    name: String,
+    description: String,
+    color: String,
+    owner_name: String,
+    mine: bool,
+    saved: i64,
+}
+
+/// A knowledge collection shared with a group.
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct GroupCollection {
+    id: Uuid,
+    name: String,
+    owner_name: String,
+    documents: i64,
+}
+
+/// A member a group page lists.
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct Member {
+    id: Uuid,
+    display_name: String,
+    username: String,
+}
+
+/// A chat shared with a group.
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct GroupChat {
+    id: Uuid,
+    title: String,
+    owner_name: String,
+    mine: bool,
+    updated_at: DateTime<Utc>,
 }
 
 async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
-    let rows = sqlx::query(&format!("{MINE} ORDER BY member DESC, g.name"))
+    let groups: Vec<Group> = sqlx::query_as(&format!("{MINE} ORDER BY member DESC, g.name"))
         .bind(user.id)
         .bind(user.role == Role::Admin)
         .fetch_all(&s.store.pool)
         .await?;
     Ok(Json(
-        json!({"groups":rows.iter().map(group_json).collect::<Vec<_>>(),"canManage":user.role == Role::Admin}),
+        json!({"groups":groups,"canManage":user.role == Role::Admin}),
     ))
 }
 
@@ -105,7 +162,7 @@ async fn detail(
 ) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
     let pool = &s.store.pool;
-    let row = sqlx::query(&format!("SELECT * FROM ({MINE}) g WHERE g.id = $3"))
+    let group: Group = sqlx::query_as(&format!("SELECT * FROM ({MINE}) g WHERE g.id = $3"))
         .bind(user.id)
         .bind(user.role == Role::Admin)
         .bind(id)
@@ -113,7 +170,7 @@ async fn detail(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let (members, more_members) = members_of(pool, id, MEMBERS_SHOWN).await?;
-    let projects: Vec<Value> = sqlx::query(
+    let projects: Vec<GroupProject> = sqlx::query_as(
         "SELECT p.id, p.name, p.description, p.color, u.display_name AS owner_name, p.owner_id = $2 AS mine,
                 (SELECT COUNT(*) FROM saved_items s WHERE s.project_id = p.id)::bigint AS saved
          FROM projects p JOIN users u ON u.id = p.owner_id WHERE p.scope = 'group' AND p.group_id = $1 ORDER BY p.updated_at DESC",
@@ -121,24 +178,17 @@ async fn detail(
     .bind(id)
     .bind(user.id)
     .fetch_all(pool)
-    .await?
-    .iter()
-    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"description":r.get::<String,_>("description"),"color":r.get::<String,_>("color"),
-        "ownerName":r.get::<String,_>("owner_name"),"mine":r.get::<bool,_>("mine"),"saved":r.get::<i64,_>("saved")}))
-    .collect();
-    let collections: Vec<Value> = sqlx::query(
+    .await?;
+    let collections: Vec<GroupCollection> = sqlx::query_as(
         "SELECT c.id, c.name, u.display_name AS owner_name, (SELECT COUNT(*) FROM knowledge_documents d WHERE d.collection_id = c.id)::bigint AS documents
          FROM knowledge_collections c JOIN users u ON u.id = c.owner_id WHERE c.scope = 'group' AND c.group_id = $1 ORDER BY c.name",
     )
     .bind(id)
     .fetch_all(pool)
-    .await?
-    .iter()
-    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"ownerName":r.get::<String,_>("owner_name"),"documents":r.get::<i64,_>("documents")}))
-    .collect();
+    .await?;
     let (chats, more_chats) = chats_of(pool, id, user.id, CHATS_SHOWN).await?;
     Ok(Json(
-        json!({"group":group_json(&row),"members":members,"moreMembers":more_members,"projects":projects,"collections":collections,"chats":chats,"moreChats":more_chats,"canManage":user.role == Role::Admin}),
+        json!({"group":group,"members":members,"moreMembers":more_members,"projects":projects,"collections":collections,"chats":chats,"moreChats":more_chats,"canManage":user.role == Role::Admin}),
     ))
 }
 
@@ -151,12 +201,12 @@ async fn members_of(
     pool: &PgPool,
     group: Uuid,
     shown: i64,
-) -> Result<(Vec<Value>, bool), sqlx::Error> {
+) -> Result<(Vec<Member>, bool), sqlx::Error> {
     let page = Page {
         offset: 0,
         limit: shown,
     };
-    let rows = sqlx::query(
+    let rows = sqlx::query_as(
         "SELECT u.id, u.display_name, u.username FROM user_group_members m JOIN users u ON u.id = m.user_id
          WHERE m.group_id = $1 AND u.enabled ORDER BY u.display_name, u.id LIMIT $2",
     )
@@ -164,7 +214,7 @@ async fn members_of(
     .bind(page.fetch())
     .fetch_all(pool)
     .await?;
-    Ok(page.cut(rows.iter().map(|r| json!({"id":r.get::<Uuid,_>("id"),"displayName":r.get::<String,_>("display_name"),"username":r.get::<String,_>("username")})).collect()))
+    Ok(page.cut(rows))
 }
 
 async fn chats_of(
@@ -172,12 +222,12 @@ async fn chats_of(
     group: Uuid,
     viewer: Uuid,
     shown: i64,
-) -> Result<(Vec<Value>, bool), sqlx::Error> {
+) -> Result<(Vec<GroupChat>, bool), sqlx::Error> {
     let page = Page {
         offset: 0,
         limit: shown,
     };
-    let rows = sqlx::query(
+    let rows = sqlx::query_as(
         "SELECT v.id, v.title, v.updated_at, u.display_name AS owner_name, v.owner_id = $2 AS mine
          FROM conversations v JOIN users u ON u.id = v.owner_id AND u.enabled
          WHERE v.share_scope = 'group' AND v.share_group_id = $1 ORDER BY v.updated_at DESC, v.id LIMIT $3",
@@ -187,8 +237,7 @@ async fn chats_of(
     .bind(page.fetch())
     .fetch_all(pool)
     .await?;
-    Ok(page.cut(rows.iter().map(|r| json!({"id":r.get::<Uuid,_>("id"),"title":r.get::<String,_>("title"),"ownerName":r.get::<String,_>("owner_name"),
-        "mine":r.get::<bool,_>("mine"),"updatedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("updated_at")})).collect()))
+    Ok(page.cut(rows))
 }
 
 #[cfg(test)]
@@ -237,10 +286,7 @@ mod tests {
         let (members, more) = members_of(&db.pool, group, 3).await.unwrap();
         assert_eq!((members.len(), more), (3, false));
         let (chats, more) = chats_of(&db.pool, group, viewer, 2).await.unwrap();
-        assert_eq!(
-            (chats.len(), more, chats[0]["mine"].as_bool()),
-            (2, true, Some(true))
-        );
+        assert_eq!((chats.len(), more, chats[0].mine), (2, true, true));
         let (chats, more) = chats_of(&db.pool, group, viewer, 50).await.unwrap();
         assert_eq!((chats.len(), more), (3, false));
         db.close().await;

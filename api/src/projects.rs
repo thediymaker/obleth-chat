@@ -11,9 +11,10 @@ use axum::{
     routing::{delete, get, put},
     Json, Router,
 };
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 /// Projects person $1 may use: their own and those shared with a group they are in.
@@ -48,7 +49,7 @@ impl Context {
 
 /// The project a conversation belongs to, if the person may still use it.
 pub async fn for_conversation(pool: &PgPool, user: Uuid, conversation: Uuid) -> Option<Context> {
-    let row = sqlx::query(&format!(
+    let (id, name, instructions): (Uuid, String, String) = sqlx::query_as(&format!(
         "SELECT p.id, p.name, p.instructions FROM conversations v JOIN projects p ON p.id = v.project_id
          WHERE v.id = $2 AND v.owner_id = $1 AND {VISIBLE}"
     ))
@@ -57,7 +58,6 @@ pub async fn for_conversation(pool: &PgPool, user: Uuid, conversation: Uuid) -> 
     .fetch_optional(pool)
     .await
     .ok()??;
-    let id: Uuid = row.get("id");
     let collections =
         sqlx::query_scalar("SELECT collection_id FROM project_collections WHERE project_id = $1")
             .bind(id)
@@ -66,8 +66,8 @@ pub async fn for_conversation(pool: &PgPool, user: Uuid, conversation: Uuid) -> 
             .unwrap_or_default();
     Some(Context {
         id,
-        name: row.get("name"),
-        instructions: row.get("instructions"),
+        name,
+        instructions,
         collections,
     })
 }
@@ -88,13 +88,40 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-fn project_json(r: &sqlx::postgres::PgRow) -> Value {
-    json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"description":r.get::<String,_>("description"),
-        "instructions":r.get::<String,_>("instructions"),"color":r.get::<String,_>("color"),"scope":r.get::<String,_>("scope"),
-        "groupId":r.get::<Option<Uuid>,_>("group_id"),"groupName":r.get::<Option<String>,_>("group_name"),
-        "mine":r.get::<bool,_>("mine"),"ownerName":r.get::<String,_>("owner_name"),
-        "chats":r.get::<i64,_>("chats"),"saved":r.get::<i64,_>("saved"),
-        "updatedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("updated_at")})
+/// A project as `select()` reads it, with what person $1 has in it.
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct Project {
+    id: Uuid,
+    name: String,
+    description: String,
+    instructions: String,
+    color: String,
+    scope: String,
+    group_id: Option<Uuid>,
+    group_name: Option<String>,
+    mine: bool,
+    owner_name: String,
+    chats: i64,
+    saved: i64,
+    updated_at: DateTime<Utc>,
+}
+
+/// A knowledge collection a project page lists.
+#[derive(Serialize, FromRow)]
+struct ProjectCollection {
+    id: Uuid,
+    name: String,
+    documents: i64,
+}
+
+/// One of the person's chats a project page lists.
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct ProjectChat {
+    id: Uuid,
+    title: String,
+    updated_at: DateTime<Utc>,
 }
 
 /// Projects with counts as person $1 sees them; $2 narrows to one project when set.
@@ -111,7 +138,7 @@ fn select() -> String {
 
 async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, false).await?;
-    let rows = sqlx::query(&format!(
+    let projects: Vec<Project> = sqlx::query_as(&format!(
         "{} ORDER BY p.owner_id = $1 DESC, p.updated_at DESC",
         select()
     ))
@@ -120,7 +147,7 @@ async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     .fetch_all(&s.store.pool)
     .await?;
     Ok(Json(
-        json!({"projects":rows.iter().map(project_json).collect::<Vec<_>>(),"groups":crate::groups::shareable(&s.store.pool, &user).await?}),
+        json!({"projects":projects,"groups":crate::groups::shareable(&s.store.pool, &user).await?}),
     ))
 }
 
@@ -230,14 +257,13 @@ async fn create(
     ))
 }
 
-async fn one(pool: &PgPool, user: Uuid, id: Uuid) -> Result<Value, ApiError> {
-    let row = sqlx::query(&select())
+async fn one(pool: &PgPool, user: Uuid, id: Uuid) -> Result<Project, ApiError> {
+    sqlx::query_as(&select())
         .bind(user)
         .bind(Some(id))
         .fetch_optional(pool)
         .await?
-        .ok_or_else(ApiError::not_found)?;
-    Ok(project_json(&row))
+        .ok_or_else(ApiError::not_found)
 }
 
 async fn detail(
@@ -250,7 +276,7 @@ async fn detail(
     let project = one(pool, user.id, id).await?;
     // Only collections this person can open: a member never learns the names of ones
     // the owner was given by someone else.
-    let collections: Vec<Value> = sqlx::query(&format!(
+    let collections: Vec<ProjectCollection> = sqlx::query_as(&format!(
         "SELECT c.id, c.name, (SELECT COUNT(*) FROM knowledge_documents d WHERE d.collection_id = c.id)::bigint AS documents
          FROM project_collections pc JOIN knowledge_collections c ON c.id = pc.collection_id WHERE pc.project_id = $2 AND {} ORDER BY c.name",
         crate::knowledge::VISIBLE
@@ -258,14 +284,11 @@ async fn detail(
     .bind(user.id)
     .bind(id)
     .fetch_all(pool)
-    .await?
-    .iter()
-    .map(|r| json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"documents":r.get::<i64,_>("documents")}))
-    .collect();
+    .await?;
     let (chats, more_chats) = chats_in(pool, id, user.id, CHATS_SHOWN).await?;
     let saved = crate::knowledge::saved::in_project(pool, user.id, id, 30).await?;
     // The app's code, for the owner, whose page offers to make one when there is none.
-    let app: Option<String> = if project["mine"] == true {
+    let app: Option<String> = if project.mine {
         sqlx::query_scalar("SELECT id FROM apps WHERE project_id = $1")
             .bind(id)
             .fetch_optional(pool)
@@ -287,12 +310,12 @@ async fn chats_in(
     project: Uuid,
     owner: Uuid,
     shown: i64,
-) -> Result<(Vec<Value>, bool), sqlx::Error> {
+) -> Result<(Vec<ProjectChat>, bool), sqlx::Error> {
     let page = Page {
         offset: 0,
         limit: shown,
     };
-    let rows = sqlx::query(
+    let rows = sqlx::query_as(
         "SELECT id, title, updated_at FROM conversations WHERE project_id = $1 AND owner_id = $2 AND NOT archived ORDER BY updated_at DESC, id LIMIT $3",
     )
     .bind(project)
@@ -300,7 +323,7 @@ async fn chats_in(
     .bind(page.fetch())
     .fetch_all(pool)
     .await?;
-    Ok(page.cut(rows.iter().map(|r| json!({"id":r.get::<Uuid,_>("id"),"title":r.get::<String,_>("title"),"updatedAt":r.get::<chrono::DateTime<chrono::Utc>,_>("updated_at")})).collect()))
+    Ok(page.cut(rows))
 }
 
 pub(crate) async fn owned(pool: &PgPool, user: Uuid, id: Uuid) -> Result<(), ApiError> {

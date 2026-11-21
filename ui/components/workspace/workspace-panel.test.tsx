@@ -143,8 +143,11 @@ describe("the Build view over the preview", () => {
     expect(post).toHaveBeenCalledWith({ source: "obleth-chat", type: "pick-start" }, ORIGIN);
     expect(screen.getByRole("button", { name: /Click an element/ })).toHaveAttribute("aria-pressed", "true");
     store.draft = "make it bigger";
+    const drawn = store.getVersion();
     say({ source: "obleth-preview", type: "picked", element: { tag: "button", selector: "#hero > button.cta", text: "Sign up", path: "/", width: 120, height: 40 } });
     expect(store.draft).toBe("In the preview, the `button` “Sign up” (`#hero > button.cta`): make it bigger");
+    // The message box is told, so it shows what was put in it.
+    expect(store.getVersion()).toBeGreaterThan(drawn);
     expect(await screen.findByRole("button", { name: /Point/ })).toHaveAttribute("aria-pressed", "false");
     // Esc in Chat's own page ends a pick that was started.
     fireEvent.click(screen.getByRole("button", { name: /Point/ }));

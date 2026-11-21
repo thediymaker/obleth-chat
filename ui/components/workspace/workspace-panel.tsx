@@ -35,6 +35,8 @@ export function usePreviewsFlag(bridge: WorkspaceBridge) {
 }
 
 const iconButton = "text-muted-foreground hover:text-foreground";
+// A button laid over the app in the preview: a page of any color, so it carries its own ground.
+const overPreview = "bg-popover text-popover-foreground shadow-md hover:bg-popover dark:bg-popover dark:hover:bg-popover";
 
 function Bar({ id, space, tab, bridge }: { id: string; space: Space; tab: WorkspaceTab; bridge: WorkspaceBridge }) {
   const w = space.workspace!;
@@ -202,7 +204,11 @@ function Preview({ id, space, bridge, shown }: { id: string; space: Space; bridg
       else if (data.type === "picked") {
         setPicking(false);
         const element = pickedElement(data);
-        if (element) store.draft = withPicked(store.draft, element);
+        if (element) {
+          // Into the message box, which shows it and takes the keys.
+          store.draft = withPicked(store.draft, element);
+          store.emit();
+        }
       }
     };
     window.addEventListener("message", heard);
@@ -236,9 +242,9 @@ function Preview({ id, space, bridge, shown }: { id: string; space: Space; bridg
             <div className="absolute right-2 bottom-2 flex items-center gap-1.5">
               {inChat && canPick && (
                 <Button
-                  variant={picking ? "default" : "outline"}
+                  variant="outline"
                   size="xs"
-                  className={cn(!picking && "opacity-80 hover:opacity-100")}
+                  className={cn(overPreview, picking && "border-foreground dark:border-foreground")}
                   aria-pressed={picking}
                   title={picking ? "Click an element in the preview, or press Esc" : "Point at something in the preview and say what to change"}
                   data-pick
@@ -250,7 +256,7 @@ function Preview({ id, space, bridge, shown }: { id: string; space: Space; bridg
                   <MousePointerClick /> {picking ? "Click an element · Esc cancels" : "Point"}
                 </Button>
               )}
-              <Button variant="outline" size="icon-xs" className="opacity-70 hover:opacity-100" aria-label="Full screen" title="Full screen" onClick={() => box.current?.requestFullscreen?.().catch(() => {})}>
+              <Button variant="outline" size="icon-xs" className={overPreview} aria-label="Full screen" title="Full screen" onClick={() => box.current?.requestFullscreen?.().catch(() => {})}>
                 <Maximize2 />
               </Button>
             </div>

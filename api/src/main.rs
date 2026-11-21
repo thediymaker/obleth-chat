@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
         )
         .init();
     let config = Config::from_env()?;
-    let auth_config = AuthConfig::from_env()?;
+    let auth_config = AuthConfig::from_env(&config.origin)?;
     // A transaction left open while its task waits on something else holds its locks
     // until Postgres ends it, so it ends one left idle this long.
     let pool = PgPoolOptions::new()
@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
     let mut state = AppState::new(auth, pool.clone(), gateway, config.max_streams);
     state.decisions = obleth_chat::decisions::Decisions::new(pool.clone(), secret_key.clone());
     state.admin_gateway_url = config.admin_gateway_url;
+    state.ui_url = config.ui_url;
     // One bucket holds Knowledge documents and, when set, every other file's bytes.
     let objects = obleth_chat::knowledge::ObjectStore::from_env()?;
     if objects.is_some() {
@@ -76,7 +77,7 @@ async fn main() -> Result<()> {
         objects.is_some(),
     );
     state.store = state.store.clone().with_limits(limits);
-    match obleth_chat::sandbox::SandboxConfig::from_env()? {
+    match obleth_chat::sandbox::SandboxConfig::from_env(&config.origin)? {
         Ok(sandbox_config) => {
             let sandboxes =
                 obleth_chat::sandbox::Sandboxes::new(sandbox_config.clone(), pool.clone())?;

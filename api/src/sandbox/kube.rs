@@ -1,7 +1,7 @@
 //! Minimal Kubernetes REST client for one namespace: create, read, list and delete
 //! objects, and exec over the v5 WebSocket channel protocol. The service account
 //! token is re-read on every call because projected tokens rotate.
-use crate::config::var;
+use crate::config::env::text;
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Method, StatusCode};
@@ -44,23 +44,23 @@ impl Kube {
     /// In-cluster configuration, overridable for local development with
     /// OBLETH_CHAT_KUBE_API, OBLETH_CHAT_KUBE_TOKEN_FILE and OBLETH_CHAT_KUBE_CA_FILE.
     pub fn from_env(namespace: String) -> Result<Self> {
-        let base = match var("OBLETH_CHAT_KUBE_API") {
+        let base = match text("OBLETH_CHAT_KUBE_API") {
             Some(url) => url,
             None => format!(
                 "https://{}:{}",
-                var("KUBERNETES_SERVICE_HOST")
+                text("KUBERNETES_SERVICE_HOST")
                     .context("Kubernetes API address is not configured")?,
-                var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|| "443".into())
+                text("KUBERNETES_SERVICE_PORT").unwrap_or_else(|| "443".into())
             ),
         };
         let base = Url::parse(&base).context("Invalid Kubernetes API URL")?;
         if base.scheme() != "https" {
             bail!("The Kubernetes API URL must use https");
         }
-        let token_file = var("OBLETH_CHAT_KUBE_TOKEN_FILE")
+        let token_file = text("OBLETH_CHAT_KUBE_TOKEN_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("{SERVICE_ACCOUNT}/token")));
-        let ca_file = var("OBLETH_CHAT_KUBE_CA_FILE")
+        let ca_file = text("OBLETH_CHAT_KUBE_CA_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("{SERVICE_ACCOUNT}/ca.crt")));
         let mut roots = rustls::RootCertStore::empty();

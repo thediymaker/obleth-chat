@@ -7,7 +7,7 @@ pub mod preview;
 pub mod terminal;
 pub mod tools;
 
-use crate::config::var;
+use crate::config::env::{choice, number, text};
 use crate::{auth::Identity, error::ApiError, AppState};
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -64,21 +64,19 @@ impl SandboxConfig {
     /// Workspaces run in Chat's own namespace when Chat runs in Kubernetes with a
     /// service account token, or in OBLETH_CHAT_SANDBOX_NAMESPACE, unless
     /// OBLETH_CHAT_WORKSPACES=off. `Ok(Err(reason))` says why they are off.
-    pub fn from_env() -> Result<Result<Self, String>> {
-        match var("OBLETH_CHAT_WORKSPACES").as_deref().map(str::trim) {
-            None | Some("auto") => {}
-            Some("off") => return Ok(Err("Turned off with OBLETH_CHAT_WORKSPACES=off".into())),
-            Some(_) => bail!("OBLETH_CHAT_WORKSPACES must be auto or off"),
+    pub fn from_env(origin: &Url) -> Result<Result<Self, String>> {
+        if !choice("OBLETH_CHAT_WORKSPACES", &[("auto", true), ("off", false)])?.unwrap_or(true) {
+            return Ok(Err("Turned off with OBLETH_CHAT_WORKSPACES=off".into()));
         }
-        let Some(namespace) = var("OBLETH_CHAT_SANDBOX_NAMESPACE").or_else(kube::own_namespace)
+        let Some(namespace) = text("OBLETH_CHAT_SANDBOX_NAMESPACE").or_else(kube::own_namespace)
         else {
             return Ok(Err(
                 "Chat is not running in Kubernetes with a service account token".into(),
             ));
         };
-        let image = var("OBLETH_CHAT_SANDBOX_IMAGE").unwrap_or_else(|| release_image("workspace"));
-        let preview_domain = var("OBLETH_CHAT_PREVIEW_DOMAIN").map(|d| d.to_ascii_lowercase());
-        let preview_suffix = var("OBLETH_CHAT_PREVIEW_HOST_SUFFIX")
+        let image = text("OBLETH_CHAT_SANDBOX_IMAGE").unwrap_or_else(|| release_image("workspace"));
+        let preview_domain = text("OBLETH_CHAT_PREVIEW_DOMAIN").map(|d| d.to_ascii_lowercase());
+        let preview_suffix = text("OBLETH_CHAT_PREVIEW_HOST_SUFFIX")
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
         if !preview_suffix.is_empty()
@@ -91,9 +89,6 @@ impl SandboxConfig {
         {
             bail!("OBLETH_CHAT_PREVIEW_HOST_SUFFIX must start with - and hold letters, digits and dashes, such as -dev");
         }
-        let chat_origin =
-            var("OBLETH_CHAT_ORIGIN").unwrap_or_else(|| "http://localhost:8085".into());
-        let origin = Url::parse(&chat_origin).context("Invalid OBLETH_CHAT_ORIGIN")?;
         if let Some(domain) = &preview_domain {
             if !domain.split('.').all(|label| {
                 !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -108,42 +103,29 @@ impl SandboxConfig {
                 bail!("The preview domain must not contain the Chat origin");
             }
         }
+        // Minutes, up to 90 days.
         let minutes = |key: &str, default: u64| -> Result<Duration> {
-            let value = var(key)
-                .map(|v| v.parse::<u64>())
-                .transpose()
-                .with_context(|| format!("Invalid {key}"))?
-                .unwrap_or(default);
-            if !(5..=60 * 24 * 90).contains(&value) {
-                bail!("{key} must be between 5 and 129600 minutes");
-            }
+            let value = number(key, 5..=60 * 24 * 90)?.unwrap_or(default);
             Ok(Duration::from_secs(value * 60))
         };
-        let everyone = match var("OBLETH_CHAT_SANDBOX_ACCESS").as_deref() {
-            None | Some("admins") => false,
-            Some("everyone") => true,
-            Some(_) => bail!("OBLETH_CHAT_SANDBOX_ACCESS must be admins or everyone"),
-        };
-        let storage = var("OBLETH_CHAT_SANDBOX_STORAGE").unwrap_or_else(|| "10Gi".into());
+        let everyone = choice(
+            "OBLETH_CHAT_SANDBOX_ACCESS",
+            &[("admins", false), ("everyone", true)],
+        )?
+        .unwrap_or(false);
+        let storage = text("OBLETH_CHAT_SANDBOX_STORAGE").unwrap_or_else(|| "10Gi".into());
         let disk_limit = quantity_bytes(&storage)
             .context("OBLETH_CHAT_SANDBOX_STORAGE must be a size such as 10Gi")?;
-        let slots = match var("OBLETH_CHAT_SANDBOX_SLOTS") {
-            Some(value) => value
-                .parse::<usize>()
-                .ok()
-                .filter(|n| (1..=10_000).contains(n))
-                .context("OBLETH_CHAT_SANDBOX_SLOTS must be between 1 and 10000")?,
-            None => 8,
-        };
+        let slots = number("OBLETH_CHAT_SANDBOX_SLOTS", 1..=10_000)?.unwrap_or(8);
         Ok(Ok(Self {
             namespace,
             image,
-            runtime_class: var("OBLETH_CHAT_SANDBOX_RUNTIME_CLASS"),
-            storage_class: var("OBLETH_CHAT_SANDBOX_STORAGE_CLASS"),
+            runtime_class: text("OBLETH_CHAT_SANDBOX_RUNTIME_CLASS"),
+            storage_class: text("OBLETH_CHAT_SANDBOX_STORAGE_CLASS"),
             storage,
             disk_limit,
-            cpu_limit: var("OBLETH_CHAT_SANDBOX_CPU").unwrap_or_else(|| "2".into()),
-            memory_limit: var("OBLETH_CHAT_SANDBOX_MEMORY").unwrap_or_else(|| "4Gi".into()),
+            cpu_limit: text("OBLETH_CHAT_SANDBOX_CPU").unwrap_or_else(|| "2".into()),
+            memory_limit: text("OBLETH_CHAT_SANDBOX_MEMORY").unwrap_or_else(|| "4Gi".into()),
             everyone,
             slots,
             preview_scheme: if origin.scheme() == "https" {
@@ -1691,7 +1673,8 @@ mod tests {
             env::remove_var(key);
         }
         env::set_var("OBLETH_CHAT_SANDBOX_NAMESPACE", "chat");
-        let config = SandboxConfig::from_env().unwrap().unwrap();
+        let origin = Url::parse("http://localhost:8085").unwrap();
+        let config = SandboxConfig::from_env(&origin).unwrap().unwrap();
         assert_eq!(config.namespace, "chat");
         assert_eq!(
             config.image,
@@ -1703,10 +1686,10 @@ mod tests {
         assert_eq!(config.slots, 8);
         assert!(config.preview_domain.is_none());
         env::set_var("OBLETH_CHAT_SANDBOX_SLOTS", "0");
-        assert!(SandboxConfig::from_env().is_err());
+        assert!(SandboxConfig::from_env(&origin).is_err());
         env::remove_var("OBLETH_CHAT_SANDBOX_SLOTS");
         env::set_var("OBLETH_CHAT_WORKSPACES", "off");
-        let Err(reason) = SandboxConfig::from_env().unwrap() else {
+        let Err(reason) = SandboxConfig::from_env(&origin).unwrap() else {
             panic!("workspaces should be off");
         };
         assert!(reason.contains("off"));

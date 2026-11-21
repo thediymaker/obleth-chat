@@ -3,7 +3,7 @@
 //! signed with AWS Signature Version 4. Works with S3, Cloudflare R2 and other
 //! S3-compatible stores using path-style addresses (`<endpoint>/<bucket>/<key>`).
 
-use crate::config::var;
+use crate::config::env::text;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -33,14 +33,14 @@ impl ObjectStore {
     /// Reads OBLETH_CHAT_S3_ENDPOINT, _BUCKET, _ACCESS_KEY_ID, _SECRET_ACCESS_KEY and
     /// _REGION (default `auto`, which R2 expects). None when no endpoint is set.
     pub fn from_env() -> Result<Option<Self>> {
-        let Some(endpoint) = var("OBLETH_CHAT_S3_ENDPOINT") else {
+        let Some(endpoint) = text("OBLETH_CHAT_S3_ENDPOINT") else {
             return Ok(None);
         };
         let endpoint = Url::parse(endpoint.trim()).context("Invalid OBLETH_CHAT_S3_ENDPOINT")?;
         if !matches!(endpoint.scheme(), "https" | "http") || endpoint.host_str().is_none() {
             bail!("OBLETH_CHAT_S3_ENDPOINT must be an http(s) URL");
         }
-        let bucket = var("OBLETH_CHAT_S3_BUCKET").context("Set OBLETH_CHAT_S3_BUCKET")?;
+        let bucket = text("OBLETH_CHAT_S3_BUCKET").context("Set OBLETH_CHAT_S3_BUCKET")?;
         if !bucket
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
@@ -50,9 +50,9 @@ impl ObjectStore {
         Ok(Some(Self::new(
             endpoint,
             bucket,
-            var("OBLETH_CHAT_S3_REGION").unwrap_or_else(|| "auto".into()),
-            var("OBLETH_CHAT_S3_ACCESS_KEY_ID").context("Set OBLETH_CHAT_S3_ACCESS_KEY_ID")?,
-            var("OBLETH_CHAT_S3_SECRET_ACCESS_KEY")
+            text("OBLETH_CHAT_S3_REGION").unwrap_or_else(|| "auto".into()),
+            text("OBLETH_CHAT_S3_ACCESS_KEY_ID").context("Set OBLETH_CHAT_S3_ACCESS_KEY_ID")?,
+            text("OBLETH_CHAT_S3_SECRET_ACCESS_KEY")
                 .context("Set OBLETH_CHAT_S3_SECRET_ACCESS_KEY")?,
         )))
     }

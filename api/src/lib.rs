@@ -90,6 +90,9 @@ pub struct AppState {
     pub slots: Arc<Semaphore>,
     pub shutdown: CancellationToken,
     pub admin_gateway_url: Option<String>,
+    /// The web interface server (OBLETH_CHAT_UI_URL); without one Chat serves its API
+    /// and the branding.
+    pub ui_url: Option<url::Url>,
     pub followups_enabled: bool,
     pub sandboxes: Option<sandbox::Sandboxes>,
     /// Why workspaces are off, for administrators.
@@ -112,6 +115,7 @@ impl AppState {
             slots: Arc::new(Semaphore::new(max_streams)),
             shutdown: CancellationToken::new(),
             admin_gateway_url: None,
+            ui_url: None,
             followups_enabled: true,
             sandboxes: None,
             workspaces_off: None,
@@ -152,6 +156,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let batches = batches::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
+    let ui_url = state.ui_url.clone();
     let _ = CSP.set(content_security_policy(sandboxes.as_ref()));
     Router::new()
         .route(
@@ -209,7 +214,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(mcp)
         .merge(memory)
         .merge(batches)
-        .fallback_service(web(branding_dir, sandboxes.as_ref()))
+        .fallback_service(web(branding_dir, ui_url, sandboxes.as_ref()))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn(error::envelope))
         .layer(middleware::from_fn(security_headers))
@@ -245,7 +250,11 @@ fn content_security_policy(sandboxes: Option<&sandbox::Sandboxes>) -> HeaderValu
 /// The web interface: the Next.js server that OBLETH_CHAT_UI_URL names, with the
 /// site's branding from its own folder. Without one, Chat answers its API and the
 /// branding, as when `next dev` runs in front of it.
-fn web(branding_dir: PathBuf, sandboxes: Option<&sandbox::Sandboxes>) -> Router {
+fn web(
+    branding_dir: PathBuf,
+    ui_url: Option<url::Url>,
+    sandboxes: Option<&sandbox::Sandboxes>,
+) -> Router {
     let previews = sandboxes.and_then(|sb| {
         let c = sb.config();
         Some(format!(
@@ -254,12 +263,12 @@ fn web(branding_dir: PathBuf, sandboxes: Option<&sandbox::Sandboxes>) -> Router 
             c.preview_domain.as_ref()?
         ))
     });
-    match ui::Ui::from_env(previews) {
-        Ok(Some(ui)) => return ui.router(branding_dir),
-        Ok(None) => tracing::warn!(
+    match ui_url.map(|base| ui::Ui::new(base, previews)) {
+        Some(Ok(ui)) => return ui.router(branding_dir),
+        None => tracing::warn!(
             "OBLETH_CHAT_UI_URL is not set, so Chat serves its API without the web interface"
         ),
-        Err(error) => tracing::error!(%error, "the web interface is off"),
+        Some(Err(error)) => tracing::error!(%error, "the web interface is off"),
     }
     ui::branding(branding_dir).fallback(|| async {
         (

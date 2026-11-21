@@ -2,7 +2,7 @@
 //! Browser credentials are opaque, revocable server-side sessions. Identity and roles
 //! always come from Postgres, never from a request header or browser-stored claim.
 
-use crate::config::var;
+use crate::config::env::{flag, number, text};
 use std::{
     convert::Infallible,
     net::{IpAddr, Ipv6Addr, SocketAddr},
@@ -120,14 +120,14 @@ pub fn parse_scopes(value: &str) -> anyhow::Result<Vec<String>> {
 }
 
 impl AuthConfig {
-    pub fn from_env() -> anyhow::Result<Self> {
-        let origin = var("OBLETH_CHAT_ORIGIN").unwrap_or_else(|| "http://localhost:8085".into());
-        let issuer = var("OBLETH_CHAT_OIDC_ISSUER");
-        let client_id = var("OBLETH_CHAT_OIDC_CLIENT_ID");
-        let client_secret = var("OBLETH_CHAT_OIDC_CLIENT_SECRET");
-        let allow_signup = var("OBLETH_CHAT_OIDC_ALLOW_SIGNUP");
-        let scopes = var("OBLETH_CHAT_OIDC_SCOPES");
-        let provider_usernames = var("OBLETH_CHAT_OIDC_PROVIDER_USERNAMES");
+    /// The rest of the sign-in settings, for Chat at `origin` (OBLETH_CHAT_ORIGIN).
+    pub fn from_env(origin: &Url) -> anyhow::Result<Self> {
+        let issuer = text("OBLETH_CHAT_OIDC_ISSUER");
+        let client_id = text("OBLETH_CHAT_OIDC_CLIENT_ID");
+        let client_secret = text("OBLETH_CHAT_OIDC_CLIENT_SECRET");
+        let allow_signup = flag("OBLETH_CHAT_OIDC_ALLOW_SIGNUP")?;
+        let scopes = text("OBLETH_CHAT_OIDC_SCOPES");
+        let provider_usernames = flag("OBLETH_CHAT_OIDC_PROVIDER_USERNAMES")?;
         let oidc = match (issuer, client_id, client_secret) {
             (None, None, None)
                 if allow_signup.is_none() && scopes.is_none() && provider_usernames.is_none() =>
@@ -136,41 +136,25 @@ impl AuthConfig {
             }
             (Some(issuer), Some(client_id), Some(client_secret)) => Some(OidcConfig {
                 issuer, client_id, client_secret,
-                allow_signup: match allow_signup.as_deref().unwrap_or("false") {
-                    "true" => true,
-                    "false" => false,
-                    _ => bail!("OBLETH_CHAT_OIDC_ALLOW_SIGNUP must be true or false"),
-                },
-                provider_usernames: match provider_usernames.as_deref().unwrap_or("false") {
-                    "true" => true,
-                    "false" => false,
-                    _ => bail!("OBLETH_CHAT_OIDC_PROVIDER_USERNAMES must be true or false"),
-                },
+                allow_signup: allow_signup.unwrap_or(false),
+                provider_usernames: provider_usernames.unwrap_or(false),
                 scopes: parse_scopes(scopes.as_deref().unwrap_or(DEFAULT_OIDC_SCOPES))?,
             }),
             _ => bail!("OIDC requires OBLETH_CHAT_OIDC_ISSUER, OBLETH_CHAT_OIDC_CLIENT_ID and OBLETH_CHAT_OIDC_CLIENT_SECRET"),
         };
+        // Their ranges depend on each other, so `validated` checks them.
         let config = Self {
-            origin,
-            session_hours: var("OBLETH_CHAT_SESSION_HOURS")
-                .map(|v| v.parse())
-                .transpose()?
-                .unwrap_or(12),
-            bootstrap_username: var("OBLETH_CHAT_BOOTSTRAP_USERNAME"),
-            bootstrap_password: var("OBLETH_CHAT_BOOTSTRAP_PASSWORD"),
+            origin: origin.to_string(),
+            session_hours: number("OBLETH_CHAT_SESSION_HOURS", 0..=u32::MAX)?.unwrap_or(12),
+            bootstrap_username: text("OBLETH_CHAT_BOOTSTRAP_USERNAME"),
+            bootstrap_password: text("OBLETH_CHAT_BOOTSTRAP_PASSWORD"),
             oidc,
-            login_rate_per_minute: var("OBLETH_CHAT_LOGIN_RATE_PER_MINUTE")
-                .map(|v| v.parse())
-                .transpose()?
+            login_rate_per_minute: number("OBLETH_CHAT_LOGIN_RATE_PER_MINUTE", 0..=u32::MAX)?
                 .unwrap_or(300),
-            password_sign_in: match var("OBLETH_CHAT_PASSWORD_SIGN_IN").as_deref() {
-                None | Some("true") => true,
-                Some("false") => false,
-                Some(_) => bail!("OBLETH_CHAT_PASSWORD_SIGN_IN must be true or false"),
-            },
+            password_sign_in: flag("OBLETH_CHAT_PASSWORD_SIGN_IN")?.unwrap_or(true),
             forward_tokens: crate::config::GatewayAuth::from_env()?
                 == crate::config::GatewayAuth::Forward,
-            secret_key: var("OBLETH_CHAT_SECRET_KEY_FILE")
+            secret_key: text("OBLETH_CHAT_SECRET_KEY_FILE")
                 .map(|path| SecretKey::from_file(std::path::Path::new(&path)))
                 .transpose()?,
         };
@@ -413,7 +397,7 @@ impl Auth {
     pub async fn new(pool: PgPool, config: AuthConfig) -> anyhow::Result<Self> {
         let config = config.validated()?;
         let group_policy = group_policy::GroupPolicy::from_env(config.oidc.is_some())?;
-        let trusted_proxies = parse_trusted_proxies(var("OBLETH_CHAT_TRUSTED_PROXY").as_deref())?;
+        let trusted_proxies = parse_trusted_proxies(text("OBLETH_CHAT_TRUSTED_PROXY").as_deref())?;
         group_policy.validate(&pool).await?;
         let oidc = match &config.oidc {
             Some(provider) => Some(Arc::new(oidc::Oidc::new(provider, &config.origin).await?)),

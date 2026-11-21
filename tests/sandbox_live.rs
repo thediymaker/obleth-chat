@@ -11,7 +11,11 @@ async fn tools_run_inside_a_live_workspace() {
         .connect(&std::env::var("OBLETH_CHAT_DATABASE_URL").unwrap())
         .await
         .unwrap();
-    let sb = Sandboxes::new(SandboxConfig::from_env().unwrap().unwrap(), pool).unwrap();
+    let origin = std::env::var("OBLETH_CHAT_ORIGIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let sb = Sandboxes::new(SandboxConfig::from_env(&origin).unwrap().unwrap(), pool).unwrap();
     let slug = std::env::var("OBLETH_CHAT_SANDBOX_TEST_SLUG").unwrap();
     let sandbox = sb.by_slug(&slug).await.unwrap().unwrap();
     let sandbox = sb.ensure_running(&sandbox).await.unwrap();

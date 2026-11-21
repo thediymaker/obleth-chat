@@ -195,10 +195,12 @@ fn github_error(message: &str) -> ApiError {
 
 /// Where GitHub is; tests point these at stand-ins.
 fn github_api() -> String {
-    crate::config::var("OBLETH_CHAT_GITHUB_API").unwrap_or_else(|| "https://api.github.com".into())
+    crate::config::env::text("OBLETH_CHAT_GITHUB_API")
+        .unwrap_or_else(|| "https://api.github.com".into())
 }
 fn github_git() -> String {
-    crate::config::var("OBLETH_CHAT_GITHUB_GIT").unwrap_or_else(|| "https://github.com".into())
+    crate::config::env::text("OBLETH_CHAT_GITHUB_GIT")
+        .unwrap_or_else(|| "https://github.com".into())
 }
 
 async fn github(

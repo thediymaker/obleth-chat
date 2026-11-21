@@ -14,7 +14,7 @@ pub mod saved;
 pub mod storage;
 
 use crate::attachments::size_label;
-use crate::config::var;
+use crate::config::env::text;
 use crate::connections::wakeups::Wakeups;
 use crate::paging::{Page, PageQuery};
 use crate::{
@@ -100,10 +100,10 @@ impl Knowledge {
             pool,
             store,
             extract::Tools::from_env(),
-            var("OBLETH_CHAT_EMBEDDING_MODEL").unwrap_or_else(|| "qwen3-embedding-8b".into()),
+            text("OBLETH_CHAT_EMBEDDING_MODEL").unwrap_or_else(|| "qwen3-embedding-8b".into()),
             i64::from(user_mb) * 1024 * 1024,
         );
-        // Set but empty means no prefix.
+        // Unlike every other setting, set but empty means something here: no prefix.
         knowledge.env_prompts = (
             env::var("OBLETH_CHAT_EMBEDDING_QUERY_PREFIX").ok(),
             env::var("OBLETH_CHAT_EMBEDDING_DOCUMENT_PREFIX").ok(),

@@ -7,7 +7,7 @@ pub mod cdp;
 pub mod live;
 pub mod tools;
 
-use crate::config::var;
+use crate::config::env::{choice, number, text};
 use crate::{
     auth::Identity,
     error::ApiError,
@@ -52,27 +52,18 @@ impl BrowserConfig {
     /// The browser comes with workspaces unless OBLETH_CHAT_BROWSER=off. Its image
     /// defaults to this release's.
     pub fn from_env() -> Result<Option<Self>> {
-        match var("OBLETH_CHAT_BROWSER").as_deref().map(str::trim) {
-            None | Some("on") => {}
-            Some("off") => return Ok(None),
-            Some(_) => bail!("OBLETH_CHAT_BROWSER must be on or off"),
+        if !choice("OBLETH_CHAT_BROWSER", &[("on", true), ("off", false)])?.unwrap_or(true) {
+            return Ok(None);
         }
-        let image = var("OBLETH_CHAT_BROWSER_IMAGE").unwrap_or_else(|| release_image("browser"));
-        let storage = var("OBLETH_CHAT_BROWSER_STORAGE").unwrap_or_else(|| "1Gi".into());
+        let image = text("OBLETH_CHAT_BROWSER_IMAGE").unwrap_or_else(|| release_image("browser"));
+        let storage = text("OBLETH_CHAT_BROWSER_STORAGE").unwrap_or_else(|| "1Gi".into());
         quantity_bytes(&storage)
             .context("OBLETH_CHAT_BROWSER_STORAGE must be a size such as 1Gi")?;
-        let minutes = match var("OBLETH_CHAT_BROWSER_IDLE_MINUTES") {
-            Some(value) => value
-                .parse::<u64>()
-                .ok()
-                .filter(|m| (5..=24 * 60).contains(m))
-                .context("OBLETH_CHAT_BROWSER_IDLE_MINUTES must be between 5 and 1440")?,
-            None => 15,
-        };
+        let minutes = number("OBLETH_CHAT_BROWSER_IDLE_MINUTES", 5..=24 * 60)?.unwrap_or(15);
         Ok(Some(Self {
             image,
-            cpu_limit: var("OBLETH_CHAT_BROWSER_CPU").unwrap_or_else(|| "1".into()),
-            memory_limit: var("OBLETH_CHAT_BROWSER_MEMORY").unwrap_or_else(|| "1Gi".into()),
+            cpu_limit: text("OBLETH_CHAT_BROWSER_CPU").unwrap_or_else(|| "1".into()),
+            memory_limit: text("OBLETH_CHAT_BROWSER_MEMORY").unwrap_or_else(|| "1Gi".into()),
             storage,
             idle: Duration::from_secs(minutes * 60),
         }))
@@ -142,7 +133,7 @@ impl Browsers {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .build()?;
-        let fixed = var("OBLETH_CHAT_BROWSER_ADDRESS");
+        let fixed = text("OBLETH_CHAT_BROWSER_ADDRESS");
         Ok(Self {
             inner: Arc::new(Inner {
                 config,

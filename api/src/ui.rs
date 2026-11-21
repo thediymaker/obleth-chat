@@ -42,20 +42,8 @@ pub struct Ui {
 }
 
 impl Ui {
-    /// The interface server from OBLETH_CHAT_UI_URL, if one is set.
-    pub fn from_env(previews: Option<String>) -> anyhow::Result<Option<Self>> {
-        let Some(raw) = crate::config::var("OBLETH_CHAT_UI_URL") else {
-            return Ok(None);
-        };
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Ok(None);
-        }
-        let base =
-            Url::parse(raw).map_err(|e| anyhow::anyhow!("Invalid OBLETH_CHAT_UI_URL: {e}"))?;
-        if !matches!(base.scheme(), "http" | "https") {
-            anyhow::bail!("OBLETH_CHAT_UI_URL must be an http or https address");
-        }
+    /// The interface server at `base` (OBLETH_CHAT_UI_URL).
+    pub fn new(base: Url, previews: Option<String>) -> anyhow::Result<Self> {
         // Idle connections are dropped well inside an interface pod's 10 s shutdown
         // delay, so a reused one rarely meets a pod that is going away; a page load
         // that does is sent again on a new connection.
@@ -66,11 +54,11 @@ impl Ui {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(60))
             .build()?;
-        Ok(Some(Self {
+        Ok(Self {
             base,
             client,
             previews: previews.and_then(|p| HeaderValue::from_str(&p).ok()),
-        }))
+        })
     }
 
     /// Branding from its folder; everything else from the interface server.

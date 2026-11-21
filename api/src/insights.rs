@@ -10,6 +10,7 @@
 //! Administrators see counts for a period and a group, and can have a model group the
 //! topic lines into workstreams. A group with fewer than five people shows totals only.
 use crate::audit::{self, Action, Target};
+use crate::worker::{self, Start};
 use crate::{
     auth::Identity,
     background::{
@@ -263,18 +264,15 @@ pub fn router(state: AppState) -> Router {
 /// Labels chats that went quiet after more messages, every minute while insights are on.
 /// Replicas share the work by claiming each chat before asking about it.
 pub async fn worker(s: AppState, shutdown: CancellationToken) {
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-            _ = shutdown.cancelled() => break,
-        }
+    let pass = || async {
         if let Err(error) = tick(&s).await {
             tracing::warn!("insights: {error}");
         }
         if let Err(error) = workstreams_tick(&s).await {
             tracing::warn!("insights workstreams: {error}");
         }
-    }
+    };
+    worker::every(worker::INSIGHTS, Start::AfterPeriod, shutdown, pass).await
 }
 
 /// One pass of the worker: the number of chats it labelled.

@@ -42,6 +42,7 @@ pub mod steer;
 pub mod store;
 pub mod suggestions;
 pub mod ui;
+pub mod worker;
 
 #[cfg(test)]
 mod test_support;

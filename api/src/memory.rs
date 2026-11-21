@@ -8,6 +8,7 @@
 //! can see, change, pin and delete every memory, add their own, and turn memory off.
 //! Temporary chats are never read and never given memories.
 use crate::audit::{self, Action, Target};
+use crate::worker::Start;
 use crate::{
     auth::Identity,
     background::{identity_of, json_after_thinking, newest_within, settle, Claims, Failure},
@@ -1214,13 +1215,9 @@ async fn tag(
 // after the embedding settings change, and chats that went quiet with new messages.
 
 pub async fn worker(s: AppState, shutdown: CancellationToken) {
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
-            _ = shutdown.cancelled() => break,
-        }
+    let pass = || async {
         let (Some(gateway), Some(knowledge)) = (&s.gateway, &s.knowledge) else {
-            continue;
+            return;
         };
         if let Err(error) = embed_missing(&s.store.pool, knowledge, gateway).await {
             tracing::warn!("memory embeddings: {error}");
@@ -1228,7 +1225,8 @@ pub async fn worker(s: AppState, shutdown: CancellationToken) {
         if let Err(error) = read_quiet(&s, QUIET).await {
             tracing::warn!("memory: {error}");
         }
-    }
+    };
+    crate::worker::every(crate::worker::MEMORY, Start::AfterPeriod, shutdown, pass).await
 }
 
 /// Embeds memories that have no embedding, a few at a time, as their owners.

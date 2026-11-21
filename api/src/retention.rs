@@ -2,13 +2,13 @@
 //! Every cleanup is bounded, serialized across replicas, and uses the same owner
 //! row locks as chat/file writes. An active writer is skipped rather than blocked.
 use crate::audit::{self, Action, Target};
+use crate::worker::{self, Start};
 use crate::{error::ApiError, store::Store, AppState};
 use axum::{extract::State, http::HeaderMap, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -216,24 +216,28 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
 /// Store::sweep_temporary. Replicas may sweep at once: each deletion re-checks under
 /// the owner's lock.
 pub async fn temporary_worker(store: Store, shutdown: CancellationToken) {
-    let mut timer = tokio::time::interval(Duration::from_secs(60));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! { _=shutdown.cancelled()=>break, _=timer.tick()=>{} }
+    let stop = shutdown.clone();
+    worker::every(worker::TEMPORARY_CHATS, Start::Now, shutdown, || async {
+        // Each chat goes in its own transaction, so a sweep can stop part way.
         tokio::select! {
-            _=shutdown.cancelled()=>break,
-            result=store.sweep_temporary()=>if result.is_err() { tracing::warn!("Temporary chat cleanup failed; it will retry in a minute"); }
+            _ = stop.cancelled() => {}
+            result = store.sweep_temporary() => if result.is_err() {
+                tracing::warn!("Temporary chat cleanup failed; it will retry in a minute");
+            }
         }
-    }
+    })
+    .await
 }
 pub async fn worker(pool: PgPool, shutdown: CancellationToken) {
-    let mut timer = tokio::time::interval(Duration::from_secs(3600));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! { _=shutdown.cancelled()=>break, _=timer.tick()=>{} }
+    let stop = shutdown.clone();
+    worker::every(worker::RETENTION, Start::Now, shutdown, || async {
+        // A run is one transaction, so it can stop part way and starts over next time.
         tokio::select! {
-            _=shutdown.cancelled()=>break,
-            result=run_once(&pool)=>if result.is_err() { tracing::warn!("Retention cleanup failed; it will retry at the next hourly run"); }
+            _ = stop.cancelled() => {}
+            result = run_once(&pool) => if result.is_err() {
+                tracing::warn!("Retention cleanup failed; it will retry at the next hourly run");
+            }
         }
-    }
+    })
+    .await
 }

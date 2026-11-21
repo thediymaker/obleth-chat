@@ -363,11 +363,8 @@ impl Connections {
         if self.secret.is_none() || self.legacy.is_none() {
             return;
         }
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(300)) => {}
-            }
+        // main.rs reseals once at startup.
+        let pass = || async {
             match self.reseal().await {
                 Ok(0) => {}
                 Ok(moved) => tracing::info!(moved, "connection tokens moved to the secret key"),
@@ -375,7 +372,9 @@ impl Connections {
                     tracing::warn!("could not move connection tokens to the secret key: {error:#}")
                 }
             }
-        }
+        };
+        let start = crate::worker::Start::AfterPeriod;
+        crate::worker::every(crate::worker::RESEAL, start, shutdown, pass).await
     }
 
     /// Lets people switch a chat to Auto mode (the default) or not.

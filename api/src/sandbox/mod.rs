@@ -1007,15 +1007,18 @@ impl Sandboxes {
     }
 
     pub async fn worker(self, shutdown: CancellationToken) {
-        loop {
+        let pass = || async {
             if let Err(error) = self.reconcile().await {
                 tracing::warn!("workspace reconciliation failed: {error:#}");
             }
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-                _ = shutdown.cancelled() => break,
-            }
-        }
+        };
+        crate::worker::every(
+            crate::worker::WORKSPACES,
+            crate::worker::Start::Now,
+            shutdown,
+            pass,
+        )
+        .await
     }
 
     /// HMAC key shared by all replicas, created on first use.

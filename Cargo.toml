@@ -51,6 +51,8 @@ async-stream = "0.3"
 http-body-util = "0.1"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
+# Paused time for the worker timing tests.
+tokio = { version = "1", features = ["test-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tower = { version = "0.5", features = ["util"] }
 

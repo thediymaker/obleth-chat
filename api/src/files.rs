@@ -16,22 +16,19 @@ use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{error::ApiError, knowledge::ObjectStore};
+use crate::{error::ApiError, knowledge::ObjectStore, worker};
 
 /// How long an uploaded object may wait for the row that names it.
 const PENDING_GRACE: &str = "15 minutes";
 /// Objects read at once for one request.
 const PARALLEL_READS: usize = 8;
 /// How long the worker waits after a pass that moved nothing, doubling per idle
-/// pass up to [`IDLE_PAUSE_MAX`]: once every file is in the bucket there is nothing
-/// to do, and the trash grace is long enough that a five-minute check keeps up.
-const IDLE_PAUSE: Duration = Duration::from_secs(30);
-const IDLE_PAUSE_MAX: Duration = Duration::from_secs(5 * 60);
-
+/// pass up to FILES_IDLE_MAX: once every file is in the bucket there is nothing to
+/// do, and the trash grace is long enough that a five-minute check keeps up.
 fn idle_pause(idle_passes: u32) -> Duration {
-    IDLE_PAUSE
+    worker::FILES_IDLE
         .saturating_mul(1 << idle_passes.saturating_sub(1).min(4))
-        .min(IDLE_PAUSE_MAX)
+        .min(worker::FILES_IDLE_MAX)
 }
 
 #[derive(Clone)]
@@ -206,9 +203,8 @@ impl Files {
             } else {
                 idle_pause(idle_passes)
             };
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(pause) => {}
+            if !worker::pause(&shutdown, pause, None).await {
+                return;
             }
         }
     }

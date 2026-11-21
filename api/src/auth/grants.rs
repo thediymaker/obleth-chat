@@ -697,14 +697,15 @@ impl Grants {
         self.revoke_ended().await;
     }
 
-    /// Sweeps every 30 seconds until shutdown.
+    /// Sweeps every GRANTS until shutdown.
     pub async fn worker(self, shutdown: tokio_util::sync::CancellationToken) {
-        loop {
-            self.sweep().await;
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(30)) => {}
-            }
-        }
+        let pass = || self.sweep();
+        crate::worker::every(
+            crate::worker::GRANTS,
+            crate::worker::Start::Now,
+            shutdown,
+            pass,
+        )
+        .await
     }
 }

@@ -661,15 +661,18 @@ impl Browsers {
         if self.inner.fixed.is_some() {
             return;
         }
-        loop {
+        let pass = || async {
             if let Err(error) = self.reconcile().await {
                 tracing::warn!("browser reconciliation failed: {error:#}");
             }
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-                _ = shutdown.cancelled() => break,
-            }
-        }
+        };
+        crate::worker::every(
+            crate::worker::BROWSERS,
+            crate::worker::Start::Now,
+            shutdown,
+            pass,
+        )
+        .await
     }
 }
 

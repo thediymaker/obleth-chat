@@ -53,8 +53,6 @@ const EMBED_TRIES: u32 = 3;
 const EMBED_BACKOFF: Duration = Duration::from_millis(500);
 /// The wake-up key for queued work: documents to index and items to embed.
 const QUEUE: &str = "knowledge-queue";
-/// How long the idle worker waits for a wake-up before looking for work anyway.
-const IDLE: Duration = Duration::from_secs(30);
 /// How often the worker checks that the embedding settings still match the vectors;
 /// saving the settings checks at once.
 const RECONCILE_EVERY: Duration = Duration::from_secs(60);
@@ -147,7 +145,7 @@ impl Knowledge {
     }
 
     /// Processes queued documents and embeds saved items until shutdown. Idle, it waits
-    /// for a wake-up, looking for work anyway every IDLE.
+    /// for a wake-up, looking for work anyway every KNOWLEDGE_IDLE.
     pub async fn worker(self, gateway: Gateway, shutdown: CancellationToken) {
         let mut reconciled: Option<Instant> = None;
         loop {
@@ -190,12 +188,12 @@ impl Knowledge {
                         false
                     }
                 };
-            if !worked {
-                tokio::select! {
-                    _ = shutdown.cancelled() => return,
-                    _ = self.wakeups.wait(QUEUE, IDLE) => {}
-                }
-            } else if shutdown.is_cancelled() {
+            let wait = if worked {
+                Duration::ZERO
+            } else {
+                crate::worker::KNOWLEDGE_IDLE
+            };
+            if !crate::worker::pause(&shutdown, wait, Some((&self.wakeups, QUEUE))).await {
                 return;
             }
         }

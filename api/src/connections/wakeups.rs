@@ -84,9 +84,8 @@ impl Wakeups {
                     }
                 }
             }
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            if !crate::worker::pause(&shutdown, crate::worker::WAKEUPS_RECONNECT, None).await {
+                return;
             }
         }
     }

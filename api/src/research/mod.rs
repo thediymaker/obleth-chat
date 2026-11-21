@@ -518,7 +518,7 @@ pub fn poll_every(age: chrono::Duration) -> chrono::Duration {
 
 /// Watches running experiments on every replica; `check` keeps them from doubling up.
 pub async fn worker(pool: PgPool, sb: Sandboxes, shutdown: CancellationToken) {
-    loop {
+    let pass = || async {
         let running: Vec<(Uuid, DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as(
             "SELECT id, started_at, checked_at FROM research_runs WHERE status='running' ORDER BY checked_at NULLS FIRST",
         )
@@ -541,11 +541,14 @@ pub async fn worker(pool: PgPool, sb: Sandboxes, shutdown: CancellationToken) {
                 }
             })
             .await;
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-            _ = shutdown.cancelled() => break,
-        }
-    }
+    };
+    crate::worker::every(
+        crate::worker::RESEARCH,
+        crate::worker::Start::Now,
+        shutdown,
+        pass,
+    )
+    .await
 }
 
 // ---- What the page and the model see ----

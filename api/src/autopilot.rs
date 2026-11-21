@@ -5,8 +5,6 @@
 //! and stop after MAX_NUDGES in a row that made no progress, until the person
 //! writes again.
 
-use std::time::Duration;
-
 use serde_json::Value;
 use sqlx::Row;
 use tokio_util::sync::CancellationToken;
@@ -15,6 +13,7 @@ use uuid::Uuid;
 use crate::auth::grants::SIGN_IN_AGAIN;
 use crate::background::identity_of;
 use crate::lifecycle::TurnEnd;
+use crate::worker::{self, Start};
 use crate::{launch_turn, models, AppState, Launch, PAUSED};
 
 /// Nudges in a row before Chat leaves the chat for the person.
@@ -67,15 +66,12 @@ pub fn nudge_for(
 }
 
 pub async fn worker(s: AppState, shutdown: CancellationToken) {
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-            _ = shutdown.cancelled() => break,
-        }
+    let pass = || async {
         if let Err(error) = tick(&s).await {
             tracing::warn!("auto mode watchdog: {error}");
         }
-    }
+    };
+    worker::every(worker::AUTO_MODE, Start::AfterPeriod, shutdown, pass).await
 }
 
 /// One pass of the watchdog; the worker runs it every minute.

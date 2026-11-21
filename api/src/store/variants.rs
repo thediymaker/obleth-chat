@@ -100,8 +100,10 @@ impl Store {
             .and_then(Value::as_str)
             .unwrap_or(&conversation_model)
             .to_owned();
+        // The reply's settings also name its model and, when Auto chose it, that it
+        // did and why; the new version takes the model above and the parameters only.
         if let Some(map) = settings.as_object_mut() {
-            map.remove("model");
+            map.retain(|key, _| crate::models::PARAMETER_KEYS.contains(&key.as_str()));
         }
         Ok(VariantContext {
             draft,

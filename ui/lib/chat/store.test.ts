@@ -235,6 +235,25 @@ describe("an open chat", () => {
     expect(t.store.active!.messages[3]).toMatchObject({ content: "Half and the rest", status: "completed" });
   });
 
+  it("retries and edits a reply Auto chose with only what the API takes", async () => {
+    // A reply Auto chose keeps which model and why; none of that goes back with a new version.
+    const auto = { model: "glm", resolvedModel: "glm", auto: true, autoWhy: { reason: "fresh", candidates: 8 }, temperature: 0.2 };
+    const messages: Message[] = [
+      { id: "u1", role: "user", content: "Hello", status: "completed" },
+      { id: "a1", role: "assistant", content: "Hi", status: "completed", settings: auto },
+    ];
+    const allowed = ["content", "model", "attachmentIds", "systemPrompt", "temperature", "topP", "maxTokens", "reasoningEffort", "regenerateMessageId", "editMessageId"];
+    for (const [mode, id] of [["regenerate", "a1"], ["edit", "u1"]] as const) {
+      const t = await opened({ "POST /api/conversations/c1/messages": () => ({ body: null }) }, structuredClone(messages));
+      const sending = t.store.forkAndSend(id, mode, "Hello again");
+      await until(() => t.calls.some((c) => c.path.endsWith("/messages")));
+      const body = t.calls.find((c) => c.path.endsWith("/messages"))!.body as Record<string, unknown>;
+      expect(Object.keys(body).filter((key) => body[key] !== undefined && !allowed.includes(key))).toEqual([]);
+      t.stream.send("done", { status: "completed" });
+      await sending;
+    }
+  });
+
   it("regenerates a reply in place", async () => {
     const t = await opened({ "POST /api/conversations/c1/messages": () => ({ body: null }) });
     const sending = t.store.forkAndSend("a1", "regenerate");

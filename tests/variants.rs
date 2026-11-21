@@ -760,3 +760,30 @@ async fn a_replys_versions_come_whole_for_their_owner_only(pool: PgPool) {
     .unwrap();
     assert!(store.reply_versions(owner, chat, question).await.is_err());
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_reply_auto_chose_can_be_edited_and_regenerated(pool: PgPool) {
+    let owner = user(&pool).await;
+    let store = Store::new(pool.clone());
+    let chat = store.create(owner, "Auto", "auto").await.unwrap().id;
+    let answer = turn(&store, owner, chat, "Which model?", "This one").await;
+    // What Chat saves on a reply Auto chose: the model, that Auto chose it, and why.
+    let why = json!({"reason": "fresh", "topics": ["coding"], "difficulty": 2, "candidates": 8});
+    store
+        .set_served_model(answer, "glm-5-3", Some(&why))
+        .await
+        .unwrap();
+    let prompt = store.get(owner, chat).await.unwrap().messages[0].id;
+    for (source, mode) in [(prompt, "edit"), (answer, "regenerate")] {
+        let context = store
+            .variant_context(owner, chat, source, mode)
+            .await
+            .unwrap();
+        assert_eq!(context.model, "glm-5-3", "{mode}");
+        // Only the generation settings carry over to the new turn, so they read as such.
+        let settings: obleth_chat::models::ParameterOverrides =
+            serde_json::from_value(context.settings.clone())
+                .unwrap_or_else(|e| panic!("{mode}: {e}: {}", context.settings));
+        assert_eq!(settings.max_tokens, Some(256), "{mode}");
+    }
+}

@@ -1066,13 +1066,14 @@ export class ChatStore {
     const userIndex = c.messages[index]!.role === "user" ? index : index - 1;
     const user = c.messages[userIndex];
     if (!user || user.role !== "user") return;
-    const previousSettings = c.messages[index]!.settings || c.settings || {};
+    // The new version is sent with the model and settings chosen now (send's own), never
+    // the reply's saved ones: those also say which model Auto chose and why, which the
+    // API does not take.
     await this.send(mode === "edit" ? content || "" : user.content, {
       kind: mode,
       messageId,
       userIndex,
       attached: user.attachments || [],
-      settings: { ...previousSettings, model: this.model, ...this.generation() },
     });
   }
   /** Sends the waiting reply to another model: stops it first when it is still waiting. */
@@ -1092,7 +1093,7 @@ export class ChatStore {
   }
   async send(
     input: string,
-    options: { kind?: "send" | "edit" | "regenerate"; messageId?: string; userIndex?: number; attached?: Attachment[]; settings?: Record<string, unknown> } = {},
+    options: { kind?: "send" | "edit" | "regenerate"; messageId?: string; userIndex?: number; attached?: Attachment[] } = {},
   ) {
     this.syncStreamingState();
     const prompt = String(input || "").trim();
@@ -1103,7 +1104,7 @@ export class ChatStore {
       this.toast("Choose a vision-capable model to send an image.");
       return;
     }
-    const settings = options.settings || { model: this.model, ...this.generation() };
+    const settings = { model: this.model, ...this.generation() };
     const selected = this.route.page === "chat" && this.route.id === this.active?.id ? this.active : null;
     const op: Operation = {
       key: selected?.id || `draft:${this.draftKey}`,

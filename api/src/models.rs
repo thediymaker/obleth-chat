@@ -90,6 +90,16 @@ fn visibility_all() -> String {
 
 /// The highest output limit anyone may set; 0 means none.
 pub const MAX_OUTPUT_TOKENS: i32 = 262_144;
+/// The fields of [`ParameterOverrides`] as they are saved. A reply's settings hold
+/// these and more (the model, and whether and why Auto chose it); a new version of
+/// the reply carries over only these.
+pub const PARAMETER_KEYS: [&str; 5] = [
+    "systemPrompt",
+    "temperature",
+    "topP",
+    "maxTokens",
+    "reasoningEffort",
+];
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ParameterOverrides {
@@ -1363,6 +1373,28 @@ async fn delete_preset(
 #[cfg(test)]
 mod tests {
     use super::gateway_name;
+
+    #[test]
+    fn parameter_keys_are_the_overrides_fields() {
+        let all = super::ParameterOverrides {
+            system_prompt: Some(String::new()),
+            temperature: Some(0.0),
+            top_p: Some(1.0),
+            max_tokens: Some(1),
+            reasoning_effort: Some(super::ReasoningEffort::Low),
+        };
+        let value = serde_json::to_value(all).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut expected = super::PARAMETER_KEYS.to_vec();
+        keys.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+    }
 
     #[test]
     fn maps_upstream_names_to_gateway_models() {

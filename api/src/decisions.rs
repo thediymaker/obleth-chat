@@ -18,8 +18,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures_util::StreamExt;
-use reqwest::{redirect, Client, Response};
+use reqwest::{redirect, Client};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use url::Url;
@@ -262,9 +261,9 @@ impl Decisions {
             }
         })?;
         let status = response.status();
-        let bytes = read_capped(response)
+        let bytes = crate::http::read_capped(response, MAX_RESPONSE)
             .await
-            .ok_or("The endpoint's answer could not be read")?;
+            .map_err(|_| "The endpoint's answer could not be read")?;
         if status.is_redirection() {
             return Err(format!(
                 "The endpoint answered {} (a redirect); enter the address it redirects to",
@@ -306,19 +305,6 @@ impl Asker<'_> {
             .ask(settings, self.gateway, self.user, state, questions, timeout)
             .await
     }
-}
-
-async fn read_capped(response: Response) -> Option<Vec<u8>> {
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(part) = stream.next().await {
-        let part = part.ok()?;
-        if bytes.len() + part.len() > MAX_RESPONSE {
-            return None;
-        }
-        bytes.extend_from_slice(&part);
-    }
-    Some(bytes)
 }
 
 /// A pick-one verdict.
@@ -593,16 +579,7 @@ async fn document(s: &AppState, user: &Identity) -> Result<Value, ApiError> {
     let settings = d.resolve(&row, None);
     // The gateway's models, for suggestions; another endpoint may serve others.
     let models = match &s.gateway {
-        Some(gateway) => gateway.models(user).await.ok().map(|m| {
-            m["models"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|m| m["id"].as_str())
-                .filter(|id| *id != "auto")
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        }),
+        Some(gateway) => gateway.model_ids(user).await.ok(),
         None => None,
     };
     let key = match &settings.endpoint {

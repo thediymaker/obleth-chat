@@ -404,11 +404,11 @@ impl Client {
             }
         })?;
         let status = response.status().as_u16();
-        let bytes = super::read_capped(response, MAX_BODY)
+        let bytes = crate::http::read_capped(response, MAX_BODY)
             .await
             .map_err(|e| match e {
-                super::Read::Closed => "slurmrestd closed the connection".to_string(),
-                super::Read::TooLarge => format!(
+                crate::http::Read::Closed => "slurmrestd closed the connection".to_string(),
+                crate::http::Read::TooLarge => format!(
                     "slurmrestd's answer was larger than {} MiB, so Chat did not read it",
                     MAX_BODY / 1024 / 1024
                 ),

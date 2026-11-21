@@ -3189,7 +3189,7 @@ async fn forwarded_provider_tokens_reach_the_gateway_and_rotate_before_expiry() 
             .unwrap()
             .forward_tokens(auth.grants().unwrap());
     let last = || async { seen.lock().await.last().cloned().unwrap() };
-    gateway.models(&user).await.unwrap();
+    gateway.model_ids(&user).await.unwrap();
     assert_eq!(last().await, format!("Bearer {}", access[0]));
 
     // A local account still gets Chat's signed token.
@@ -3198,16 +3198,16 @@ async fn forwarded_provider_tokens_reach_the_gateway_and_rotate_before_expiry() 
     // A password session has no grant to end it, so it stays within the old cap.
     let short = lifetime(admin.id).await;
     assert!(short <= 168.0 * 3600.0 + 1.0, "{short}");
-    gateway.models(&admin).await.unwrap();
+    gateway.model_ids(&admin).await.unwrap();
     let signed = last().await;
     assert!(signed.starts_with("Bearer ey") && !access.iter().any(|a| signed.ends_with(a)));
 
     // Near expiry the token is refreshed first, and the refresh token rotates.
     expire_soon(&db.pool, "").await;
-    gateway.models(&user).await.unwrap();
+    gateway.model_ids(&user).await.unwrap();
     expire_soon(&db.pool, "").await;
-    gateway.models(&user).await.unwrap();
-    gateway.models(&user).await.unwrap();
+    gateway.model_ids(&user).await.unwrap();
+    gateway.model_ids(&user).await.unwrap();
     let access = issuer.access.lock().await.clone();
     let refresh = issuer.refresh.lock().await.clone();
     assert_eq!(
@@ -3221,10 +3221,10 @@ async fn forwarded_provider_tokens_reach_the_gateway_and_rotate_before_expiry() 
         .unwrap()
         .forward_tokens(auth.grants().unwrap());
     assert_eq!(
-        forwarding.models(&admin).await.unwrap_err().0,
+        forwarding.model_ids(&admin).await.unwrap_err().0,
         StatusCode::FORBIDDEN
     );
-    forwarding.models(&user).await.unwrap();
+    forwarding.model_ids(&user).await.unwrap();
     assert_eq!(last().await, format!("Bearer {}", access[2]));
 
     // Someone with an identity never falls back to Chat's token.
@@ -3234,7 +3234,7 @@ async fn forwarded_provider_tokens_reach_the_gateway_and_rotate_before_expiry() 
         .execute(&db.pool)
         .await
         .unwrap();
-    let error = gateway.models(&user).await.unwrap_err();
+    let error = gateway.model_ids(&user).await.unwrap_err();
     assert_eq!(
         (error.0, error.1.as_str()),
         (StatusCode::UNAUTHORIZED, grants::SIGN_IN_AGAIN)

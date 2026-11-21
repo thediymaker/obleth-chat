@@ -5,7 +5,6 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use axum::http::StatusCode;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use futures_util::StreamExt;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::{Client, Response};
 use rsa::{
@@ -45,6 +44,25 @@ const CATALOG_TTL: Duration = Duration::from_secs(15);
 /// one is replaced.
 const TOKEN_SECS: u64 = 300;
 const TOKEN_RENEW_SECS: u64 = 60;
+/// How long connecting to the gateway may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the model catalog and its details may take.
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long `/v1/load` may take; it only decorates the model list.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an embeddings request may take.
+const EMBEDDINGS_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the reason in a failed answer is waited for.
+const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(5);
+/// The largest model catalog or model details answer read.
+const MAX_CATALOG: usize = 2 * 1024 * 1024;
+/// The largest `/v1/load` answer read.
+const MAX_LOAD: usize = 1024 * 1024;
+/// The largest whole completion or verdict read.
+const MAX_ANSWER: usize = 16 * 1024 * 1024;
+/// The most an embeddings answer may take per input: room for 8192 floats written
+/// out in full, well above the dimensions models produce.
+const MAX_EMBEDDING: usize = 256 * 1024;
 
 type Catalog = Arc<tokio::sync::OnceCell<Vec<DiscoveredModel>>>;
 
@@ -142,7 +160,7 @@ impl Gateway {
     pub fn forwarding(base: Url) -> Result<Self> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()?;
         Ok(Self {
             client,
@@ -192,10 +210,26 @@ impl Gateway {
     pub(crate) fn url(&self, path: &str) -> Url {
         self.base.join(path).unwrap_or_else(|_| self.base.clone())
     }
+    /// Sends a request made for `user` with its Authorization header. A request
+    /// that doesn't reach the gateway is `unavailable`; the status is the caller's.
+    pub(crate) async fn send(
+        &self,
+        user: &Identity,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Response, ApiError> {
+        request
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(user).await?,
+            )
+            .send()
+            .await
+            .map_err(|_| unavailable())
+    }
     /// The Authorization header for a call made for `user`. Someone who signs in
     /// with the identity provider gets their own provider token whenever tokens are
     /// forwarded, never Chat's; everyone else gets Chat's signed token.
-    pub(crate) async fn authorization(
+    async fn authorization(
         &self,
         user: &Identity,
     ) -> Result<reqwest::header::HeaderValue, ApiError> {
@@ -257,64 +291,35 @@ impl Gateway {
         );
         Ok(value)
     }
-    pub async fn models(&self, user: &Identity) -> Result<Value, ApiError> {
-        let response = self
-            .client
-            .get(self.base.join("v1/models").unwrap())
-            .header(
-                reqwest::header::AUTHORIZATION,
-                self.authorization(user).await?,
-            )
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
-        if !response.status().is_success() {
-            return Err(upstream_error(response).await);
-        }
-        let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
-        while let Some(part) = stream.next().await {
-            let part = part.map_err(|_| unavailable())?;
-            if bytes.len() + part.len() > 1024 * 1024 {
-                return Err(unavailable());
-            }
-            bytes.extend_from_slice(&part);
-        }
-        let data: Value = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
-        let mut models =
-            vec![json!({"id":"auto","name":"Auto","detail":"Let Obleth choose a model"})];
-        let Some(list) = data.get("data").and_then(Value::as_array) else {
-            return Err(unavailable());
-        };
-        for m in list.iter().take(1000) {
-            if let Some(id) = m
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| valid_model(id) && *id != "auto")
-            {
-                models.push(
-                    json!({"id":id,"name":id,"detail":"Available through your gateway identity"}),
-                );
-            }
-        }
-        Ok(json!({"models":models}))
+    /// The ids of every model the gateway lists for `user`, asked afresh, without
+    /// `auto`.
+    pub async fn model_ids(&self, user: &Identity) -> Result<Vec<String>, ApiError> {
+        let catalog = self
+            .discovery_json(user, "v1/models", false)
+            .await?
+            .ok_or_else(unavailable)?;
+        let list = catalog
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(unavailable)?;
+        Ok(list
+            .iter()
+            .take(1000)
+            .filter_map(|m| m.get("id").and_then(Value::as_str))
+            .filter(|id| valid_model(id) && *id != "auto")
+            .map(str::to_owned)
+            .collect())
     }
     /// Live load per model from the gateway's `/v1/load`, as the user. None when the
     /// gateway doesn't offer it: another kind of gateway, an older one, or one whose
     /// administrator turned it off.
     pub async fn load(&self, user: &Identity) -> Result<Option<Value>, ApiError> {
         let response = self
-            .client
-            .get(self.base.join("v1/load").unwrap())
-            .header(
-                reqwest::header::AUTHORIZATION,
-                self.authorization(user).await?,
+            .send(
+                user,
+                self.client.get(self.url("v1/load")).timeout(LOAD_TIMEOUT),
             )
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
+            .await?;
         let status = response.status().as_u16();
         if (400..500).contains(&status) && !matches!(status, 401 | 403 | 429) {
             return Ok(None);
@@ -322,18 +327,7 @@ impl Gateway {
         if !response.status().is_success() {
             return Err(upstream_error(response).await);
         }
-        let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
-        while let Some(part) = stream.next().await {
-            let part = part.map_err(|_| unavailable())?;
-            if bytes.len() + part.len() > 1024 * 1024 {
-                return Err(unavailable());
-            }
-            bytes.extend_from_slice(&part);
-        }
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| unavailable())
+        json_body(response, MAX_LOAD).await.map(Some)
     }
     /// Embeds each input with the given model, as the user, in input order.
     pub async fn embeddings(
@@ -342,22 +336,16 @@ impl Gateway {
         model: &str,
         input: &[String],
     ) -> Result<Vec<Vec<f32>>, ApiError> {
-        let response = self
+        let request = self
             .client
-            .post(self.base.join("v1/embeddings").unwrap())
-            .header(
-                reqwest::header::AUTHORIZATION,
-                self.authorization(user).await?,
-            )
-            .timeout(std::time::Duration::from_secs(120))
-            .json(&json!({"model":model,"input":input,"encoding_format":"float"}))
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
+            .post(self.url("v1/embeddings"))
+            .timeout(EMBEDDINGS_TIMEOUT)
+            .json(&json!({"model":model,"input":input,"encoding_format":"float"}));
+        let response = self.send(user, request).await?;
         if !response.status().is_success() {
             return Err(upstream_error(response).await);
         }
-        let data: Value = response.json().await.map_err(|_| unavailable())?;
+        let data = json_body(response, MAX_EMBEDDING * input.len().max(1)).await?;
         let mut rows: Vec<(u64, Vec<f32>)> = data["data"]
             .as_array()
             .ok_or_else(unavailable)?
@@ -389,22 +377,12 @@ impl Gateway {
         body: &Value,
         timeout: Duration,
     ) -> Result<Value, ApiError> {
-        let response = self
-            .client
-            .post(self.base.join("v1/verdicts").unwrap())
-            .header(
-                reqwest::header::AUTHORIZATION,
-                self.authorization(user).await?,
-            )
-            .timeout(timeout)
-            .json(body)
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
+        let request = self.client.post(self.url("v1/verdicts")).timeout(timeout);
+        let response = self.send(user, request.json(body)).await?;
         if !response.status().is_success() {
             return Err(upstream_error(response).await);
         }
-        response.json().await.map_err(|_| unavailable())
+        json_body(response, MAX_ANSWER).await
     }
     /// A whole completion in one answer, for work Chat does on its own, such as naming
     /// the task a chat was about.
@@ -414,22 +392,15 @@ impl Gateway {
         body: &Value,
         timeout: Duration,
     ) -> Result<Value, ApiError> {
-        let response = self
+        let request = self
             .client
-            .post(self.base.join("v1/chat/completions").unwrap())
-            .header(
-                reqwest::header::AUTHORIZATION,
-                self.authorization(user).await?,
-            )
-            .timeout(timeout)
-            .json(body)
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
+            .post(self.url("v1/chat/completions"))
+            .timeout(timeout);
+        let response = self.send(user, request.json(body)).await?;
         if !response.status().is_success() {
             return Err(upstream_error(response).await);
         }
-        response.json().await.map_err(|_| unavailable())
+        json_body(response, MAX_ANSWER).await
     }
     pub async fn chat(
         &self,
@@ -463,19 +434,13 @@ impl Gateway {
         if let Some(bytes) = own_system.filter(|_| body["model"] == "auto") {
             extra.insert("x-obleth-classify-system", bytes.into());
         }
-        let response = self
+        let request = self
             .client
-            .post(self.base.join("v1/chat/completions").unwrap())
-            .header(
-                reqwest::header::AUTHORIZATION,
-                self.authorization(user).await?,
-            )
+            .post(self.url("v1/chat/completions"))
             .header("x-obleth-session-id", conversation.to_string())
             .headers(extra)
-            .json(body)
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
+            .json(body);
+        let response = self.send(user, request).await?;
         if !response.status().is_success() {
             return Err(upstream_error(response).await);
         }
@@ -499,35 +464,15 @@ impl Gateway {
         path: &str,
         optional: bool,
     ) -> Result<Option<Value>, ApiError> {
-        let response = self
-            .client
-            .get(self.base.join(path).unwrap())
-            .header(
-                reqwest::header::AUTHORIZATION,
-                self.authorization(user).await?,
-            )
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
+        let request = self.client.get(self.url(path)).timeout(CATALOG_TIMEOUT);
+        let response = self.send(user, request).await?;
         if optional && matches!(response.status().as_u16(), 404 | 405 | 501) {
             return Ok(None);
         }
         if !response.status().is_success() {
             return Err(upstream_error(response).await);
         }
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| unavailable())?;
-            if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
-                return Err(unavailable());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(Some(
-            serde_json::from_slice(&bytes).map_err(|_| unavailable())?,
-        ))
+        json_body(response, MAX_CATALOG).await.map(Some)
     }
 
     /// The chat models the gateway offers `user`, reused for CATALOG_TTL; concurrent
@@ -730,6 +675,13 @@ pub fn unavailable() -> ApiError {
         "The gateway could not complete this request".into(),
     )
 }
+/// A gateway answer's JSON body, refusing one larger than `max`.
+async fn json_body(response: Response, max: usize) -> Result<Value, ApiError> {
+    let bytes = crate::http::read_capped(response, max)
+        .await
+        .map_err(|_| unavailable())?;
+    serde_json::from_slice(&bytes).map_err(|_| unavailable())
+}
 /// What a reply says when the gateway stopped waiting for a free slot on its model.
 pub const CAPACITY_TIMEOUT: &str =
     "The model stayed full, so the gateway stopped waiting. Retry, or pick another model.";
@@ -750,7 +702,7 @@ pub(crate) async fn upstream_error(response: Response) -> ApiError {
     };
     let reason = match status.as_u16() {
         401 | 403 => None,
-        _ => tokio::time::timeout(Duration::from_secs(5), response.bytes())
+        _ => tokio::time::timeout(ERROR_BODY_TIMEOUT, response.bytes())
             .await
             .ok()
             .and_then(Result::ok)
@@ -897,17 +849,26 @@ mod tests {
         use axum::{routing::get, Json, Router};
         let listed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = listed.clone();
-        let app = Router::new().route(
-            "/v1/models",
-            get(move || {
-                let count = count.clone();
-                async move {
-                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    Json(json!({"data":[{"id":"fixture-model"}]}))
-                }
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        Json(json!({"data":[{"id":"fixture-model"}]}))
+                    }
+                }),
+            )
+            // An embedding as long as the input asks for.
+            .route(
+                "/v1/embeddings",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    let length: usize = body["input"][0].as_str().unwrap().parse().unwrap();
+                    Json(json!({"data":[{"index":0,"embedding":vec![0.123_456_79; length]}]}))
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -926,6 +887,22 @@ mod tests {
         )
         .unwrap();
         (gateway, listed)
+    }
+
+    #[tokio::test]
+    async fn an_oversized_embeddings_answer_is_refused() {
+        let (gateway, _) = counted().await;
+        let user = person("ada");
+        let vectors = gateway
+            .embeddings(&user, "fixture-embed", &["4096".into()])
+            .await
+            .unwrap();
+        assert_eq!(vectors[0].len(), 4096);
+        let error = gateway
+            .embeddings(&user, "fixture-embed", &["100000".into()])
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]

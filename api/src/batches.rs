@@ -54,6 +54,16 @@ const MAX_RESULTS: usize = 192 * 1024 * 1024;
 static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 /// How long a download waits for its turn before saying so.
 const DOWNLOAD_WAIT: Duration = Duration::from_secs(30);
+/// How long the gateway may take to list batches or answer about one.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long it may take to cancel or delete a batch.
+const CHANGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long it may take to take a spreadsheet's file or start its batch.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long one results file may take to download.
+const RESULTS_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long the reason in a refused answer is waited for.
+const REASON_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long Chat keeps a batch's rows; the gateway keeps batches 30 days.
 const KEEP_DAYS: i32 = 35;
 /// How long a start waits for its turn to read a spreadsheet before saying so.
@@ -99,7 +109,7 @@ async fn refused(response: reqwest::Response) -> ApiError {
     let status = response.status().as_u16();
     match status {
         400 | 404 | 409 | 413 | 422 => {
-            let body = tokio::time::timeout(Duration::from_secs(5), response.bytes())
+            let body = tokio::time::timeout(REASON_TIMEOUT, response.bytes())
                 .await
                 .ok()
                 .and_then(Result::ok)
@@ -121,16 +131,14 @@ async fn refused(response: reqwest::Response) -> ApiError {
     }
 }
 
+/// A gateway call that must succeed: anything else is refused as the person should
+/// read it.
 async fn call(
     gw: &Gateway,
     user: &Identity,
     request: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, ApiError> {
-    let response = request
-        .header(header::AUTHORIZATION, gw.authorization(user).await?)
-        .send()
-        .await
-        .map_err(|_| crate::gateway::unavailable())?;
+    let response = gw.send(user, request).await?;
     if response.status().is_success() {
         Ok(response)
     } else {
@@ -138,26 +146,16 @@ async fn call(
     }
 }
 
-/// A response body, refusing one larger than `limit`.
-async fn read_capped(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ApiError> {
-    use futures_util::StreamExt;
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(part) = stream.next().await {
-        let part = part.map_err(|_| crate::gateway::unavailable())?;
-        if bytes.len() + part.len() > limit {
-            return Err(ApiError(
+async fn json_of(response: reqwest::Response) -> Result<Value, ApiError> {
+    let bytes = crate::http::read_capped(response, 8 * 1024 * 1024)
+        .await
+        .map_err(|read| match read {
+            crate::http::Read::Closed => crate::gateway::unavailable(),
+            crate::http::Read::TooLarge => ApiError(
                 StatusCode::BAD_GATEWAY,
                 "The results are too large to put together here".into(),
-            ));
-        }
-        bytes.extend_from_slice(&part);
-    }
-    Ok(bytes)
-}
-
-async fn json_of(response: reqwest::Response) -> Result<Value, ApiError> {
-    let bytes = read_capped(response, 8 * 1024 * 1024).await?;
+            ),
+        })?;
     serde_json::from_slice(&bytes).map_err(|_| crate::gateway::unavailable())
 }
 
@@ -316,14 +314,8 @@ async fn list(
             Some(after) => format!("v1/batches?limit=100&after={after}"),
             None => "v1/batches?limit=100".to_string(),
         };
-        let response = gw
-            .http()
-            .get(gw.url(&path))
-            .header(header::AUTHORIZATION, gw.authorization(&user).await?)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|_| crate::gateway::unavailable())?;
+        let request = gw.http().get(gw.url(&path)).timeout(LOOKUP_TIMEOUT);
+        let response = gw.send(&user, request).await?;
         // A gateway without batches (another kind, an older one, or turned off).
         if page == 0 && matches!(response.status().as_u16(), 404 | 405 | 501) {
             return Ok(Json(json!({"available": false, "batches": []})));
@@ -748,7 +740,7 @@ async fn create(
                 header::CONTENT_TYPE,
                 format!("multipart/form-data; boundary={boundary}"),
             )
-            .timeout(Duration::from_secs(300))
+            .timeout(UPLOAD_TIMEOUT)
             .body(multipart(&boundary, file)),
     )
     .await?;
@@ -762,7 +754,7 @@ async fn create(
         &user,
         gw.http()
             .post(gw.url("v1/batches"))
-            .timeout(Duration::from_secs(300))
+            .timeout(UPLOAD_TIMEOUT)
             .json(&json!({
                 "input_file_id": file_id,
                 "endpoint": "/v1/chat/completions",
@@ -820,7 +812,7 @@ async fn cancel(
         &user,
         gw.http()
             .post(gw.url(&format!("v1/batches/{id}/cancel")))
-            .timeout(Duration::from_secs(30)),
+            .timeout(CHANGE_TIMEOUT),
     )
     .await?;
     let b = json_of(response).await?;
@@ -855,7 +847,7 @@ async fn update(
         &user,
         gw.http()
             .get(gw.url(&format!("v1/batches/{id}")))
-            .timeout(Duration::from_secs(15)),
+            .timeout(LOOKUP_TIMEOUT),
     )
     .await?;
     let b = json_of(response).await?;
@@ -916,28 +908,16 @@ async fn remove(
         return Err(ApiError::not_found());
     }
     let gw = gateway(&state)?;
-    let response = gw
-        .http()
-        .delete(gw.url(&format!("v1/batches/{id}")))
-        .header(header::AUTHORIZATION, gw.authorization(&user).await?)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|_| crate::gateway::unavailable())?;
+    let request = gw.http().delete(gw.url(&format!("v1/batches/{id}")));
+    let response = gw.send(&user, request.timeout(CHANGE_TIMEOUT)).await?;
     let status = response.status().as_u16();
     if !response.status().is_success() && !matches!(status, 404 | 405) {
         return Err(refused(response).await);
     }
     if !response.status().is_success() {
         // Gone already, or a gateway that can't delete batches: tell them apart.
-        let still = gw
-            .http()
-            .get(gw.url(&format!("v1/batches/{id}")))
-            .header(header::AUTHORIZATION, gw.authorization(&user).await?)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|_| crate::gateway::unavailable())?;
+        let request = gw.http().get(gw.url(&format!("v1/batches/{id}")));
+        let still = gw.send(&user, request.timeout(LOOKUP_TIMEOUT)).await?;
         if still.status().is_success() {
             return Err(ApiError(
                 StatusCode::NOT_IMPLEMENTED,
@@ -1175,7 +1155,7 @@ async fn results(
             &user,
             gw.http()
                 .get(gw.url(&format!("v1/batches/{id}")))
-                .timeout(Duration::from_secs(15)),
+                .timeout(LOOKUP_TIMEOUT),
         )
         .await?,
     )
@@ -1201,9 +1181,7 @@ async fn results(
         let response = call(
             gw,
             &user,
-            gw.http()
-                .get(gw.url(&path))
-                .timeout(Duration::from_secs(600)),
+            gw.http().get(gw.url(&path)).timeout(RESULTS_TIMEOUT),
         )
         .await?;
         read_outcomes(response, &mut left, &mut outcomes).await?;

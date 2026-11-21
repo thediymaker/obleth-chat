@@ -2,6 +2,12 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Changes**
+
+- **Every answer Chat reads from the gateway has a size limit.** The model list, model details and load were read through three copies of the same capped loop, while embeddings, verdicts and whole completions were read without a limit. They now share one reader with the one Slurm and Kubernetes answers use, which also refuses an answer whose length is over the limit before reading it: 2 MiB for the model list and details, 1 MiB for load, 16 MiB for a completion or verdict, and 256 KiB per input for embeddings. A larger answer fails as a gateway error. Batches and decision endpoints use the same reader.
+
 ## v1.7.0
 
 **Changes**

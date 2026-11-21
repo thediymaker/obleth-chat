@@ -16,6 +16,7 @@ pub mod feedback;
 pub mod files;
 pub mod gateway;
 pub mod groups;
+mod http;
 pub mod images;
 pub mod imports;
 pub mod insights;

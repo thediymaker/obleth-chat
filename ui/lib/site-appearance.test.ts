@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultBranding } from "./branding";
+import { normalizeBranding } from "./branding";
 import { cornerProperties, readAppearance, siteAppearance, withAppearance } from "./site-appearance";
 
 describe("readAppearance", () => {
@@ -20,15 +20,30 @@ describe("readAppearance", () => {
 });
 
 describe("withAppearance", () => {
-  const file = { ...defaultBranding, siteName: "Lab Chat", siteNameLines: ["Lab", "Chat"], appearance: { defaultTheme: "light" as const, accent: "#7cb7ff", personalAccent: true } };
+  const file = { siteName: "Lab\nChat", assistantName: "Helper", logo: { light: "./assets/lab.svg", alt: "Lab" }, home: { eyebrow: "Welcome", title: "Hello" }, login: { help: "Ask IT" }, appearance: { defaultTheme: "light", accent: "#7cb7ff" } };
   it("lays the administrator's settings over the file's", () => {
-    const shown = withAppearance(file, { siteName: "Research Computing", accent: "#5fd3bc", personalAccent: false });
+    const shown = withAppearance(file, { siteName: "Research Computing", accent: "#5fd3bc", personalAccent: false, branding: { assistantName: "Sparky", home: { eyebrow: "" }, login: { helpLink: { label: "Request an account", url: "https://accounts.example.edu" } }, links: [] } });
     expect(shown.siteName).toBe("Research Computing");
     expect(shown.siteNameLines).toEqual(["Research Computing"]);
     expect(shown.appearance).toEqual({ defaultTheme: "light", accent: "#5fd3bc", personalAccent: false });
+    expect(shown.assistantName).toBe("Sparky");
+    // A present but empty text hides the line; what was not sent stays the file's.
+    expect(shown.home).toMatchObject({ eyebrow: "", title: "Hello" });
+    expect(shown.login.help).toBe("Ask IT");
+    expect(shown.login.helpLink).toEqual({ label: "Request an account", url: "https://accounts.example.edu" });
+    expect(shown.links).toEqual([]);
+    expect(shown.logo).toEqual({ light: "/assets/lab.svg", dark: "/assets/lab.svg", alt: "Lab" });
   });
-  it("is the file's own when nothing is set", () => {
-    expect(withAppearance(file, {})).toBe(file);
+  it("shows an uploaded logo and tab icon in place of the file's, or no logo at all", () => {
+    const images = { "logo-dark": "/api/branding/images/logo-dark?v=abc", favicon: "/api/branding/images/favicon?v=def" };
+    const shown = withAppearance(file, { branding: { images, logoAlt: "Research Computing" } });
+    expect(shown.logo).toEqual({ light: images["logo-dark"], dark: images["logo-dark"], alt: "Research Computing" });
+    expect(shown.favicon).toEqual({ light: images.favicon, dark: images.favicon });
+    expect(withAppearance(file, { branding: { images, hideLogo: true } }).logo).toEqual({ light: "", dark: "", alt: "" });
+  });
+  it("is the file's own when nothing is set, and does not trust an address that leaves the site", () => {
+    expect(withAppearance(file, {})).toEqual(normalizeBranding(file));
+    expect(withAppearance(file, { branding: { images: { "logo-light": "https://elsewhere.example/x.svg" } } }).logo.light).toBe("");
   });
 });
 

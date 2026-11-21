@@ -34,7 +34,7 @@ export const ADMIN_TABS = [
   ["workspaces", Terminal, "Workspaces"],
   ["feedback", ThumbsUp, "Feedback"],
   ["audit", Clock, "Activity"],
-  ["appearance", Palette, "Appearance"],
+  ["appearance", Palette, "Branding"],
   ["system", Server, "System"],
 ] as const;
 export type AdminSection = (typeof ADMIN_TABS)[number][0];

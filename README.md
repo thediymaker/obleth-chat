@@ -191,7 +191,7 @@ Edit [branding/site.config.js](branding/site.config.js) and reload the page. Thi
 - Text is plain text, with `\n` for a line break. Set optional text, including the sign-in and home page footers, to `''` to hide it.
 - Set `appearance.defaultTheme` to `system`, `light`, or `dark`. People can switch appearance in the header or in Settings; their browser remembers their choice.
 - Set `appearance.accent` to a color such as `#5fd3bc` to change the accent, the one color Chat uses for whatever is still working (a reply being written, a running step, a chat that has not finished). Chat shows a shade of it on each theme that stays readable. People can pick their own accent in Settings unless `appearance.personalAccent` is `false`.
-- An administrator can change the site's name, accent, starting theme, corners and whether people may pick their own accent in **Settings › Administration › Appearance**, without touching files. What is set there wins over `site.config.js`; anything left "as installed" follows the file. The logo and the sign-in text stay in the file.
+- An administrator can set all of this in **Settings › Administration › Branding**, without touching files: the site's name and logo, the browser tab icon, the accent, starting theme and corners, the words on the home and sign-in pages, the links and the icons. What is set there wins over `site.config.js`; anything left alone follows the file, which stays the installation's default. Uploaded images (up to 512 KB each) are kept in the database.
 
 For Docker, copy the configuration and place your images in a host directory:
 

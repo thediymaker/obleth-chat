@@ -34,6 +34,8 @@ interface SessionResponse {
   banner?: Banner | null;
   /** The look an administrator set for the site; absent from a server that has none to give. */
   appearance?: unknown;
+  /** The words, links, icons and images an administrator set, with the same rule. */
+  branding?: unknown;
 }
 
 export interface SessionState {
@@ -100,7 +102,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       const result = await api.request<SessionResponse>("/api/session");
       if (mine !== epoch.current) return;
       const base = { oidc: result.oidcEnabled ?? false, passwords: result.passwordSignIn ?? true, banner: result.banner ?? null };
-      if (result.appearance !== undefined) siteAppearance.set(result.appearance);
+      if (result.appearance !== undefined) siteAppearance.set({ ...(result.appearance as object), branding: result.branding });
       if (!result.authenticated || !result.user) {
         setState((s) => ({ ...s, ...base, phase: "login", user: null }));
         return;

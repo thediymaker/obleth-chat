@@ -89,7 +89,7 @@ fn one_line(text: &str) -> String {
 }
 
 /// A link may go to a web or mail address only.
-fn link_url(url: &str) -> Option<String> {
+pub(crate) fn link_url(url: &str) -> Option<String> {
     let url = url.trim();
     let parsed = url::Url::parse(url).ok()?;
     (["http", "https", "mailto"].contains(&parsed.scheme())

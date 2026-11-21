@@ -93,6 +93,151 @@ async fn call(
     )
 }
 
+/// A request with a body that is not JSON, answering with the bytes and the headers.
+async fn raw(
+    app: &Router,
+    user: Option<&Session>,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("origin", ORIGIN)
+        .header("content-type", "application/octet-stream");
+    if let Some(user) = user {
+        request = request
+            .header("cookie", &user.cookie)
+            .header("x-csrf-token", &user.csrf);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::from(body.to_vec())).unwrap())
+        .await
+        .unwrap();
+    let (status, headers) = (response.status(), response.headers().clone());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, bytes.to_vec())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn administrators_set_the_words_and_images_and_every_page_gets_them(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let admin = session(&pool, "admin").await;
+    let person = session(&pool, "user").await;
+    let (_, signed_out) = call(&app, None, "GET", "/api/session", Value::Null).await;
+    assert_eq!(signed_out["branding"], json!({}));
+
+    // The words: only what was sent is kept, and it reaches the sign-in page.
+    let words = json!({"assistantName": "Sparky", "home": {"title": "Ask anything"}, "links": []});
+    let (status, saved) = call(
+        &app,
+        Some(&admin),
+        "PATCH",
+        "/api/admin/appearance",
+        json!({"siteName": "Lab Chat", "branding": words}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["branding"], words);
+    assert_eq!(saved["images"], json!({}));
+    let (_, signed_out) = call(&app, None, "GET", "/api/session", Value::Null).await;
+    assert_eq!(signed_out["branding"], words);
+    assert_eq!(signed_out["appearance"], json!({"siteName": "Lab Chat"}));
+    let (status, _) = call(
+        &app,
+        Some(&admin),
+        "PATCH",
+        "/api/admin/appearance",
+        json!({"branding": {"links": [{"label": "x", "url": "javascript:alert(1)"}]}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // An image: administrators only, an image by its bytes, served to anyone.
+    let png = b"\x89PNG\r\n\x1a\n-not-really-pixels-";
+    let (status, _, _) = raw(
+        &app,
+        Some(&person),
+        "PUT",
+        "/api/admin/branding/images/logo-dark",
+        png,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = raw(
+        &app,
+        Some(&admin),
+        "PUT",
+        "/api/admin/branding/images/logo-dark",
+        b"<html>no</html>",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = raw(
+        &app,
+        Some(&admin),
+        "PUT",
+        "/api/admin/branding/images/banner",
+        png,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, body) = raw(
+        &app,
+        Some(&admin),
+        "PUT",
+        "/api/admin/branding/images/logo-dark",
+        png,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let answer: Value = serde_json::from_slice(&body).unwrap();
+    let path = answer["images"]["logo-dark"].as_str().unwrap().to_owned();
+    assert!(
+        path.starts_with("/api/branding/images/logo-dark?v="),
+        "{path}"
+    );
+
+    let (status, headers, bytes) = raw(&app, None, "GET", &path, b"").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, png);
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert!(headers["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .contains("sandbox"));
+    let (_, signed_out) = call(&app, None, "GET", "/api/session", Value::Null).await;
+    assert_eq!(signed_out["branding"]["images"]["logo-dark"], path.as_str());
+    assert_eq!(signed_out["branding"]["assistantName"], "Sparky");
+
+    // Saving the words again leaves the image; removing it takes it out of every answer.
+    let (_, saved) = call(
+        &app,
+        Some(&admin),
+        "PATCH",
+        "/api/admin/appearance",
+        json!({}),
+    )
+    .await;
+    assert_eq!(saved["images"]["logo-dark"], path.as_str());
+    let (status, _, _) = raw(
+        &app,
+        Some(&admin),
+        "DELETE",
+        "/api/admin/branding/images/logo-dark",
+        b"",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = raw(&app, None, "GET", "/api/branding/images/logo-dark", b"").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, signed_out) = call(&app, None, "GET", "/api/session", Value::Null).await;
+    assert_eq!(signed_out["branding"], json!({}));
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn administrators_set_the_look_and_every_page_gets_it_with_the_session(pool: PgPool) {
     let app = fixture(&pool).await;

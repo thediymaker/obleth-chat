@@ -8,17 +8,18 @@
 
 import type { QueryClient } from "@tanstack/react-query";
 import type { ApiClient, StreamEvent, Validator } from "@/lib/api";
-import { applyChatDraft, chatDraft } from "@/components/projects/chat-draft";
+import { applyChatDraft, chatDraft } from "@/lib/chat/chat-draft";
 import { NOT_MODIFIED, readEvents as readEventsDefault } from "@/lib/api";
-import { createBrowserBridge, type BrowserBridge } from "@/components/browser/bridge";
-import { createCodeBridge, type CodeBridge } from "@/components/code/bridge";
+import { createBrowserBridge, type BrowserBridge } from "@/lib/browser/bridge";
+import { createCodeBridge, type CodeBridge } from "@/lib/code/bridge";
 import { createDevicesBridge, type DevicesBridge } from "@/lib/devices/bridge";
-import { createWorkspaceBridge, type WorkspaceBridge } from "@/components/workspace/bridge";
+import { createWorkspaceBridge, type WorkspaceBridge } from "@/lib/workspace/bridge";
 import { createAttachments, type Attachments } from "./attachments";
 import { EFFORTS } from "./composer";
 import { conversationBusy, isPendingMessage, mergeProgress, renderSignature, suggestionsPending } from "./conversation-state";
-import { applyToolsDraft, chatToolsKey, enableAuto, resetToolsDraft } from "@/components/connections/chat-tools";
+import { applyToolsDraft, chatToolsKey, enableAuto, resetToolsDraft } from "./tools-draft";
 import { resetSteerDraft } from "@/lib/chat/steer-draft";
+import { forgetShownCode } from "./rendered";
 import { keys, type Capabilities } from "@/lib/queries";
 import { nextRating } from "./feedback";
 import { createFollow, type Follow } from "./follow";
@@ -187,6 +188,10 @@ export class ChatStore {
   follow: Follow | null = null;
   scroller: HTMLElement | null = null;
 
+  /** What the person opened or picked in replies (a trace's filter, an open trace, the
+   *  worker shown in a delegate step), by message or step id; cleared with the session. */
+  readonly views = { traceFilters: new Map<string, string>(), openTraces: new Set<string>(), workers: new Map<string, number>() };
+
   // ---- Bookkeeping ----
   readonly operations = new Map<string, Operation>();
   private revisions = new Map<string, number>();
@@ -314,6 +319,10 @@ export class ChatStore {
     resetToolsDraft();
     chatDraft.reset();
     resetSteerDraft();
+    this.views.traceFilters.clear();
+    this.views.openTraces.clear();
+    this.views.workers.clear();
+    forgetShownCode();
   }
 
   // ---- Helpers ----

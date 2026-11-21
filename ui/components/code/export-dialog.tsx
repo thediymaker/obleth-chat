@@ -14,8 +14,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { api } from "@/lib/api";
-import { type CodeOverview, projectCodePath, slug } from "./model";
-import { startDownload } from "@/components/workspace/model";
+import { type CodeOverview, projectCodePath, slug } from "@/lib/code/model";
+import { startDownload } from "@/lib/workspace/model";
 import { count } from "@/lib/format";
 
 export const codeKeys = {

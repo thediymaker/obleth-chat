@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { codeEvents } from "@/components/code/events";
+import { codeEvents } from "@/lib/code/events";
 import { createWorkspaceBridge } from "./bridge";
 
 function setup(handler: (path: string, options: any) => unknown = () => ({})) {

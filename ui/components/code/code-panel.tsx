@@ -20,10 +20,10 @@ import { api } from "@/lib/api";
 import { useFeature } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { DiffStat, DiffView } from "./diff-view";
-import { SETTLE_MS, codeEvents } from "./events";
+import { SETTLE_MS, codeEvents } from "@/lib/code/events";
 import { ExportDialog } from "./export-dialog";
 import { MoveToProjectDialog } from "@/components/projects/chat-project";
-import { type ChatCode, type ConflictRegion, LETTER, chatCodePath, codeHref, conflictRegions, resolvePrompt, short, syncSays } from "./model";
+import { type ChatCode, type ConflictRegion, LETTER, chatCodePath, codeHref, conflictRegions, resolvePrompt, short, syncSays } from "@/lib/code/model";
 import { ago, count } from "@/lib/format";
 
 export const chatCodeKey = (id: string) => ["chat-code", id] as const;

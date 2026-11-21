@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { PaneNote } from "@/components/workspace/pane-note";
 import { useBranding } from "@/lib/branding-context";
 import { cn } from "@/lib/utils";
-import { liveUrl } from "./bridge";
+import { liveUrl } from "@/lib/browser/bridge";
 import { buttonOf, keyMessage, modifiers, pagePoint, viewport } from "./input";
 
 type Note = "connecting" | "starting" | "closed" | "status" | null;

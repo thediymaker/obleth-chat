@@ -6,9 +6,9 @@
 
 import { useRouter } from "next/navigation";
 import { useChatStore } from "@/components/chat/chat-provider";
-import { startAutoDraft } from "@/components/connections/chat-tools";
-import { chatDraft } from "@/components/projects/chat-draft";
-import type { CodeStart } from "./bridge";
+import { startAutoDraft } from "@/lib/chat/tools-draft";
+import { chatDraft } from "@/lib/chat/chat-draft";
+import type { CodeStart } from "@/lib/code/bridge";
 
 export function useStartInProject() {
   const store = useChatStore();

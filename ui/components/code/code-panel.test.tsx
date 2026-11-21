@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { fakeStore } from "@/components/workspace/test-store";
 import { CodePanel, CodeTabLabel } from "./code-panel";
-import { codeEvents } from "./events";
-import type { ChatCode } from "./model";
+import { codeEvents } from "@/lib/code/events";
+import type { ChatCode } from "@/lib/code/model";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
 vi.mock("@/components/chat/chat-provider", () => import("@/components/workspace/test-store"));

@@ -10,7 +10,7 @@ import { BrowserToggle } from "@/components/browser/browser-toggle";
 import { CodeChip } from "@/components/code/code-chip";
 import { KnowledgePicker, KnowledgePill } from "@/components/knowledge/chat-knowledge";
 import { ProjectComposerChip } from "@/components/projects/chat-project";
-import { useChatDraft } from "@/components/projects/chat-draft";
+import { useChatDraft } from "@/lib/chat/chat-draft";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";

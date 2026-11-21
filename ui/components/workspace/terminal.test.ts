@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createWorkspaceBridge } from "./bridge";
+import { createWorkspaceBridge } from "@/lib/workspace/bridge";
 import { typeCommand } from "./terminal";
 
 const decode = (data: Uint8Array) => new TextDecoder().decode(data);

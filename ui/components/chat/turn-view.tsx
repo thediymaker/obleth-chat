@@ -404,14 +404,12 @@ const FILTERS: [string, string][] = [
   ["commands", "Commands"],
   ["problems", "Problems"],
 ];
-// Which filter each trace shows, by reply.
-const filters = new Map<string, string>();
-
 function Trace({ m, work }: { m: Message; work: Work }) {
+  const { traceFilters } = useChatStore().views;
   const id = m.id || "live";
-  const [filter, setFilterState] = useState(filters.get(id) || "all");
+  const [filter, setFilterState] = useState(traceFilters.get(id) || "all");
   const setFilter = (f: string) => {
-    filters.set(id, f);
+    traceFilters.set(id, f);
     setFilterState(f);
   };
   const t0 = statsOf(work).began;
@@ -474,9 +472,9 @@ function Trace({ m, work }: { m: Message; work: Work }) {
   );
 }
 
-// Which replies have their trace open.
-const opened = new Set<string>();
+/** Whether a reply's trace is open, kept on the store while the session lasts. */
 function useTraceOpen(id: string): [boolean, () => void] {
+  const opened = useChatStore().views.openTraces;
   const [open, setOpen] = useState(opened.has(id));
   return [
     open,
@@ -579,10 +577,10 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
   );
 }
 
-// Which worker each delegate step shows in its detail panel.
-const chosen = new Map<string, number>();
-/** The workers of a delegate step as a graph: the lead, each worker, and their reports coming back. */
+/** The workers of a delegate step as a graph: the lead, each worker, and their reports
+ *  coming back. The worker picked for the detail panel is kept on the store. */
 function WorkerGraph({ s, m }: { s: ActivityEntry; m: Message }) {
+  const chosen = useChatStore().views.workers;
   const list: any[] = s.agents,
     n = list.length;
   const [pickedState, setPicked] = useState<number | null>(chosen.has(s.id!) ? chosen.get(s.id!)! : null);

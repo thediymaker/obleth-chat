@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { ApiError } from "@/lib/api";
-import { ToolsButton, applyToolsDraft, resetToolsDraft, startAutoDraft } from "./chat-tools";
+import { applyToolsDraft, resetToolsDraft, startAutoDraft } from "@/lib/chat/tools-draft";
+import { ToolsButton } from "./chat-tools";
 import { addedMessage, connectionBody, type Connection } from "./connections";
 import { McpServersPage } from "./mcp-page";
 

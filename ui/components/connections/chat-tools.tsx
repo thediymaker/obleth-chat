@@ -3,14 +3,14 @@
 // The chat side of connections, for the chat page to render: which clusters and MCP
 // servers the model may use in one chat, and Auto mode (tools run without asking).
 // Every active connection is on unless switched off for that chat. A new chat keeps
-// its choices here until it is created; then `applyToolsDraft(id)` stores them.
+// its choices in lib/chat/tools-draft.ts until it is created; then the store's
+// `applyToolsDraft(id)` saves them.
 //
 //   <ToolsButton chatId={id} disabled={streaming} />   the composer's Tools 2/3 button
 //   <ToolsContextSection chatId={id} />                the context panel's Tools block
 //   useChatTools(id).auto                              whether Auto mode is on
-//   applyToolsDraft(id), enableAuto(id), resetToolsDraft(), startAutoDraft()
 
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link2, Zap } from "lucide-react";
 import Link from "next/link";
 import { useState, useSyncExternalStore } from "react";
@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { DetailRow, FormActions, FormDialog, Pill } from "@/components/manage/kit";
 import { api } from "@/lib/api";
+import { chatToolsKey, chatToolsPath, setToolsDraft, subscribeToolsDraft, toolsDraft } from "@/lib/chat/tools-draft";
 import { useCapabilities } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { KINDS, kindOf, type Connection } from "./connections";
@@ -35,22 +36,7 @@ export interface ChatTool {
   on: boolean;
 }
 
-// The new chat's choices, before it exists.
-let draft = { off: new Set<string>(), auto: false };
-const listeners = new Set<() => void>();
-const emit = () => listeners.forEach((l) => l());
-const subscribe = (l: () => void) => {
-  listeners.add(l);
-  return () => listeners.delete(l);
-};
-const setDraft = (next: Partial<typeof draft>) => {
-  draft = { ...draft, ...next };
-  emit();
-};
-const useDraft = () => useSyncExternalStore(subscribe, () => draft, () => draft);
-
-const chatPath = (id: string) => `/api/conversations/${encodeURIComponent(id)}/connections`;
-export const chatToolsKey = (id: string | null) => ["chat-tools", id ?? ""] as const;
+const useDraft = () => useSyncExternalStore(subscribeToolsDraft, toolsDraft, toolsDraft);
 
 /** The tools of one chat (or of the new chat, with no id), and whether Auto mode is on. */
 export function useChatTools(chatId: string | null) {
@@ -64,7 +50,7 @@ export function useChatTools(chatId: string | null) {
     queryFn: async (): Promise<{ list: ChatTool[]; auto: boolean }> => {
       try {
         if (chatId) {
-          const r = await api.request<{ connections?: ChatTool[]; auto?: boolean }>(chatPath(chatId));
+          const r = await api.request<{ connections?: ChatTool[]; auto?: boolean }>(chatToolsPath(chatId));
           return { list: r.connections ?? [], auto: !!r.auto };
         }
         const r = await api.request<{ connections?: Connection[] }>("/api/connections");
@@ -81,28 +67,6 @@ export function useChatTools(chatId: string | null) {
   return { list, auto: auto && autoAllowed, autoAllowed, on: list.filter((c) => c.on).length, total: list.length };
 }
 
-/** Stores what was chosen before a new chat existed. */
-export async function applyToolsDraft(id: string, queries?: QueryClient) {
-  const off = [...draft.off];
-  const auto = draft.auto;
-  setDraft({ off: new Set(), auto: false });
-  if (auto) await api.request(chatPath(id), { method: "PATCH", body: { auto: true } }).catch(() => {});
-  await Promise.all(off.map((connectionId) => api.request(chatPath(id), { method: "PATCH", body: { connectionId, on: false } }).catch(() => {})));
-  await queries?.invalidateQueries({ queryKey: chatToolsKey(id) });
-}
-
-/** Research turns Auto mode on for its chat, where the installation allows it. */
-export async function enableAuto(id: string, autoAllowed: boolean, queries?: QueryClient) {
-  if (!autoAllowed) return;
-  await api.request(chatPath(id), { method: "PATCH", body: { auto: true } }).catch(() => {});
-  await queries?.invalidateQueries({ queryKey: chatToolsKey(id) });
-}
-
-/** A new chat starts from every active connection again, with Auto off. */
-export const resetToolsDraft = () => setDraft({ off: new Set(), auto: false });
-/** A new chat that should start in Auto mode, such as research from a project. */
-export const startAutoDraft = () => setDraft({ auto: true });
-
 /** The dialog that switches each connection, and Auto mode, for this chat. */
 export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | null; open: boolean; onOpenChange: (open: boolean) => void }) {
   const queries = useQueryClient();
@@ -115,12 +79,12 @@ export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | 
   async function switchOne(item: ChatTool) {
     const on = !item.on;
     try {
-      if (chatId) await api.request(chatPath(chatId), { method: "PATCH", body: { connectionId: item.id, on } });
+      if (chatId) await api.request(chatToolsPath(chatId), { method: "PATCH", body: { connectionId: item.id, on } });
       else {
-        const off = new Set(draft.off);
+        const off = new Set(toolsDraft().off);
         if (on) off.delete(item.id);
         else off.add(item.id);
-        setDraft({ off });
+        setToolsDraft({ off });
       }
       if (chatId) patch((old) => ({ ...old, list: old.list.map((c) => (c.id === item.id ? { ...c, on } : c)) }));
     } catch (e) {
@@ -131,9 +95,9 @@ export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | 
     const next = !auto;
     try {
       if (chatId) {
-        await api.request(chatPath(chatId), { method: "PATCH", body: { auto: next } });
+        await api.request(chatToolsPath(chatId), { method: "PATCH", body: { auto: next } });
         patch((old) => ({ ...old, auto: next }));
-      } else setDraft({ auto: next });
+      } else setToolsDraft({ auto: next });
     } catch (e) {
       toast((e as Error).message);
     }

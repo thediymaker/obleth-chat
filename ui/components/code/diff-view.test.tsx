@@ -1,10 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { DiffView } from "./diff-view";
-import { diffRows } from "./model";
+import { diffRows } from "@/lib/code/model";
 
-vi.mock("./model", async (original) => {
-  const model = await original<typeof import("./model")>();
+vi.mock("@/lib/code/model", async (original) => {
+  const model = await original<typeof import("@/lib/code/model")>();
   return { ...model, diffRows: vi.fn(model.diffRows) };
 });
 

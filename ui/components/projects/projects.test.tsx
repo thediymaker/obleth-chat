@@ -11,7 +11,7 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: vi.fn() }
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { moveChatToResearchProject } from "./api";
-import { applyChatDraft, chatDraft } from "./chat-draft";
+import { applyChatDraft, chatDraft } from "@/lib/chat/chat-draft";
 import { ProjectContextSection } from "./chat-project";
 import { CollectionsPicker } from "./collections-picker";
 import { ProjectDialog } from "./project-dialog";

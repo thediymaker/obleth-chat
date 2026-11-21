@@ -10,8 +10,8 @@
 import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
-import type { WorkspaceBridge } from "./bridge";
-import { terminalUrl } from "./model";
+import type { WorkspaceBridge } from "@/lib/workspace/bridge";
+import { terminalUrl } from "@/lib/workspace/model";
 
 type XTerm = import("@xterm/xterm").Terminal;
 type Fit = import("@xterm/addon-fit").FitAddon;

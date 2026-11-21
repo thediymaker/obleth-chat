@@ -7,7 +7,7 @@
 import { GitBranch, X } from "lucide-react";
 import { useSyncExternalStore } from "react";
 import { useChat } from "@/components/chat/chat-provider";
-import { short } from "./model";
+import { short } from "@/lib/code/model";
 
 export function CodeChip() {
   const store = useChat();

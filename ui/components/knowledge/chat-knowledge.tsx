@@ -11,7 +11,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, Eyebrow } from "@/components/app-shell/page";
-import { chatDraft, useChatDraft } from "@/components/projects/chat-draft";
+import { chatDraft, useChatDraft } from "@/lib/chat/chat-draft";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";

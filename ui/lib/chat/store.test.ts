@@ -83,9 +83,22 @@ const done = (content: string): Message[] => [
 ];
 
 describe("when the session ends", () => {
+  it("forgets which traces were open, their filters, the chosen workers and the code shown for drawings", async () => {
+    const { showsCode, toggleDrawing } = await import("./rendered");
+    const { store } = setup({});
+    store.views.traceFilters.set("a1", "files");
+    store.views.openTraces.add("a1");
+    store.views.workers.set("step-1", 2);
+    toggleDrawing("mermaid", "graph TD; a-->b");
+    expect(showsCode("mermaid", "graph TD; a-->b")).toBe(true);
+    store.dispose();
+    expect(store.views.traceFilters.size + store.views.openTraces.size + store.views.workers.size).toBe(0);
+    expect(showsCode("mermaid", "graph TD; a-->b")).toBe(false);
+  });
+
   it("drops what was set up for a new chat and typed into Steer", async () => {
-    const { startAutoDraft } = await import("@/components/connections/chat-tools");
-    const { chatDraft } = await import("@/components/projects/chat-draft");
+    const { startAutoDraft } = await import("./tools-draft");
+    const { chatDraft } = await import("@/lib/chat/chat-draft");
     const { steerDraft } = await import("./steer-draft");
     const { store } = setup({});
     startAutoDraft();
@@ -97,7 +110,7 @@ describe("when the session ends", () => {
     expect(chatDraft.get()).toEqual({ project: null, collections: [] });
     expect(steerDraft.text).toBe("");
     const applied: unknown[] = [];
-    const { applyToolsDraft } = await import("@/components/connections/chat-tools");
+    const { applyToolsDraft } = await import("./tools-draft");
     const { api } = await import("@/lib/api");
     const request = vi.spyOn(api, "request").mockImplementation(async (...args: unknown[]) => {
       applied.push(args);

@@ -7,10 +7,10 @@
 
 import { useSyncExternalStore } from "react";
 import { vi } from "vitest";
-import { createBrowserBridge } from "@/components/browser/bridge";
-import { createCodeBridge } from "@/components/code/bridge";
+import { createBrowserBridge } from "@/lib/browser/bridge";
+import { createCodeBridge } from "@/lib/code/bridge";
 import { createDevicesBridge } from "@/lib/devices/bridge";
-import { createWorkspaceBridge } from "@/components/workspace/bridge";
+import { createWorkspaceBridge } from "@/lib/workspace/bridge";
 import { api } from "@/lib/api";
 
 export type FakeStore = ReturnType<typeof makeStore>;

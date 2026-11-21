@@ -18,7 +18,7 @@ import { count } from "@/lib/format";
 import { keys, useCapabilities, useFeature } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 import { type ProjectDetail, useProjectDetail } from "./api";
-import { chatDraft } from "./chat-draft";
+import { chatDraft } from "@/lib/chat/chat-draft";
 import { ProjectDialog } from "./project-dialog";
 import { ProjectMark } from "./projects-home";
 import { messageOf } from "@/components/manage/kit";

@@ -19,7 +19,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { useProjects } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { moveChat, type Project, projectLine, useConversationProject } from "./api";
-import { chatDraft, useChatDraft } from "./chat-draft";
+import { chatDraft, useChatDraft } from "@/lib/chat/chat-draft";
 import { NewProjectDialog } from "./project-dialog";
 import { messageOf } from "@/components/manage/kit";
 

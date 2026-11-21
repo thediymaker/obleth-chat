@@ -18,7 +18,7 @@ import { api } from "@/lib/api";
 import { ago } from "@/lib/format";
 import { useCapabilities, useFeature } from "@/lib/queries";
 import { ComputeOff, ComputeTabs } from "./compute";
-import { type Workspace, diskUsage, downloadUrl, statusLabel, statusTone } from "./model";
+import { type Workspace, diskUsage, downloadUrl, statusLabel, statusTone } from "@/lib/workspace/model";
 
 export const workspacesKey = ["compute-workspaces"] as const;
 

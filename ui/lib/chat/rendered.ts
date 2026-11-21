@@ -377,6 +377,8 @@ export function toggleDrawing(kind: string, source: string) {
   if (showingCode.has(key)) showingCode.delete(key);
   else showingCode.add(key);
 }
+/** The session ended: drawn blocks show their drawing again. */
+export const forgetShownCode = () => showingCode.clear();
 /** Saves a drawn block as a file: the SVG of a drawing, or the table's data. */
 export function downloadDrawing(block: HTMLElement) {
   const kind = block.dataset.kind!,

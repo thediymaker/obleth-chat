@@ -23,7 +23,7 @@ import { useFeature } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { DiffStat, DiffView } from "./diff-view";
 import { ExportDialog, ImportDialog, codeKeys } from "./export-dialog";
-import { type BlameGroup, type ChangedFile, type ChatRef, type CodeOverview, type CodeRoute, type CommitDetail, type CommitEntry, type CompareResult, type LineVersion, codeHref, codeRoute, projectCodePath, short, undoInChatPrompt } from "./model";
+import { type BlameGroup, type ChangedFile, type ChatRef, type CodeOverview, type CodeRoute, type CommitDetail, type CommitEntry, type CompareResult, type LineVersion, codeHref, codeRoute, projectCodePath, short, undoInChatPrompt } from "@/lib/code/model";
 import { useStartInProject } from "./start-chat";
 import { ago, bytes, count } from "@/lib/format";
 

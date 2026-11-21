@@ -3,7 +3,7 @@
 
 import { memo, useMemo } from "react";
 import { cn } from "@/lib/utils";
-import { diffRows } from "./model";
+import { diffRows } from "@/lib/code/model";
 
 /** Drawn again only when its text changes, not on every repaint of the pane around it. */
 export const DiffView = memo(function DiffView({ text, className }: { text: string | null | undefined; className?: string }) {

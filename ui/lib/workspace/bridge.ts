@@ -7,7 +7,7 @@
 import { toast as sonner } from "sonner";
 import type { StreamEvent } from "@/lib/api";
 import type { Message } from "@/lib/chat/types";
-import { SETTLE_MS, codeEvents } from "@/components/code/events";
+import { SETTLE_MS, codeEvents } from "@/lib/code/events";
 import { type FileEntry, type OpenFile, type Workspace, downloadUrl, imageFile, previewReload, rawUrl, startDownload, workspacePath } from "./model";
 
 export type { Workspace } from "./model";

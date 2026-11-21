@@ -11,7 +11,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { ErrorBox, Loading, Page, isNotFound, NotFound } from "@/components/app-shell/page";
-import { chatDraft } from "@/components/projects/chat-draft";
+import { chatDraft } from "@/lib/chat/chat-draft";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";

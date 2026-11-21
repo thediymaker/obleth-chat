@@ -1109,15 +1109,22 @@ impl Store {
         .await
     }
 
-    /// Records the model the gateway's Auto router chose for a reply.
-    pub async fn set_served_model(&self, message: Uuid, model: &str) -> Result<(), ApiError> {
+    /// Records the model the gateway's Auto router chose for a reply, and why when
+    /// the gateway said.
+    pub async fn set_served_model(
+        &self,
+        message: Uuid,
+        model: &str,
+        why: Option<&Value>,
+    ) -> Result<(), ApiError> {
         validate_model(model)?;
         sqlx::query(
-            "WITH served AS (UPDATE messages SET settings = settings || jsonb_build_object('model', $2::text, 'auto', true) WHERE id = $1 RETURNING generation_id)
+            "WITH served AS (UPDATE messages SET settings = settings || jsonb_strip_nulls(jsonb_build_object('model', $2::text, 'auto', true, 'autoWhy', $3::jsonb)) WHERE id = $1 RETURNING generation_id)
              UPDATE generation_usage SET model = $2 WHERE generation_id IN (SELECT generation_id FROM served)",
         )
         .bind(message)
         .bind(model)
+        .bind(why)
         .execute(&self.pool)
         .await?;
         Ok(())

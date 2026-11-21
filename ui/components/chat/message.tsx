@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useBranding } from "@/lib/branding-context";
 import { attachmentUrl, describe } from "@/lib/chat/attachments";
+import { autoWhyShort, autoWhyText } from "@/lib/chat/auto-why";
 import { clock, effortLabel, NUDGE } from "@/lib/chat/composer";
 import { isPendingMessage, responseVersion } from "@/lib/chat/conversation-state";
 import { ratable } from "@/lib/chat/feedback";
@@ -148,6 +149,7 @@ export function detailCells(m: ChatMessage): [string, string, boolean?][] {
   };
   const cells: [string, unknown, boolean?][] = [
     ["Model", p.resolvedModel || p.model],
+    ["Why Auto chose it", p.auto ? autoWhyText(p.autoWhy) : null, true],
     ["Effort", p.reasoningEffort && effortLabel(p.reasoningEffort)],
     ["Temperature", p.temperature],
     ["Top P", p.topP],
@@ -173,7 +175,7 @@ function MessageDetails({ m, id }: { m: ChatMessage; id: string }) {
         {cells.map(([k, v, wide]) => (
           <div key={k} className={cn("min-w-0", wide && "col-span-2")}>
             <span className="block text-xs text-muted-foreground">{k}</span>
-            <strong className="block truncate text-md font-medium" title={v}>
+            <strong className={cn("block text-md font-medium", k === "Why Auto chose it" ? "leading-snug" : "truncate")} title={v}>
               {v}
             </strong>
           </div>
@@ -369,6 +371,8 @@ export function messageSignature(store: ChatStore, m: ChatMessage, index: number
     store.switchingVersion,
     !!store.shared,
     m.settings?.resolvedModel,
+    m.settings?.autoWhy?.reason,
+    m.settings?.autoWhy?.difficulty,
     store.context,
   ]);
 }
@@ -511,6 +515,16 @@ export const MessageView = memo(
             >
               {responseStatus(store, m)}
             </span>
+          )}
+          {assistant && !isPendingMessage(m) && m.settings?.auto && autoWhyShort(m.settings.autoWhy) && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button type="button" className="text-xs text-muted-foreground hover:text-text-2" data-auto-why aria-label={`Why Auto chose this model: ${autoWhyText(m.settings.autoWhy)}`} onClick={details ? toggleDetails : undefined}>
+                  · <span className="underline decoration-dotted underline-offset-2">{autoWhyShort(m.settings.autoWhy)}</span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-80">{autoWhyText(m.settings.autoWhy)}</TooltipContent>
+            </Tooltip>
           )}
         </div>
         {details && detailsOpen && <MessageDetails m={m} id={`details-${key}`} />}

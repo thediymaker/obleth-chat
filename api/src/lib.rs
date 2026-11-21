@@ -1691,6 +1691,8 @@ async fn run_generation(
     let mut request_id = None;
     // With Auto the gateway picks the model; the stream says which one it was.
     let mut served: Option<String> = None;
+    // Why Auto chose it, when the gateway says so with its answer.
+    let mut auto_why: Option<Value> = None;
     let mut finish_reason: Option<String> = None;
     let mut first = true;
     let generation_id = turn.generation_id;
@@ -2060,6 +2062,11 @@ async fn run_generation(
             {
                 request_id = Some(found.to_owned());
             }
+            // Auto's reason comes with the answer that chose the model; later rounds
+            // of the turn name that model and say nothing.
+            if payload["model"] == "auto" {
+                auto_why = gateway::auto_why(response.headers());
+            }
             emit(
                 &mut tx,
                 "meta",
@@ -2135,7 +2142,7 @@ async fn run_generation(
                                 // Keep the rest of this turn's tool rounds on the same model.
                                 payload["model"] = json!(model);
                             }
-                            emit(&mut tx, "model", json!({"model":model}));
+                            emit(&mut tx, "model", json!({"model":model,"why":auto_why}));
                         }
                     }
                     if let Some(u) = v.get("usage").filter(|v| v.is_object()) {
@@ -3459,7 +3466,11 @@ async fn run_generation(
         status = "error";
         tracing::error!("could not persist completed chat generation");
     } else if let Some(model) = &served {
-        if let Err(error) = s.store.set_served_model(turn.assistant_id, model).await {
+        if let Err(error) = s
+            .store
+            .set_served_model(turn.assistant_id, model, auto_why.as_ref())
+            .await
+        {
             tracing::warn!("could not record the model Auto chose: {error:?}");
         }
     }
@@ -3530,6 +3541,9 @@ async fn run_generation(
         let mut done = json!({"status":status,"usage":usage,"requestId":request_id,"finishReason":finish_reason,"followUpsStatus":if followups {"pending"}else{"idle"}});
         if let Some(model) = &served {
             done["settings"] = json!({"model":model,"resolvedModel":model,"auto":true,"systemPrompt":parameters.system_prompt,"temperature":parameters.temperature,"topP":parameters.top_p,"maxTokens":parameters.max_tokens,"reasoningEffort":turn.reasoning_effort});
+            if let Some(why) = &auto_why {
+                done["settings"]["autoWhy"] = why.clone();
+            }
         }
         if let Some(text) = rewritten {
             done["content"] = json!(text);

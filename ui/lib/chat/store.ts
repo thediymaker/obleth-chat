@@ -1268,7 +1268,7 @@ export class ChatStore {
         break;
       // Auto: the gateway says which model it chose once the reply starts.
       case "model":
-        assistant.settings = { ...assistant.settings, resolvedModel: data.model, auto: true };
+        assistant.settings = { ...assistant.settings, resolvedModel: data.model, auto: true, ...(data.why ? { autoWhy: data.why } : {}) };
         break;
       case "delta":
         assistant.content += data.content || "";

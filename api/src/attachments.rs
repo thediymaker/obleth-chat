@@ -26,6 +26,7 @@ use crate::{
     error::ApiError,
     files::{attachment_key, Files, Placed},
     knowledge::extract::{self, Extracted, Tools},
+    store::{require_owner, Require},
     AppState,
 };
 
@@ -495,7 +496,7 @@ async fn upload(
     .await?;
     let saved = async {
         let mut tx = s.store.pool.begin().await?;
-        lock_owner(&mut tx, user.id).await?;
+        require_owner(&mut tx, user.id, Require::Enabled).await?;
         insert_in(&mut tx, &limits, user.id, &file, &placed, &digest).await?;
         if file.searched() {
             crate::knowledge::attached::stage_in(&mut tx, user.id, &file.meta).await?;
@@ -583,7 +584,8 @@ async fn insert_in(
 
 /// Portable archives carry file bytes explicitly. Reuse identical private files
 /// across imported messages so replayed attachments do not multiply disk usage.
-/// Nothing is committed independently of the caller's conversation transaction.
+/// Nothing is committed independently of the caller's conversation transaction,
+/// which holds the owner's lock.
 pub async fn import_in(
     tx: &mut Transaction<'_, Postgres>,
     store: &Files,
@@ -597,7 +599,6 @@ pub async fn import_in(
     if files.is_empty() {
         return Ok(vec![]);
     }
-    lock_owner(tx, owner).await?;
     let mut ids = vec![];
     let tools = Tools::from_env();
     for item in files {
@@ -703,7 +704,7 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     let user = s.auth.require(&headers, true).await?;
     let mut tx = s.store.pool.begin().await?;
-    lock_owner(&mut tx, user.id).await?;
+    require_owner(&mut tx, user.id, Require::Enabled).await?;
     let exists: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM attachments WHERE id=$1 AND owner_id=$2 FOR UPDATE")
             .bind(id)
@@ -727,16 +728,6 @@ async fn delete(
         .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn lock_owner(tx: &mut Transaction<'_, Postgres>, owner: Uuid) -> Result<(), ApiError> {
-    let found: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM users WHERE id=$1 AND enabled=TRUE FOR UPDATE")
-            .bind(owner)
-            .fetch_optional(&mut **tx)
-            .await?;
-    found.ok_or_else(ApiError::unauthorized)?;
-    Ok(())
 }
 
 fn validate_ids(ids: &[Uuid]) -> Result<(), ApiError> {
@@ -827,8 +818,9 @@ pub async fn load_owner(
     Ok(files)
 }
 
-/// The message and every file must belong to this owner. User-row locking makes
-/// quota changes, deletion, and linking serializable across application replicas.
+/// The message and every file must belong to this owner. The caller's transaction
+/// holds the owner's lock, which keeps quota changes, deletion and linking in turn
+/// across replicas.
 pub async fn link_message(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
@@ -839,7 +831,6 @@ pub async fn link_message(
     if ids.is_empty() {
         return Ok(());
     }
-    lock_owner(tx, owner).await?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.id=$1 AND c.owner_id=$2 AND m.role='user')")
         .bind(message).bind(owner).fetch_one(&mut **tx).await?;
     if !exists {

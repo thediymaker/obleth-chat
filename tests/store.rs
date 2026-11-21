@@ -5,11 +5,13 @@ mod common;
 use axum::http::StatusCode;
 use common::Chats;
 use obleth_chat::store::{
-    ConversationPatch, ReasoningEffort, Store, MAX_CONTEXT_BYTES, MAX_CONVERSATIONS_PER_USER,
-    MAX_CONVERSATION_BYTES, MAX_HISTORY, MAX_RESPONSE_BYTES,
+    lock_owner, ConversationPatch, ReasoningEffort, Require, Store, MAX_CONTEXT_BYTES,
+    MAX_CONVERSATIONS_PER_USER, MAX_CONVERSATION_BYTES, MAX_HISTORY, MAX_RESPONSE_BYTES,
 };
 use serde_json::json;
 use sqlx::PgPool;
+use std::time::Duration;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 async fn user(pool: &PgPool) -> Uuid {
@@ -873,4 +875,65 @@ async fn stopped_workspace_replies_are_replayed_with_their_steps(pool: PgPool) {
     assert!(replayed.contains("- Ran cargo build (error): exit 101"));
     assert!(replayed.contains("stopped before finishing: Generation reached"));
     assert_eq!(second.messages.last().unwrap().content, "continue");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_owner_lock_lets_rows_that_point_at_the_person_be_written(pool: PgPool) {
+    let alice = user(&pool).await;
+    let mut held = pool.begin().await.unwrap();
+    assert!(lock_owner(&mut held, alice, Require::Any).await.unwrap());
+    // A row with a foreign key to the person only needs a key-share lock.
+    timeout(
+        Duration::from_secs(5),
+        sqlx::query("INSERT INTO user_limit_overrides(user_id) VALUES($1)")
+            .bind(alice)
+            .execute(&pool),
+    )
+    .await
+    .expect("the insert waited for the owner's lock")
+    .unwrap();
+    // Another owner transaction still waits its turn.
+    let mut second = pool.begin().await.unwrap();
+    assert!(timeout(
+        Duration::from_millis(300),
+        lock_owner(&mut second, alice, Require::Any)
+    )
+    .await
+    .is_err());
+    held.commit().await.unwrap();
+    assert!(lock_owner(&mut second, alice, Require::Any).await.unwrap());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_owner_lock_says_whether_the_account_is_what_was_asked(pool: PgPool) {
+    let alice = user(&pool).await;
+    let mut tx = pool.begin().await.unwrap();
+    for require in [
+        Require::Any,
+        Require::Enabled,
+        Require::EnabledNoPasswordChange,
+    ] {
+        assert!(lock_owner(&mut tx, alice, require).await.unwrap());
+    }
+    sqlx::query("UPDATE users SET password_change_required=TRUE WHERE id=$1")
+        .bind(alice)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(lock_owner(&mut tx, alice, Require::Enabled).await.unwrap());
+    assert!(
+        !lock_owner(&mut tx, alice, Require::EnabledNoPasswordChange)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE users SET enabled=FALSE WHERE id=$1")
+        .bind(alice)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(lock_owner(&mut tx, alice, Require::Any).await.unwrap());
+    assert!(!lock_owner(&mut tx, alice, Require::Enabled).await.unwrap());
+    assert!(!lock_owner(&mut tx, Uuid::new_v4(), Require::Any)
+        .await
+        .unwrap());
 }

@@ -1,5 +1,6 @@
 //! Optional, bounded follow-up generation. Every attempt uses the same permitted
 //! model and the ordinary usage ledger; failures never change the primary answer.
+use crate::store::{self, Require};
 use crate::{
     auth::Identity,
     error::ApiError,
@@ -199,13 +200,7 @@ async fn claim(
     model: &str,
 ) -> Result<Option<Context>, ApiError> {
     let mut tx = pool.begin().await?;
-    let enabled: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM users WHERE id=$1 AND enabled AND NOT password_change_required FOR UPDATE",
-    )
-    .bind(owner)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if enabled.is_none() {
+    if !store::lock_owner(&mut tx, owner, Require::EnabledNoPasswordChange).await? {
         return Ok(None);
     }
     let context = sqlx::query_as::<_, Context>(
@@ -262,15 +257,7 @@ async fn generate(
         limit => limit.min(OUTPUT_TOKENS),
     };
     let mut tx = state.store.pool.begin().await?;
-    let enabled: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM users WHERE id=$1 AND enabled AND NOT password_change_required FOR UPDATE",
-    )
-    .bind(user.id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if enabled.is_none() {
-        return Err(ApiError::unauthorized());
-    }
+    store::require_owner(&mut tx, user.id, Require::EnabledNoPasswordChange).await?;
     let current: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM conversations c JOIN messages m ON m.id=c.selected_leaf_id
          WHERE c.id=$1 AND c.owner_id=$2 AND m.id=$3 AND m.status='completed'
@@ -392,10 +379,7 @@ async fn settle(
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await?;
     // Finish even after a disable/revocation; accounting must not disappear.
-    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
-        .bind(owner)
-        .fetch_optional(&mut *tx)
-        .await?;
+    store::lock_owner(&mut tx, owner, Require::Any).await?;
     let status = if questions.is_some() {
         "completed"
     } else {

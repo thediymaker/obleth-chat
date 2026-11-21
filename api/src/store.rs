@@ -370,7 +370,7 @@ impl Store {
         .await?;
         let mut deleted = 0;
         for (owner, id) in due {
-            let mut tx = self.lock_owner(owner, true).await?;
+            let mut tx = self.begin_owner(owner, Require::Any).await?;
             recover_expired_in(&mut tx, owner).await?;
             let still: bool = sqlx::query_scalar(&format!(
                 "SELECT EXISTS(SELECT 1 FROM conversations WHERE {DUE} AND id = $2 AND owner_id = $3)"
@@ -922,7 +922,7 @@ impl Store {
         }
         // Internal completion must still persist interruption after an administrator
         // disables an account. No HTTP route exposes this operation directly.
-        let mut tx = self.lock_owner(owner, true).await?;
+        let mut tx = self.begin_owner(owner, Require::Any).await?;
         recover_expired_in(&mut tx, owner).await?;
         let active: Option<Option<Uuid>> = sqlx::query_scalar(
             "SELECT active_generation FROM conversations WHERE id = $1 AND owner_id = $2 FOR UPDATE",
@@ -979,34 +979,74 @@ impl Store {
     }
 
     pub async fn recover_expired(&self, owner: Uuid) -> Result<u64, ApiError> {
-        let mut tx = self.lock_owner(owner, true).await?;
+        let mut tx = self.begin_owner(owner, Require::Any).await?;
         let recovered = recover_expired_in(&mut tx, owner).await?;
         tx.commit().await?;
         Ok(recovered)
     }
 
     async fn owner_transaction(&self, owner: Uuid) -> Result<Transaction<'_, Postgres>, ApiError> {
-        self.lock_owner(owner, false).await
+        self.begin_owner(owner, Require::Enabled).await
     }
 
-    async fn lock_owner(
+    async fn begin_owner(
         &self,
         owner: Uuid,
-        allow_disabled: bool,
+        require: Require,
     ) -> Result<Transaction<'_, Postgres>, ApiError> {
         let mut tx = self.pool.begin().await?;
-        // Consistent user -> conversation lock order prevents cross-operation deadlocks.
-        let exists: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM users WHERE id = $1 AND (enabled = TRUE OR $2) FOR UPDATE",
-        )
-        .bind(owner)
-        .bind(allow_disabled)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if exists.is_none() {
-            return Err(ApiError::unauthorized());
-        }
+        require_owner(&mut tx, owner, require).await?;
         Ok(tx)
+    }
+}
+
+/// What an account must be for its owner's transaction to go ahead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Require {
+    /// Any account, even a disabled one: work already under way still finishes.
+    Any,
+    Enabled,
+    /// Enabled and not waiting for a new password.
+    EnabledNoPasswordChange,
+}
+
+/// Locks the owner's row for the rest of `tx`. Every owner transaction takes this
+/// lock first, so user then conversation is the one lock order and two replicas
+/// never deadlock. FOR NO KEY UPDATE keeps the owner's transactions in turn while
+/// rows that only point at the user, such as sessions, images and audit entries,
+/// are written without waiting. False when the account is gone or is not what
+/// `require` asks.
+pub async fn lock_owner(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    require: Require,
+) -> Result<bool, ApiError> {
+    let account: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT enabled, password_change_required FROM users WHERE id = $1 FOR NO KEY UPDATE",
+    )
+    .bind(owner)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(
+        account.is_some_and(|(enabled, password_change)| match require {
+            Require::Any => true,
+            Require::Enabled => enabled,
+            Require::EnabledNoPasswordChange => enabled && !password_change,
+        }),
+    )
+}
+
+/// `lock_owner` for a person's request: an account that is not what `require`
+/// asks is treated as signed out.
+pub async fn require_owner(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    require: Require,
+) -> Result<(), ApiError> {
+    if lock_owner(tx, owner, require).await? {
+        Ok(())
+    } else {
+        Err(ApiError::unauthorized())
     }
 }
 

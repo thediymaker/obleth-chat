@@ -1,6 +1,7 @@
 //! Chat-owned presentation and access policy over the Gateway's identity-scoped
 //! catalog. Neither discovery nor Auto can grant access the gateway did not list.
 use crate::audit::{self, Action, Target};
+use crate::store::{self, Require};
 use crate::{
     auth::Identity,
     error::ApiError,
@@ -1153,14 +1154,7 @@ async fn owner_transaction(
     user: Uuid,
 ) -> Result<Transaction<'_, Postgres>, ApiError> {
     let mut tx = pool.begin().await?;
-    let exists =
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id=$1 AND enabled FOR UPDATE")
-            .bind(user)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if exists.is_none() {
-        return Err(ApiError::unauthorized());
-    }
+    store::require_owner(&mut tx, user, Require::Enabled).await?;
     Ok(tx)
 }
 fn validate_preferences(preferences: &Preferences) -> Result<(), ApiError> {

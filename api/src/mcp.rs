@@ -5,6 +5,7 @@
 //! under the same limits. Streamable HTTP answered with plain JSON: no sessions and
 //! no server push, so every call stands alone.
 use crate::audit::{Action, Target};
+use crate::store::{self, Require};
 use axum::{
     body::Bytes,
     extract::State,
@@ -489,10 +490,8 @@ async fn stop_chat(s: &AppState, token: &TokenUser, args: &Value) -> Result<Valu
     let user = &token.user;
     s.store.recover_expired(user.id).await?;
     let mut tx = s.store.pool.begin().await?;
-    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
+    // The token was checked as the call came in.
+    store::lock_owner(&mut tx, user.id, Require::Any).await?;
     sqlx::query("SELECT 1 FROM conversations WHERE id=$1 AND owner_id=$2 FOR UPDATE")
         .bind(id)
         .bind(user.id)

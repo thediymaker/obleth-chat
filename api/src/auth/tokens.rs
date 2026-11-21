@@ -2,6 +2,7 @@
 //! A signed-in person makes one from a recent sign-in; it is shown once, stored only
 //! as a hash, expires within 30 days, and reads or runs only its owner's chats.
 use super::*;
+use crate::store::{self, Require};
 use axum::routing::delete;
 
 pub const READ: &str = "chats:read";
@@ -183,10 +184,8 @@ async fn create(
         vec![READ, WRITE]
     };
     let mut tx = auth.pool.begin().await?;
-    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
+    // The person was checked as the request came in.
+    store::lock_owner(&mut tx, user.id, Require::Any).await?;
     let active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM api_tokens WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>NOW()",
     )

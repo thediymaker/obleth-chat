@@ -6,6 +6,7 @@
 //! without changing it. Workers never touch connections or clusters. Each worker is
 //! charged on its own usage row, and workers cannot hand work on.
 
+use crate::store::{self, Require};
 use crate::{
     auth::Identity,
     code::workspace::Shell,
@@ -424,15 +425,7 @@ async fn reserve<S: Shell>(
     }
     let reserved: Result<(), ApiError> = async {
         let mut tx = ctx.pool.begin().await?;
-        let enabled: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM users WHERE id=$1 AND enabled AND NOT password_change_required FOR UPDATE",
-        )
-        .bind(ctx.user.id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if enabled.is_none() {
-            return Err(ApiError::unauthorized());
-        }
+        store::require_owner(&mut tx, ctx.user.id, Require::EnabledNoPasswordChange).await?;
         operations::reserve_agent_in(
             &mut tx,
             ctx.user.id,

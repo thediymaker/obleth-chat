@@ -17,6 +17,7 @@ use crate::attachments::size_label;
 use crate::config::env::text;
 use crate::connections::wakeups::Wakeups;
 use crate::paging::{Page, PageQuery};
+use crate::store::{self, Require};
 use crate::{auth::Identity, error::ApiError, gateway::Gateway, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -1017,10 +1018,8 @@ async fn upload(
     let placed = files.place(key.clone(), body, &mime).await?;
     let recorded = async {
         let mut tx = k.pool.begin().await?;
-        sqlx::query("SELECT 1 FROM users WHERE id=$1 FOR UPDATE")
-            .bind(user.id)
-            .execute(&mut *tx)
-            .await?;
+        // The person was checked as the request came in.
+        store::lock_owner(&mut tx, user.id, Require::Any).await?;
         let row = sqlx::query("SELECT COALESCE(SUM(size),0)::bigint AS used, COUNT(*) AS count FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
             .bind(user.id)
             .fetch_one(&mut *tx)

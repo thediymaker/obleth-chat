@@ -1,5 +1,6 @@
 //! Background generation ownership and explicit cancellation across replicas.
 //! Browser connections are subscribers; the generation lease owns the work.
+use crate::store::Require;
 use crate::{error::ApiError, store, AppState};
 use axum::{
     extract::{Path, State},
@@ -28,10 +29,8 @@ pub async fn stop(
     // Recover an already-expired lease before comparing the requested generation.
     state.store.recover_expired(user.id).await?;
     let mut tx = state.store.pool.begin().await?;
-    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
+    // The person was checked as the request came in.
+    store::lock_owner(&mut tx, user.id, Require::Any).await?;
     let (active,): (Option<Uuid>,) = sqlx::query_as(
         "SELECT active_generation FROM conversations WHERE id=$1 AND owner_id=$2 FOR UPDATE",
     )

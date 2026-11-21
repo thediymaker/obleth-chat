@@ -3,7 +3,7 @@
 // One message of a conversation, with its attachments.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Bookmark, ChevronDown, ChevronLeft, ChevronRight, Clock, Copy, ExternalLink, GitBranch, Info, Orbit, Pencil, Plus, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Bookmark, ChevronDown, ChevronLeft, ChevronRight, Clock, Columns2, Copy, ExternalLink, GitBranch, Info, Orbit, Pencil, Plus, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { BrandLogo } from "@/components/brand";
 import { BrowserCard } from "@/components/browser/browser-card";
@@ -23,6 +23,7 @@ import { initials, num, when, count, duration } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "./chat-provider";
+import { CompareDialog } from "./compare-dialog";
 import { NamedIcon } from "./icon";
 import { citeHtml, KnowledgeSources } from "@/components/knowledge/chat-knowledge";
 import { SavedNotes } from "@/components/library/saved-notes";
@@ -191,6 +192,8 @@ function MessageDetails({ m, id }: { m: ChatMessage; id: string }) {
 function Versions({ m }: { m: ChatMessage }) {
   const store = useChatStore();
   const versions = m.versions || [];
+  const [comparing, setComparing] = useState(false);
+  const chatId = store.active?.id;
   if (versions.length < 2 || store.shared) return null;
   const index = m.versionIndex || versions.findIndex((v) => v.id === m.id) + 1;
   const previous = responseVersion(m, -1),
@@ -207,6 +210,14 @@ function Versions({ m }: { m: ChatMessage }) {
       <IconButton label="Next version" disabled={busy || !next} onClick={() => store.selectMessageVersion(next)}>
         <ChevronRight />
       </IconButton>
+      {m.role === "assistant" && m.id && chatId && (
+        <>
+          <IconButton label="Compare the versions side by side" onClick={() => setComparing(true)}>
+            <Columns2 />
+          </IconButton>
+          {comparing && <CompareDialog chatId={chatId} messageId={m.id} open onOpenChange={setComparing} />}
+        </>
+      )}
     </div>
   );
 }

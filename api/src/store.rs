@@ -26,7 +26,7 @@ mod tests;
 mod variants;
 mod workflows;
 pub use imports::ImportSummary;
-pub use variants::VariantContext;
+pub use variants::{ReplyVersion, VariantContext};
 pub use workflows::{
     ChatArchive, ConversationPatch, ForkResult, HistoryPage, HistoryQuery, ARCHIVE_BYTES,
 };

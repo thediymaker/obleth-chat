@@ -178,6 +178,10 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
             "/api/conversations/{id}/messages/{message}/select",
             post(select_version),
         )
+        .route(
+            "/api/conversations/{id}/messages/{message}/versions",
+            get(reply_versions),
+        )
         .route("/api/{*rest}", any(|| async { ApiError::not_found() }))
         .with_state(state)
         .merge(auth)
@@ -579,6 +583,17 @@ async fn select_version(
     let user = s.auth.require(&headers, true).await?;
     Ok(Json(
         json!({"conversation":s.store.select_version(user.id,id,message).await?}),
+    ))
+}
+/// A reply's versions with their text, for comparing them.
+async fn reply_versions(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path((id, message)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let user = s.auth.require(&headers, false).await?;
+    Ok(Json(
+        json!({"versions":s.store.reply_versions(user.id,id,message).await?}),
     ))
 }
 async fn send(

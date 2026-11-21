@@ -33,6 +33,21 @@ pub(super) fn source_index(
         _ => Err(ApiError::bad("Choose edit or regenerate")),
     }
 }
+/// One version of a reply, whole: `Store::reply_versions`.
+#[derive(Clone, Debug, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyVersion {
+    pub id: Uuid,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    /// The model that wrote it: the one Auto chose, when Auto did.
+    pub model: String,
+    pub content: String,
+    pub usage: Option<Value>,
+    /// The version that was asked about, which is the one the chat shows.
+    pub selected: bool,
+}
+
 impl Store {
     /// Pre-admission preview: walks only the selected path's ids, roles and settings,
     /// then reads the one source message. start_turn_inner re-resolves the source under
@@ -131,6 +146,35 @@ impl Store {
             Some((source_message_id, mode)),
         )
         .await
+    }
+
+    /// Every version of one reply with its text, the model that wrote it and what it
+    /// cost, in the order they were written, for reading them side by side.
+    pub async fn reply_versions(
+        &self,
+        owner: Uuid,
+        id: Uuid,
+        message: Uuid,
+    ) -> Result<Vec<ReplyVersion>, ApiError> {
+        let rows = sqlx::query_as::<_, ReplyVersion>(
+            "SELECT v.id, v.status, v.created_at, v.content, v.usage, v.id = m.id AS selected,
+                    COALESCE(NULLIF(v.settings->>'resolvedModel',''), NULLIF(v.settings->>'model',''), '') AS model
+             FROM messages m
+             JOIN conversations c ON c.id = m.conversation_id
+             JOIN messages v ON v.conversation_id = m.conversation_id AND v.role = m.role
+                  AND v.parent_message_id IS NOT DISTINCT FROM m.parent_message_id
+             WHERE m.id = $3 AND c.id = $2 AND c.owner_id = $1 AND m.role = 'assistant'
+             ORDER BY v.ordinal, v.created_at, v.id",
+        )
+        .bind(owner)
+        .bind(id)
+        .bind(message)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Err(ApiError::not_found());
+        }
+        Ok(rows)
     }
 
     pub async fn select_version(

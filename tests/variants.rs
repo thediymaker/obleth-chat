@@ -692,3 +692,69 @@ async fn variant_context_reads_selected_path_snapshots_and_initializes_imports(p
     assert_eq!(imported.draft, "First");
     assert_eq!(imported.settings["temperature"], json!(0.7));
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_replys_versions_come_whole_for_their_owner_only(pool: PgPool) {
+    let owner = user(&pool).await;
+    let other = user(&pool).await;
+    let store = Store::new(pool.clone());
+    let chat = store.create(owner, "Compare", "fixture").await.unwrap().id;
+    let first = turn(&store, owner, chat, "Queue or lock?", "Use a queue.").await;
+    let again = variant(&store, owner, chat, first, "regenerate", "").await;
+    store
+        .finish_turn_detailed(
+            owner,
+            chat,
+            again.generation_id,
+            "Use a lock.",
+            "",
+            "completed",
+            Some(serde_json::json!({"completion_tokens":4,"generation_ms":900})),
+            None,
+            Some("stop"),
+            None,
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE messages SET settings = settings || '{\"resolvedModel\":\"large\"}'::jsonb WHERE id = $1")
+        .bind(again.assistant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let versions = store
+        .reply_versions(owner, chat, again.assistant_id)
+        .await
+        .unwrap();
+    let seen: Vec<_> = versions
+        .iter()
+        .map(|v| (v.id, v.content.as_str(), v.model.as_str(), v.selected))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (first, "Use a queue.", "fixture", false),
+            (again.assistant_id, "Use a lock.", "large", true),
+        ]
+    );
+    assert_eq!(versions[1].usage.as_ref().unwrap()["completion_tokens"], 4);
+    // Asked from the other version, that one is the one marked.
+    let versions = store.reply_versions(owner, chat, first).await.unwrap();
+    assert_eq!(
+        versions.iter().map(|v| v.selected).collect::<Vec<_>>(),
+        vec![true, false]
+    );
+
+    // Not another person's chat, not a message of another chat, not a question.
+    assert!(store.reply_versions(other, chat, first).await.is_err());
+    let elsewhere = store.create(owner, "Other", "fixture").await.unwrap().id;
+    assert!(store.reply_versions(owner, elsewhere, first).await.is_err());
+    let question: Uuid = sqlx::query_scalar(
+        "SELECT id FROM messages WHERE conversation_id = $1 AND role = 'user' LIMIT 1",
+    )
+    .bind(chat)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(store.reply_versions(owner, chat, question).await.is_err());
+}

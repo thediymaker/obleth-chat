@@ -1377,6 +1377,78 @@ async fn a_research_reply_is_checked_against_its_runs(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn people_see_what_their_own_workspace_uses_and_when_it_sleeps(pool: PgPool) {
+    let kube = Arc::new(FakeKube::default());
+    let (app, _) = app_with(pool.clone(), Some(DOMAIN), Some(kube.clone())).await;
+    let session = login(&app).await;
+    let usage = || {
+        let app = app.clone();
+        let session = session.clone();
+        async move {
+            let response = app
+                .oneshot(req(
+                    "/api/workspaces/usage",
+                    "localhost:8085",
+                    &session,
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_str::<Value>(&text(response).await).unwrap()
+        }
+    };
+    // Before a workspace was ever started: what one may use, and nothing else.
+    let none = usage().await;
+    assert_eq!(none["status"], "none", "{none}");
+    assert!(none["limits"]["cpuMillis"].as_i64().unwrap() > 0, "{none}");
+    assert!(none["limits"]["memoryBytes"].as_i64().unwrap() > 0);
+    assert!(none.get("cpuMillis").is_none());
+
+    kube.set_pod(Some("127.0.0.1"));
+    workspace(&pool, 3000, "running").await;
+    sqlx::query("UPDATE sandbox_pods SET disk_bytes = 1500000")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let running = usage().await;
+    assert_eq!(running["status"], "running", "{running}");
+    assert_eq!(running["cpuMillis"], 250);
+    assert_eq!(running["memoryBytes"], 64 * 1024 * 1024);
+    assert_eq!(running["diskBytes"], 1500000);
+    let idle = running["idleMinutes"].as_i64().unwrap();
+    let last: chrono::DateTime<chrono::Utc> =
+        running["lastUsedAt"].as_str().unwrap().parse().unwrap();
+    let stops: chrono::DateTime<chrono::Utc> =
+        running["stopsAt"].as_str().unwrap().parse().unwrap();
+    assert_eq!((stops - last).num_minutes(), idle);
+
+    // Asleep: the files' size stays, the live numbers and the stop time go.
+    sqlx::query("UPDATE sandbox_pods SET status = 'stopped'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let asleep = usage().await;
+    assert_eq!(asleep["status"], "stopped");
+    assert_eq!(asleep["cpuMillis"], Value::Null);
+    assert_eq!(asleep["stopsAt"], Value::Null);
+    assert_eq!(asleep["diskBytes"], 1500000);
+
+    // Signed out, nothing is said.
+    let response = app
+        .clone()
+        .oneshot(req(
+            "/api/workspaces/usage",
+            "localhost:8085",
+            &(String::new(), String::new()),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn administrators_see_open_workspaces_stop_them_and_count_refusals(pool: PgPool) {
     let kube = Arc::new(FakeKube::default());
     kube.set_pod(Some("127.0.0.1"));

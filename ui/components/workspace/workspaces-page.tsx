@@ -15,10 +15,12 @@ import { useChatStore } from "@/components/chat/chat-provider";
 import { Pill, Quota, useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { sandboxMeters, sandboxNote } from "@/lib/chat/sandbox";
 import { ago } from "@/lib/format";
 import { useCapabilities, useFeature } from "@/lib/queries";
 import { ComputeOff, ComputeTabs } from "./compute";
 import { type Workspace, diskUsage, downloadUrl, statusLabel, statusTone } from "./model";
+import { SandboxMeters, useSandboxUsage } from "./sandbox-card";
 
 export const workspacesKey = ["compute-workspaces"] as const;
 
@@ -53,6 +55,7 @@ export function WorkspacesPage() {
   const on = useFeature("workspaces");
   const previews = caps.data?.features?.previews === true;
   const list = useWorkspaceList();
+  const live = useSandboxUsage(on);
   const queries = useQueryClient();
   const store = useChatStore();
   const confirm = useConfirm();
@@ -117,14 +120,19 @@ export function WorkspacesPage() {
                 Your container <Pill tone={statusTone(machine!)}>{statusLabel(machine!)}</Pill>
               </h2>
               <p className="mt-0.5 text-sm text-muted-foreground">
-                {machine!.status === "stopped" ? "Asleep: it wakes when you open a project or the assistant needs it. Files are kept." : "It sleeps after an hour unused and keeps your files."}
+                {live.data ? sandboxNote(live.data) : machine!.status === "stopped" ? "Asleep: it wakes when you open a project or the assistant needs it. Files are kept." : "It sleeps when left unused and keeps your files."}
               </p>
             </div>
-            {usage && (
-              <div className="grid w-full gap-1.5 sm:w-56">
-                <span className="text-sm text-text-2">{usage.of}</span>
-                <Quota value={machine!.diskBytes || 0} max={limit} label="Disk used" />
-              </div>
+            {/* What it uses now, when the cluster says; otherwise the disk its files take. */}
+            {live.data && sandboxMeters(live.data).some((m) => m.key !== "disk") ? (
+              <SandboxMeters usage={live.data} className="w-full sm:w-80" />
+            ) : (
+              usage && (
+                <div className="grid w-full gap-1.5 sm:w-56">
+                  <span className="text-sm text-text-2">{usage.of}</span>
+                  <Quota value={machine!.diskBytes || 0} max={limit} label="Disk used" />
+                </div>
+              )
             )}
           </section>
           <section className="divide-y rounded-lg border bg-card" aria-label="Workspaces">

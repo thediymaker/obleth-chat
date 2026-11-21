@@ -2,10 +2,12 @@
 
 // Home's intent tabs and "Running now". The tabs say what the new chat is for and
 // set the box up for it; "Running now" lists what is alive without the person:
-// chats that wait for a yes or no, chats at work, their jobs and their workspaces.
+// chats that wait for a yes or no, chats at work, their jobs, their workspaces and
+// the container those run in, with what it uses now.
 
 import Link from "next/link";
 import { useClusterQueues } from "@/components/clusters/status";
+import { SandboxCard, useSandboxUsage } from "@/components/workspace/sandbox-card";
 import { useWorkspaceList } from "@/components/workspace/workspaces-page";
 import { type Intent, type IntentInfo, runningNow } from "@/lib/chat/home";
 import { useConversations, useFeature } from "@/lib/queries";
@@ -53,8 +55,11 @@ export function RunningNow() {
   const workspacesOn = useFeature("workspaces");
   const { data: chats } = useConversations();
   const queues = useClusterQueues();
-  const items = runningNow({ chats, workspaces: useWorkspaces(workspacesOn), queues });
-  if (!items.length) return null;
+  // The person's container, while it is up: what it uses, and when it sleeps.
+  const { data: usage } = useSandboxUsage(workspacesOn);
+  const sandbox = usage && (usage.status === "running" || usage.status === "starting") ? usage : null;
+  const items = runningNow({ chats, workspaces: useWorkspaces(workspacesOn), queues, limit: sandbox ? 5 : 6 });
+  if (!items.length && !sandbox) return null;
   return (
     <section className="mt-10 max-[760px]:mt-8" aria-labelledby="running-now" data-running-now>
       <h2 id="running-now" className="mb-3.5 text-base leading-[normal] font-medium tracking-normal">
@@ -74,6 +79,11 @@ export function RunningNow() {
             {item.detail && <span className="mt-1 truncate text-sm leading-[normal] text-muted-foreground">{item.detail}</span>}
           </Link>
         ))}
+        {sandbox && (
+          <Link href="/workspaces" data-running="sandbox" aria-label="Your workspace container" className="flex min-w-0 flex-col rounded-lg border bg-card px-4 py-3.5 transition-colors hover:border-line-strong hover:bg-raised">
+            <SandboxCard usage={sandbox} />
+          </Link>
+        )}
       </div>
     </section>
   );

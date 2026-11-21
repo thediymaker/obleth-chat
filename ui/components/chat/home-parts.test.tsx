@@ -68,6 +68,37 @@ describe("Running now", () => {
     expect(screen.queryByText("Quiet")).toBeNull();
   });
 
+  test("shows the person's container while it is up: what it uses and when it sleeps", async () => {
+    apiRequest.mockImplementation(async (path: string) => {
+      if (path === "/api/capabilities") return { features: { workspaces: true } };
+      if (path === "/api/conversations") return { conversations: [] };
+      if (path === "/api/workspaces") return { workspaces: [] };
+      if (path === "/api/workspaces/usage")
+        return { status: "running", cpuMillis: 250, memoryBytes: 512 * 2 ** 20, diskBytes: 2 ** 30, limits: { cpuMillis: 2000, memoryBytes: 2 * 2 ** 30, diskBytes: 10 * 2 ** 30 }, idleMinutes: 60, stopsAt: new Date(Date.now() + 42.4 * 60_000).toISOString() };
+      throw new Error(`unexpected ${path}`);
+    });
+    show();
+    const card = (await screen.findByText("0.25 of 2 cores")).closest("a")!;
+    expect(card.getAttribute("href")).toBe("/workspaces");
+    expect(card.textContent).toContain("Your workspace · Awake");
+    expect(card.textContent).toContain("512.0 MB of 2.0 GB");
+    expect(card.textContent).toContain("Sleeps in 42 minutes if left alone.");
+    expect(card.querySelector('[data-meter="cpu"] [role="meter"]')?.getAttribute("aria-valuenow")).toBe("13");
+  });
+
+  test("a container that is asleep is not listed", async () => {
+    apiRequest.mockImplementation(async (path: string) => {
+      if (path === "/api/capabilities") return { features: { workspaces: true } };
+      if (path === "/api/conversations") return { conversations: [] };
+      if (path === "/api/workspaces") return { workspaces: [] };
+      if (path === "/api/workspaces/usage") return { status: "stopped", diskBytes: 2 ** 30 };
+      throw new Error(`unexpected ${path}`);
+    });
+    const { container } = show();
+    await vi.waitFor(() => expect(apiRequest).toHaveBeenCalledWith("/api/workspaces/usage"));
+    expect(container.querySelector("[data-running-now]")).toBeNull();
+  });
+
   test("shows nothing when nothing is alive", async () => {
     apiRequest.mockImplementation(async (path: string) => {
       if (path === "/api/capabilities") return { features: {} };

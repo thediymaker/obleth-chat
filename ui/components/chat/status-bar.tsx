@@ -2,13 +2,17 @@
 
 // The line under every signed-in page. In a chat it says what is happening now: a
 // reply at work and for how long (or that it waits for the person), the chat's
-// workspace, the model and how much of its window the chat uses. Then the person's
+// workspace (with what its container uses, and the whole card one click away), the
+// model and how much of its window the chat uses. Then the person's
 // jobs on their clusters, when any run or wait. After that, how many models this account can use, today's requests and tokens against any daily
 // limits, the site's name and the keyboard shortcuts.
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useClusterQueues } from "@/components/clusters/status";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { SandboxCard, useSandboxUsage } from "@/components/workspace/sandbox-card";
+import { sandboxShort } from "@/lib/chat/sandbox";
 import { clock, effortLabel } from "@/lib/chat/composer";
 import { contextUse } from "@/lib/chat/context";
 import { isLive } from "@/lib/chat/turn";
@@ -63,6 +67,35 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** The chat's workspace: its state, what the container uses now, and the whole card on a click. */
+function WorkspaceSegment({ label, dot }: { label: string; dot: string }) {
+  const { data: usage } = useSandboxUsage();
+  const short = sandboxShort(usage);
+  const state = (
+    <>
+      <span className={cn("size-1.5 rounded-full", dot)} aria-hidden="true" />
+      {label.toLowerCase()}
+      {short && <span className="text-muted-foreground tabular-nums max-[1200px]:hidden">· {short}</span>}
+    </>
+  );
+  if (!usage)
+    return (
+      <span className={cn(SEGMENT, "max-[760px]:hidden")} data-status="workspace">
+        {state}
+      </span>
+    );
+  return (
+    <Popover>
+      <PopoverTrigger className={cn(SEGMENT, "hover:text-foreground max-[760px]:hidden")} title="What your workspace uses now" data-status="workspace">
+        {state}
+      </PopoverTrigger>
+      <PopoverContent side="top" align="start" className="w-80 font-sans">
+        <SandboxCard usage={usage} />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 /** 32px, on the sidebar's color, in the monospace face. */
 export function StatusBar() {
   const store = useChat();
@@ -94,12 +127,7 @@ export function StatusBar() {
           {runText({ waiting, began: Date.parse(last._began || last.createdAt || ""), now })}
         </span>
       )}
-      {space && (
-        <span className={cn(SEGMENT, "max-[760px]:hidden")} data-status="workspace">
-          <span className={cn("size-1.5 rounded-full", space[1])} aria-hidden="true" />
-          {space[0].toLowerCase()}
-        </span>
-      )}
+      {space && <WorkspaceSegment label={space[0]} dot={space[1]} />}
       {chat && (
         <span className={cn(SEGMENT, "max-[1000px]:hidden")} data-status="model">
           <span className="max-w-56 truncate">{store.modelName(store.model || chat.model)}</span>

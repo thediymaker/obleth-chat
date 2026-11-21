@@ -38,6 +38,10 @@ export interface MessageSettings {
   auto?: boolean;
   /** Why Auto chose the model, when the gateway said. */
   autoWhy?: import("./auto-why").AutoWhy;
+  /** Chat also asked other models for this reply: see lib/chat/compare. */
+  compare?: import("./compare").CompareNote;
+  /** This reply is one of those other answers, to the reply with this id. */
+  compareOf?: string;
   systemPrompt?: string;
   temperature?: number;
   topP?: number;

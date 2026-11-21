@@ -681,8 +681,11 @@ fn now() -> Result<u64, ApiError> {
 /// headers: `x-obleth-auto-reason` says what happened to the conversation's model
 /// (`fresh`, `kept`, `escalated:tool_loop`, …) and `x-obleth-auto-why` how the request
 /// was read (`topics=coding+math; difficulty=2; from=heuristic; needs=tools+vision;
-/// candidates=4`). Older gateways send only the first, or neither. Only words and
-/// numbers this function knows are kept, so nothing a gateway sends reaches a page as is.
+/// candidates=4`), and `x-obleth-auto-next` which models scored best after the one
+/// chosen and how far behind (`glm;gap=0.031, qwen;gap=0.120`). Older gateways send
+/// only the first, or none. Only words and numbers this function knows, and model
+/// names of the form Chat takes, are kept, so nothing a gateway sends reaches a page
+/// as is.
 pub fn auto_why(headers: &reqwest::header::HeaderMap) -> Option<Value> {
     const REASONS: [&str; 11] = [
         "fresh",
@@ -754,6 +757,27 @@ pub fn auto_why(headers: &reqwest::header::HeaderMap) -> Option<Value> {
             }
             _ => {}
         }
+    }
+    // The runners-up: at most two, each a model name and its distance from the pick.
+    let next: Vec<Value> = text("x-obleth-auto-next")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|part| {
+            let mut fields = part.trim().split(';');
+            let model = fields.next().filter(|m| valid_model(m) && *m != "auto")?;
+            let gap = fields
+                .find_map(|f| f.trim().strip_prefix("gap="))
+                .and_then(|g| g.parse::<f64>().ok())
+                .filter(|g| g.is_finite() && (0.0..=1e6).contains(g));
+            Some(match gap {
+                Some(gap) => json!({"model": model, "gap": gap}),
+                None => json!({"model": model}),
+            })
+        })
+        .take(2)
+        .collect();
+    if !next.is_empty() {
+        why.insert("next".into(), json!(next));
     }
     (!why.is_empty()).then_some(Value::Object(why))
 }
@@ -1047,6 +1071,20 @@ mod tests {
                 ),
             ])),
             None
+        );
+        // The runners-up: two at most, a distance only when it is a number.
+        assert_eq!(
+            auto_why(&headers(&[
+                ("x-obleth-auto-reason", "fresh"),
+                (
+                    "x-obleth-auto-next",
+                    "org/glm-5.3;gap=0.031, qwen;gap=near, auto;gap=0.1, , third;gap=0.2"
+                ),
+            ])),
+            Some(json!({"reason": "fresh", "next": [
+                {"model": "org/glm-5.3", "gap": 0.031},
+                {"model": "qwen"},
+            ]}))
         );
     }
 

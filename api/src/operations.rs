@@ -177,6 +177,31 @@ pub async fn reserve_agent_in(
     )
     .await
 }
+/// A second opinion on a reply (see `compare`), on one row leased for
+/// `lease_seconds`. The caller holds the enabled owner's users row lock. It runs
+/// beside the chat, so it counts toward the daily limits but not the account's
+/// responses at once.
+pub async fn reserve_compare_in(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    generation: Uuid,
+    model: &str,
+    max_tokens: i32,
+    context_bytes: usize,
+    lease_seconds: i64,
+) -> Result<(), ApiError> {
+    recover_in(tx, owner).await?;
+    reserve_kind_in(
+        tx,
+        owner,
+        generation,
+        model,
+        max_tokens,
+        context_bytes,
+        Some(("compare", lease_seconds)),
+    )
+    .await
+}
 async fn reserve_kind_in(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
@@ -298,11 +323,11 @@ impl Counts {
         self.reserved_tokens += other.reserved_tokens;
     }
 }
-/// A reservation still held: a chat turn its conversation still leases, or a follow-up
-/// or worker request inside its own lease. Rows aliased `g` in `generation_usage`.
+/// A reservation still held: a chat turn its conversation still leases, or a follow-up,
+/// worker or second-opinion request inside its own lease. Rows aliased `g` in `generation_usage`.
 macro_rules! live {
     () => {
-        "((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent') AND g.reservation_expires>NOW()))"
+        "((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent','compare') AND g.reservation_expires>NOW()))"
     };
 }
 const LIVE: &str = live!();

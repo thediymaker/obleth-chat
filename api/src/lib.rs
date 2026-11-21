@@ -10,6 +10,7 @@ pub mod banner;
 pub mod batches;
 pub mod browser;
 pub mod code;
+pub mod compare;
 pub mod config;
 pub mod connections;
 pub mod decisions;
@@ -144,6 +145,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let operations = operations::router(state.clone());
     let retention = retention::router(state.clone());
     let banner = banner::router(state.clone());
+    let compare = compare::router(state.clone());
     let appearance = appearance::router(state.clone());
     let attachments = attachments::router(state.clone());
     let images = images::router(state.clone());
@@ -209,6 +211,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(operations)
         .merge(retention)
         .merge(banner)
+        .merge(compare)
         .merge(appearance)
         .merge(attachments)
         .merge(images)
@@ -1398,6 +1401,12 @@ async fn run_generation(
         payload["tools"] = Value::Array(tools);
     }
     let mut activity: Vec<Value> = vec![];
+    // A reply Auto chooses may also be put to the models Auto ranked next (see
+    // `compare`). Its first request is kept for that while an administrator has
+    // comparing on, with how many requests the reply took: only one is compared.
+    let comparable = payload["model"] == "auto" && compare::watching(&s.store.pool).await;
+    let mut first_request: Option<Value> = None;
+    let mut requests = 0u32;
     let user_message_id = turn.messages.last().map(|m| m.id);
     emit(
         &mut tx,
@@ -1460,6 +1469,10 @@ async fn run_generation(
                     record(&mut activity, &entry, true);
                     emit(&mut tx, "tool", entry);
                 }
+            }
+            requests += 1;
+            if comparable && requests == 1 {
+                first_request = Some(payload.clone());
             }
             let mut calls: Vec<ToolCall> = vec![];
             let mut stalls = 0;
@@ -2858,7 +2871,27 @@ async fn run_generation(
     };
     let title = async { replied && insights::after_reply(&s, &user, id).await };
     let memory = async { replied && memory::after_reply(&s, &user, id, turn.assistant_id).await };
-    let (followups, title_pending, memory_pending) = tokio::join!(followups, title, memory);
+    // Second opinions, for a plain answer Auto chose: one request, no tools run.
+    let comparing = async {
+        match (first_request.take(), &served) {
+            (Some(request), Some(model)) if replied && persisted.is_ok() && requests == 1 => {
+                compare::after_reply(
+                    &s,
+                    &gateway,
+                    &user,
+                    id,
+                    turn.assistant_id,
+                    model,
+                    auto_why.as_ref(),
+                    request,
+                )
+                .await
+            }
+            _ => false,
+        }
+    };
+    let (followups, title_pending, memory_pending, compare_pending) =
+        tokio::join!(followups, title, memory, comparing);
     if persisted.is_err() {
         emit(
             &mut tx,
@@ -2884,6 +2917,9 @@ async fn run_generation(
         }
         if memory_pending {
             done["memoryPending"] = json!(true);
+        }
+        if compare_pending {
+            done["comparePending"] = json!(true);
         }
         done
     });

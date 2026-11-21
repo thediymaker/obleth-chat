@@ -1306,6 +1306,8 @@ export class ChatStore {
         if (data.titlePending) for (const wait of [3000, 9000]) setTimeout(() => this.reconcileConversation(c.id), wait);
         // Memory reads the exchange in the background; its card joins the reply when done.
         if (data.memoryPending) for (const wait of [5000, 12000, 25000]) setTimeout(() => this.reconcileConversation(c.id), wait);
+        // Chat is also asking other models: the reply says so from its next read, and its card waits for them.
+        if (data.comparePending) setTimeout(() => this.reconcileConversation(c.id), 1200);
         break;
       case "error":
         assistant.status = "error";

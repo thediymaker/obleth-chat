@@ -67,7 +67,6 @@ export function change(now: number | null | undefined, before: number | null | u
   if (Math.abs(x) < 0.005) return { same: true, word };
   return { same: false, up: x > 0, amount: percent(Math.abs(x)), word };
 }
-export const changeText = (c: Change) => (!c ? "" : c.same ? `Same as ${c.word}` : `${c.up ? "↑" : "↓"} ${c.amount} on ${c.word}`);
 
 /** One chat holding at least half of a period's tokens flattens every token share. */
 export const outlier = (data: { sessions?: number; largestChat?: number; tokens?: number }) =>

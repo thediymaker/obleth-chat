@@ -68,7 +68,7 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
 
   if (!d) {
     return (
-      <Page wide>
+      <Page>
         {isPending ? (
           <Loading />
         ) : isNotFound(error) ? (
@@ -115,7 +115,7 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <Page wide className={onApp ? "max-w-[1600px]" : undefined}>
+    <Page className={onApp ? "max-w-[1600px]" : undefined}>
       <PageHeader
         breadcrumb={
           <nav aria-label="Breadcrumb" className="-mb-1 flex items-center gap-1.5 text-sm text-muted-foreground">

@@ -2,7 +2,8 @@ import { render, screen, within } from "@testing-library/react";
 import { vi } from "vitest";
 import { UsageView, type UsageState } from "./usage-tab";
 import { buckets } from "./usage";
-import { change, changeText } from "./insights";
+import { change } from "./insights";
+import { ChangeNote } from "./parts";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
 
@@ -135,5 +136,6 @@ test("every day or hour of the period is drawn, with zeros where nothing was use
   view(data, { metric: "people" });
   expect(screen.getByRole("img", { name: "People per day: 9 in all" })).toBeInTheDocument();
   expect(change(5, 0, 7)).toBeNull();
-  expect(changeText(change(90, 100, 1))).toBe("↓ 10% on yesterday");
+  expect(render(<ChangeNote change={change(90, 100, 1)} />).container).toHaveTextContent("↓ 10% on yesterday");
+  expect(render(<ChangeNote change={change(100, 100, 7)} />).container).toHaveTextContent("Same as the 7 days before");
 });

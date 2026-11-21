@@ -1,9 +1,9 @@
 "use client";
 
 // The save dialog (new items and editing your own) and the viewer for someone else's
-// item in a shared project. useLibraryDialogs() gives any page `open(id)`, `create`
-// and `saveFrom` (what a chat saves: a code block, a reply, selected text), plus the
-// element to render.
+// item in a shared project. useLibraryDialogs() gives any page `show(item)`,
+// `open(id)`, `create` and `saveFrom` (what a chat saves: a code block, a reply,
+// selected text), plus the element to render.
 
 import { useQueryClient } from "@tanstack/react-query";
 import { Copy, ExternalLink, MessageSquare, Trash2 } from "lucide-react";
@@ -343,11 +343,12 @@ export function SavedViewer({ open, onOpenChange, item }: { open: boolean; onOpe
 }
 
 /**
- * The Library's dialogs for any page: `open(id)` shows a saved item (yours to edit,
- * someone else's to read), `create(kind)` starts a note or a link, and `saveFrom`
- * opens the save dialog for something in a chat. Render `element` once.
+ * The Library's dialogs for any page: `show(item)` shows a saved item (yours to edit,
+ * someone else's to read) and `open(id)` fetches it first, `create(kind)` starts a
+ * note or a link, and `saveFrom` opens the save dialog for something in a chat.
+ * Render `element` once.
  */
-export function useLibraryDialogs(items: SavedItem[] = []) {
+export function useLibraryDialogs() {
   const user = useUser();
   const [edit, setEdit] = useState<{ draft: SaveDraft; title: string } | null>(null);
   const [editOpen, setEditOpen] = useState(false);
@@ -369,12 +370,12 @@ export function useLibraryDialogs(items: SavedItem[] = []) {
   const open = useCallback(
     async (id: string) => {
       try {
-        show(items.find((i) => i.id === id) || (await getSaved(id)));
+        show(await getSaved(id));
       } catch (e) {
         toast(isNotFound(e) ? "This item does not exist, or it is not shared with you." : messageOf(e));
       }
     },
-    [items, show],
+    [show],
   );
   const create = useCallback((kind: SavedKind = "note", extra: Partial<SaveDraft> = {}) => {
     setEdit({ draft: { kind, ...extra }, title: kind === "link" ? "Save a link" : "New note" });
@@ -393,5 +394,5 @@ export function useLibraryDialogs(items: SavedItem[] = []) {
       <SavedViewer open={viewOpen} onOpenChange={setViewOpen} item={view} />
     </>
   );
-  return { open, create, saveFrom, element };
+  return { open, show, create, saveFrom, element };
 }

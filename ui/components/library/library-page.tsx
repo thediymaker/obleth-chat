@@ -97,7 +97,7 @@ function SavedCard({ item, onOpen }: { item: SavedItem; onOpen: () => void }) {
 
 const ALL = "all";
 
-function SavedView({ openId }: { openId?: string }) {
+function SavedView({ openId, dialogs }: { openId?: string; dialogs: ReturnType<typeof useLibraryDialogs> }) {
   const router = useRouter();
   const path = usePathname();
   const params = useSearchParams();
@@ -109,7 +109,6 @@ function SavedView({ openId }: { openId?: string }) {
   const [shown, setShown] = useState(SAVED_PAGE);
   const { data, error, isPending, refetch } = useSaved(filters, true, shown);
   const { data: projects } = useProjects();
-  const dialogs = useLibraryDialogs(data?.items);
   const opened = useRef("");
   // /library/<id> opens that item, once.
   useEffect(() => {
@@ -212,7 +211,7 @@ function SavedView({ openId }: { openId?: string }) {
         <>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {items.map((item) => (
-              <SavedCard key={item.id} item={item} onOpen={() => dialogs.open(item.id)} />
+              <SavedCard key={item.id} item={item} onOpen={() => dialogs.show(item)} />
             ))}
           </div>
           {data?.more && (
@@ -224,7 +223,6 @@ function SavedView({ openId }: { openId?: string }) {
           )}
         </>
       )}
-      {dialogs.element}
     </>
   );
 }
@@ -289,19 +287,18 @@ function GeneratedView() {
 
 export function LibraryPage({ tab, openId }: { tab: "saved" | "generated"; openId?: string }) {
   usePageChrome(tab === "generated" ? "Library › Generated" : "Library");
-  const own = useLibraryDialogs();
-  const create = (kind: SavedKind) => own.create(kind);
+  const dialogs = useLibraryDialogs();
   return (
-    <Page wide>
+    <Page>
       <PageHeader
         title="Library"
         description={tab === "generated" ? "Pictures made in your chats, kept here to find again." : "Everything worth keeping: functions, articles, notes and pictures you saved while thinking."}
         actions={
           <>
-            <Button variant="outline" onClick={() => create("note")}>
+            <Button variant="outline" onClick={() => dialogs.create("note")}>
               <File /> New note
             </Button>
-            <Button onClick={() => create("link")}>
+            <Button onClick={() => dialogs.create("link")}>
               <Plus /> Save a link
             </Button>
           </>
@@ -309,8 +306,8 @@ export function LibraryPage({ tab, openId }: { tab: "saved" | "generated"; openI
       >
         <LibraryTabs />
       </PageHeader>
-      {tab === "generated" ? <GeneratedView /> : <SavedView openId={openId} />}
-      {own.element}
+      {tab === "generated" ? <GeneratedView /> : <SavedView openId={openId} dialogs={dialogs} />}
+      {dialogs.element}
     </Page>
   );
 }

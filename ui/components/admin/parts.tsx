@@ -60,17 +60,3 @@ export function KindBar({ kinds, label, by = "tokens", className }: { kinds?: { 
   );
 }
 
-/** Which kinds appear, with their colors. */
-export function KindLegend({ kinds, children }: { kinds: readonly (typeof KINDS)[number][]; children?: (id: string) => React.ReactNode }) {
-  return (
-    <ul className="flex flex-wrap gap-x-4 gap-y-1.5 text-sm">
-      {kinds.map(([id, name, color]) => (
-        <li key={id} className="inline-flex items-center gap-1.5">
-          <i aria-hidden className="inline-block size-2.5 rounded-[2px]" style={{ background: kindColor(color) }} />
-          {name}
-          {children?.(id)}
-        </li>
-      ))}
-    </ul>
-  );
-}

@@ -139,7 +139,6 @@ export class ChatStore {
   topP = 1;
   maxTokens = 0;
   reasoningEffort = "medium";
-  compact = false;
   context = true;
   focus = false;
   private draftText = "";
@@ -172,7 +171,6 @@ export class ChatStore {
   /** Open/closed state that outlives a re-render: thinking panels, details, sources, activity. */
   thinkingOpen = new Map<string, boolean>();
   detailsOpen = new Set<string>();
-  sourcesOpen = new Set<string>();
   openActivity = new Set<string>();
   panes = new Map<string, PaneState>();
   /** Notes sent with Steer per chat, until the reply reads them. */
@@ -406,7 +404,6 @@ export class ChatStore {
     this.preferenceOverrides = overrides || {};
     const preferred = this.models.find((m) => m.id === preferences.defaultModel);
     this.preferences = { ...preferences, ...generationValues(preferred, this.preferenceOverrides) };
-    this.compact = preferences.density === "compact";
     this.context = preferences.context !== false;
     this.focus = !!preferences.focus;
     if (generation) {
@@ -618,14 +615,13 @@ export class ChatStore {
   setRoute(route: Route) {
     if (route.page === this.route.page && route.id === this.route.id && this.routed) return;
     this.routed = true;
-    const newPage = route.page !== this.route.page || route.id !== this.route.id;
     this.route = route;
-    this.navigate(newPage);
+    this.navigate();
   }
   private conversationIdIs(id: string) {
     return this.route.page === "chat" && this.route.id === id;
   }
-  async navigate(_newPage = true) {
+  async navigate() {
     const left = leftTemporary(this.temporaryOpen, this.route);
     if (left) this.leaveTemporary(left);
     const { page, id } = this.route;

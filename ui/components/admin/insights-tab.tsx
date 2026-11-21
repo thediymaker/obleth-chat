@@ -17,7 +17,7 @@ import { api } from "@/lib/api";
 import { when, num, compact, PERIOD_DAYS } from "@/lib/format";
 import { useModels } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { ChangeNote, GroupPicker, KindBar, KindLegend } from "./parts";
+import { ChangeNote, GroupPicker, KindBar } from "./parts";
 import { FLAGS, INSIGHT_PERIODS, KINDS, change, kindColor, nameOf, outlier, percent, share, type Insights, type InsightsSettings, type KindCount, type Workstream } from "./insights";
 import { useKept } from "./state";
 
@@ -68,14 +68,19 @@ function Stack({ data }: { data: Insights }) {
   return (
     <Section title="Kind of use" actions={<span className="text-sm text-muted-foreground">{percent(studied)} research and learning</span>}>
       <KindBar kinds={data.kinds} label="Kind of use" by="sessions" className="h-4" />
-      <KindLegend kinds={present}>
-        {(id) => (
-          <>
-            {" "}
-            <strong className="font-medium">{percent(share(by[id], total))}</strong> <small className="text-xs text-muted-foreground">{num(by[id])}</small>
-          </>
-        )}
-      </KindLegend>
+      <Legend
+        className="gap-x-4 gap-y-1.5 text-sm text-foreground"
+        items={present.map(([id, name, color]) => ({
+          name,
+          color: kindColor(color),
+          suffix: (
+            <>
+              {" "}
+              <strong className="font-medium">{percent(share(by[id], total))}</strong> <small className="text-xs text-muted-foreground">{num(by[id])}</small>
+            </>
+          ),
+        }))}
+      />
       <KindTrend trend={data.trend} />
     </Section>
   );

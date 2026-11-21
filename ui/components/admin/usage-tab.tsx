@@ -16,8 +16,8 @@ import { INPUT, Legend, OUTPUT } from "@/components/manage/chart-legend";
 import { CheckField, Chips, FormActions, FormDialog, FormError, Meter, Dropdown, Note, Pill, Quota, Section, TableWrap, TextField, Tiles, displayName, td, th, useSubmit, SearchForm } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { when, num, count, compact, PERIOD_DAYS } from "@/lib/format";
-import { ChangeNote, GroupPicker, KindBar, KindLegend } from "./parts";
-import { KINDS, change, percent, share } from "./insights";
+import { ChangeNote, GroupPicker, KindBar } from "./parts";
+import { KINDS, change, kindColor, percent, share } from "./insights";
 import { useKept } from "./state";
 import { METRICS, PURPOSES, SORTS, USAGE_PERIODS, allowance, buckets, periodName, sortPeople, type Limits, type Metric, type Sort, type UsageOverview, type UsagePerson } from "./usage";
 
@@ -138,7 +138,7 @@ function Mix({ data, days }: { data: UsageOverview; days: number }) {
     </li>
   );
   return (
-    <Section {...head} actions={<KindLegend kinds={KINDS.filter(([id]) => (m.kinds || []).some((k) => k.name === id))} />}>
+    <Section {...head} actions={<Legend className="gap-x-4 gap-y-1.5 text-sm text-foreground" items={KINDS.filter(([id]) => (m.kinds || []).some((k) => k.name === id)).map(([, name, color]) => ({ name, color: kindColor(color) }))} />}>
       <ul className="grid gap-3">
         <Line label="All labelled chats" note={`${count(m.sessions, "chat", "chats")} · ${count(m.people, "person", "people")}`} kinds={m.kinds} />
       </ul>

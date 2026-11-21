@@ -65,7 +65,7 @@ export function ProjectsHome() {
     </Button>
   );
   return (
-    <Page wide>
+    <Page>
       <PageHeader
         title="Projects"
         description="Projects worth coming back to: instructions, documents and saved things that every chat in the project starts with."

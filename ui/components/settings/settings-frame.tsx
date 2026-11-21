@@ -24,7 +24,7 @@ export function SettingsFrame({ children }: { children: React.ReactNode }) {
   const { isAdmin } = useSession();
   const connections = useFeature("connections");
   return (
-    <Page className="max-w-[1400px]">
+    <Page>
       <PageHeader title="Settings" description={`Your account and preferences${isAdmin ? ", and how this server runs" : ""}.`}>
         <SectionTabs label="Settings sections" tabs={settingsTabs(isAdmin, connections)} />
       </PageHeader>

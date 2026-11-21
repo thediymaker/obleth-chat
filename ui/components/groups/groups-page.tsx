@@ -96,7 +96,7 @@ export function GroupsPage({ id = "" }: { id?: string }) {
   );
   if (!all)
     return (
-      <Page wide>
+      <Page>
         {head}
         <ErrorBox error={error} onRetry={retry} />
         {!error && <Loading label="Loading groups…" />}
@@ -104,7 +104,7 @@ export function GroupsPage({ id = "" }: { id?: string }) {
     );
   if (!all.length)
     return (
-      <Page wide>
+      <Page>
         {head}
         <ErrorBox error={error} onRetry={retry} />
         <EmptyState
@@ -120,7 +120,7 @@ export function GroupsPage({ id = "" }: { id?: string }) {
   const d = detail.data;
   const current = d?.group.id || chosen;
   return (
-    <Page wide>
+    <Page>
       {head}
       <ErrorBox error={error} onRetry={retry} />
       <div className="grid items-start gap-6 lg:grid-cols-[240px_minmax(0,1fr)_280px]">

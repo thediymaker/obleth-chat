@@ -11,7 +11,6 @@ import { useSession } from "@/lib/session";
 export const keys = {
   capabilities: ["capabilities"] as const,
   conversations: ["conversations"] as const,
-  conversation: (id: string) => ["conversation", id] as const,
   models: ["models"] as const,
   preferences: ["preferences"] as const,
   presets: ["presets"] as const,

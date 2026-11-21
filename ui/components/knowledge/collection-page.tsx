@@ -339,7 +339,7 @@ export function CollectionPage({ id }: { id: string }) {
   usePageChrome(detail?.collection.name || "Collection");
   if (!detail)
     return (
-      <Page wide>
+      <Page>
         {isPending ? (
           <Loading label="Opening the collection…" />
         ) : isNotFound(error) ? (
@@ -361,7 +361,7 @@ export function CollectionPage({ id }: { id: string }) {
   const passages = docs.reduce((n, d) => n + (d.status === "ready" ? d.passages : 0), 0);
   const bytes = docs.reduce((n, d) => n + d.size, 0);
   return (
-    <Page wide>
+    <Page>
       <nav aria-label="Breadcrumb" className="mb-3 flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/knowledge" className="hover:text-foreground">
           Library

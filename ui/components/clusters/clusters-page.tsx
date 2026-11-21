@@ -385,7 +385,7 @@ export function ClustersPage() {
       </Page>
     );
   return (
-    <Page wide>
+    <Page>
       {head}
       {!list.data ? (
         list.error ? (

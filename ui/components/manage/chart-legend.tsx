@@ -13,8 +13,8 @@ export interface Series {
 export const INPUT = "var(--chart-1)";
 export const OUTPUT = "var(--chart-3)";
 
-/** One legend entry per series, never color alone. */
-export function Legend({ items, className }: { items: { name: string; color: string; dashed?: boolean }[]; className?: string }) {
+/** One legend entry per series, never color alone; `suffix` follows an entry's name. */
+export function Legend({ items, className }: { items: { name: string; color: string; dashed?: boolean; suffix?: React.ReactNode }[]; className?: string }) {
   return (
     <ul className={cn("flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground", className)}>
       {items.map((item) => (
@@ -25,6 +25,7 @@ export function Legend({ items, className }: { items: { name: string; color: str
             <i aria-hidden className="inline-block size-2.5 rounded-[2px]" style={{ background: item.color }} />
           )}
           {item.name}
+          {item.suffix}
         </li>
       ))}
     </ul>

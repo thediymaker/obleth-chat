@@ -60,7 +60,7 @@ export function KnowledgeHome() {
     </Button>
   );
   return (
-    <Page wide>
+    <Page>
       <PageHeader title="Library" description="Your knowledge, connected: documents your chats search and cite, a home for the context that makes an answer yours." actions={newButton}>
         <LibraryTabs />
       </PageHeader>

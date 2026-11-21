@@ -13,8 +13,8 @@ import { cn } from "@/lib/utils";
 
 /** A page's padded column: 1440px at most, 32px around (44px on top from 1600px
  * wide, 28px 24px up to 1200px, 24px 18px on a phone). Every page is the same
- * width; `wide` is accepted and ignored. */
-export function Page({ children, wide: _wide = false, className }: { children: React.ReactNode; wide?: boolean; className?: string }) {
+ * width. */
+export function Page({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <div data-page className={cn("mx-auto w-full max-w-[1440px] px-[18px] py-6 min-[761px]:px-6 min-[761px]:py-7 min-[1201px]:p-8 min-[1600px]:pt-11", className)}>
       {children}

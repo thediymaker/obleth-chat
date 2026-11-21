@@ -111,7 +111,6 @@ export function HistoryPage() {
   async function update(chat: HistoryChat, body: Record<string, unknown>) {
     try {
       await updateConversation(chat.id, body);
-      queries.invalidateQueries({ queryKey: keys.conversation(chat.id) });
       await refresh();
     } catch (error) {
       if ((error as Error).name !== "AbortError") toast((error as Error).message);

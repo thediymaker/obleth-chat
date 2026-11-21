@@ -3,7 +3,6 @@
 // Security (password, this session, signed-in devices) and API access (personal
 // tokens for an MCP client such as Claude Code).
 
-import { useQueryClient } from "@tanstack/react-query";
 import { Lock, Plus, RefreshCw, Shield } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -311,8 +310,3 @@ export function TokensCard({ tokens, onChange }: { tokens: ApiToken[]; onChange:
   );
 }
 
-/** Keeps the Security and API access lists fresh after a change. */
-export function useRefreshAccount() {
-  const queries = useQueryClient();
-  return () => queries.invalidateQueries({ queryKey: ["settings", "account"] });
-}

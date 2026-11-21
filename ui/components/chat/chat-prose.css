@@ -143,6 +143,53 @@
 .chat-prose th.number,
 .chat-prose td.number { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* The reply being written ends in a caret, in the accent. */
+@keyframes caret-blink {
+  50% { opacity: 0; }
+}
+.chat-prose.is-writing > p:last-child::after,
+.chat-prose.is-writing > :is(h1, h2, h3, h4, h5, h6):last-child::after,
+.chat-prose.is-writing > :is(ul, ol):last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 3px;
+  vertical-align: -0.18em;
+  background: var(--signal);
+  animation: caret-blink 1s steps(1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-prose.is-writing > :last-child::after,
+  .chat-prose.is-writing > :is(ul, ol):last-child > li:last-child::after { animation: none; }
+}
+
+/* A table of results as a figure (lib/chat/figure.ts): bars, the table, and the line
+   that switches between them. */
+.chat-prose .table-figure { margin: 16px 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); overflow: hidden; }
+.chat-prose .table-figure .table-scroll { margin: 0; border: 0; border-radius: 0; }
+.chat-prose .table-figure[data-view="figure"] .table-scroll,
+.chat-prose .table-figure[data-view="table"] .figure-bars { display: none; }
+.chat-prose .figure-bars { display: grid; align-items: center; gap: 10px 16px; padding: 16px 16px 14px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.4; color: var(--foreground); overflow-x: auto; }
+.chat-prose .fb-label { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-prose .fb-track { display: block; min-width: 4rem; height: 10px; }
+.chat-prose .fb-bar { display: block; height: 100%; border-radius: 2px; background: var(--text-2); }
+.chat-prose .fb-pending { width: 100%; background: transparent; border: 1px dashed var(--signal); animation: signal-breathe 1.8s ease-in-out infinite; }
+.chat-prose .fb-value { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chat-prose .fb-live { color: var(--signal); }
+.chat-prose .fb-more { color: var(--muted-foreground); white-space: nowrap; }
+.chat-prose .figure-caption { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px 6px 16px; border-top: 1px solid var(--line-soft); font-size: 12px; line-height: 1.4; color: var(--muted-foreground); }
+.chat-prose .figure-title { margin-right: auto; min-width: 0; }
+.chat-prose .figure-switch { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.chat-prose .figure-caption button { height: 26px; padding: 0 9px; font: inherit; color: var(--muted-foreground); background: transparent; cursor: pointer; }
+.chat-prose .figure-caption button:hover { color: var(--foreground); }
+.chat-prose .figure-caption button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.chat-prose .figure-switch button[aria-pressed="true"] { background: var(--secondary); color: var(--foreground); }
+.chat-prose .figure-copy { border: 1px solid var(--border); border-radius: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .chat-prose .fb-pending { animation: none; }
+}
+
 /* Math. */
 .chat-prose .math.display { display: block; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .chat-prose .katex { font-size: 1.05em; }

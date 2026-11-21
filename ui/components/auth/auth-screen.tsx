@@ -3,7 +3,7 @@
 import { AlertCircle, LogIn, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { AuthIntro, AuthLayout } from "@/components/auth/auth-layout";
-import { Copy, ExternalAwareLink } from "@/components/brand";
+import { Copy, ExternalAwareLink, LogoLoader } from "@/components/brand";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -62,8 +62,8 @@ export function AuthScreen() {
 
 export function Checking({ label = "Checking your sign-in…" }: { label?: string }) {
   return (
-    <div role="status" className="flex flex-col items-center gap-3 py-10 text-sm text-muted-foreground">
-      <span aria-hidden className="size-5 animate-spin rounded-full border-2 border-border border-t-foreground" />
+    <div role="status" className="flex flex-col items-center gap-5 py-10 text-sm text-muted-foreground">
+      <LogoLoader />
       <p>{label}</p>
     </div>
   );

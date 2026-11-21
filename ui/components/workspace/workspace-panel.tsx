@@ -8,6 +8,7 @@
 
 import { ArrowLeft, Clock, Download, ExternalLink, File, Folder, Info, Maximize2, Orbit, RefreshCw, Terminal as TerminalIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { LogoLoader } from "@/components/brand";
 import { Pill } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -80,7 +81,7 @@ function EmptyPreview({ id, space, bridge }: { id: string; space: Space; bridge:
   const w = space.workspace!;
   if (w.status === "starting")
     return (
-      <PaneNote icon={Orbit} spin status title="Starting your workspace…">
+      <PaneNote icon={Orbit} mark={<LogoLoader />} status title="Starting your workspace…">
         A private Linux environment is being prepared for this conversation.
       </PaneNote>
     );

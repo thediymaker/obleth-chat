@@ -19,6 +19,23 @@ export function BrandLogo({ className, imageClassName = "size-full" }: { classNa
   );
 }
 
+/**
+ * The logo as the loading mark: muted, then filled from the bottom up. A site
+ * without a logo gets a plain ring.
+ */
+export function LogoLoader({ className, box = "h-14 w-10" }: { className?: string; /** One height and width for both layers. */ box?: string }) {
+  const { logo } = useBranding();
+  if (!logo.light && !logo.dark) return <span aria-hidden className={cn("size-5 animate-spin rounded-full border-2 border-border border-t-foreground", className)} />;
+  return (
+    <span aria-hidden className={cn("relative inline-flex shrink-0", box, className)} data-logo-loader>
+      <BrandLogo className="size-full opacity-20" />
+      <span className="logo-fill absolute inset-x-0 bottom-0 h-full overflow-hidden">
+        <BrandLogo className={cn("absolute bottom-0 left-0", box)} />
+      </span>
+    </span>
+  );
+}
+
 /** Logo and site name, linking home. */
 export function Brand({ className }: { className?: string }) {
   const branding = useBranding();

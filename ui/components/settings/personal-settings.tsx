@@ -10,6 +10,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState } from "@/components/app-shell/page";
+import { AccentPicker, useAccent } from "@/components/accent";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { CheckField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, displayName, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
@@ -98,6 +99,7 @@ export function PersonalSettings() {
     toast("Profile updated");
   });
   const defaults = useSubmit((form) => save({ defaultModel: String(form.get("default-model")), ...readGeneration(form, "default") }));
+  const accent = useAccent();
   const appearance = useSubmit((form) =>
     save({ density: form.get("appearance-compact") === "on" ? "compact" : "comfortable", focus: form.get("appearance-focus") === "on", context: form.get("appearance-context") === "on", modelSuggestions: form.get("appearance-suggestions") === "on" }),
   );
@@ -214,6 +216,13 @@ export function PersonalSettings() {
               <ThemeToggle labels className="w-fit" />
               <Note>Saved in this browser. System follows your device.</Note>
             </div>
+            {accent.allowed && (
+              <div className="grid gap-1.5">
+                <h3 className="text-md font-medium">Accent</h3>
+                <AccentPicker />
+                <Note>The color of whatever is still working: a reply being written, a running step. Saved in this browser.</Note>
+              </div>
+            )}
             <Note>Layout preferences are saved to your account across devices.</Note>
             <form key={`${p.density}-${p.focus}-${p.context}-${p.modelSuggestions}`} onSubmit={appearance.onSubmit} className="grid gap-3">
               <CheckField id="appearance-compact" label="Compact spacing" defaultChecked={p.density === "compact"} description="Fit more messages on screen." />

@@ -313,6 +313,7 @@ function AnswerContent({ m, index }: { m: ChatMessage; index: number }) {
     <div className="min-w-0" data-answer>
       <Markdown
         text={m.content}
+        className={m.status === "streaming" && String(m.content || "").trim() ? "is-writing" : undefined}
         cite={m.role === "assistant" ? (html) => citeHtml(html, m) : undefined}
         onSaveCode={canSave ? async (item) => store.saveFromChat({ ...item, title: item.title || codeTitle(item.body) }, index, await conversationProjectId(client, store.shared ? null : (store.active?.id ?? null))) : undefined}
         onCopy={(text) => store.copy(text)}

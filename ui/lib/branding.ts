@@ -2,6 +2,8 @@
 // its branding folder so an install can change it without a rebuild. The file
 // sets window.OblethChatConfig; this module checks every field and fills defaults.
 
+import { accentHex } from "@/lib/accent";
+
 export interface Link {
   label: string;
   url: string;
@@ -18,7 +20,8 @@ export interface Branding {
   login: { title: string; description: string; ssoLabel: string; ssoHint: string; help: string; helpLink: Link | null };
   links: Link[];
   home: { eyebrow: string; title: string; description: string; footer: string };
-  appearance: { defaultTheme: "system" | "light" | "dark" };
+  /** accent is "#rrggbb", or "" for Chat's own; personalAccent lets each person pick theirs. */
+  appearance: { defaultTheme: "system" | "light" | "dark"; accent: string; personalAccent: boolean };
 }
 
 declare global {
@@ -54,7 +57,7 @@ const defaults: Branding = {
     description: "Ask a question, explore an idea, or start something new.",
     footer: "",
   },
-  appearance: { defaultTheme: "system" },
+  appearance: { defaultTheme: "system", accent: "", personalAccent: true },
 };
 
 type Obj = Record<string, unknown>;
@@ -100,7 +103,8 @@ export const ICON_ROLES = ["greeting", "assistant", "loading"] as const;
 export function normalizeBranding(value: unknown, knownIcons: ReadonlySet<string> = new Set()): Branding {
   const input = object(value);
   const configuredIcons = object(input.icons);
-  const defaultTheme = object(input.appearance).defaultTheme;
+  const appearance = object(input.appearance);
+  const defaultTheme = appearance.defaultTheme;
   const nameLines = text(input.siteName, defaults.siteName)
     .split(/\r\n?|\n/)
     .map((line) => line.trim())
@@ -134,7 +138,11 @@ export function normalizeBranding(value: unknown, knownIcons: ReadonlySet<string
           .filter((item) => item.label && item.url)
       : defaults.links,
     home: copyFields(input.home, defaults.home),
-    appearance: { defaultTheme: defaultTheme === "light" || defaultTheme === "dark" || defaultTheme === "system" ? defaultTheme : "system" },
+    appearance: {
+      defaultTheme: defaultTheme === "light" || defaultTheme === "dark" || defaultTheme === "system" ? defaultTheme : "system",
+      accent: accentHex(appearance.accent),
+      personalAccent: appearance.personalAccent !== false,
+    },
   };
 }
 

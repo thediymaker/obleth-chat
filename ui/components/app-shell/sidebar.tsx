@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Brand } from "@/components/brand";
 import { ChatMenuItems } from "@/components/chat/chat-menu";
-import { NEW_CHAT_EVENT } from "@/components/chat/chat-provider";
+import { NEW_CHAT_EVENT, useChatSelect } from "@/components/chat/chat-provider";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { initials } from "@/lib/format";
@@ -40,6 +40,8 @@ export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () 
   const { data: capabilities } = useCapabilities();
   const { data: chats = [] } = useConversations();
   const { data: projects } = useProjects();
+  // The chat a reply is being written in, marked as alive in the list.
+  const working = useChatSelect((store) => store.streamChatId);
   const features = capabilities?.features ?? {};
   const section = sectionOf(path);
   const name = user.display_name || user.username;
@@ -126,8 +128,14 @@ export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () 
           {chats.length ? (
             chats.slice(0, 15).map((chat) => (
               <div key={chat.id} className={cn("group my-px flex min-w-0 items-center gap-px rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground", chatId === chat.id && "bg-sidebar-accent text-sidebar-accent-foreground")}>
-                <Link href={`/chat/${encodeURIComponent(chat.id)}`} onClick={onNavigate} title={chat.title} className="min-w-0 flex-1 truncate px-2.5 py-[7px] text-md">
-                  {chat.title}
+                <Link href={`/chat/${encodeURIComponent(chat.id)}`} onClick={onNavigate} title={chat.title} className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-[7px] text-md">
+                  <span className="min-w-0 flex-1 truncate">{chat.title}</span>
+                  {working === chat.id && (
+                    <span className="relative inline-flex size-2 shrink-0" role="img" aria-label="Still working">
+                      <span className="signal-pulse absolute inset-0 rounded-full bg-signal" />
+                      <span className="absolute inset-0 rounded-full bg-signal" />
+                    </span>
+                  )}
                 </Link>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>

@@ -22,10 +22,10 @@ import { duration, count, compact } from "@/lib/format";
 
 const MARK_TONE: Record<string, string> = {
   bad: "text-destructive-foreground",
-  now: "text-blue",
+  now: "text-signal",
   off: "text-faint",
   warn: "text-amber",
-  ok: "text-success",
+  ok: "text-focus-border",
   next: "text-faint",
 };
 
@@ -38,6 +38,35 @@ function useNow(active: boolean) {
     return () => clearInterval(timer);
   }, [active]);
   return now;
+}
+
+/** Alive: a dot with one soft ring leaving it. Amber when it waits for the person. */
+function LiveDot({ tone = "signal", className }: { tone?: "signal" | "amber"; className?: string }) {
+  const fill = tone === "amber" ? "bg-amber" : "bg-signal";
+  return (
+    <span className={cn("relative inline-flex size-2 shrink-0", className)} aria-hidden="true">
+      <span className={cn("signal-pulse absolute inset-0 rounded-full", fill)} />
+      <span className={cn("absolute inset-0 rounded-full", fill)} />
+    </span>
+  );
+}
+
+// A row of the trace sits on a rail: its mark, and a line down to the next row.
+const RAIL_ROW = "relative flex gap-3 pb-3 last:pb-0 before:absolute before:top-[22px] before:bottom-px before:left-[9px] before:w-px before:bg-line-strong last:before:hidden";
+const RAIL_MARK: Record<string, string> = {
+  ok: "border-line-strong text-text-2",
+  now: "border-signal bg-signal/15 text-signal",
+  bad: "border-destructive text-destructive-foreground",
+  warn: "border-amber/60 text-amber",
+  off: "border-dashed border-line-strong text-faint",
+  next: "border-dashed border-line-strong text-faint",
+};
+function RailMark({ mark, children }: { mark: string; children: React.ReactNode }) {
+  return (
+    <span className={cn("relative z-[1] flex size-[19px] shrink-0 items-center justify-center rounded-full border bg-card [&_svg]:size-[11px]", RAIL_MARK[mark] || RAIL_MARK.ok)} aria-hidden="true">
+      {children}
+    </span>
+  );
 }
 
 function Lines({ s }: { s: ActivityEntry }) {
@@ -111,7 +140,7 @@ const DECISIONS: ["allow" | "chat" | "deny", (s: ActivityEntry) => string, boole
   ["chat", (s) => s.remember || "Allow for this chat", false],
   ["deny", () => "Deny", false],
 ];
-function Decisions({ s }: { s: ActivityEntry }) {
+function Decisions({ s, size = "xs" }: { s: ActivityEntry; size?: "xs" | "sm" }) {
   const store = useChatStore();
   const [busy, setBusy] = useState(false);
   return (
@@ -119,7 +148,7 @@ function Decisions({ s }: { s: ActivityEntry }) {
       {DECISIONS.map(([decision, label, primary]) => (
         <Button
           key={decision}
-          size="xs"
+          size={size}
           variant={primary ? "default" : "outline"}
           disabled={busy}
           title={decision === "chat" ? `Run ${s.summary} without asking for the rest of this conversation` : undefined}
@@ -135,11 +164,15 @@ function Decisions({ s }: { s: ActivityEntry }) {
     </>
   );
 }
+const EYEBROW_ASK = "text-2xs font-medium tracking-[.08em] text-amber uppercase";
 function Approval({ s }: { s: ActivityEntry }) {
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-amber/40 bg-amber/5 px-2.5 py-2 text-sm">
-      <span className="min-w-0 flex-1">{s.question || `Allow ${s.connection || "this tool"} to run this?`}</span>
-      <Decisions s={s} />
+    <div className="mt-2 grid gap-2 rounded-lg border border-amber/40 bg-amber/[0.06] px-3 py-2.5">
+      <span className={EYEBROW_ASK}>Needs your say</span>
+      <span className="text-md">{s.question || `Allow ${s.connection || "this tool"} to run this?`}</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <Decisions s={s} />
+      </div>
     </div>
   );
 }
@@ -184,31 +217,71 @@ function DeviceStep({ s }: { s: ActivityEntry }) {
   return progress ? <p className="mt-1 text-sm text-muted-foreground">{progress}</p> : null;
 }
 
-/** The workers a delegate step sent: each one's progress, then its report. */
+// The most steps a worker takes (the server's limit), so a lane never outgrows its row.
+const WORKER_STEPS = 30;
+const BAR = "h-2 max-w-3.5 min-w-[3px] flex-1 rounded-[2px]";
+/** A worker's steps as bars: one per step taken, the one it is on in the accent. */
+function LaneBars({ a }: { a: any }) {
+  const steps = Math.min(WORKER_STEPS, Math.max(0, Number(a.steps) || 0));
+  const running = a.status === "running";
+  const taken = running ? Math.max(0, steps - 1) : steps;
+  return (
+    <span className="flex gap-[3px]" aria-hidden="true">
+      {Array.from({ length: taken }, (_, i) => (
+        <span key={i} className={cn(BAR, "bg-focus-border")} />
+      ))}
+      {running && <span className={cn(BAR, "signal-breathe bg-signal")} />}
+      {a.status === "error" && <span className={cn(BAR, "bg-destructive")} />}
+      {a.status === "queued" && <span className={cn(BAR, "border border-dashed border-line-strong")} />}
+    </span>
+  );
+}
+const workerMark = (a: any) => (a.status === "error" ? "bad" : a.status === "completed" ? "ok" : a.status === "running" ? "now" : "next");
+/** Where a worker is, in a few words. */
+function workerState(a: any) {
+  if (a.status === "completed") return `Reported · ${count(a.steps || 0, "step")}`;
+  if (a.status === "error") return "Failed";
+  if (a.status === "running") return a.steps ? `Step ${a.steps}` : "Starting";
+  return "Waiting to start";
+}
+const WORKER_TONE: Record<string, string> = { ok: "text-text-2", now: "text-signal", bad: "text-destructive-foreground", next: "text-faint" };
+/** The end of a lane: where the worker is, and what it has used. */
+function WorkerState({ a, mark }: { a: any; mark: string }) {
+  return (
+    <span className="grid gap-0.5 text-xs sm:text-right">
+      <span className={WORKER_TONE[mark]}>{workerState(a)}</span>
+      {a.tokens ? <small className="font-mono text-xs text-faint">{compact(a.tokens)} tokens</small> : null}
+    </span>
+  );
+}
+
+/** The workers a delegate step sent, one lane each: its steps, what it is doing, then its report. */
 function Agents({ s }: { s: ActivityEntry }) {
   const list: any[] = Array.isArray(s.agents) ? s.agents : [];
   if (!list.length) return null;
-  const tokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k tokens` : `${n} tokens`);
   return (
-    <ol className="mt-1.5 grid gap-1">
+    <ol className="mt-2 overflow-hidden rounded-lg border">
       {list.map((a, i) => {
-        const mark = a.status === "error" ? "bad" : a.status === "completed" ? "ok" : a.status === "running" ? "now" : "next";
-        const facts = [a.status === "completed" ? count(a.steps, "step") : a.doing, a.status !== "completed" && a.steps ? `step ${a.steps}` : "", a.tokens ? compact(a.tokens) : ""].filter(Boolean).join(" · ");
+        const mark = workerMark(a);
         const head = (
-          <span className="flex min-w-0 items-center gap-2">
-            <span className={cn("size-2 shrink-0 rounded-full bg-current", MARK_TONE[mark])} aria-label={a.status || ""} />
+          <span className="grid grid-cols-[minmax(0,11rem)_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1 px-3 py-2 max-sm:grid-cols-1">
             <span className="min-w-0">
               <strong className="block truncate text-sm font-medium">{a.title}</strong>
-              <small className="block truncate text-xs text-muted-foreground">{facts}</small>
+              {a.model && <small className="block truncate font-mono text-xs text-muted-foreground">{a.model}</small>}
             </span>
+            <span className="grid min-w-0 gap-1.5">
+              <LaneBars a={a} />
+              {a.status !== "completed" && a.doing && <span className="truncate font-mono text-xs text-muted-foreground">{a.doing}</span>}
+            </span>
+            <WorkerState a={a} mark={mark} />
           </span>
         );
         return (
-          <li key={i}>
+          <li key={i} className="border-b border-line-soft last:border-b-0">
             {a.report ? (
               <details>
-                <summary className="cursor-pointer list-none">{head}</summary>
-                <div className="mt-1 ml-4 max-h-80 overflow-y-auto rounded-md bg-muted px-3 py-2">
+                <summary className="cursor-pointer list-none hover:bg-accent [&::-webkit-details-marker]:hidden">{head}</summary>
+                <div className="max-h-80 overflow-y-auto border-t border-line-soft bg-muted px-3 py-2">
                   <Markdown text={a.report} />
                 </div>
               </details>
@@ -271,10 +344,10 @@ function Step({ s }: { s: ActivityEntry }) {
     );
   else body = <div className="flex items-center">{head}</div>;
   return (
-    <li className="flex gap-2.5 py-1">
-      <span className={cn("mt-0.5 flex size-5 shrink-0 items-center justify-center", MARK_TONE[mark])} aria-hidden="true">
-        <NamedIcon name={glyph} className="size-3.5" />
-      </span>
+    <li className={RAIL_ROW} data-mark={mark}>
+      <RailMark mark={mark}>
+        <NamedIcon name={glyph} />
+      </RailMark>
       <div className="min-w-0 flex-1">{body}</div>
     </li>
   );
@@ -288,8 +361,10 @@ function TraceRow({ r }: { r: Row }) {
   const store = useChatStore();
   if (r.type === "thought")
     return (
-      <li className="flex gap-2.5 py-1" data-f="thinking">
-        <Orbit className="mt-0.5 size-4 shrink-0 text-faint" aria-hidden="true" />
+      <li className={RAIL_ROW} data-f="thinking">
+        <RailMark mark="off">
+          <Orbit />
+        </RailMark>
         <details className="min-w-0 flex-1">
           <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
             <span className="min-w-0 flex-1 text-md text-text-2">{gist(r.text)}</span>
@@ -303,8 +378,10 @@ function TraceRow({ r }: { r: Row }) {
     );
   if (r.type === "note")
     return (
-      <li className="flex gap-2.5 py-1">
-        <MessageSquare className="mt-0.5 size-4 shrink-0 text-faint" aria-hidden="true" />
+      <li className={RAIL_ROW}>
+        <RailMark mark="ok">
+          <MessageSquare />
+        </RailMark>
         <span className="text-md">
           <span className="text-muted-foreground">You, while it worked:</span> {r.e.summary}
         </span>
@@ -312,8 +389,10 @@ function TraceRow({ r }: { r: Row }) {
     );
   if (r.type === "checkpoint")
     return (
-      <li className="flex items-center gap-2.5 py-1">
-        <Bookmark className="size-4 shrink-0 text-faint" aria-hidden="true" />
+      <li className={RAIL_ROW}>
+        <RailMark mark="ok">
+          <Bookmark />
+        </RailMark>
         <span className="min-w-0 flex-1 text-md">
           {r.e.summary} saved <span className="text-faint">· {r.e.stat || "project saved"}</span>
         </span>
@@ -325,8 +404,10 @@ function TraceRow({ r }: { r: Row }) {
   if (r.type === "deadend") {
     const first = (r.tries[0] as Extract<Row, { type: "step" }>).e;
     return (
-      <li className="flex gap-2.5 py-1">
-        <span className="mt-1.5 size-2 shrink-0 rounded-full bg-faint" aria-hidden="true" />
+      <li className={RAIL_ROW}>
+        <RailMark mark="off">
+          <span className="size-1.5 rounded-full bg-current" />
+        </RailMark>
         <details className="min-w-0 flex-1 rounded-md border px-2.5 py-1.5">
           <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
             <span className="min-w-0 flex-1 text-md">Dead end: {first.summary}</span>
@@ -348,8 +429,10 @@ function TraceRow({ r }: { r: Row }) {
     const fixes = r.middle.filter((x): x is Extract<Row, { type: "step" }> => x.type === "step");
     const fileFix = FILE_TOOLS.has(r.fix.e.tool || "");
     return (
-      <li className="flex gap-2.5 py-1">
-        <span className="mt-1.5 size-2 shrink-0 rounded-full bg-amber" aria-hidden="true" />
+      <li className={RAIL_ROW}>
+        <RailMark mark="warn">
+          <span className="size-1.5 rounded-full bg-current" />
+        </RailMark>
         <div className="min-w-0 flex-1 rounded-md border border-amber/40 px-3 py-2">
           <div className="mb-1 text-xs font-semibold tracking-wide text-amber uppercase">Problem fixed</div>
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-md">
@@ -461,7 +544,7 @@ function Trace({ m, work }: { m: Message; work: Work }) {
                 <span>{g.phase}</span>
                 <small className="font-mono normal-case">{range(g)}</small>
               </div>
-              <ol>
+              <ol className="pt-2.5 pb-1">
                 {rows.map((r, j) => (
                   <TraceRow key={j} r={r} />
                 ))}
@@ -525,9 +608,13 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
     waits = Date.parse(s.startedAt || "") + 15 * 60000;
   const head = s.question ? s.question : s.readOnly === false && s.service !== "mcp" ? `Allow this change on ${s.connection}?` : `Allow ${s.connection || "this tool"} to run this?`;
   return (
-    <div className="grid gap-2.5 rounded-md border border-amber/40 bg-amber/5 p-3">
+    <div className="grid gap-2.5 rounded-lg border border-amber/40 bg-amber/[0.06] p-3.5">
       <div>
-        <strong className="block text-md font-semibold">{head}</strong>
+        <span className={cn(EYEBROW_ASK, "mb-1 flex items-baseline justify-between gap-2")}>
+          Needs your say
+          {Number.isFinite(waits) && <small className="font-normal tracking-normal text-muted-foreground normal-case">Waits {clock(waits - now)} more</small>}
+        </span>
+        <strong className="block text-base font-semibold">{head}</strong>
         {s.readOnly === false && (
           <span className="text-sm text-muted-foreground">{changeNote(s.service)}</span>
         )}
@@ -572,8 +659,7 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
         )
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <Decisions s={s} />
-        {Number.isFinite(waits) && <small className="ml-auto text-xs text-muted-foreground">Waits {clock(waits - now)} more</small>}
+        <Decisions s={s} size="sm" />
       </div>
     </div>
   );
@@ -581,65 +667,65 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
 
 // Which worker each delegate step shows in its detail panel.
 const chosen = new Map<string, number>();
-/** The workers of a delegate step as a graph: the lead, each worker, and their reports coming back. */
+/** The workers of a delegate step as lanes: each one's steps as they happen, and the one picked in full. */
 function WorkerGraph({ s, m }: { s: ActivityEntry; m: Message }) {
   const list: any[] = s.agents,
     n = list.length;
   const [pickedState, setPicked] = useState<number | null>(chosen.has(s.id!) ? chosen.get(s.id!)! : null);
   const picked = Math.min(n - 1, pickedState ?? Math.max(0, list.findIndex((a) => a.status === "running")));
-  const mark = (a: any) => (a.status === "error" ? "bad" : a.status === "completed" ? "ok" : a.status === "running" ? "now" : "next");
   const done = list.filter((a) => a.status === "completed").length,
     bad = list.filter((a) => a.status === "error").length,
     left = n - done - bad;
   const lead = m.settings?.resolvedModel || m.settings?.model || "Lead model";
   const a = list[picked];
-  const facts = [a.status === "completed" || a.status === "error" ? count(a.steps || 0, "step") : `step ${a.steps || 0} of 30`, a.tokens ? `${compact(a.tokens)} tokens` : ""].filter(Boolean).join(" · ");
+  const facts = [a.status === "completed" || a.status === "error" ? count(a.steps || 0, "step") : `step ${a.steps || 0} of ${WORKER_STEPS}`, a.tokens ? `${compact(a.tokens)} tokens` : ""].filter(Boolean).join(" · ");
   const status = ({ completed: "Reported", error: "Failed", running: "Working", queued: "Waiting to start" } as Record<string, string>)[a.status] || "";
   return (
-    <div className="grid gap-3 rounded-md border p-3">
-      <div className="grid items-center gap-2 sm:grid-cols-[auto_1fr_auto]">
-        <div className="rounded-md border bg-muted px-2.5 py-1.5 text-center">
-          <span className="block text-2xs tracking-wider text-muted-foreground uppercase">Lead</span>
-          <strong className="block truncate font-mono text-[12px]">{lead}</strong>
-          <small className="text-xs text-muted-foreground">{left ? `waiting on ${left}` : "reading reports"}</small>
-        </div>
-        <div className="grid gap-1.5">
-          {list.map((w, i) => {
-            const progress = w.status === "completed" || w.status === "error" ? 100 : Math.min(100, Math.round(((w.steps || 0) / 30) * 100));
-            return (
-              <button
-                key={i}
-                type="button"
-                aria-pressed={i === picked}
-                onClick={() => {
-                  chosen.set(s.id!, i);
-                  setPicked(i);
-                }}
-                className={cn("relative overflow-hidden rounded-md border px-2.5 py-1.5 text-left", i === picked && "border-foreground")}
-              >
-                <span className="flex items-center gap-2">
-                  <span className={cn("size-2 shrink-0 rounded-full bg-current", MARK_TONE[mark(w)])} aria-hidden="true" />
-                  <strong className="min-w-0 flex-1 truncate text-sm font-medium">{w.title}</strong>
-                  <small className="font-mono text-xs text-faint">{compact(w.tokens)}</small>
-                </span>
-                <span className="block truncate text-xs text-muted-foreground">{w.status === "completed" ? `Reported · ${count(w.steps || 0, "step")}` : w.doing || ""}</span>
-                <span className="absolute bottom-0 left-0 h-0.5 bg-blue" style={{ width: `${progress}%` }} aria-hidden="true" />
-              </button>
-            );
-          })}
-        </div>
-        <div className="rounded-md border bg-muted px-2.5 py-1.5 text-center">
-          <span className="block text-2xs tracking-wider text-muted-foreground uppercase">Reports</span>
-          <strong className="block">
-            {done} of {n}
-          </strong>
-          <small className="text-xs text-muted-foreground">{bad ? `${bad} failed` : left ? "coming in" : "all in"}</small>
-        </div>
+    <div className="overflow-hidden rounded-lg border">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-b border-line-soft px-3 py-2 text-sm">
+        <strong className="font-semibold">{count(n, "worker")}</strong>
+        <span className="min-w-0 truncate text-muted-foreground">
+          reporting to <span className="font-mono text-xs">{lead}</span>
+        </span>
+        <span className={cn("ml-auto text-xs", left ? "text-signal" : bad ? "text-destructive-foreground" : "text-muted-foreground")}>
+          {left ? `${left} still working` : bad ? `${bad} failed` : "All reports in"}
+          {left > 0 && done > 0 ? ` · ${done} of ${n} reported` : ""}
+        </span>
       </div>
-      <div className="rounded-md bg-muted px-3 py-2" aria-live="polite">
+      <div role="group" aria-label="Workers">
+        {list.map((w, i) => {
+          const mark = workerMark(w);
+          return (
+            <button
+              key={i}
+              type="button"
+              aria-pressed={i === picked}
+              onClick={() => {
+                chosen.set(s.id!, i);
+                setPicked(i);
+              }}
+              className={cn(
+                "grid w-full grid-cols-[minmax(0,11rem)_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1 border-b border-line-soft px-3 py-2.5 text-left hover:bg-accent max-sm:grid-cols-1",
+                i === picked && "bg-muted",
+              )}
+            >
+              <span className="min-w-0">
+                <strong className="block truncate text-md font-medium">{w.title}</strong>
+                {(w.model || s.workerModel) && <small className="block truncate font-mono text-xs text-muted-foreground">{w.model || s.workerModel}</small>}
+              </span>
+              <span className="grid min-w-0 gap-1.5">
+                <LaneBars a={w} />
+                <span className={cn("truncate font-mono text-xs", mark === "now" ? "text-foreground" : "text-muted-foreground")}>{w.status === "completed" ? "Report ready" : w.doing || (w.status === "queued" ? "Waiting to start" : "")}</span>
+              </span>
+              <WorkerState a={w} mark={mark} />
+            </button>
+          );
+        })}
+      </div>
+      <div className="bg-muted px-3 py-2.5" aria-live="polite">
         <div className="flex flex-wrap items-baseline gap-2">
           <strong className="text-md">{a.title}</strong>
-          <span className={cn("text-sm", MARK_TONE[mark(a)])}>{status}</span>
+          <span className={cn("text-sm", WORKER_TONE[workerMark(a)])}>{status}</span>
           <small className="text-xs text-muted-foreground">{facts}</small>
         </div>
         {a.task && <p className="mt-1 text-sm text-text-2">Task: {a.task}</p>}
@@ -657,8 +743,8 @@ function WorkerGraph({ s, m }: { s: ActivityEntry; m: Message }) {
           <ol className="mt-1 grid gap-0.5">
             {(a.recent?.length ? a.recent : [a.doing]).filter(Boolean).map((t: string, j: number, all: string[]) => (
               <li key={j} className="flex items-center gap-2 text-sm">
-                <span className={cn("size-1.5 rounded-full bg-current", j === all.length - 1 && a.status === "running" ? "text-blue" : "text-success")} aria-hidden="true" />
-                <span>{t}</span>
+                <span className={cn("size-1.5 shrink-0 rounded-full", j === all.length - 1 && a.status === "running" ? "signal-breathe bg-signal" : "bg-focus-border")} aria-hidden="true" />
+                <span className="min-w-0 truncate">{t}</span>
               </li>
             ))}
           </ol>
@@ -704,7 +790,7 @@ function Target({ s, draft }: { s?: ActivityEntry; draft: unknown }) {
   );
 }
 
-const RAIL_TONE: Record<string, string> = { done: "bg-success", now: "bg-blue animate-pulse", ask: "bg-amber animate-pulse", next: "bg-line-strong" };
+const RAIL_TONE: Record<string, string> = { done: "bg-text-2", now: "bg-signal signal-breathe", ask: "bg-amber signal-breathe", next: "bg-line-strong" };
 
 function RunCard({ m, work }: { m: Message; work: Work }) {
   const store = useChatStore();
@@ -723,7 +809,7 @@ function RunCard({ m, work }: { m: Message; work: Work }) {
         <span className="min-w-0 flex-1 truncate font-mono text-foreground">{run.pane.label}</span>
         {run.pane.note && <span>{run.pane.note}</span>}
         <span className="inline-flex items-center gap-1">
-          <span className="size-1.5 animate-pulse rounded-full bg-success" aria-hidden="true" />
+          <span className="signal-breathe size-1.5 rounded-full bg-signal" aria-hidden="true" />
           live
         </span>
       </div>
@@ -733,19 +819,19 @@ function RunCard({ m, work }: { m: Message; work: Work }) {
             {run.pane.kind === "running" ? (
               <>
                 {run.pane.text}
-                <span className="text-faint">›</span> {run.pane.label} <span className="animate-pulse">▍</span>
+                <span className="text-faint">›</span> {run.pane.label} <span className="animate-pulse text-signal">▍</span>
               </>
             ) : (
               <>
                 {run.pane.text}
-                {run.pane.kind === "draft" && <span className="animate-pulse">▍</span>}
+                {run.pane.kind === "draft" && <span className="animate-pulse text-signal">▍</span>}
               </>
             )}
           </pre>
         ) : (
           <div className="text-md text-text-2">
             {run.pane.text}
-            {run.pane.kind === "thinking" && <span className="animate-pulse">▍</span>}
+            {run.pane.kind === "thinking" && <span className="animate-pulse text-signal">▍</span>}
           </div>
         )}
       </div>
@@ -755,7 +841,7 @@ function RunCard({ m, work }: { m: Message; work: Work }) {
     <>
       <section className="grid gap-3 rounded-lg border bg-card p-3" aria-label="Working">
         <div className="flex items-center gap-3">
-          <span className={cn("size-2.5 shrink-0 animate-pulse rounded-full", run.waiting[0] ? "bg-amber" : "bg-blue")} aria-hidden="true" />
+          <LiveDot tone={run.waiting[0] ? "amber" : "signal"} className="size-2.5" />
           <div className="min-w-0 flex-1">
             <strong className="block truncate text-md font-semibold">{run.headline}</strong>
             <small className="text-xs text-muted-foreground">

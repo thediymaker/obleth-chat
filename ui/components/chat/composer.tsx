@@ -74,7 +74,8 @@ function SendButton() {
   const use = contextUse(store.active, { windowSize: Number(store.policyModel()?.metadata?.contextWindow) || 0, systemPrompt: store.systemPrompt, open: !!store.route.id });
   const op = store.currentOperation();
   const round = 2 * Math.PI * 17,
-    level = use.share > 0.9 ? "text-destructive-foreground" : use.share > 0.75 ? "text-amber" : "text-foreground";
+    // The ring takes the accent while a reply is being written; near the end of the window it warns instead.
+    level = use.share > 0.9 ? "text-destructive-foreground" : use.share > 0.75 ? "text-amber" : store.streaming ? "text-signal" : "text-foreground";
   const amount = use.unknown ? "—" : use.windowSize ? `${compact(use.used)} / ${compact(use.windowSize)}` : use.used ? compact(use.used) : "—";
   const stopping = store.streaming;
   const disabled = stopping ? !!op?.stopRequested : store.switchingVersion || !store.available || store.attachments.busy();

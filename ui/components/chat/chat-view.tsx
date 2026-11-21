@@ -196,7 +196,7 @@ export function ChatHome() {
           <h2 className="text-base leading-[normal] font-medium tracking-normal">{chats.length ? "Pick up where you left off" : "A fresh start, just for you."}</h2>
           {chats.length > 0 && (
             <Button variant="ghost" size="sm" onClick={() => window.dispatchEvent(new Event(OPEN_SEARCH_EVENT))}>
-              All conversations <ChevronRight />
+              Search chats <ChevronRight />
             </Button>
           )}
         </div>
@@ -214,7 +214,7 @@ export function ChatHome() {
             ))}
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">Your conversations appear here after your first message.</p>
+          <p className="text-sm text-muted-foreground">Your chats appear here after your first message.</p>
         )}
       </section>
       {branding.home.footer && (
@@ -270,7 +270,7 @@ export function ChatPage({ id }: { id: string }) {
   if (store.loadingChat && !c)
     return (
       <div className="py-16 text-center text-sm text-muted-foreground" role="status">
-        Opening your conversation…
+        Opening your chat…
       </div>
     );
   const newChat = (
@@ -296,7 +296,7 @@ export function ChatPage({ id }: { id: string }) {
   if (!c)
     return (
       <div className="py-16 text-center text-sm text-muted-foreground" role="status">
-        Opening your conversation…
+        Opening your chat…
       </div>
     );
   const sh = store.shared;
@@ -330,14 +330,14 @@ export function ChatPage({ id }: { id: string }) {
                   <HeaderButton label="Share chat" onClick={() => store.openDialog({ kind: "share", id: c.id })}>
                     <Link2 />
                   </HeaderButton>
-                  <HeaderButton label="Conversation alternatives" onClick={() => store.run(() => store.alternatives())}>
+                  <HeaderButton label="Chat alternatives" onClick={() => store.run(() => store.alternatives())}>
                     <GitBranch />
                   </HeaderButton>
                 </>
               )}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon-sm" className="size-[30px]" aria-label="Conversation options">
+                  <Button variant="ghost" size="icon-sm" className="size-[30px]" aria-label="Chat options">
                     <MoreHorizontal />
                   </Button>
                 </DropdownMenuTrigger>
@@ -362,7 +362,7 @@ export function ChatPage({ id }: { id: string }) {
         )}
         <div className="mx-auto w-full max-w-[884px] flex-1 px-8 pt-7 pb-2 max-[760px]:px-4 max-[760px]:pt-5">
           <Messages />
-          {empty && <div className="px-5 py-[45px] text-center text-md text-muted-foreground">{sh ? "Nothing here yet. New messages show up as they arrive." : "A new conversation, ready for your first idea."}</div>}
+          {empty && <div className="px-5 py-[45px] text-center text-md text-muted-foreground">{sh ? "Nothing here yet. New messages show up as they arrive." : "A new chat, ready for your first idea."}</div>}
         </div>
         {sh ? (
           <div className="sticky bottom-3 z-[5] mx-auto mt-2 mb-3 flex w-[min(calc(100%-32px),820px)] items-center gap-2.5 rounded-lg border border-line-strong bg-card px-3.5 py-2.5 text-md text-text-2 shadow-[0_6px_20px_var(--shadow-soft)]">

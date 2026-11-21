@@ -126,7 +126,7 @@ export function ActivityTab() {
           </Button>
         </div>
       </div>
-      <Note>Administrative changes and account security events. Conversation content stays private.</Note>
+      <Note>Administrative changes and account security events. Chat content stays private.</Note>
       <ErrorBox error={audit.error} onRetry={() => audit.refetch()} />
       {audit.isLoading ? (
         <Loading label="Loading administration…" />

@@ -67,15 +67,15 @@ export function WorkspacesPage() {
     );
   const items = list.data?.items;
   const limit = list.data?.diskLimit || 0;
-  const newProject = (
+  const newWorkspace = (
     <Button onClick={start}>
-      <Plus /> New project
+      <Plus /> New workspace
     </Button>
   );
   const remove = (p: Workspace) =>
     confirm.ask({
       title: "Delete this workspace?",
-      text: `The project folder of “${p.title || "this conversation"}” and everything in it are deleted. The conversation stays.`,
+      text: `The workspace folder of “${p.title || "this chat"}” and everything in it are deleted. The chat stays.`,
       label: "Delete workspace",
       cancel: "Keep it",
       action: async () => {
@@ -88,7 +88,7 @@ export function WorkspacesPage() {
   const usage = machine ? diskUsage(machine.diskBytes, limit) : null;
   return (
     <Page>
-      <PageHeader title="Compute" description="Every chat with a workspace is a project folder in your own Linux container. Open one to browse its files, use a terminal or download it." actions={newProject}>
+      <PageHeader title="Compute" description="Every chat with a workspace has its own folder in your Linux container. Open one to browse its files, use a terminal or download it." actions={newWorkspace}>
         <ComputeTabs />
       </PageHeader>
       <ErrorBox error={list.error} onRetry={() => list.refetch()} />
@@ -115,7 +115,7 @@ export function WorkspacesPage() {
                 Your container <Pill tone={statusTone(machine!)}>{statusLabel(machine!)}</Pill>
               </h2>
               <p className="mt-0.5 text-sm text-muted-foreground">
-                {machine!.status === "stopped" ? "Asleep: it wakes when you open a project or the assistant needs it. Files are kept." : "It sleeps after an hour unused and keeps your files."}
+                {machine!.status === "stopped" ? "Asleep: it wakes when you open a workspace or the assistant needs it. Files are kept." : "It sleeps after an hour unused and keeps your files."}
               </p>
             </div>
             {usage && (
@@ -134,7 +134,7 @@ export function WorkspacesPage() {
                   <Link href={`/workspaces/${id}`} className="flex min-w-0 grow basis-56 items-center gap-3">
                     <Terminal className="size-4 shrink-0 text-muted-foreground" />
                     <span className="min-w-0">
-                      <strong className="block truncate text-md font-medium">{p.title || "Untitled conversation"}</strong>
+                      <strong className="block truncate text-md font-medium">{p.title || "Untitled chat"}</strong>
                       <small className="block text-sm text-muted-foreground">
                         {live ? "Preview running · " : ""}Used {ago(p.lastUsedAt)}
                       </small>
@@ -151,12 +151,12 @@ export function WorkspacesPage() {
                     </Button>
                     {p.status === "running" && (
                       <Button asChild size="icon-sm" variant="ghost">
-                        <a href={downloadUrl(p.conversationId || "")} download aria-label="Download project" title="Download project (.zip, without dependencies)">
+                        <a href={downloadUrl(p.conversationId || "")} download aria-label="Download workspace" title="Download workspace (.zip, without dependencies)">
                           <Download />
                         </a>
                       </Button>
                     )}
-                    <Button size="icon-sm" variant="ghost" aria-label={`Delete the workspace of ${p.title || "this conversation"}`} title={`Delete the workspace of ${p.title || "this conversation"}`} onClick={() => remove(p)}>
+                    <Button size="icon-sm" variant="ghost" aria-label={`Delete the workspace of ${p.title || "this chat"}`} title={`Delete the workspace of ${p.title || "this chat"}`} onClick={() => remove(p)}>
                       <Trash2 />
                     </Button>
                   </div>

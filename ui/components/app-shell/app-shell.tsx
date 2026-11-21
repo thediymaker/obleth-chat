@@ -96,7 +96,7 @@ function Frame({ children }: { children: React.ReactNode }) {
           </div>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle className="hidden sm:inline-flex" />
-            <Button variant="ghost" size="icon-sm" aria-label="Search conversations" title="Search conversations (⌘K)" onClick={() => setSearch(true)}>
+            <Button variant="ghost" size="icon-sm" aria-label="Search chats" title="Search chats (⌘K)" onClick={() => setSearch(true)}>
               <Search />
             </Button>
             {/* A page's own action (a chat's Details), or Focus mode. */}

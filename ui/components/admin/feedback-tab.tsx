@@ -239,7 +239,7 @@ function RatingsSection() {
           </Button>
         )}
       </div>
-      <Note>Thumbs up and down people gave replies in the last {days} days. You see the model, the rating, the reasons and any comment, never the conversation or who gave it.</Note>
+      <Note>Thumbs up and down people gave replies in the last {days} days. You see the model, the rating, the reasons and any comment, never the chat or who gave it.</Note>
       <ErrorBox error={feedback.error} onRetry={() => feedback.refetch()} />
       {f ? <FeedbackView data={f} days={days} /> : !feedback.error && <Loading label="Loading administration…" />}
     </div>

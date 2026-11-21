@@ -132,7 +132,7 @@ export function PersonalSettings() {
               </FormActions>
             </form>
           </Section>
-          <Section title="Conversation defaults" description="Start new conversations with these settings. Model policies may lock individual controls.">
+          <Section title="Chat defaults" description="Start new chats with these settings. Model policies may lock individual controls.">
             {preferenceData ? (
               <form key={JSON.stringify(p)} onSubmit={defaults.onSubmit} className="grid gap-4">
                 <SelectField id="default-model" label="Default model" options={modelOptions(models)} defaultValue={p.defaultModel || "auto"} help="Picking a model in a chat also makes it your default." />
@@ -179,7 +179,7 @@ export function PersonalSettings() {
                         onClick={() =>
                           confirm.ask({
                             title: "Delete this preset?",
-                            text: "Your conversations will remain available.",
+                            text: "Your chats will remain available.",
                             label: "Delete preset",
                             cancel: "Keep preset",
                             action: async () => {
@@ -278,7 +278,7 @@ function AppearanceCard({ values }: { values: Look }) {
       <div className="grid gap-3">
         <SwitchField id="appearance-compact" label="Compact spacing" description="Fit more messages on screen." checked={look.density === "compact"} disabled={saving} onCheckedChange={(on) => change({ density: on ? "compact" : "comfortable" })} />
         <SwitchField id="appearance-focus" label="Focus mode" description="Collapse the main navigation." checked={!!look.focus} disabled={saving} onCheckedChange={(on) => change({ focus: on })} />
-        <SwitchField id="appearance-context" label="Conversation context" description="Show model and generation details." checked={look.context !== false} disabled={saving} onCheckedChange={(on) => change({ context: on })} />
+        <SwitchField id="appearance-context" label="Chat context" description="Show model and generation details." checked={look.context !== false} disabled={saving} onCheckedChange={(on) => change({ context: on })} />
         <SwitchField
           id="appearance-suggestions"
           label="Suggest a better suited model"

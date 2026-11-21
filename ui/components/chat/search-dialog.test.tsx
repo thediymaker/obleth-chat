@@ -13,7 +13,7 @@ import { SearchDialog } from "@/components/chat/search-dialog";
 
 polyfillLayout();
 
-describe("Search conversations", () => {
+describe("Search chats", () => {
   beforeEach(() => {
     push.mockReset();
     request.mockReset();

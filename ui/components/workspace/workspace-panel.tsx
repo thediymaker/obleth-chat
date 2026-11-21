@@ -82,7 +82,7 @@ function EmptyPreview({ id, space, bridge }: { id: string; space: Space; bridge:
   if (w.status === "starting")
     return (
       <PaneNote icon={Orbit} spin status title="Starting your workspace…">
-        A private Linux environment is being prepared for this conversation.
+        A private Linux environment is being prepared for this chat.
       </PaneNote>
     );
   if (w.status === "error")
@@ -337,7 +337,7 @@ export function WorkspacePanel({ conversationId, tab }: { conversationId: string
   useEffect(() => {
     if (on && !space.loaded) void bridge.load(conversationId);
   }, [on, space.loaded, bridge, conversationId]);
-  if (!space.workspace) return space.loaded || (caps && !caps.features?.workspaces) ? <PaneNote icon={TerminalIcon} title="This conversation has no workspace" /> : <PaneLoading />;
+  if (!space.workspace) return space.loaded || (caps && !caps.features?.workspaces) ? <PaneNote icon={TerminalIcon} title="This chat has no workspace" /> : <PaneLoading />;
   return (
     <div className="flex h-full min-h-0 flex-col" data-conversation={conversationId}>
       <Bar id={conversationId} space={space} tab={tab} bridge={bridge} />

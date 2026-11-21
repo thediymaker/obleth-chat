@@ -25,7 +25,7 @@ export function WorkspaceToggle() {
       size="xs"
       aria-pressed={on}
       className={cn("rounded-full", on && "bg-secondary text-foreground", shown && "ring-1 ring-line-strong")}
-      title={on ? "This conversation has a workspace: the model can create files, run commands and show a live preview" : "Give the model a private Linux workspace with a live preview"}
+      title={on ? "This chat has a workspace: the model can create files, run commands and show a live preview" : "Give the model a private Linux workspace with a live preview"}
       disabled={store.streaming}
       onClick={() => store.run(() => store.toggleWorkspace())}
     >

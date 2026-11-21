@@ -122,7 +122,7 @@ function Decisions({ s }: { s: ActivityEntry }) {
           size="xs"
           variant={primary ? "default" : "outline"}
           disabled={busy}
-          title={decision === "chat" ? `Run ${s.summary} without asking for the rest of this conversation` : undefined}
+          title={decision === "chat" ? `Run ${s.summary} without asking for the rest of this chat` : undefined}
           onClick={async () => {
             setBusy(true);
             await store.decide(s.id!, decision);

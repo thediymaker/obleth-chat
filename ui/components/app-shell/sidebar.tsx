@@ -118,7 +118,7 @@ export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () 
       <div className="mt-3 flex min-h-0 flex-1 flex-col border-t border-sidebar-border pt-3">
         <div className="mb-1 flex items-center justify-between pr-1 pl-3">
           <span className="text-2xs font-medium tracking-[.08em] text-muted-foreground uppercase">Recent</span>
-          <Button variant="ghost" size="icon-xs" className="size-7 [&_svg]:size-3.5" aria-label="Search conversations" title="Search conversations" onClick={onSearch}>
+          <Button variant="ghost" size="icon-xs" className="size-7 [&_svg]:size-3.5" aria-label="Search chats" title="Search chats" onClick={onSearch}>
             <Search />
           </Button>
         </div>

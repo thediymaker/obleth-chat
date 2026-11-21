@@ -191,8 +191,8 @@ export function PeopleTab() {
         title: "Change this account’s role?",
         text:
           body.role === "admin"
-            ? "This person will be able to manage users, groups, model access, and installation settings."
-            : "This person will lose administrator access. Their personal conversations will stay private and available.",
+            ? "This person will be able to manage users, groups, model access, and this server’s settings."
+            : "This person will lose administrator access. Their personal chats will stay private and available.",
         label: "Change role",
         action: save,
       });
@@ -264,7 +264,7 @@ export function PeopleTab() {
           </table>
         </TableWrap>
       ) : (
-        <EmptyState title="No accounts found" text="Try another search, or create an account for someone joining your workspace." />
+        <EmptyState title="No accounts found" text="Try another search, or create an account for someone joining this server." />
       )}
       {data?.hasMore && (
         <div>

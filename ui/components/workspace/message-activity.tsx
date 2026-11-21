@@ -29,7 +29,7 @@ function Step({ s }: { s: ActivityEntry }) {
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-sm">
             <span className="flex-1">{s.question || `Allow ${s.connection || "this tool"} to run this?`}</span>
             {(["allow", "chat", "deny"] as const).map((d) => (
-              <button key={d} type="button" className="rounded-md border px-2 py-0.5" title={d === "chat" ? `Run ${s.summary} without asking for the rest of this conversation` : undefined} onClick={() => store.decide(s.id!, d)}>
+              <button key={d} type="button" className="rounded-md border px-2 py-0.5" title={d === "chat" ? `Run ${s.summary} without asking for the rest of this chat` : undefined} onClick={() => store.decide(s.id!, d)}>
                 {d === "allow" ? (s.question ? "Allow once" : "Allow") : d === "chat" ? s.remember || "Allow for this chat" : "Deny"}
               </button>
             ))}

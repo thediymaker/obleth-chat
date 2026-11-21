@@ -71,7 +71,7 @@ test("personal settings save defaults, appearance and favorites to the account",
   await userEvent.click(screen.getByRole("switch", { name: "Compact spacing" }));
   await waitFor(() => expect(calls.filter((c) => c.method === "PATCH").at(-1)?.body).toEqual({ density: "compact" }));
   await waitFor(() => expect(toast).toHaveBeenCalledWith("Preferences saved"));
-  await userEvent.click(screen.getByRole("switch", { name: "Conversation context" }));
+  await userEvent.click(screen.getByRole("switch", { name: "Chat context" }));
   await waitFor(() => expect(calls.filter((c) => c.method === "PATCH").at(-1)?.body).toEqual({ context: false }));
   expect(screen.getByRole("checkbox", { name: "Gemma" })).toBeChecked();
   await userEvent.click(screen.getByRole("checkbox", { name: /^GLM/ }));

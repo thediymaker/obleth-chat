@@ -34,7 +34,7 @@ import { useSession } from "@/lib/session";
 const FILTERS: [ArchivedFilter, string][] = [
   ["false", "Active"],
   ["true", "Archived"],
-  ["all", "All conversations"],
+  ["all", "Active and archived"],
 ];
 const asFilter = (value: string | null): ArchivedFilter => (value === "true" || value === "all" ? value : "false");
 
@@ -122,7 +122,7 @@ export function HistoryPage() {
     try {
       await bulkConversations([...selected], action);
       await refresh();
-      toast(action === "archive" ? "Conversations archived" : "Conversations restored");
+      toast(action === "archive" ? "Chats archived" : "Chats restored");
     } catch (error) {
       if ((error as Error).name !== "AbortError") toast((error as Error).message);
     } finally {
@@ -145,8 +145,8 @@ export function HistoryPage() {
     });
 
   const empty = query
-    ? { title: "No conversations found", text: "Try another search or include archived conversations." }
-    : { title: archived === "true" ? "Nothing archived" : "A fresh start", text: "Your conversations will appear here as you use Chat." };
+    ? { title: "No chats found", text: "Try another search or include archived chats." }
+    : { title: archived === "true" ? "Nothing archived" : "A fresh start", text: "Your chats will appear here as you use Chat." };
 
   return (
     <Page>
@@ -159,8 +159,8 @@ export function HistoryPage() {
           </Button>
         }
       />
-      <SearchForm id="history-query" label="Search conversations" placeholder="Search titles and messages…" maxLength={256} value={query} onSearch={search} className="mb-[22px] sm:max-w-none">
-        <Dropdown className="w-[180px]" aria-label="Conversation visibility" value={draftArchived} onChange={(e) => setDraftArchived(e.target.value as ArchivedFilter)}>
+      <SearchForm id="history-query" label="Search chats" placeholder="Search titles and messages…" maxLength={256} value={query} onSearch={search} className="mb-[22px] sm:max-w-none">
+        <Dropdown className="w-[180px]" aria-label="Chat visibility" value={draftArchived} onChange={(e) => setDraftArchived(e.target.value as ArchivedFilter)}>
           {FILTERS.map(([value, label]) => (
             <option key={value} value={value}>
               {label}
@@ -192,15 +192,15 @@ export function HistoryPage() {
           </Button>
         </div>
       </div>
-      {list.isFetching && !data && <Loading label="Loading conversations…" />}
+      {list.isFetching && !data && <Loading label="Loading chats…" />}
       {list.isFetching && data && (
         <p role="status" className="sr-only">
-          Loading conversations…
+          Loading chats…
         </p>
       )}
       {chats.length ? (
         <>
-          <ul className="border-t" aria-label="Conversations">
+          <ul className="border-t" aria-label="Chats">
             {chats.map((chat) => (
               <li key={chat.id} className="group/item flex flex-wrap items-center gap-x-[15px] gap-y-1.5 border-b py-3">
                 <Checkbox aria-label={`Select ${chat.title}`} checked={selected.has(chat.id)} onCheckedChange={(on) => toggle(chat.id, on === true)} />
@@ -247,14 +247,14 @@ export function HistoryPage() {
       <Confirm
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
-        title={`Delete ${n} conversation${n === 1 ? "" : "s"}?`}
-        text="This permanently deletes the selected conversations and their messages."
-        cancel="Keep conversations"
-        label="Delete conversations"
+        title={`Delete ${n} chat${n === 1 ? "" : "s"}?`}
+        text="This permanently deletes the selected chats and their messages."
+        cancel="Keep chats"
+        label="Delete chats"
         action={async () => {
           await bulkConversations([...selected], "delete");
           await refresh();
-          toast("Conversations deleted");
+          toast("Chats deleted");
         }}
       />
       <ImportDialog open={importing} onOpenChange={setImporting} onImported={refresh} />
@@ -315,8 +315,8 @@ export function ImportDialog({ open, onOpenChange, onImported }: { open: boolean
       <FormDialog
         open={open}
         onOpenChange={reset}
-        title="Import conversations"
-        description="Bring your chats over from Chat, Open WebUI, ChatGPT or Claude. They are added to your account, and your existing conversations are kept."
+        title="Import chats"
+        description="Bring your chats over from Chat, Open WebUI, ChatGPT or Claude. They are added to your account, and your existing chats are kept."
       >
         <form id="history-import-form" onSubmit={submit} className="grid gap-4">
           <Field
@@ -340,7 +340,7 @@ export function ImportDialog({ open, onOpenChange, onImported }: { open: boolean
           <FormError message={error} />
           <FormActions>
             <Button type="submit" disabled={!file || sending}>
-              Import conversations
+              Import chats
             </Button>
           </FormActions>
         </form>

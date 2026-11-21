@@ -76,20 +76,20 @@ export function SearchDialog({ open, onOpenChange }: { open: boolean; onOpenChan
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="overflow-hidden p-0" showCloseButton>
-        <DialogTitle className="sr-only">Search conversations</DialogTitle>
+        <DialogTitle className="sr-only">Search chats</DialogTitle>
         <DialogDescription className="sr-only">Find a chat by its title or what was said in it</DialogDescription>
         <Command
           shouldFilter={false}
           className="**:data-[slot=command-input-wrapper]:h-12 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground [&_[cmdk-group]]:px-2 [&_[cmdk-input]]:h-12 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-2.5"
         >
-          <CommandInput placeholder="Search titles and messages…" value={text} onValueChange={setText} maxLength={256} aria-label="Search conversations" />
+          <CommandInput placeholder="Search titles and messages…" value={text} onValueChange={setText} maxLength={256} aria-label="Search chats" />
           <CommandList>
             {!typed ? (
               recent.length ? (
                 <CommandGroup heading="Recent">{(recent as Found[]).slice(0, 15).map(row)}</CommandGroup>
               ) : (
                 <div className="py-6 text-center text-sm text-muted-foreground" role="status">
-                  {recentLoading ? "Loading conversations…" : "Your conversations will appear here as you use Chat."}
+                  {recentLoading ? "Loading chats…" : "Your chats will appear here as you use Chat."}
                 </div>
               )
             ) : results.error && !waiting ? (
@@ -102,7 +102,7 @@ export function SearchDialog({ open, onOpenChange }: { open: boolean; onOpenChan
               </div>
             ) : (
               <>
-                {!found.length && <CommandEmpty>No conversations found.</CommandEmpty>}
+                {!found.length && <CommandEmpty>No chats found.</CommandEmpty>}
                 {found.length > 0 && (
                   <CommandGroup heading={results.data && results.data.total > found.length ? `Chats · ${found.length} of ${results.data.total}` : "Chats"}>{found.map(row)}</CommandGroup>
                 )}

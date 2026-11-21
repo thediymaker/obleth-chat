@@ -467,7 +467,7 @@ export const MessageView = memo(
                     <RefreshCw />
                   </IconButton>
                   {!store.active?.temporary && (
-                    <IconButton label="Branch conversation" onClick={() => store.run(() => store.branch(index))}>
+                    <IconButton label="Branch chat" onClick={() => store.run(() => store.branch(index))}>
                       <GitBranch />
                     </IconButton>
                   )}

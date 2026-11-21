@@ -53,7 +53,7 @@ export function auditSentence(e: AuditEvent): Part[] {
   };
   const removed = (
     [
-      ["conversations", "inactive conversation"],
+      ["conversations", "inactive chat"],
       ["unusedFiles", "unused file"],
       ["auditEvents", "old activity entry", "old activity entries"],
       ["expiredSessions", "expired sign-in"],
@@ -90,7 +90,7 @@ export function auditSentence(e: AuditEvent): Part[] {
     "model.update": () => trim([actor, " changed the model ", target("")]),
     "model.certify": () => trim([actor, m.cleared ? " cleared the certification of the model " : " recorded a certification for the model ", target("")]),
     "models.short_list": () => (models.length ? [actor, ` set the short list of models to ${models.length}`] : [actor, " cleared the short list of models"]),
-    "limits.update": () => (e.targetType === "user" ? [actor, " changed the limits for ", target("a person")] : [actor, " changed the workspace limits"]),
+    "limits.update": () => (e.targetType === "user" ? [actor, " changed the limits for ", target("a person")] : [actor, " changed the default limits"]),
     "decisions.update": () => [actor, " changed the decisions settings"],
     "insights.update": () => [actor, " changed the usage insights settings"],
     "app.published": () => [actor, ` published the app ${quoted(m.name)} as v${Number(m.version) || ""}`],

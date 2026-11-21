@@ -26,7 +26,7 @@ export function WorkspacePage({ conversationId }: { conversationId: string }) {
   const list = useWorkspaceList();
   const chats = useConversations();
   const item = list.data?.items.find((p) => p.conversationId === conversationId);
-  const title = item?.title || chats.data?.find((c) => c.id === conversationId)?.title || "Project";
+  const title = item?.title || chats.data?.find((c) => c.id === conversationId)?.title || "Workspace";
   usePageChrome(title);
   const space = bridge.space(conversationId);
   useEffect(() => {

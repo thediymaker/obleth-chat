@@ -251,7 +251,7 @@ function Conversation({ app }: { app: AppPage }) {
             </form>
           )}
           <p className="mt-2 text-center text-xs leading-normal text-faint">
-            {app.history ? "The app sees this conversation." : "The app sees each message on its own."} It runs with your access. Version {app.version}.
+            {app.history ? "The app sees this chat." : "The app sees each message on its own."} It runs with your access. Version {app.version}.
           </p>
         </div>
       </div>

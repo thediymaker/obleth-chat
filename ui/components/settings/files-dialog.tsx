@@ -71,7 +71,7 @@ export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChang
     <FormDialog open={open} onOpenChange={onOpenChange} title="Your files" wide>
       {confirm.element}
       <Note>
-        Files are private to your account. Attach any file to a conversation: Chat reads text, code and documents (PDF, Word, PowerPoint, Excel), shows images to models that can see them, and puts every file in the conversation’s
+        Files are private to your account. Attach any file to a chat: Chat reads text, code and documents (PDF, Word, PowerPoint, Excel), shows images to models that can see them, and puts every file in the chat’s
         workspace when it has one.
       </Note>
       {isLoading ? (
@@ -109,7 +109,7 @@ export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChang
                   onClick={() =>
                     confirm.ask({
                       title: "Delete this file?",
-                      text: "Files referenced by saved conversations cannot be deleted.",
+                      text: "Files referenced by saved chats cannot be deleted.",
                       label: "Delete file",
                       cancel: "Keep file",
                       action: async () => {

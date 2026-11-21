@@ -63,7 +63,7 @@ function Toolbar({ data, state, on }: { data?: UsageOverview; state: UsageState;
         )}
       </div>
       <Button size="sm" variant="outline" onClick={() => on.editLimits()}>
-        <Settings /> Workspace limits
+        <Settings /> Default limits
       </Button>
     </div>
   );
@@ -406,16 +406,16 @@ function LimitsDialog({ userId, person, data, onClose, onSaved }: { userId: stri
     onSaved();
     toast("Usage limits saved");
   });
-  const placeholder = userId ? "Inherit workspace default" : "Unlimited";
+  const placeholder = userId ? "Inherit the default" : "Unlimited";
   return (
-    <FormDialog open onOpenChange={(o) => !o && onClose()} title={userId ? `Limits for ${displayName(person)}` : "Workspace limits"}>
+    <FormDialog open onOpenChange={(o) => !o && onClose()} title={userId ? `Limits for ${displayName(person)}` : "Default limits"}>
       <form onSubmit={onSubmit} className="grid gap-4">
-        <Note>{userId ? "Leave a field blank to inherit the workspace default." : "Leave daily limits blank for unlimited usage."} Concurrent responses must be between 1 and 32.</Note>
+        <Note>{userId ? "Leave a field blank to use the default limits." : "Leave daily limits blank for unlimited usage."} Concurrent responses must be between 1 and 32.</Note>
         <TextField id="limit-requests" label="Requests per day" type="number" min={1} max={1000000} placeholder={placeholder} defaultValue={limits.dailyRequests ?? ""} />
         {userId && <CheckField id="limit-requests-unlimited" label="Unlimited daily requests" defaultChecked={Object.hasOwn(limits, "dailyRequests") && limits.dailyRequests === null} />}
         <TextField id="limit-tokens" label="Tokens per day" type="number" min={1} max={1000000000} placeholder={placeholder} defaultValue={limits.dailyTokens ?? ""} />
         {userId && <CheckField id="limit-tokens-unlimited" label="Unlimited daily tokens" defaultChecked={Object.hasOwn(limits, "dailyTokens") && limits.dailyTokens === null} />}
-        <TextField id="limit-concurrent" label="Concurrent responses" type="number" min={1} max={32} placeholder="Inherit workspace default" required={!userId} defaultValue={limits.concurrentRequests ?? ""} />
+        <TextField id="limit-concurrent" label="Concurrent responses" type="number" min={1} max={32} placeholder="Inherit the default" required={!userId} defaultValue={limits.concurrentRequests ?? ""} />
         <Note>Token allowances include reported usage and reserved output tokens for active responses.</Note>
         <FormError message={error} />
         <FormActions>
@@ -427,7 +427,7 @@ function LimitsDialog({ userId, person, data, onClose, onSaved }: { userId: stri
                 try {
                   await api.request(`/api/admin/limits/${encodeURIComponent(userId)}`, { method: "DELETE" });
                   onSaved();
-                  toast("Account uses workspace limits");
+                  toast("Account uses the default limits");
                 } catch (e) {
                   toast((e as Error).message);
                 }

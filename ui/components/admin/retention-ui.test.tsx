@@ -15,7 +15,7 @@ const patches = (calls: { method: string }[]) => calls.filter((c) => c.method ==
 
 test("automatic deletion cannot be enabled before explicit confirmation", async () => {
   const calls = tab();
-  await userEvent.type(await screen.findByLabelText("Inactive conversations · days"), "365");
+  await userEvent.type(await screen.findByLabelText("Inactive chats · days"), "365");
   await userEvent.type(screen.getByLabelText("Audit activity · days"), "90");
   await userEvent.click(screen.getByRole("button", { name: "Save retention" }));
   expect(await screen.findByText(/permanently deletes/)).toBeInTheDocument();

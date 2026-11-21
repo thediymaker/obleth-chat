@@ -25,7 +25,7 @@ export function SettingsFrame({ children }: { children: React.ReactNode }) {
   const connections = useFeature("connections");
   return (
     <Page className="max-w-[1400px]">
-      <PageHeader title="Settings" description={`Your account and preferences${isAdmin ? ", and how this installation runs" : ""}.`}>
+      <PageHeader title="Settings" description={`Your account and preferences${isAdmin ? ", and how this server runs" : ""}.`}>
         <SectionTabs label="Settings sections" tabs={settingsTabs(isAdmin, connections)} />
       </PageHeader>
       {children}

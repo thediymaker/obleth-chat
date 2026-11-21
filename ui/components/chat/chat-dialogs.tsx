@@ -38,9 +38,9 @@ function RenameDialog({ dialog, close }: { dialog: Extract<ChatDialog, { kind: "
     if (title.trim()) await store.rename(dialog.id, title.trim());
   });
   return (
-    <FormDialog open onOpenChange={(o) => !o && close()} title="Rename conversation">
+    <FormDialog open onOpenChange={(o) => !o && close()} title="Rename chat">
       <form className="grid gap-4" onSubmit={form.onSubmit}>
-        <Field id="chat-title" label="Conversation title">
+        <Field id="chat-title" label="Chat title">
           <Input id="chat-title" maxLength={80} value={title} required autoFocus onFocus={(e) => e.currentTarget.select()} onChange={(e) => setTitle(e.target.value)} />
         </Field>
         <FormError message={form.error} />
@@ -60,10 +60,10 @@ function DeleteDialog({ dialog, close }: { dialog: Extract<ChatDialog, { kind: "
     <Confirm
       open
       onOpenChange={(o) => !o && close()}
-      title="Delete this conversation?"
-      text="This permanently deletes this conversation from your account."
-      cancel="Keep conversation"
-      label="Delete conversation"
+      title="Delete this chat?"
+      text="This permanently deletes this chat from your account."
+      cancel="Keep chat"
+      label="Delete chat"
       action={() => store.remove(dialog.id)}
     />
   );
@@ -74,7 +74,7 @@ function EditDialog({ dialog, close }: { dialog: Extract<ChatDialog, { kind: "ed
   const [text, setText] = useState(dialog.content);
   const form = useSubmit(() => store.forkAndSend(dialog.messageId, "edit", text));
   return (
-    <FormDialog open onOpenChange={(o) => !o && close()} title="Edit and resend" description="Creates a new version in this conversation. Previous versions remain available." className="sm:max-w-xl">
+    <FormDialog open onOpenChange={(o) => !o && close()} title="Edit and resend" description="Creates a new version in this chat. Previous versions remain available." className="sm:max-w-xl">
       <form className="grid gap-4" onSubmit={form.onSubmit}>
         <Field id="edited-message" label="Message">
           <Textarea id="edited-message" rows={7} maxLength={12000} required={dialog.required} value={text} onChange={(e) => setText(e.target.value)} />
@@ -105,7 +105,7 @@ function FeedbackDialog({ dialog, close }: { dialog: Extract<ChatDialog, { kind:
       open
       onOpenChange={(o) => !o && close()}
       title="What went wrong?"
-      description="Thanks. If you like, say what went wrong. Only you and administrators see this, and administrators don’t see the conversation or who sent it."
+      description="Thanks. If you like, say what went wrong. Only you and administrators see this, and administrators don’t see the chat or who sent it."
     >
       <form className="grid gap-4" onSubmit={form.onSubmit}>
         <fieldset>
@@ -239,7 +239,7 @@ function AlternativesDialog({ dialog, close }: { dialog: Extract<ChatDialog, { k
   const store = useChat();
   const current = store.active?.id;
   return (
-    <FormDialog open onOpenChange={(o) => !o && close()} title="Conversation alternatives">
+    <FormDialog open onOpenChange={(o) => !o && close()} title="Chat alternatives">
       <div className="grid max-h-[60vh] gap-1 overflow-y-auto">
         {dialog.conversations.length ? (
           dialog.conversations.map((c) => (
@@ -255,14 +255,14 @@ function AlternativesDialog({ dialog, close }: { dialog: Extract<ChatDialog, { k
                 <h3 className="truncate text-md font-medium">{c.title}</h3>
                 <p className="truncate text-sm text-muted-foreground">
                   {store.modelName(c.model)}
-                  {c.id === current ? " · Current conversation" : ""}
+                  {c.id === current ? " · Current chat" : ""}
                 </p>
               </span>
               <ChevronRight className="size-4 text-muted-foreground" />
             </Link>
           ))
         ) : (
-          <p className="text-sm text-muted-foreground">No separate branches yet. Use Branch conversation on a response to create one.</p>
+          <p className="text-sm text-muted-foreground">No separate branches yet. Use Branch chat on a response to create one.</p>
         )}
       </div>
     </FormDialog>
@@ -270,8 +270,8 @@ function AlternativesDialog({ dialog, close }: { dialog: Extract<ChatDialog, { k
 }
 
 export const SHORTCUTS: [string, string][] = [
-  ["Search conversations", "⌘ / Ctrl K"],
-  ["New conversation", "⌘ / Ctrl Shift O"],
+  ["Search chats", "⌘ / Ctrl K"],
+  ["New chat", "⌘ / Ctrl Shift O"],
   ["Chat details", "⌘ / Ctrl ."],
   ["Send a message", "Enter"],
   ["New line", "Shift Enter"],
@@ -411,7 +411,7 @@ export function YourFilesDialog({ open, onOpenChange }: { open: boolean; onOpenC
         open={open}
         onOpenChange={onOpenChange}
         title="Your files"
-        description="Files are private to your account. Attach any file to a conversation: Chat reads text, code and documents (PDF, Word, PowerPoint, Excel), shows images to models that can see them, and puts every file in the conversation’s workspace when it has one."
+        description="Files are private to your account. Attach any file to a chat: Chat reads text, code and documents (PDF, Word, PowerPoint, Excel), shows images to models that can see them, and puts every file in the chat’s workspace when it has one."
         className="sm:max-w-lg"
       >
         {files.isPending ? (
@@ -463,7 +463,7 @@ export function YourFilesDialog({ open, onOpenChange }: { open: boolean; onOpenC
         open={!!deleting}
         onOpenChange={(o) => !o && setDeleting(null)}
         title="Delete this file?"
-        text="Files referenced by saved conversations cannot be deleted."
+        text="Files referenced by saved chats cannot be deleted."
         cancel="Keep file"
         label="Delete file"
         action={async () => {

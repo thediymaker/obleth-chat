@@ -198,11 +198,11 @@ export function retentionBody(form: FormData): Pick<Retention, "conversationDays
   const read = (id: string) => (String(form.get(id) ?? "").trim() ? Number(form.get(id)) : null);
   return { conversationDays: read("retention-conversations"), unusedFileDays: read("retention-files"), auditDays: read("retention-audit") };
 }
-/** "Inactive conversations: delete after 365 days. Unused files: keep forever. …" */
+/** "Inactive chats: delete after 365 days. Unused files: keep forever. …" */
 export const retentionSummary = (body: ReturnType<typeof retentionBody>) =>
   (
     [
-      ["Inactive conversations", body.conversationDays],
+      ["Inactive chats", body.conversationDays],
       ["Unused files", body.unusedFileDays],
       ["Audit activity", body.auditDays],
     ] as const
@@ -231,20 +231,20 @@ export function RetentionCard({ retention: r, onSaved, confirm }: { retention: R
   return (
     <Section
       title="Data retention"
-      description="Keep all data by default. Enter a number of days to automatically remove eligible data across this installation."
+      description="Keep all data by default. Enter a number of days to automatically remove eligible data across this server."
       actions={<Pill tone={on ? "amber" : ""}>{on ? "Automatic deletion enabled" : "Keep forever"}</Pill>}
     >
       <form onSubmit={onSubmit} className="grid gap-4">
         <TextField
           id="retention-conversations"
-          label="Inactive conversations · days"
+          label="Inactive chats · days"
           type="number"
           min={1}
           max={3650}
           step={1}
           placeholder="Keep forever"
           defaultValue={r.conversationDays ?? ""}
-          help="Delete conversations with no recent activity, including archived conversations. Active responses are excluded."
+          help="Delete chats with no recent activity, including archived chats. Active responses are excluded."
         />
         <TextField
           id="retention-files"
@@ -255,7 +255,7 @@ export function RetentionCard({ retention: r, onSaved, confirm }: { retention: R
           step={1}
           placeholder="Keep forever"
           defaultValue={r.unusedFileDays ?? ""}
-          help="Delete older uploads only when no saved conversation references them."
+          help="Delete older uploads only when no saved chat references them."
         />
         <TextField
           id="retention-audit"
@@ -494,7 +494,7 @@ export function DecisionsCard({ decisions: d, onSaved }: { decisions: Decisions;
     toast("Decisions saved");
   });
   const keyHelp = d.keyUnreadable
-    ? "The saved key can’t be read because the installation’s secret key changed. Enter it again."
+    ? "The saved key can’t be read because this server’s secret key changed. Enter it again."
     : d.hasKey
       ? "A key is saved. Leave this blank to keep it."
       : d.canStoreKey

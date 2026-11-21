@@ -24,7 +24,7 @@ test("a chat dialog shows the server's message as a form error and stays open", 
   await userEvent.click(screen.getByRole("button", { name: "Save title" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("That title is too long");
   expect(store.rename).toHaveBeenCalledWith("c1", "Old title");
-  expect(screen.getByRole("dialog", { name: "Rename conversation" })).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "Rename chat" })).toBeInTheDocument();
 });
 
 test("Cancel closes a Library dialog and an Administration dialog alike", async () => {

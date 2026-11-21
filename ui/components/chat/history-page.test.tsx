@@ -64,8 +64,8 @@ describe("All chats", () => {
     expect(screen.getByText("3 selected")).toBeInTheDocument();
     expect(exportButton).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(await screen.findByText("Delete 3 conversations?")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Delete conversations" }));
+    expect(await screen.findByText("Delete 3 chats?")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Delete chats" }));
     await waitFor(() => expect(request).toHaveBeenCalledWith("/api/conversations/bulk", { method: "POST", body: { ids: ["c0", "c1", "c2"], action: "delete" } }));
   });
 
@@ -75,7 +75,7 @@ describe("All chats", () => {
     renderWithQueries(<HistoryPage />);
     await screen.findByText("Chat 0");
     expect(request).toHaveBeenCalledWith("/api/conversations?query=gpu&archived=all&limit=50&offset=0", expect.anything());
-    expect(screen.getByRole("textbox", { name: "Search conversations" })).toHaveValue("gpu");
+    expect(screen.getByRole("textbox", { name: "Search chats" })).toHaveValue("gpu");
     await userEvent.click(screen.getByRole("button", { name: "Unpin" }));
     await waitFor(() => expect(request).toHaveBeenCalledWith("/api/conversations/c0", { method: "PATCH", body: { pinned: false } }));
   });
@@ -84,7 +84,7 @@ describe("All chats", () => {
     serve(1);
     renderWithQueries(<HistoryPage />);
     await screen.findByText("Chat 0");
-    await userEvent.type(screen.getByRole("textbox", { name: "Search conversations" }), "gpu");
+    await userEvent.type(screen.getByRole("textbox", { name: "Search chats" }), "gpu");
     await userEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() => expect(request).toHaveBeenCalledWith("/api/conversations?query=gpu&archived=false&limit=50&offset=0", expect.anything()));
     expect(replace).toHaveBeenCalledWith("/history?query=gpu", { scroll: false });
@@ -94,12 +94,12 @@ describe("All chats", () => {
     search = "query=nothing";
     request.mockImplementation(async (path: string) => (path === "/api/models" ? { models: [] } : { conversations: [], total: 0, hasMore: false }));
     renderWithQueries(<HistoryPage />);
-    expect(await screen.findByText("No conversations found")).toBeInTheDocument();
-    expect(screen.getByText("Try another search or include archived conversations.")).toBeInTheDocument();
+    expect(await screen.findByText("No chats found")).toBeInTheDocument();
+    expect(screen.getByText("Try another search or include archived chats.")).toBeInTheDocument();
   });
 });
 
-describe("Import conversations", () => {
+describe("Import chats", () => {
   beforeEach(() => {
     request.mockReset();
   });
@@ -113,7 +113,7 @@ describe("Import conversations", () => {
     expect(screen.getByLabelText("Export file")).toHaveAttribute("accept", ".json,.zip,application/json,application/zip");
     const file = new File(["{}"], "conversations.json", { type: "application/json" });
     await choose(file);
-    await userEvent.click(screen.getByRole("button", { name: "Import conversations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Import chats" }));
     expect(await screen.findByText("Import finished")).toBeInTheDocument();
     expect(screen.getByText("Imported 3 chats from ChatGPT.")).toBeInTheDocument();
     expect(request.mock.calls[0][1].raw).toBe(file);
@@ -125,7 +125,7 @@ describe("Import conversations", () => {
     const file = new File(["x"], "export.zip", { type: "application/zip" });
     Object.defineProperty(file, "size", { value: 300 * 1024 * 1024 });
     await choose(file);
-    await userEvent.click(screen.getByRole("button", { name: "Import conversations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Import chats" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Unzip it and choose the conversations.json file inside.");
     expect(request).not.toHaveBeenCalled();
   });
@@ -137,7 +137,7 @@ describe("Import conversations", () => {
     const view = renderWithQueries(<ImportDialog open onOpenChange={() => {}} onImported={onImported} />);
     const file = new File(["{}"], "conversations.json", { type: "application/json" });
     await choose(file);
-    await userEvent.click(screen.getByRole("button", { name: "Import conversations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Import chats" }));
     expect(screen.getByText("Importing… A large export can take a few minutes.")).toBeInTheDocument();
     expect(request.mock.calls[0][1].raw).toBe(file);
     expect(request.mock.calls[0][1].signal.aborted).toBe(false);

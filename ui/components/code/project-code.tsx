@@ -13,6 +13,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { memo, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ErrorBox, Eyebrow } from "@/components/app-shell/page";
+import { type SectionTab, SectionTabs } from "@/components/app-shell/section-tabs";
 import { Dropdown, Pill, Quota, useConfirm } from "@/components/manage/kit";
 import { useNewChatInProject, useProjectFrame } from "@/components/projects/project-frame";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
@@ -648,21 +649,17 @@ export function ProjectCode({ projectId }: { projectId: string }) {
       },
     });
 
-  const tabs: [CodeRoute["view"], string, string][] = [
-    ["overview", "Overview", base],
-    ["history", "History", `${base}/history`],
-    ["files", "Files", `${base}/files`],
-    ...(route.view === "compare" ? [["compare", "Compare", pathname] as [CodeRoute["view"], string, string]] : []),
+  const tabs: SectionTab[] = [
+    { href: base, label: "Overview" },
+    { href: `${base}/history`, label: "History", prefix: true },
+    { href: `${base}/files`, label: "Files", prefix: true },
+    ...(route.view === "compare" ? [{ href: pathname, label: "Compare" }] : []),
   ];
   const top = (
-    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-      <nav aria-label="Code" className="flex gap-1 rounded-md bg-muted p-0.5">
-        {tabs.map(([view, label, href]) => (
-          <Link key={view} href={href} aria-current={route.view === view ? "page" : undefined} className={cn("rounded px-3 py-1 text-sm text-muted-foreground hover:text-foreground", route.view === view && "bg-background text-foreground shadow-xs")}>
-            {label}
-          </Link>
-        ))}
-      </nav>
+    <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
+      <div className="min-w-0 flex-1">
+        <SectionTabs tabs={tabs} label="Code" />
+      </div>
       {o?.main && (
         <Button size="sm" variant="outline" onClick={() => setExporting(true)}>
           <Download /> Export

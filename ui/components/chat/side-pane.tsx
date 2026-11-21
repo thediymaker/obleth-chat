@@ -3,7 +3,7 @@
 // The pane beside a chat: its Details, the workspace's Preview, Files, Terminal and
 // Code tabs, and the Browser. On a phone it covers the chat until closed.
 
-import { FileText, GitBranch, Globe, PanelRight, Play, Settings, Terminal, X } from "lucide-react";
+import { Settings, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserPanel } from "@/components/browser/browser-panel";
 import { CodePanel, CodeTabLabel } from "@/components/code/code-panel";
@@ -11,20 +11,20 @@ import { ToolsContextSection } from "@/components/connections/chat-tools";
 import { KnowledgeContextSection } from "@/components/knowledge/chat-knowledge";
 import { ProjectContextSection } from "@/components/projects/chat-project";
 import { Button } from "@/components/ui/button";
-import { WorkspacePanel } from "@/components/workspace/workspace-panel";
+import { WorkspaceTabs } from "@/components/workspace/workspace-tabs";
 import { effortLabel } from "@/lib/chat/composer";
 import { contextUse } from "@/lib/chat/context";
 import { cn } from "@/lib/utils";
 import { useChat } from "./chat-provider";
 import { compact } from "@/lib/format";
 
-const TABS: Record<string, [string, typeof Play]> = {
-  preview: ["Preview", Play],
-  files: ["Files", FileText],
-  terminal: ["Terminal", Terminal],
-  code: ["Git", GitBranch],
-  browser: ["Browser", Globe],
-  details: ["Details", PanelRight],
+const TABS: Record<string, string> = {
+  preview: "Preview",
+  files: "Files",
+  terminal: "Terminal",
+  code: "Git",
+  browser: "Browser",
+  details: "Details",
 };
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -209,7 +209,6 @@ export function SidePane({ id }: { id: string }) {
   if (!store.paneVisible(id)) return null;
   const pane = store.pane(id);
   const tabs = store.paneTabs(id);
-  const tab = pane.tab;
   // Details alone need less room than a preview or a page.
   const detailsOnly = tabs.length === 1 && tabs[0] === "details";
   return (
@@ -225,44 +224,21 @@ export function SidePane({ id }: { id: string }) {
       )}
     >
       {!detailsOnly && <ResizeHandle pane={ref} width={width} setWidth={setWidth} />}
-      {/* The tab bar, with underlined tabs. */}
-      <div className="flex min-h-11 shrink-0 items-center gap-3 border-b pr-2 pl-4 leading-[normal]">
-        {/* Stretched 1px over the bar's border, so the underline sits on it without the row scrolling. */}
-        <div className="-mb-px flex min-w-0 flex-1 gap-4 self-stretch overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" role="tablist">
-          {tabs.map((t) => {
-            const [label] = TABS[t] || [t];
-            return (
-              <button
-                key={t}
-                type="button"
-                role="tab"
-                aria-selected={tab === t}
-                onClick={() => store.showTab(id, t)}
-                className={cn(
-                  "flex shrink-0 items-center gap-[7px] border-b border-transparent py-3 text-md text-muted-foreground hover:text-foreground",
-                  tab === t && "border-foreground text-foreground",
-                )}
-              >
-                {t === "code" ? <CodeTabLabel conversationId={id} /> : label}
-              </button>
-            );
-          })}
-        </div>
-        <Button variant="ghost" size="icon-sm" className="size-8" aria-label="Close the pane" onClick={() => store.closePane(id)}>
-          <X />
-        </Button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {tab === "details" ? (
-          <ChatDetails />
-        ) : tab === "browser" ? (
-          <BrowserPanel conversationId={id} />
-        ) : tab === "code" ? (
-          <CodePanel conversationId={id} />
-        ) : (
-          <WorkspacePanel conversationId={id} tab={tab as "preview" | "files" | "terminal"} />
-        )}
-      </div>
+      <WorkspaceTabs
+        conversationId={id}
+        label="Side pane"
+        tabs={tabs.map((t) => ({ id: t, label: t === "code" ? <CodeTabLabel conversationId={id} /> : TABS[t] || t }))}
+        value={pane.tab}
+        onValueChange={(t) => store.showTab(id, t)}
+        barClassName="min-h-11 pr-2 pl-2 leading-[normal]"
+        panelClassName="min-h-0 overflow-y-auto"
+        render={(t) => (t === "details" ? <ChatDetails /> : t === "browser" ? <BrowserPanel conversationId={id} /> : t === "code" ? <CodePanel conversationId={id} /> : null)}
+        end={
+          <Button variant="ghost" size="icon-sm" className="size-8" aria-label="Close the pane" onClick={() => store.closePane(id)}>
+            <X />
+          </Button>
+        }
+      />
     </aside>
   );
 }

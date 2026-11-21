@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { fakeStore } from "@/components/workspace/test-store";
@@ -28,6 +28,15 @@ beforeEach(() => {
 });
 
 describe("the project's Code tab", () => {
+  it("marks the page it is on in the Code tabs, including a commit under History", async () => {
+    path = "/projects/p1/code/history/aaaaaaaaaa";
+    mockApi((p) => (p.includes("/commits/") ? { commit: commits[1], body: "", files: [] } : p.includes("/log") ? { commits } : overview), { code: true });
+    renderPage(<ProjectCode projectId="p1" />);
+    const nav = await screen.findByRole("navigation", { name: "Code" });
+    expect(within(nav).getByRole("link", { name: "History" })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "Overview" })).not.toHaveAttribute("aria-current");
+  });
+
   it("shows the latest commits and the chats working on the code", async () => {
     mockApi((p) => (p.includes("/log") ? { commits } : overview), { code: true, workspaces: true });
     renderPage(<ProjectCode projectId="p1" />);

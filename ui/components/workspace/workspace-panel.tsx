@@ -1,7 +1,8 @@
 "use client";
 
 // The workspace's tabs in the chat's side pane, and full width on its Compute page. The
-// side pane owns the tab buttons and closing; this draws the bar under them (the
+// tab host (workspace-tabs.tsx) owns the tab buttons and keeps this mounted behind its
+// other tabs; this draws the bar under them (the
 // preview's address, disk use, status, refresh, download, open in a new tab, full
 // screen) and the tab itself. The preview frame and the terminal stay alive while
 // another of these tabs shows.

@@ -12,12 +12,10 @@ import { useChat } from "@/components/chat/chat-provider";
 import { CodePanel, CodeTabLabel } from "@/components/code/code-panel";
 import { Button } from "@/components/ui/button";
 import { useConversations, useFeature } from "@/lib/queries";
-import { cn } from "@/lib/utils";
 import { ComputeOff } from "./compute";
-import { usePreviewsFlag, WorkspacePanel, type WorkspaceTab } from "./workspace-panel";
+import { usePreviewsFlag } from "./workspace-panel";
+import { type HostTab, WorkspaceTabs } from "./workspace-tabs";
 import { useWorkspaceList } from "./workspaces-page";
-
-type Tab = WorkspaceTab | "code";
 
 export function WorkspacePage({ conversationId }: { conversationId: string }) {
   const store = useChat();
@@ -34,14 +32,14 @@ export function WorkspacePage({ conversationId }: { conversationId: string }) {
   useEffect(() => {
     if (on) void bridge.load(conversationId);
   }, [on, bridge, conversationId]);
-  const tabs: [Tab, string, typeof Play][] = [...(previews ? [["preview", "Preview", Play] as [Tab, string, typeof Play]] : []), ["files", "Files", FileText], ["terminal", "Terminal", Terminal], ...(code ? [["code", "Git", GitBranch] as [Tab, string, typeof Play]] : [])];
-  const [tab, setTab] = useState<Tab>("preview");
-  const current: Tab = tabs.some(([t]) => t === tab) ? tab : tabs[0]![0];
-  // The preview and terminal stay alive behind the Git tab.
-  const [last, setLast] = useState<WorkspaceTab>("preview");
-  useEffect(() => {
-    if (current !== "code") setLast(current);
-  }, [current]);
+  const tabs: HostTab[] = [
+    ...(previews ? [{ id: "preview", label: "Preview", icon: Play }] : []),
+    { id: "files", label: "Files", icon: FileText },
+    { id: "terminal", label: "Terminal", icon: Terminal },
+    ...(code ? [{ id: "code", label: <CodeTabLabel conversationId={conversationId} />, icon: GitBranch }] : []),
+  ];
+  const [tab, setTab] = useState("preview");
+  const current = tabs.some((t) => t.id === tab) ? tab : tabs[0]!.id;
   if (store.capabilities && !on)
     return (
       <Page>
@@ -71,29 +69,16 @@ export function WorkspacePage({ conversationId }: { conversationId: string }) {
           <NotFound what="workspace" to="/workspaces" back="your workspaces" />
         </Page>
       ) : (
-        <>
-          <div className="flex gap-0.5 overflow-x-auto border-b px-2 py-1.5" role="tablist" aria-label="Workspace">
-            {tabs.map(([t, label, Icon]) => (
-              <button
-                key={t}
-                type="button"
-                role="tab"
-                aria-selected={current === t}
-                onClick={() => setTab(t)}
-                className={cn("inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-sm", current === t ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground")}
-              >
-                <Icon className="size-3.5" />
-                {t === "code" ? <CodeTabLabel conversationId={conversationId} /> : label}
-              </button>
-            ))}
-          </div>
-          <div className="h-[calc(100dvh-10rem)] min-h-96">
-            {current === "code" && <CodePanel conversationId={conversationId} />}
-            <div className={cn("h-full", current === "code" && "hidden")}>
-              <WorkspacePanel conversationId={conversationId} tab={current === "code" ? last : current} />
-            </div>
-          </div>
-        </>
+        <WorkspaceTabs
+          conversationId={conversationId}
+          label="Workspace"
+          tabs={tabs}
+          value={current}
+          onValueChange={setTab}
+          barClassName="px-2"
+          panelClassName="h-[calc(100dvh-10rem)] min-h-96"
+          render={() => <CodePanel conversationId={conversationId} />}
+        />
       )}
     </div>
   );

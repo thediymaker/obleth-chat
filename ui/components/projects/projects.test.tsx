@@ -14,8 +14,8 @@ import { moveChatToResearchProject } from "./api";
 import { applyChatDraft, chatDraft } from "./chat-draft";
 import { ProjectContextSection } from "./chat-project";
 import { CollectionsPicker } from "./collections-picker";
-import { Confirm } from "./form-field";
 import { ProjectDialog } from "./project-dialog";
+import { Confirm } from "@/components/manage/kit";
 
 const request = api.request as unknown as ReturnType<typeof vi.fn>;
 let calls: [string, string, unknown][];
@@ -135,7 +135,7 @@ describe("a project's collections", () => {
 
 describe("a confirmation that deletes", () => {
   it("shows its button in the destructive colors, not the default ones", async () => {
-    wrap(<Confirm open onOpenChange={() => {}} title="Delete this project?" text="Gone for good." confirm="Delete project" cancel="Keep project" onConfirm={() => {}} />);
+    wrap(<Confirm open onOpenChange={() => {}} title="Delete this project?" text="Gone for good." label="Delete project" cancel="Keep project" action={() => {}} />);
     const button = await screen.findByRole("button", { name: "Delete project" });
     expect(button.className).toMatch(/bg-destructive/);
     expect(button.className).not.toMatch(/bg-primary/);

@@ -102,7 +102,7 @@ export function AccessLinkDialog({ link, onClose }: { link: AccessLink | null; o
         <>
           <Note>Share this link privately. It can be used once and expires {when(link.expiresAt)}.</Note>
           <CopyField id="one-time-link" label="One-time link" value={link.url} rows={3} copyLabel="Copy link" done="One-time link copied" />
-          <FormActions>
+          <FormActions cancel={false}>
             <Button variant="outline" onClick={onClose}>
               Done
             </Button>

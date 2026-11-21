@@ -8,9 +8,9 @@ import { Brain, ChevronDown, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
-import { messageOf } from "@/components/projects/form-field";
 import { cn } from "@/lib/utils";
 import { addMemory, deleteMemory, refreshMemory } from "./api";
+import { messageOf } from "@/components/manage/kit";
 
 interface Item {
   id: string;

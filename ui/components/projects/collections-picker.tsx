@@ -17,7 +17,7 @@ import { count } from "@/lib/format";
 import { keys } from "@/lib/queries";
 import type { QueryClient } from "@tanstack/react-query";
 import { MAX_COLLECTIONS, type ProjectDetail, projectPath } from "./api";
-import { messageOf } from "./form-field";
+import { messageOf } from "@/components/manage/kit";
 
 /** Turns a collection on for the project, as for one just made from it. */
 export async function turnOnInProject(client: QueryClient, detail: ProjectDetail, id: string) {

@@ -3,7 +3,8 @@
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import { AuthIntro, AuthLayout } from "@/components/auth/auth-layout";
-import { Field, FormError, usePasswordPair } from "@/components/auth/auth-screen";
+import { Field, usePasswordPair } from "@/components/auth/auth-screen";
+import { FormError } from "@/components/manage/form-error";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useSession } from "@/lib/session";

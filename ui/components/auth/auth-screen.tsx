@@ -1,9 +1,10 @@
 "use client";
 
-import { AlertCircle, LogIn, RefreshCw } from "lucide-react";
+import { LogIn, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { AuthIntro, AuthLayout } from "@/components/auth/auth-layout";
 import { Copy, ExternalAwareLink } from "@/components/brand";
+import { FormError } from "@/components/manage/form-error";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -79,16 +80,6 @@ function Failed() {
         <RefreshCw /> Try again
       </Button>
     </>
-  );
-}
-
-export function FormError({ message }: { message: string }) {
-  if (!message) return null;
-  return (
-    <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground">
-      <AlertCircle className="mt-0.5 size-4 shrink-0" />
-      <span>{message}</span>
-    </div>
   );
 }
 

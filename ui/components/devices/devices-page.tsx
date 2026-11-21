@@ -66,9 +66,6 @@ export function AddDeviceDialog({ picked, suggested, onClose, onAdded }: { picke
         <Note>The device is reached only from a browser tab where you attached it: this one, now. A tab on another computer asks you to attach it again.</Note>
         <FormError message={error} />
         <FormActions>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
           <Button type="submit" disabled={busy}>
             Add device
           </Button>
@@ -115,9 +112,6 @@ function SignInDialog({ device, onClose }: { device: Connection | null; onClose:
         )}
         <FormError message={error} />
         <FormActions>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
           <Button type="submit" disabled={busy}>
             Save
           </Button>
@@ -144,9 +138,6 @@ function EditDialog({ device, onClose }: { device: Connection | null; onClose: (
         <CheckField id="device-confirm" label="Ask before changing calls" description="Sending, resetting, flashing and erasing wait for your Allow." defaultChecked={device?.confirmActions ?? true} />
         <FormError message={error} />
         <FormActions>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
           <Button type="submit" disabled={busy}>
             Save
           </Button>

@@ -20,9 +20,9 @@ import { cn } from "@/lib/utils";
 import type { SavedSummary } from "./api";
 import { ACCEPT, DEFAULT_MAX_FILE, refreshKnowledge, uploadDocument, useCollections } from "@/components/knowledge/api";
 import { CollectionsPicker, NewProjectCollection } from "./collections-picker";
-import { messageOf } from "./form-field";
 import { useProjectFrame } from "./project-frame";
 import { useRouter } from "next/navigation";
+import { messageOf } from "@/components/manage/kit";
 
 export function Section({ title, aside, children, className }: { title: React.ReactNode; aside?: React.ReactNode; children: React.ReactNode; className?: string }) {
   return (

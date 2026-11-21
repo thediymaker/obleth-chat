@@ -87,12 +87,12 @@ describe("AppChatPage", () => {
     expect(JSON.parse(sessionStorage.getItem("obleth-chat:app-chat:k7f3q2xm")!)).toHaveLength(4);
   });
 
-  it("shows a failed run with Try again, and leaves it out of the history", async () => {
+  it("shows a failed run with Retry, and leaves it out of the history", async () => {
     replies = [{ runId: "r1", status: "failed", output: null, error: "The model timed out" }, { runId: "r2", status: "completed", output: "Done", error: null }];
     renderPage("assay-lab");
     await userEvent.type(await screen.findByLabelText("Message Assay Lab"), "Run it{Enter}");
     expect(await screen.findByText("The model timed out")).toBeTruthy();
-    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Retry/ }));
     expect(await screen.findByText("Done")).toBeTruthy();
     expect(sent[1]).toEqual({ message: "Run it", history: [] });
     expect(screen.queryByText("The model timed out")).toBeNull();

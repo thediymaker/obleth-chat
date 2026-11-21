@@ -58,9 +58,6 @@ export function SecretDialog({ secret, open, onClose, onSaved }: { secret: Secre
         <TextField id="secret-note" label="What it is for" maxLength={200} autoComplete="off" defaultValue={secret?.note || ""} help="Shown beside the name, to you only." />
         <FormError message={error} />
         <FormActions>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
           <Button type="submit" disabled={busy}>
             {secret ? "Save" : "Add secret"}
           </Button>

@@ -5,7 +5,7 @@
 // (importDialog, repoFields, importRepo), which the new-project form can use too.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Download, ExternalLink, Globe, Upload } from "lucide-react";
+import { ChevronRight, Download, ExternalLink, Globe, Upload } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { CheckField, FormActions, FormDialog, FormError, Note, TextField, useSubmit } from "@/components/manage/kit";
@@ -74,7 +74,7 @@ export function ExportDialog({ projectId, name, overview, open, onOpenChange }: 
           . Push again from the project any time to update it.
         </p>
         <Note>To put a site online, import that repository in Vercel or Netlify, or turn on GitHub Pages in its settings.</Note>
-        <FormActions>
+        <FormActions cancel={false}>
           <Button asChild variant="outline">
             <a href={pushed.url} target="_blank" rel="noopener">
               <ExternalLink /> Open on GitHub
@@ -174,7 +174,9 @@ export function RepoFields({ optional = false }: { optional?: boolean }) {
         help="Chat copies its default branch once, with its history, as the project’s code."
       />
       <Collapsible>
-        <CollapsibleTrigger className="text-sm text-muted-foreground hover:text-foreground">Private repository?</CollapsibleTrigger>
+        <CollapsibleTrigger className="group flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+          <ChevronRight className="size-3.5 transition-transform group-data-[state=open]:rotate-90" /> Private repository?
+        </CollapsibleTrigger>
         <CollapsibleContent className="pt-2">
           <TextField id="code-repo-token" label="Access token" type="password" autoComplete="off" spellCheck={false} placeholder="github_pat_…" help="Used for this copy only and never kept. It needs read access to the repository’s contents." />
         </CollapsibleContent>

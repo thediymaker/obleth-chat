@@ -203,10 +203,7 @@ export function TokenDialog({ step, onStep, onCreated }: { step: TokenStep; onSt
     return (
       <FormDialog open={open} onOpenChange={close} title="Sign in again">
         <Note>{staleMessage}. For your security, Chat asks for a fresh sign-in before it makes a token. Sign out, sign back in, and create the token within 15 minutes.</Note>
-        <FormActions>
-          <Button variant="outline" onClick={() => onStep(null)}>
-            Not now
-          </Button>
+        <FormActions cancel="Not now">
           <Button onClick={() => signOut()}>Sign out to sign in again</Button>
         </FormActions>
       </FormDialog>
@@ -224,7 +221,7 @@ export function TokenDialog({ step, onStep, onCreated }: { step: TokenStep; onSt
           copyLabel="Copy command"
           help={`Other MCP clients connect to ${mcpUrl()} with the header Authorization: Bearer and the token.`}
         />
-        <FormActions>
+        <FormActions cancel={false}>
           <Button onClick={() => onStep(null)}>Done</Button>
         </FormActions>
       </FormDialog>

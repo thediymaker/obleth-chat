@@ -8,13 +8,13 @@ import { Box, Braces, Copy, ExternalLink, KeyRound, MessageSquare, MousePointerC
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ErrorBox, Eyebrow, Loading } from "@/components/app-shell/page";
-import { Confirm, FormError, FormField, messageOf } from "@/components/projects/form-field";
+import { Confirm, Field, FormActions, FormDialog, FormError, messageOf } from "@/components/manage/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { copyText } from "@/lib/clipboard";
 import { when } from "@/lib/format";
 import { keys, useModels } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -411,14 +411,7 @@ function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) 
     <Button
       variant="outline"
       size="xs"
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          toast("Copied");
-        } catch {
-          toast("Couldn’t copy. Select the text and copy it instead.");
-        }
-      }}
+      onClick={() => copyText(text)}
     >
       <Copy /> {label}
     </Button>
@@ -523,61 +516,46 @@ function ApiCard({ app, keys: list, onChanged }: { app: App; keys: { id: string;
         <Plus /> Create key
       </Button>
 
-      <Dialog open={creating} onOpenChange={setCreating}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Create a key</DialogTitle>
-            <DialogDescription className="sr-only">Name the key so you know where it is used.</DialogDescription>
-          </DialogHeader>
-          <form
-            id="app-key-form"
-            className="grid gap-4"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              setError("");
-              try {
-                const r = await createKey(app.id, name.trim());
-                setCreating(false);
-                setSecret(r.secret);
-                onChanged();
-              } catch (err) {
-                setError(messageOf(err));
-              }
-            }}
-          >
-            <FormField id="app-key-name" label="Name" help="Calls with this key run as you, on your allowance.">
-              <Input id="app-key-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={80} required placeholder="Lab pipeline" autoFocus />
-            </FormField>
-            <FormError message={error} />
-            <DialogFooter>
-              <Button type="button" variant="ghost" onClick={() => setCreating(false)}>
-                Cancel
-              </Button>
-              <Button type="submit">Create key</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={!!secret} onOpenChange={(o) => !o && setSecret("")}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Your new key</DialogTitle>
-            <DialogDescription>Copy it now: Chat keeps only a hash and can’t show it again.</DialogDescription>
-          </DialogHeader>
-          <Input id="app-key-secret" readOnly value={secret} className="font-mono text-sm" onFocus={(e) => e.currentTarget.select()} />
-          <DialogFooter>
-            <CopyButton text={secret} />
-            <Button onClick={() => setSecret("")}>Done</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <FormDialog open={creating} onOpenChange={setCreating} title="Create a key" className="sm:max-w-md">
+        <form
+          id="app-key-form"
+          className="grid gap-4"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setError("");
+            try {
+              const r = await createKey(app.id, name.trim());
+              setCreating(false);
+              setSecret(r.secret);
+              onChanged();
+            } catch (err) {
+              setError(messageOf(err));
+            }
+          }}
+        >
+          <Field id="app-key-name" label="Name" help="Calls with this key run as you, on your allowance.">
+            <Input id="app-key-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={80} required placeholder="Lab pipeline" autoFocus />
+          </Field>
+          <FormError message={error} />
+          <FormActions>
+            <Button type="submit">Create key</Button>
+          </FormActions>
+        </form>
+      </FormDialog>
+      <FormDialog open={!!secret} onOpenChange={(o) => !o && setSecret("")} title="Your new key" description="Copy it now: Chat keeps only a hash and can’t show it again." className="sm:max-w-lg">
+        <Input id="app-key-secret" readOnly value={secret} className="font-mono text-sm" onFocus={(e) => e.currentTarget.select()} />
+        <FormActions cancel={false}>
+          <CopyButton text={secret} />
+          <Button onClick={() => setSecret("")}>Done</Button>
+        </FormActions>
+      </FormDialog>
       <Confirm
         open={!!revoking}
         onOpenChange={(o) => !o && setRevoking(null)}
         title={`Revoke ${revoking?.name ?? "this key"}?`}
         text="Programs using it stop working at once."
-        confirm="Revoke"
-        onConfirm={async () => {
+        label="Revoke"
+        action={async () => {
           await revokeKey(app.id, revoking!.id);
           onChanged();
           toast("Key revoked");
@@ -636,17 +614,18 @@ function RunsCard({ app, runs, onRefresh }: { app: App; runs: AppRun[]; onRefres
       ) : (
         <p className="text-sm text-muted-foreground">No runs yet. Try the draft, or call the published app.</p>
       )}
-      <Dialog open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
-        <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>
-              {open && `${runLabel(open, true)} · ${when(open.startedAt)}`}
-            </DialogTitle>
-            <DialogDescription className="flex items-center gap-2">
-              {open && <StatusBadge status={open.status} />}
-              {open?.ms != null && <span>{open.ms} ms</span>}
-            </DialogDescription>
-          </DialogHeader>
+      <FormDialog
+        open={!!open}
+        onOpenChange={(o) => !o && setOpen(null)}
+        title={open ? `${runLabel(open, true)} · ${when(open.startedAt)}` : ""}
+        description={
+          <span className="flex items-center gap-2">
+            {open && <StatusBadge status={open.status} />}
+            {open?.ms != null && <span>{open.ms} ms</span>}
+          </span>
+        }
+        wide
+      >
           {!detail ? (
             <Loading />
           ) : (
@@ -659,8 +638,7 @@ function RunsCard({ app, runs, onRefresh }: { app: App; runs: AppRun[]; onRefres
               <Trace trace={detail.trace ?? []} />
             </div>
           )}
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
     </section>
   );
 }
@@ -676,51 +654,42 @@ function JsonDialog({ open, onOpenChange, app, onSaved }: { open: boolean; onOpe
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fresh each time it opens
   }, [open]);
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>Everything as JSON</DialogTitle>
-          <DialogDescription>The app’s inputs and steps. Saving replaces them all.</DialogDescription>
-        </DialogHeader>
-        <form
-          id="app-json-form"
-          className="grid gap-4"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setError("");
-            let d: Definition;
-            try {
-              d = JSON.parse(text);
-            } catch {
-              setError("That isn’t valid JSON");
-              return;
-            }
-            setBusy(true);
-            try {
-              onSaved(await saveApp(app, d));
-              onOpenChange(false);
-            } catch (err) {
-              setError(messageOf(err));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <FormField id="app-json-text" label="Inputs and steps">
-            <Textarea id="app-json-text" rows={22} spellCheck={false} className="font-mono text-xs" value={text} onChange={(e) => setText(e.target.value)} />
-          </FormField>
-          <FormError message={error} />
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={busy}>
-              Save
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+    <FormDialog open={open} onOpenChange={onOpenChange} title="Everything as JSON" description="The app’s inputs and steps. Saving replaces them all." className="sm:max-w-3xl">
+      <form
+        id="app-json-form"
+        className="grid gap-4"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setError("");
+          let d: Definition;
+          try {
+            d = JSON.parse(text);
+          } catch {
+            setError("That isn’t valid JSON");
+            return;
+          }
+          setBusy(true);
+          try {
+            onSaved(await saveApp(app, d));
+            onOpenChange(false);
+          } catch (err) {
+            setError(messageOf(err));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <Field id="app-json-text" label="Inputs and steps">
+          <Textarea id="app-json-text" rows={22} spellCheck={false} className="font-mono text-xs" value={text} onChange={(e) => setText(e.target.value)} />
+        </Field>
+        <FormError message={error} />
+        <FormActions>
+          <Button type="submit" disabled={busy}>
+            Save
+          </Button>
+        </FormActions>
+      </form>
+    </FormDialog>
   );
 }
 
@@ -739,62 +708,53 @@ function DetailsDialog({ open, onOpenChange, app, onSaved, onDeleted }: { open: 
   }, [open]);
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>App details</DialogTitle>
-            <DialogDescription className="sr-only">Rename the app or describe it.</DialogDescription>
-          </DialogHeader>
-          <form
-            id="app-details-form"
-            className="grid gap-4"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              setBusy(true);
-              setError("");
-              try {
-                onSaved(await saveApp(app, app.definition, { name: name.trim(), description: description.trim() }));
-                onOpenChange(false);
-              } catch (err) {
-                setError(messageOf(err));
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <FormField id="app-name" label="Name">
-              <Input id="app-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} required />
-            </FormField>
-            <FormField id="app-description" label="Description">
-              <Input id="app-description" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={1000} />
-            </FormField>
-            <p className="text-xs text-muted-foreground">
-              Its code, <code className="font-mono">{app.id}</code>, never changes, so a rename never breaks a caller.
-            </p>
-            <FormError message={error} />
-            <DialogFooter className="sm:justify-between">
-              <Button type="button" variant="outline" className="text-destructive-foreground" onClick={() => setDeleting(true)}>
-                <Box /> Delete app
+      <FormDialog open={open} onOpenChange={onOpenChange} title="App details" className="sm:max-w-lg">
+        <form
+          id="app-details-form"
+          className="grid gap-4"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setBusy(true);
+            setError("");
+            try {
+              onSaved(await saveApp(app, app.definition, { name: name.trim(), description: description.trim() }));
+              onOpenChange(false);
+            } catch (err) {
+              setError(messageOf(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <Field id="app-name" label="Name">
+            <Input id="app-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} required />
+          </Field>
+          <Field id="app-description" label="Description">
+            <Input id="app-description" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={1000} />
+          </Field>
+          <p className="text-xs text-muted-foreground">
+            Its code, <code className="font-mono">{app.id}</code>, never changes, so a rename never breaks a caller.
+          </p>
+          <FormError message={error} />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button type="button" variant="outline" className="text-destructive-foreground" onClick={() => setDeleting(true)}>
+              <Box /> Delete app
+            </Button>
+            <FormActions>
+              <Button type="submit" disabled={busy}>
+                Save
               </Button>
-              <div className="flex gap-2">
-                <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={busy}>
-                  Save
-                </Button>
-              </div>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+            </FormActions>
+          </div>
+        </form>
+      </FormDialog>
       <Confirm
         open={deleting}
         onOpenChange={setDeleting}
         title="Delete this app?"
         text="Its keys stop working and its runs are deleted. The project stays."
-        confirm="Delete app"
-        onConfirm={async () => {
+        label="Delete app"
+        action={async () => {
           await deleteApp(app);
           onOpenChange(false);
           onDeleted();

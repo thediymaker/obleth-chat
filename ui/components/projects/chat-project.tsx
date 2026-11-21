@@ -20,8 +20,8 @@ import { useProjects } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { moveChat, type Project, projectLine, useConversationProject } from "./api";
 import { chatDraft, useChatDraft } from "./chat-draft";
-import { messageOf } from "./form-field";
 import { NewProjectDialog } from "./project-dialog";
+import { messageOf } from "@/components/manage/kit";
 
 export const ProjectDot = ({ color, className }: { color: string; className?: string }) => <span className={cn("size-2 shrink-0 rounded-full", projectDot(color), className)} />;
 

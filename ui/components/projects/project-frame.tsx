@@ -19,9 +19,9 @@ import { keys, useCapabilities, useFeature } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 import { type ProjectDetail, useProjectDetail } from "./api";
 import { chatDraft } from "./chat-draft";
-import { messageOf } from "./form-field";
 import { ProjectDialog } from "./project-dialog";
 import { ProjectMark } from "./projects-home";
+import { messageOf } from "@/components/manage/kit";
 
 const FrameContext = createContext<{ detail: ProjectDetail; edit: () => void } | null>(null);
 /** The project the page is showing, and a way to open its Edit dialog. */

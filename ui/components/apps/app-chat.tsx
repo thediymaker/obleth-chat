@@ -5,10 +5,11 @@
 // (for this tab, in sessionStorage); Chat keeps only each run, under the app's Runs.
 
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ArrowUp, Pencil, RotateCcw, SquarePen } from "lucide-react";
+import { ArrowUp, Pencil, SquarePen } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { ErrorBox } from "@/components/app-shell/page";
 import { Brand } from "@/components/brand";
 import { Markdown } from "@/components/chat/markdown-view";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -191,15 +192,7 @@ function Conversation({ app }: { app: AppPage }) {
               {e.role === "user" ? (
                 <div className="w-fit max-w-full rounded-lg border bg-card px-3.5 py-2.5 text-base leading-[1.75] whitespace-pre-wrap [overflow-wrap:anywhere]">{e.content}</div>
               ) : e.error ? (
-                <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground">
-                  <AlertCircle className="mt-0.5 size-4 shrink-0" />
-                  <span className="grow">{e.error}</span>
-                  {i === entries.length - 1 && (
-                    <Button size="xs" variant="outline" onClick={retry} disabled={busy}>
-                      <RotateCcw /> Try again
-                    </Button>
-                  )}
-                </div>
+                <ErrorBox compact error={e.error} onRetry={i === entries.length - 1 && !busy ? retry : undefined} />
               ) : (
                 <Markdown text={e.content} className="text-base leading-[1.75] text-text-2" />
               )}

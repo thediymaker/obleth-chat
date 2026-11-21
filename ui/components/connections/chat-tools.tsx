@@ -167,7 +167,7 @@ export function ToolsChooser({ chatId, open, onOpenChange }: { chatId: string | 
           );
         })}
       </div>
-      <FormActions>
+      <FormActions cancel={false}>
         {clusters && (
           <Button variant="ghost" size="sm" asChild>
             <Link href="/clusters">Clusters</Link>

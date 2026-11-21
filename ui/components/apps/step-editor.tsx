@@ -5,12 +5,11 @@
 
 import { ArrowDown, ArrowUp, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { FormError, FormField } from "@/components/projects/form-field";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { CheckField, FormError, Field as FormField } from "@/components/manage/kit";
 import { useModels } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { type Field, KINDS, MAX_RULES, METHODS, type Step, TESTS, TYPE, COMPARES, type Test } from "./model";
@@ -19,17 +18,6 @@ import { StepIcon } from "./step-icon";
 
 const ID_PATTERN = "[a-z][a-z0-9_]*";
 
-function Check({ id, checked, onChange, label, help }: { id: string; checked: boolean; onChange: (v: boolean) => void; label: string; help?: string }) {
-  return (
-    <label htmlFor={id} className="flex items-start gap-2.5">
-      <Checkbox id={id} checked={checked} onCheckedChange={(v) => onChange(!!v)} className="mt-0.5" />
-      <span className="grid gap-0.5">
-        <strong className="text-md font-medium">{label}</strong>
-        {help && <small className="text-xs text-muted-foreground">{help}</small>}
-      </span>
-    </label>
-  );
-}
 const Mono = (props: React.ComponentProps<typeof Textarea>) => <Textarea {...props} spellCheck={false} className={cn("font-mono text-sm", props.className)} />;
 
 function ModelField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
@@ -134,7 +122,7 @@ function TypeFields({ d, set }: { d: StepDraft & { type: string }; set: (patch: 
           <FormField id="app-step-prompt" label="Prompt" help="What the model is sent. References are filled in.">
             <Textarea id="app-step-prompt" rows={5} value={d.prompt} onChange={(e) => set({ prompt: e.target.value })} />
           </FormField>
-          <Check id="app-step-json" checked={d.json} onChange={(json) => set({ json })} label="Read the reply as JSON" />
+          <CheckField id="app-step-json" checked={d.json} onCheckedChange={(json) => set({ json })} label="Read the reply as JSON" />
         </>
       );
     case "search":
@@ -353,7 +341,7 @@ export function InputsEditor({ inputs, busy, error, onSave }: { inputs: Field[];
                   ))}
                 </SelectContent>
               </Select>
-              <Check id={`app-input-${i}-required`} checked={f.required} onChange={(required) => set(i, { required })} label="Required" />
+              <CheckField id={`app-input-${i}-required`} checked={f.required} onCheckedChange={(required) => set(i, { required })} label="Required" />
             </div>
           </div>
         ))}

@@ -80,7 +80,6 @@ export type Dialog =
   | { kind: "tools" }
   | { kind: "files" }
   | { kind: "pasted"; id: string; name: string }
-  | { kind: "copy"; text: string }
   | { kind: "save"; item: SaveItem };
 
 /** Something from a chat for the Library's save dialog. */
@@ -1424,15 +1423,6 @@ export class ChatStore {
   openDialog(dialog: Dialog | null) {
     this.dialog = dialog;
     this.emit();
-  }
-  /** Copies text, or shows it to copy by hand when the clipboard is unavailable. */
-  async copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      this.toast("Copied to clipboard");
-    } catch {
-      this.openDialog({ kind: "copy", text });
-    }
   }
   /** Opens the Library's save dialog for part of the chat on screen, linked to its message; `projectId` is the chat's project. */
   saveFromChat(item: SaveItem, messageIndex?: number, projectId = "") {

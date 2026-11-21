@@ -1,12 +1,14 @@
 "use client";
 
-// Building blocks shared by Settings, Administration, MCP servers and Groups: cards,
-// form fields, pills, filter chips, stat tiles, meters, and confirmations. Forms are
-// uncontrolled and read with FormData.
+// Building blocks every page's cards, forms and dialogs share: cards, form fields,
+// pills, filter chips, stat tiles, meters, and confirmations. Forms are uncontrolled
+// and read with FormData.
+//
+// The dialog rule: a FormDialog's FormActions start with Cancel, which closes it; pass
+// `cancel={false}` only where the dialog's own button already closes it (Done, Close).
 
-import { AlertCircle, Copy } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
-import { toast } from "sonner";
+import { Copy } from "lucide-react";
+import { createContext, useCallback, useContext, useState } from "react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,7 +26,12 @@ import { Dropdown, type DropdownProps } from "@/components/ui/dropdown";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
+import { FormError } from "./form-error";
+
+/** The message of whatever a request threw. */
+export const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** "Admin" → "Admin", "sign_in" → "Sign In", as titleCase did. */
 export const titleCase = (value: string | null | undefined) => String(value || "").replace(/(^|[-_ ])\w/g, (c) => c.replace(/[-_]/g, " ").toUpperCase());
@@ -218,20 +225,25 @@ export function DetailRow({ label, children, className }: { label: React.ReactNo
   );
 }
 
-/** The server's message for a form that failed. */
-export function FormError({ message }: { message: string }) {
-  if (!message) return null;
+export { FormError } from "./form-error";
+
+/** Closes the FormDialog around a form, for its Cancel button. */
+const DialogClose = createContext<(() => void) | null>(null);
+
+/** The buttons at the end of a form. In a FormDialog they start with Cancel, named by
+ *  `cancel`, or left out with `cancel={false}` when another button closes the dialog. */
+export function FormActions({ children, className, cancel = "Cancel" }: { children: React.ReactNode; className?: string; cancel?: string | false }) {
+  const close = useContext(DialogClose);
   return (
-    <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground">
-      <AlertCircle className="mt-0.5 size-4 shrink-0" />
-      <span>{message}</span>
+    <div className={cn("flex flex-wrap items-center justify-end gap-2", className)}>
+      {close && cancel !== false && (
+        <Button type="button" variant="ghost" onClick={close}>
+          {cancel}
+        </Button>
+      )}
+      {children}
     </div>
   );
-}
-
-/** The buttons at the end of a form. */
-export function FormActions({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <div className={cn("flex flex-wrap items-center justify-end gap-2", className)}>{children}</div>;
 }
 
 /** Busy and error state around a form's submit, with the server's message shown inline. */
@@ -247,7 +259,7 @@ export function useSubmit(handler: (data: FormData, form: HTMLFormElement) => Pr
       try {
         await handler(new FormData(form), form);
       } catch (e) {
-        if ((e as Error).name !== "AbortError") setError((e as Error).message);
+        if ((e as Error).name !== "AbortError") setError(messageOf(e));
       } finally {
         setBusy(false);
       }
@@ -265,6 +277,7 @@ export function FormDialog({
   description,
   children,
   wide = false,
+  className,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -272,15 +285,16 @@ export function FormDialog({
   description?: React.ReactNode;
   children: React.ReactNode;
   wide?: boolean;
+  className?: string;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={cn("max-h-[90dvh] overflow-y-auto", wide && "sm:max-w-2xl")} {...(description ? {} : { "aria-describedby": undefined })}>
+      <DialogContent className={cn("max-h-[90dvh] overflow-y-auto", wide && "sm:max-w-2xl", className)} {...(description ? {} : { "aria-describedby": undefined })}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
-        {children}
+        <DialogClose.Provider value={() => onOpenChange(false)}>{children}</DialogClose.Provider>
       </DialogContent>
     </Dialog>
   );
@@ -308,56 +322,86 @@ export function DangerButton({ className, variant = "outline", size = "sm", ...p
   return <Button variant={variant} size={size} className={cn("border-destructive/40 text-destructive-foreground hover:bg-destructive/10 hover:text-destructive-foreground", className)} {...props} />;
 }
 
-/** A confirmation before something that can't be undone. `ask` opens it; the element renders it. */
-export function useConfirm() {
-  const [pending, setPending] = useState<Pending | null>(null);
+/** A yes/no question before something that can't be undone, open while `open`. The
+ *  action may throw: its message shows in the dialog, which stays open. */
+export function Confirm({
+  open,
+  onOpenChange,
+  title,
+  text,
+  label,
+  cancel = "Cancel",
+  tone = "danger",
+  action,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: React.ReactNode;
+  text: React.ReactNode;
+  label: React.ReactNode;
+  cancel?: string;
+  tone?: "danger" | "default";
+  action: () => Promise<unknown> | unknown;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const current = useRef<Pending | null>(null);
-  current.current = pending;
-  const ask = useCallback((p: Pending) => {
-    setError("");
-    setPending(p);
-  }, []);
-  const element = (
+  return (
     <AlertDialog
-      open={!!pending}
-      onOpenChange={(open) => {
-        if (!open && !busy) setPending(null);
+      open={open}
+      onOpenChange={(next) => {
+        if (busy) return;
+        if (!next) setError("");
+        onOpenChange(next);
       }}
     >
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>{pending?.title}</AlertDialogTitle>
-          <AlertDialogDescription>{pending?.text}</AlertDialogDescription>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{text}</AlertDialogDescription>
         </AlertDialogHeader>
         <FormError message={error} />
         <AlertDialogFooter>
-          <AlertDialogCancel disabled={busy}>{pending?.cancel || "Cancel"}</AlertDialogCancel>
+          <AlertDialogCancel disabled={busy}>{cancel}</AlertDialogCancel>
           <AlertDialogAction
             disabled={busy}
-            variant={pending?.tone !== "default" ? "destructive" : "default"}
+            variant={tone === "danger" ? "destructive" : "default"}
             onClick={async (event) => {
               event.preventDefault();
-              const p = current.current;
-              if (!p) return;
               setBusy(true);
               setError("");
               try {
-                await p.action();
-                setPending(null);
+                await action();
+                onOpenChange(false);
               } catch (e) {
-                setError((e as Error).message);
+                setError(messageOf(e));
               } finally {
                 setBusy(false);
               }
             }}
           >
-            {pending?.label}
+            {label}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+/** A Confirm asked for in code: `ask` opens it; the element renders it. */
+export function useConfirm() {
+  const [pending, setPending] = useState<Pending | null>(null);
+  const ask = useCallback((p: Pending) => setPending(p), []);
+  const element = (
+    <Confirm
+      open={!!pending}
+      onOpenChange={(open) => !open && setPending(null)}
+      title={pending?.title}
+      text={pending?.text}
+      label={pending?.label}
+      cancel={pending?.cancel}
+      tone={pending?.tone}
+      action={() => pending?.action()}
+    />
   );
   return { ask, element, clear: () => setPending(null) };
 }
@@ -450,29 +494,17 @@ export function Quota({ value, max, label, className }: { value: number; max: nu
   return <Meter value={Math.min(value, max)} max={Math.max(1, max)} label={label} tone={f >= 1 ? "danger" : f >= 0.8 ? "amber" : "blue"} className={className} level={f >= 1 ? "full" : f >= 0.8 ? "near" : ""} />;
 }
 
-/** Copies a value, or selects it when the clipboard is blocked. */
-export async function copyText(value: string, input?: HTMLInputElement | HTMLTextAreaElement | null, done = "Copied") {
-  try {
-    await navigator.clipboard.writeText(value);
-    toast(done);
-  } catch {
-    input?.select();
-    toast("Press Ctrl+C or ⌘C to copy");
-  }
-}
-
 /** A read-only value with a copy button. */
 export function CopyField({ id, label, value, rows, help, copyLabel = "Copy", done }: { id: string; label: string; value: string; rows?: number; help?: React.ReactNode; copyLabel?: string; done?: string }) {
-  const ref = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
   return (
     <Field id={id} label={label} help={help}>
       <div className="flex items-start gap-2">
         {rows ? (
-          <Textarea ref={ref} id={id} readOnly rows={rows} value={value} className="font-mono text-sm" onFocus={(e) => e.currentTarget.select()} />
+          <Textarea id={id} readOnly rows={rows} value={value} className="font-mono text-sm" onFocus={(e) => e.currentTarget.select()} />
         ) : (
-          <Input ref={ref} id={id} readOnly value={value} className="font-mono" onFocus={(e) => e.currentTarget.select()} />
+          <Input id={id} readOnly value={value} className="font-mono" onFocus={(e) => e.currentTarget.select()} />
         )}
-        <Button type="button" variant="outline" size="sm" className="mt-0.5" onClick={() => copyText(value, ref.current, done)}>
+        <Button type="button" variant="outline" size="sm" className="mt-0.5" onClick={() => copyText(value, done)}>
           <Copy /> {copyLabel}
         </Button>
       </div>

@@ -6,6 +6,7 @@
 import { Bookmark, Copy, MessageSquare } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useChatProjectId } from "@/components/projects/chat-project";
+import { copyText } from "@/lib/clipboard";
 import { useChat } from "./chat-provider";
 
 export function SelectionBar() {
@@ -87,7 +88,7 @@ export function SelectionBar() {
         type="button"
         className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-accent"
         onClick={() => {
-          store.copy(pick.text);
+          void copyText(pick.text);
           done();
         }}
       >

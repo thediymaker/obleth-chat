@@ -12,13 +12,13 @@ import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { ErrorBox, Loading, Page, isNotFound, NotFound } from "@/components/app-shell/page";
 import { chatDraft } from "@/components/projects/chat-draft";
-import { Confirm, messageOf } from "@/components/projects/form-field";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Confirm, messageOf } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { count, when, bytes as formatBytes } from "@/lib/format";
 import { useSession } from "@/lib/session";
@@ -344,8 +344,8 @@ function Documents({ detail, maxFileBytes, onMore }: { detail: CollectionDetail;
         title={`Remove ${removing?.name ?? ""}?`}
         text="The file and its passages are deleted. Chats stop citing it."
         cancel="Keep it"
-        confirm="Remove"
-        onConfirm={async () => {
+        label="Remove"
+        action={async () => {
           await api.request(`/api/knowledge/documents/${encodeURIComponent(removing!.id)}`, { method: "DELETE" });
           await refresh();
           toast("Document removed");

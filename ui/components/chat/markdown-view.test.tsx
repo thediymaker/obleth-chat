@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { CopyByHand } from "@/components/app-shell/copy-dialog";
 import { codeTitle, Markdown } from "@/components/chat/markdown-view";
 
 describe("Markdown", () => {
@@ -9,11 +10,22 @@ describe("Markdown", () => {
     expect(container.querySelector("strong")).toHaveTextContent("bold");
   });
 
-  it("copies a code block through onCopy", () => {
-    const onCopy = vi.fn();
-    render(<Markdown text={"```js\nconst a = 1;\n```"} onCopy={onCopy} />);
+  it("copies a code block to the clipboard, or into the copy-by-hand dialog when the clipboard is blocked", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(
+      <>
+        <Markdown text={"```js\nconst a = 1;\n```"} />
+        <CopyByHand />
+      </>,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Copy code" }));
-    expect(onCopy).toHaveBeenCalledWith("const a = 1;\n");
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("const a = 1;\n"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    writeText.mockRejectedValueOnce(new Error("blocked"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(await screen.findByRole("dialog", { name: "Copy text" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Text to copy")).toHaveValue("const a = 1;\n");
   });
 
   it("hides Save without onSaveCode and saves with it", () => {

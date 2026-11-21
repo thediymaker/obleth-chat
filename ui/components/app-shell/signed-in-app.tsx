@@ -5,12 +5,14 @@
 // screen does not fetch it.
 
 import { AppShell } from "@/components/app-shell/app-shell";
+import { CopyByHand } from "@/components/app-shell/copy-dialog";
 import { ChatProvider } from "@/components/chat/chat-provider";
 
 export function SignedInApp({ children }: { children: React.ReactNode }) {
   return (
     <ChatProvider>
       <AppShell>{children}</AppShell>
+      <CopyByHand />
     </ChatProvider>
   );
 }

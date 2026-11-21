@@ -11,8 +11,7 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, FeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import { FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
-import { messageOf } from "@/components/projects/form-field";
+import { FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, useConfirm, useSubmit, messageOf } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -611,9 +610,6 @@ function AddMemory({ data, onClose, onAdded }: { data: MemoryState; onClose: () 
         </label>
         <FormError message={error} />
         <FormActions>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
           <Button type="submit" disabled={busy}>
             Add memory
           </Button>

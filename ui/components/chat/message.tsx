@@ -11,6 +11,7 @@ import { DeviceCard } from "@/components/devices/device-card";
 import { MessageActivity } from "@/components/workspace/message-activity";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { copyText } from "@/lib/clipboard";
 import { useBranding } from "@/lib/branding-context";
 import { attachmentUrl, describe } from "@/lib/chat/attachments";
 import { clock, effortLabel, NUDGE } from "@/lib/chat/composer";
@@ -315,7 +316,6 @@ function AnswerContent({ m, index }: { m: ChatMessage; index: number }) {
         text={m.content}
         cite={m.role === "assistant" ? (html) => citeHtml(html, m) : undefined}
         onSaveCode={canSave ? async (item) => store.saveFromChat({ ...item, title: item.title || codeTitle(item.body) }, index, await conversationProjectId(client, store.shared ? null : (store.active?.id ?? null))) : undefined}
-        onCopy={(text) => store.copy(text)}
       />
       {m.finishReason === "length" && String(m.content || "").trim() && (
         <p className="mt-2 rounded-md bg-muted px-3 py-2 text-sm text-text-2">
@@ -446,7 +446,7 @@ export const MessageView = memo(
         <div className="mt-2 -ml-1.5 flex min-h-[30px] flex-wrap items-center gap-0.5 max-[760px]:flex-nowrap">
           {assistant ? (
             <>
-              <IconButton label="Copy response" onClick={() => store.copy(m.content)}>
+              <IconButton label="Copy response" onClick={() => copyText(m.content)}>
                 <Copy />
               </IconButton>
               {m.id && store.feature("knowledge") && m.status === "completed" && !shared && !store.active?.temporary && (

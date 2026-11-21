@@ -10,19 +10,19 @@ import { Copy, ExternalLink, MessageSquare, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Confirm, FormError, FormField, messageOf } from "@/components/projects/form-field";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { copyText } from "@/lib/clipboard";
 import { api } from "@/lib/api";
 import { useProjects } from "@/lib/queries";
 import { useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { getSaved, host, KINDS, kindOf, parseTags, refreshSaved, type SavedItem, type SavedKind, savedPath, suggestTags, useSaved } from "./api";
 import { isNotFound } from "@/components/app-shell/page";
+import { Confirm, Field, FormActions, FormDialog, FormError, messageOf } from "@/components/manage/kit";
 
 /** What the save dialog starts from: a new item (maybe from a chat) or one being edited. */
 export interface SaveDraft {
@@ -54,14 +54,6 @@ export interface SaveFromInput {
 }
 const NO_PROJECT = "none";
 
-async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast("Copied");
-  } catch {
-    toast("Couldn’t copy. Select the text and copy it instead.");
-  }
-}
 const copyItem = (item: Pick<SavedItem, "kind" | "url" | "body">) => copyText(item.kind === "link" ? item.url || item.body : item.body);
 
 export function SaveDialog({ open, onOpenChange, draft, title }: { open: boolean; onOpenChange: (open: boolean) => void; draft: SaveDraft; title: string }) {
@@ -128,140 +120,131 @@ export function SaveDialog({ open, onOpenChange, draft, title }: { open: boolean
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle className="truncate pr-6">{title}</DialogTitle>
-            <DialogDescription className="sr-only">Save something to Library, where later chats can find it.</DialogDescription>
-          </DialogHeader>
-          <form id="saved-form" onSubmit={submit} className="grid gap-4">
-            <FormField id="saved-title" label="Title">
-              <Input id="saved-title" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} placeholder="What is it?" />
-            </FormField>
-            <div className="grid gap-1.5">
-              <span id="saved-kind-label" className="text-sm text-text-2">
-                Kind
-              </span>
-              <div role="radiogroup" aria-labelledby="saved-kind-label" className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {(Object.entries(KINDS) as [SavedKind, (typeof KINDS)[SavedKind]][]).map(([k, [Icon, , label]]) => (
-                  <button
-                    key={k}
-                    type="button"
-                    role="radio"
-                    aria-checked={kind === k}
-                    onClick={() => setKind(k)}
-                    className={cn(
-                      "flex items-center justify-center gap-1.5 rounded-md border px-2 py-2 text-sm text-muted-foreground hover:bg-accent",
-                      kind === k && "border-line-strong bg-secondary text-foreground",
-                    )}
-                  >
-                    <Icon className="size-4" /> {label}
-                  </button>
-                ))}
-              </div>
+      <FormDialog open={open} onOpenChange={onOpenChange} title={<span className="block truncate">{title}</span>} className="sm:max-w-xl">
+        <form id="saved-form" onSubmit={submit} className="grid gap-4">
+          <Field id="saved-title" label="Title">
+            <Input id="saved-title" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} placeholder="What is it?" />
+          </Field>
+          <div className="grid gap-1.5">
+            <span id="saved-kind-label" className="text-sm text-text-2">
+              Kind
+            </span>
+            <div role="radiogroup" aria-labelledby="saved-kind-label" className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {(Object.entries(KINDS) as [SavedKind, (typeof KINDS)[SavedKind]][]).map(([k, [Icon, , label]]) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={kind === k}
+                  onClick={() => setKind(k)}
+                  className={cn(
+                    "flex items-center justify-center gap-1.5 rounded-md border px-2 py-2 text-sm text-muted-foreground hover:bg-accent",
+                    kind === k && "border-line-strong bg-secondary text-foreground",
+                  )}
+                >
+                  <Icon className="size-4" /> {label}
+                </button>
+              ))}
             </div>
-            {kind === "link" && (
-              <FormField id="saved-url" label="Address">
-                <Input id="saved-url" type="url" value={url} onChange={(e) => setUrl(e.target.value)} maxLength={2048} placeholder="https://" />
-              </FormField>
-            )}
-            <FormField id="saved-body" label={kind === "link" ? "Notes" : "Content"}>
-              <Textarea id="saved-body" value={body} onChange={(e) => setBody(e.target.value)} rows={kind === "code" ? 10 : 6} maxLength={65536} className={cn(kind === "code" && "font-mono text-sm")} />
-            </FormField>
-            {kind === "code" && (
-              <FormField id="saved-language" label="Language">
-                <Input id="saved-language" value={language} onChange={(e) => setLanguage(e.target.value)} maxLength={40} placeholder="python" />
-              </FormField>
-            )}
-            {projectField && (
-              <FormField id="saved-project" label="Project" help="Chats in the project can find it, and so can everyone the project is shared with.">
-                <Select value={project} onValueChange={setProject}>
-                  <SelectTrigger id="saved-project" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NO_PROJECT}>No project</SelectItem>
-                    {all.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </FormField>
-            )}
-            <FormField id="saved-tags" label="Tags" help="Separate tags with spaces.">
-              <Input id="saved-tags" value={tags} onChange={(e) => setTags(e.target.value)} maxLength={400} placeholder="#research #python" />
-            </FormField>
-            {suggestions.length > 0 && (
-              <div className="-mt-2 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                <span>Suggested</span>
-                {suggestions.map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    className="rounded-full border px-2 py-0.5 hover:bg-accent hover:text-foreground"
-                    onClick={() => {
-                      setTags((v) => `${v} #${t}`.trim());
-                      setUsed((u) => [...u, t]);
-                    }}
-                  >
-                    + {t}
-                  </button>
-                ))}
+          </div>
+          {kind === "link" && (
+            <Field id="saved-url" label="Address">
+              <Input id="saved-url" type="url" value={url} onChange={(e) => setUrl(e.target.value)} maxLength={2048} placeholder="https://" />
+            </Field>
+          )}
+          <Field id="saved-body" label={kind === "link" ? "Notes" : "Content"}>
+            <Textarea id="saved-body" value={body} onChange={(e) => setBody(e.target.value)} rows={kind === "code" ? 10 : 6} maxLength={65536} className={cn(kind === "code" && "font-mono text-sm")} />
+          </Field>
+          {kind === "code" && (
+            <Field id="saved-language" label="Language">
+              <Input id="saved-language" value={language} onChange={(e) => setLanguage(e.target.value)} maxLength={40} placeholder="python" />
+            </Field>
+          )}
+          {projectField && (
+            <Field id="saved-project" label="Project" help="Chats in the project can find it, and so can everyone the project is shared with.">
+              <Select value={project} onValueChange={setProject}>
+                <SelectTrigger id="saved-project" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_PROJECT}>No project</SelectItem>
+                  {all.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
+          <Field id="saved-tags" label="Tags" help="Separate tags with spaces.">
+            <Input id="saved-tags" value={tags} onChange={(e) => setTags(e.target.value)} maxLength={400} placeholder="#research #python" />
+          </Field>
+          {suggestions.length > 0 && (
+            <div className="-mt-2 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              <span>Suggested</span>
+              {suggestions.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className="rounded-full border px-2 py-0.5 hover:bg-accent hover:text-foreground"
+                  onClick={() => {
+                    setTags((v) => `${v} #${t}`.trim());
+                    setUsed((u) => [...u, t]);
+                  }}
+                >
+                  + {t}
+                </button>
+              ))}
+            </div>
+          )}
+          <label htmlFor="saved-searchable" className="flex items-start gap-2.5">
+            <Checkbox id="saved-searchable" checked={searchable} onCheckedChange={(v) => setSearchable(!!v)} className="mt-0.5" />
+            <span className="grid gap-0.5">
+              <strong className="text-md font-medium">Chats can find it</strong>
+              <small className="text-xs text-muted-foreground">Indexed like a document, so a later chat can find it when you ask about it.</small>
+            </span>
+          </label>
+          {draft.source ? (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <MessageSquare className="size-3.5" /> From{" "}
+              <Link className="underline-offset-2 hover:underline" href={`/chat/${encodeURIComponent(draft.source.conversationId)}`} onClick={() => onOpenChange(false)}>
+                {draft.source.title || "a chat"}
+              </Link>
+            </p>
+          ) : draft.sourceConversationId ? (
+            <p className="text-sm text-muted-foreground">Keeps a link back to this chat.</p>
+          ) : null}
+          <FormError message={error} />
+          {draft.id && (
+            <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/30 p-3">
+              <div className="grow">
+                <strong className="block text-md font-medium">Delete</strong>
+                <small className="text-xs text-muted-foreground">Removes it from Library and from chat searches.</small>
               </div>
-            )}
-            <label htmlFor="saved-searchable" className="flex items-start gap-2.5">
-              <Checkbox id="saved-searchable" checked={searchable} onCheckedChange={(v) => setSearchable(!!v)} className="mt-0.5" />
-              <span className="grid gap-0.5">
-                <strong className="text-md font-medium">Chats can find it</strong>
-                <small className="text-xs text-muted-foreground">Indexed like a document, so a later chat can find it when you ask about it.</small>
-              </span>
-            </label>
-            {draft.source ? (
-              <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                <MessageSquare className="size-3.5" /> From{" "}
-                <Link className="underline-offset-2 hover:underline" href={`/chat/${encodeURIComponent(draft.source.conversationId)}`} onClick={() => onOpenChange(false)}>
-                  {draft.source.title || "a chat"}
-                </Link>
-              </p>
-            ) : draft.sourceConversationId ? (
-              <p className="text-sm text-muted-foreground">Keeps a link back to this chat.</p>
-            ) : null}
-            <FormError message={error} />
-            {draft.id && (
-              <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/30 p-3">
-                <div className="grow">
-                  <strong className="block text-md font-medium">Delete</strong>
-                  <small className="text-xs text-muted-foreground">Removes it from Library and from chat searches.</small>
-                </div>
-                <Button type="button" size="sm" variant="outline" onClick={() => copyItem({ kind, url, body })}>
-                  <Copy /> Copy
-                </Button>
-                <Button type="button" size="sm" variant="outline" className="text-destructive-foreground" onClick={() => setDeleting(true)}>
-                  <Trash2 /> Delete
-                </Button>
-              </div>
-            )}
-            <DialogFooter>
-              <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-                Cancel
+              <Button type="button" size="sm" variant="outline" onClick={() => copyItem({ kind, url, body })}>
+                <Copy /> Copy
               </Button>
-              <Button type="submit" disabled={busy}>
-                {draft.id ? "Save changes" : "Save"}
+              <Button type="button" size="sm" variant="outline" className="text-destructive-foreground" onClick={() => setDeleting(true)}>
+                <Trash2 /> Delete
               </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+            </div>
+          )}
+          <FormActions>
+            <Button type="submit" disabled={busy}>
+              {draft.id ? "Save changes" : "Save"}
+            </Button>
+          </FormActions>
+        </form>
+      </FormDialog>
       {draft.id && (
         <Confirm
           open={deleting}
           onOpenChange={setDeleting}
           title={`Delete “${draft.title || "this item"}”?`}
           text="It is removed from Library and from chat searches."
-          confirm="Delete"
-          onConfirm={async () => {
+          label="Delete"
+          action={async () => {
             await api.request(savedPath(draft.id!), { method: "DELETE" });
             onOpenChange(false);
             toast("Deleted");
@@ -292,15 +275,12 @@ export function SavedViewer({ open, onOpenChange, item }: { open: boolean; onOpe
     }
   }
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle className="pr-6">{item.title}</DialogTitle>
-          <DialogDescription>
-            Saved by {item.ownerName || "someone else"}
-            {project ? ` in ${project.name}` : ""}. Only they can change it.
-          </DialogDescription>
-        </DialogHeader>
+    <FormDialog open={open} onOpenChange={onOpenChange} title={item.title} description={
+      <>
+        Saved by {item.ownerName || "someone else"}
+        {project ? ` in ${project.name}` : ""}. Only they can change it.
+      </>
+    } className="sm:max-w-xl">
         <div className="grid gap-3">
           <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
             <Icon className="size-3.5" /> {label}
@@ -325,7 +305,7 @@ export function SavedViewer({ open, onOpenChange, item }: { open: boolean; onOpe
             </div>
           )}
         </div>
-        <DialogFooter>
+        <FormActions cancel="Close">
           {project?.mine && (
             <Button
               variant="outline"
@@ -364,9 +344,8 @@ export function SavedViewer({ open, onOpenChange, item }: { open: boolean; onOpe
           >
             Save my own copy
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </FormActions>
+    </FormDialog>
   );
 }
 

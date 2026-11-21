@@ -11,20 +11,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import { Confirm, Field, FormActions, FormDialog, FormError } from "@/components/manage/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -134,13 +124,12 @@ export function HistoryPage() {
       if ((error as Error).name !== "AbortError") toast((error as Error).message);
     }
   }
-  async function bulk(action: "archive" | "unarchive" | "delete") {
+  async function bulk(action: "archive" | "unarchive") {
     setBusy(true);
     try {
       await bulkConversations([...selected], action);
-      setConfirmDelete(false);
       await refresh();
-      toast(action === "delete" ? "Conversations deleted" : action === "archive" ? "Conversations archived" : "Conversations restored");
+      toast(action === "archive" ? "Conversations archived" : "Conversations restored");
     } catch (error) {
       if ((error as Error).name !== "AbortError") toast((error as Error).message);
     } finally {
@@ -285,29 +274,19 @@ export function HistoryPage() {
       ) : (
         data && !list.isFetching && <EmptyState icon={MessageSquare} title={empty.title} text={empty.text} />
       )}
-      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Delete {n} conversation{n === 1 ? "" : "s"}?
-            </AlertDialogTitle>
-            <AlertDialogDescription>This permanently deletes the selected conversations and their messages.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Keep conversations</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              disabled={busy}
-              onClick={(event) => {
-                event.preventDefault();
-                bulk("delete");
-              }}
-            >
-              Delete conversations
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <Confirm
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`Delete ${n} conversation${n === 1 ? "" : "s"}?`}
+        text="This permanently deletes the selected conversations and their messages."
+        cancel="Keep conversations"
+        label="Delete conversations"
+        action={async () => {
+          await bulkConversations([...selected], "delete");
+          await refresh();
+          toast("Conversations deleted");
+        }}
+      />
       <ImportDialog open={importing} onOpenChange={setImporting} onImported={refresh} />
     </Page>
   );
@@ -363,66 +342,49 @@ export function ImportDialog({ open, onOpenChange, onImported }: { open: boolean
   }
   return (
     <>
-      <Dialog open={open} onOpenChange={reset}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Import conversations</DialogTitle>
-            <DialogDescription>
-              Bring your chats over from Chat, Open WebUI, ChatGPT or Claude. They are added to your account, and your existing conversations are kept.
-            </DialogDescription>
-          </DialogHeader>
-          <form id="history-import-form" onSubmit={submit} className="grid gap-3">
-            <div className="grid gap-1.5">
-              <Label htmlFor="history-file">Export file</Label>
-              <Input
-                id="history-file"
-                name="history-file"
-                type="file"
-                accept=".json,.zip,application/json,application/zip"
-                aria-describedby="history-file-help"
-                onChange={(e) => {
-                  setFile(e.target.files?.[0] ?? null);
-                  setError("");
-                }}
-              />
-              <p id="history-file-help" className="text-sm text-muted-foreground">
-                Open WebUI: Settings, Data Controls, Export Chats. ChatGPT and Claude: the zip from Export data, or the conversations.json file inside it. Up to 200 MB.
-              </p>
-            </div>
-            {sending && (
-              <p role="status" className="text-sm text-muted-foreground">
-                Importing… A large export can take a few minutes.
-              </p>
-            )}
-            {error && (
-              <p role="alert" className="text-sm text-destructive-foreground">
-                {error}
-              </p>
-            )}
-            <DialogFooter>
-              <Button type="submit" disabled={!file || sending}>
-                Import conversations
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={!!summary} onOpenChange={(next) => !next && setSummary(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Import finished</DialogTitle>
-            <DialogDescription className="sr-only">What the import brought over</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-2 text-base">
-            {summary?.map((line) => (
-              <p key={line}>{line}</p>
-            ))}
-          </div>
-          <DialogFooter>
-            <Button onClick={() => setSummary(null)}>Done</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <FormDialog
+        open={open}
+        onOpenChange={reset}
+        title="Import conversations"
+        description="Bring your chats over from Chat, Open WebUI, ChatGPT or Claude. They are added to your account, and your existing conversations are kept."
+      >
+        <form id="history-import-form" onSubmit={submit} className="grid gap-4">
+          <Field
+            id="history-file"
+            label="Export file"
+            help="Open WebUI: Settings, Data Controls, Export Chats. ChatGPT and Claude: the zip from Export data, or the conversations.json file inside it. Up to 200 MB."
+          >
+            <Input
+              id="history-file"
+              name="history-file"
+              type="file"
+              accept=".json,.zip,application/json,application/zip"
+              aria-describedby="history-file-help"
+              onChange={(e) => {
+                setFile(e.target.files?.[0] ?? null);
+                setError("");
+              }}
+            />
+          </Field>
+          {sending && <Loading compact label="Importing… A large export can take a few minutes." />}
+          <FormError message={error} />
+          <FormActions>
+            <Button type="submit" disabled={!file || sending}>
+              Import conversations
+            </Button>
+          </FormActions>
+        </form>
+      </FormDialog>
+      <FormDialog open={!!summary} onOpenChange={(next) => !next && setSummary(null)} title="Import finished">
+        <div className="grid gap-2 text-base">
+          {summary?.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+        <FormActions cancel={false}>
+          <Button onClick={() => setSummary(null)}>Done</Button>
+        </FormActions>
+      </FormDialog>
     </>
   );
 }

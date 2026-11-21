@@ -5,12 +5,12 @@
 
 import { CircleAlert, CircleCheck, Play, X } from "lucide-react";
 import { useState } from "react";
-import { FormError, FormField, messageOf } from "@/components/projects/form-field";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { FormError, Field as FormField, messageOf } from "@/components/manage/kit";
 import { cn } from "@/lib/utils";
 import type { TraceEntry } from "./layout";
 import { type Field, pretty } from "./model";

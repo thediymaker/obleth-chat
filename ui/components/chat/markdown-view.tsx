@@ -7,7 +7,7 @@
 import "katex/dist/katex.min.css";
 import "./chat-prose.css";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { toast } from "sonner";
+import { copyText } from "@/lib/clipboard";
 import { markdown } from "@/lib/chat/markdown";
 import { downloadDrawing, hydrate, toggleDrawing } from "@/lib/chat/rendered";
 import { cn } from "@/lib/utils";
@@ -43,15 +43,6 @@ function subscribeTheme(change: () => void) {
 }
 const currentTheme = () => document.documentElement.dataset.theme ?? "";
 
-async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast("Copied to clipboard");
-  } catch {
-    toast("Copying is blocked here. Select the text and copy it instead.");
-  }
-}
-
 export interface MarkdownProps {
   text: string | null | undefined;
   /** Changes the HTML after it is made, such as linking [n] citations to sources. */
@@ -59,11 +50,9 @@ export interface MarkdownProps {
   className?: string;
   /** Saves a code block to the Library; without it the Save buttons are hidden. */
   onSaveCode?: (item: SaveCodeItem) => void;
-  /** Copies a code block; by default to the clipboard with a toast. */
-  onCopy?: (text: string) => void;
 }
 
-export const Markdown = memo(function Markdown({ text, cite, className, onSaveCode, onCopy }: MarkdownProps) {
+export const Markdown = memo(function Markdown({ text, cite, className, onSaveCode }: MarkdownProps) {
   const ref = useRef<HTMLDivElement>(null);
   // Bumped when a library or drawing finished, so the HTML is made again with it.
   const [version, setVersion] = useState(0);
@@ -98,7 +87,7 @@ export const Markdown = memo(function Markdown({ text, cite, className, onSaveCo
       const code = block.querySelector("pre code")?.textContent ?? "";
       if (action === "copy-code") {
         event.preventDefault();
-        (onCopy ?? copyText)(code);
+        void copyText(code);
       } else if (action === "save-code" && onSaveCode) {
         event.preventDefault();
         const label = block.querySelector(".code-label span")?.textContent || "";
@@ -112,7 +101,7 @@ export const Markdown = memo(function Markdown({ text, cite, className, onSaveCo
         downloadDrawing(block);
       }
     },
-    [onCopy, onSaveCode],
+    [onSaveCode],
   );
 
   return (

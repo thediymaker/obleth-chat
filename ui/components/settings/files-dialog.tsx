@@ -136,7 +136,7 @@ export function FilesDialog({ open, onOpenChange }: { open: boolean; onOpenChang
       ) : (
         <EmptyState title="No uploaded files" text="Use the paperclip in Chat to attach a file." />
       )}
-      <FormActions>
+      <FormActions cancel={false}>
         <Button variant="outline" onClick={() => onOpenChange(false)}>
           Done
         </Button>

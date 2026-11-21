@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader } from "@/components/app-shell/page";
+import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -168,12 +168,11 @@ export function HistoryPage() {
 
   return (
     <Page>
-      <Eyebrow className="mb-1 block">Only you</Eyebrow>
       <PageHeader
-        title="Your conversations"
-        description="Find, organize, and keep a copy of your work."
+        title="All chats"
+        description="Find, organize, and keep a copy of your work. Only you can see this list."
         actions={
-          <Button size="sm" variant="outline" onClick={() => setImporting(true)}>
+          <Button variant="outline" onClick={() => setImporting(true)}>
             <Upload /> Import
           </Button>
         }

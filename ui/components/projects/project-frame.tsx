@@ -11,7 +11,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { appKeys, createApp } from "@/components/apps/api";
 import { usePageChrome } from "@/components/app-shell/chrome";
-import { ErrorBox, Loading, Page, isNotFound, NotFound } from "@/components/app-shell/page";
+import { ErrorBox, Loading, Page, PageHeader, isNotFound, NotFound } from "@/components/app-shell/page";
 import { SectionTabs } from "@/components/app-shell/section-tabs";
 import { Button } from "@/components/ui/button";
 import { count } from "@/lib/format";
@@ -116,40 +116,39 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
 
   return (
     <Page wide className={onApp ? "max-w-[1600px]" : undefined}>
-      <nav aria-label="Breadcrumb" className="mb-3 flex items-center gap-1.5 text-sm text-muted-foreground">
-        <Link href="/projects" className="hover:text-foreground">
-          Projects
-        </Link>
-        <span className="text-faint">/</span>
-        <span className="truncate text-text-2">{p.name}</span>
-      </nav>
-      <div className="mb-5 flex flex-wrap items-start gap-4">
-        <ProjectMark color={p.color} large />
-        <div className="min-w-0 grow basis-64">
-          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">{p.name}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{facts}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {mine && isAdmin && !d.app && (
-            <Button variant="outline" onClick={makeApp} disabled={making}>
-              <Box /> Make it an app
+      <PageHeader
+        breadcrumb={
+          <nav aria-label="Breadcrumb" className="-mb-1 flex items-center gap-1.5 text-sm text-muted-foreground">
+            <Link href="/projects" className="hover:text-foreground">
+              Projects
+            </Link>
+            <span className="text-faint">/</span>
+            <span className="truncate text-text-2">{p.name}</span>
+          </nav>
+        }
+        icon={<ProjectMark color={p.color} large />}
+        title={p.name}
+        description={facts}
+        actions={
+          <>
+            {mine && isAdmin && !d.app && (
+              <Button variant="outline" onClick={makeApp} disabled={making}>
+                <Box /> Make it an app
+              </Button>
+            )}
+            {mine && (
+              <Button variant="outline" onClick={() => setEditing(true)}>
+                <Pencil /> Edit
+              </Button>
+            )}
+            <Button onClick={() => newChat(p.id)}>
+              <Plus /> New chat in project
             </Button>
-          )}
-          {mine && (
-            <Button variant="outline" onClick={() => setEditing(true)}>
-              <Pencil /> Edit
-            </Button>
-          )}
-          <Button onClick={() => newChat(p.id)}>
-            <Plus /> New chat in project
-          </Button>
-        </div>
-      </div>
-      {list.length > 1 && (
-        <div className="mb-6">
-          <SectionTabs label="Project" tabs={list} />
-        </div>
-      )}
+          </>
+        }
+      >
+        {list.length > 1 && <SectionTabs label="Project" tabs={list} />}
+      </PageHeader>
       <FrameContext.Provider value={{ detail: d, edit: () => setEditing(true) }}>{children}</FrameContext.Provider>
       {mine && <ProjectDialog open={editing} onOpenChange={setEditing} project={p} />}
     </Page>

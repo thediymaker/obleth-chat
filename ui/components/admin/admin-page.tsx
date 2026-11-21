@@ -12,7 +12,6 @@ import { EmptyState } from "@/components/app-shell/page";
 import { SectionTabs } from "@/components/app-shell/section-tabs";
 import { Button } from "@/components/ui/button";
 import { Pill } from "@/components/manage/kit";
-import { SectionHeading } from "@/components/settings/settings-frame";
 import { useSession } from "@/lib/session";
 import { ActivityTab } from "./activity-tab";
 import { FeedbackTab } from "./feedback-tab";
@@ -48,7 +47,7 @@ export function AdminPage({ segments = [] }: { segments?: string[] }) {
   const { isAdmin } = useSession();
   const { section, groupId } = adminLocation(segments);
   const title = ADMIN_TABS.find(([id]) => id === section)?.[2] ?? "Administration";
-  usePageChrome(isAdmin ? `${title} · Administration` : "Administration");
+  usePageChrome(isAdmin ? `Administration › ${title}` : "Administration");
   if (!isAdmin)
     return (
       <EmptyState
@@ -64,9 +63,11 @@ export function AdminPage({ segments = [] }: { segments?: string[] }) {
     );
   return (
     <div className="min-w-0">
-      <SectionHeading title="Administration" description="Accounts, model access, and service activity." actions={<Pill tone="accent">Administrator</Pill>} />
-      <div className="mb-6">
-        <SectionTabs label="Administration sections" current={`/settings/admin/${section}`} tabs={ADMIN_TABS.map(([id, Icon, label]) => ({ href: `/settings/admin/${id}`, label, icon: Icon }))} />
+      <div className="mb-6 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <SectionTabs label="Administration sections" current={`/settings/admin/${section}`} tabs={ADMIN_TABS.map(([id, Icon, label]) => ({ href: `/settings/admin/${id}`, label, icon: Icon }))} />
+        </div>
+        <Pill tone="accent">Administrator</Pill>
       </div>
       {section === "users" && <PeopleTab />}
       {section === "groups" && <GroupsTab groupId={groupId} />}

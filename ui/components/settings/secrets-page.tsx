@@ -71,7 +71,7 @@ export function SecretDialog({ secret, open, onClose, onSaved }: { secret: Secre
 }
 
 export function SecretsPage() {
-  usePageChrome("Secrets");
+  usePageChrome("Settings › Secrets");
   const capabilities = useCapabilities();
   const enabled = !!capabilities.data?.features?.connections;
   const queries = useQueryClient();

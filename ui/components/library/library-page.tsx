@@ -334,14 +334,14 @@ function GeneratedView() {
 }
 
 export function LibraryPage({ tab, openId }: { tab: "saved" | "generated"; openId?: string }) {
-  usePageChrome(tab === "generated" ? "Generated" : "Library");
+  usePageChrome(tab === "generated" ? "Library › Generated" : "Library");
   const own = useLibraryDialogs();
   const create = (kind: SavedKind) => own.create(kind);
   return (
     <Page wide>
       <PageHeader
-        title="Everything worth keeping."
-        description="Functions, articles, notes and pictures you saved while thinking, and the documents your chats search."
+        title="Library"
+        description={tab === "generated" ? "Pictures made in your chats, kept here to find again." : "Everything worth keeping: functions, articles, notes and pictures you saved while thinking."}
         actions={
           <>
             <Button variant="outline" onClick={() => create("note")}>

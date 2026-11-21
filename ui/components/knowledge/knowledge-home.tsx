@@ -46,7 +46,7 @@ function CollectionCard({ c }: { c: Collection }) {
 type Tab = "all" | "mine" | "shared";
 
 export function KnowledgeHome() {
-  usePageChrome("Collections");
+  usePageChrome("Library › Collections");
   const { data, error, isPending, refetch } = useCollections(true, true);
   const [tab, setTab] = useState<Tab>("all");
   const [creating, setCreating] = useState(false);
@@ -72,7 +72,7 @@ export function KnowledgeHome() {
   );
   return (
     <Page wide>
-      <PageHeader title="Your knowledge, connected." description="A home for the context that makes an answer yours." actions={newButton}>
+      <PageHeader title="Library" description="Your knowledge, connected: documents your chats search and cite, a home for the context that makes an answer yours." actions={newButton}>
         <LibraryTabs />
       </PageHeader>
       <ErrorBox error={error} onRetry={() => refetch()} />

@@ -67,8 +67,8 @@ export function ProjectsHome() {
   return (
     <Page wide>
       <PageHeader
-        title="Projects worth coming back to."
-        description="Instructions, documents and saved things that every chat in the project starts with."
+        title="Projects"
+        description="Projects worth coming back to: instructions, documents and saved things that every chat in the project starts with."
         actions={
           <>
             {isAdmin && (

@@ -47,7 +47,7 @@ export function useStartBuilding() {
 }
 
 export function WorkspacesPage() {
-  usePageChrome("Compute");
+  usePageChrome("Compute › Workspaces");
   const caps = useCapabilities();
   const on = useFeature("workspaces");
   const previews = caps.data?.features?.previews === true;
@@ -68,7 +68,7 @@ export function WorkspacesPage() {
   const items = list.data?.items;
   const limit = list.data?.diskLimit || 0;
   const newProject = (
-    <Button size="sm" onClick={start}>
+    <Button onClick={start}>
       <Plus /> New project
     </Button>
   );

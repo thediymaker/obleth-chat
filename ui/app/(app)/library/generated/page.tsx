@@ -8,7 +8,7 @@ const KnowledgeOnly = dynamic(() => import("@/components/library/library-shell")
 
 export default function Page() {
   return (
-    <KnowledgeOnly page="library" title="Generated">
+    <KnowledgeOnly page="library" title="Library › Generated">
       <Suspense>
         <LibraryPage tab="generated" />
       </Suspense>

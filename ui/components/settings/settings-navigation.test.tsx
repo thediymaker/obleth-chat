@@ -6,7 +6,7 @@ import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { ApiError } from "@/lib/api";
 import { hashPath } from "@/lib/hash-links";
 import { TokensCard } from "./account-cards";
-import { settingsTabs } from "./settings-frame";
+import { SettingsFrame, settingsTabs } from "./settings-frame";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
 vi.mock("next/navigation", () => ({ usePathname: () => "/settings", useRouter: () => ({ push: vi.fn(), replace: vi.fn() }) }));
@@ -34,6 +34,18 @@ test("the Administration tabs are the shared section tabs, one link per section"
   expect(within(nav).getByRole("link", { name: "Groups" })).toHaveAttribute("aria-current", "page");
   expect(within(nav).getByRole("link", { name: "People" })).toHaveAttribute("href", "/settings/admin/users");
   expect(within(nav).getAllByRole("link").length).toBeGreaterThan(5);
+});
+
+test("Settings › Administration has one h1, Settings, and no second Administration heading", () => {
+  mockApi(() => ({}));
+  renderPage(
+    <SettingsFrame>
+      <AdminPage segments={["users"]} />
+    </SettingsFrame>,
+  );
+  expect(screen.getAllByRole("heading", { level: 1 }).map((h) => h.textContent)).toEqual(["Settings"]);
+  expect(screen.queryByRole("heading", { name: "Administration" })).toBeNull();
+  expect(screen.getByText("Administrator")).toBeInTheDocument();
 });
 
 test("administration deep links stay denied without asking for administrator data", async () => {

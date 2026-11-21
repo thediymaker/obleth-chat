@@ -7,7 +7,7 @@ const KnowledgeOnly = dynamic(() => import("@/components/library/library-shell")
 
 export default function Page() {
   return (
-    <KnowledgeOnly page="knowledge" title="Collections">
+    <KnowledgeOnly page="knowledge" title="Library › Collections">
       <KnowledgeHome />
     </KnowledgeOnly>
   );

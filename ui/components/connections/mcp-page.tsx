@@ -16,7 +16,7 @@ import { ConnectionRow, useConnectionManager } from "./connection-dialogs";
 import { kindOf, useConnections } from "./connections";
 
 export function McpServersPage() {
-  usePageChrome("MCP servers");
+  usePageChrome("Settings › MCP servers");
   const { isAdmin } = useSession();
   const capabilities = useCapabilities();
   const enabled = !!capabilities.data?.features?.connections;

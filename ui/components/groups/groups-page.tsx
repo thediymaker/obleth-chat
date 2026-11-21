@@ -81,8 +81,8 @@ export function GroupsPage({ id = "" }: { id?: string }) {
   };
   const head = (
     <PageHeader
-      title="Work with your people."
-      description="A group shares chats, projects and collections with everyone in it. Chats stay private until you share one."
+      title="Groups"
+      description="Work with your people. A group shares chats, projects and collections with everyone in it. Chats stay private until you share one."
       actions={
         canManage && (
           <Button variant="outline" asChild>

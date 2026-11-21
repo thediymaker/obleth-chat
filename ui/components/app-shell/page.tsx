@@ -22,14 +22,36 @@ export function Page({ children, wide: _wide = false, className }: { children: R
   );
 }
 
-/** The heading block: title, one line under it, and actions on the right. */
-export function PageHeader({ title, description, actions, children }: { title: React.ReactNode; description?: React.ReactNode; actions?: React.ReactNode; children?: React.ReactNode }) {
+/** The heading block. The rule for every page: the h1 is the sidebar's name for the
+ *  section and stays the same across its tabs (the top bar says "Section" or
+ *  "Section › Tab"); what the tab is for goes in the description; actions sit on the
+ *  right at the default button size; tabs go in `children`. `breadcrumb` sits above the
+ *  heading and `icon` beside it, for a page inside a section such as one project. */
+export function PageHeader({
+  title,
+  description,
+  actions,
+  icon,
+  breadcrumb,
+  children,
+}: {
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  actions?: React.ReactNode;
+  icon?: React.ReactNode;
+  breadcrumb?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
   return (
     <div className="mb-7 flex flex-col gap-4">
+      {breadcrumb}
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-[26px] leading-tight font-semibold tracking-[-0.6px]">{title}</h1>
-          {description && <p className="mt-2 text-base text-muted-foreground">{description}</p>}
+        <div className="flex min-w-0 flex-1 basis-80 items-start gap-4">
+          {icon}
+          <div className="min-w-0">
+            <h1 className="text-[26px] leading-tight font-semibold tracking-[-0.6px]">{title}</h1>
+            {description && <p className="mt-2 max-w-3xl text-base text-muted-foreground">{description}</p>}
+          </div>
         </div>
         {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>

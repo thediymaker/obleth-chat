@@ -14,9 +14,10 @@ import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Eyebrow, isFeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { useChatStore } from "@/components/chat/chat-provider";
 import { connectionsKey, isDevice, useConnections, type Connection } from "@/components/connections/connections";
-import { CheckField, FormActions, FormDialog, FormError, Note, Pill, SelectField, TextField, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
+import { CheckField, Dropdown, FormActions, FormDialog, FormError, Note, Pill, SelectField, TextField, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { saveSecret, secretsKey, useSecrets } from "@/components/settings/secrets-page";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ComputeOff, ComputeTabs } from "@/components/workspace/compute";
 import { SerialTerminal } from "./serial-terminal";
 import { api } from "@/lib/api";
@@ -130,8 +131,10 @@ function EditDialog({ device, onClose }: { device: Connection | null; onClose: (
   const queries = useQueryClient();
   const { busy, error, onSubmit } = useSubmit(async (form) => {
     if (!device) return;
-    await api.request(`/api/connections/${encodeURIComponent(device.id)}`, { method: "PATCH", body: { name: String(form.get("device-name") || "").trim(), confirmActions: form.get("device-confirm") === "on" } });
+    const name = String(form.get("device-name") || "").trim();
+    await api.request(`/api/connections/${encodeURIComponent(device.id)}`, { method: "PATCH", body: { name, confirmActions: form.get("device-confirm") === "on" } });
     await queries.invalidateQueries({ queryKey: connectionsKey });
+    toast(`${name} saved`);
     onClose();
   });
   return (
@@ -175,13 +178,13 @@ function Monitor({ id }: { id: string }) {
     <div className="grid gap-2">
       <div className="flex flex-wrap items-center gap-2">
         <Eyebrow>Monitor</Eyebrow>
-        <select className="h-7 rounded-md border bg-background px-2 text-sm" value={status.baudRate ?? baud} disabled={status.open || a.device.busy} onChange={(e) => setBaud(Number(e.target.value))} aria-label="Baud rate">
+        <Dropdown className="h-7 w-auto" value={String(status.baudRate ?? baud)} disabled={status.open || a.device.busy} onChange={(e) => setBaud(Number(e.target.value))} aria-label="Baud rate">
           {BAUDS.map((b) => (
-            <option key={b} value={b}>
+            <option key={b} value={String(b)}>
               {b} baud
             </option>
           ))}
-        </select>
+        </Dropdown>
         {status.open ? (
           <Button size="xs" variant="outline" onClick={() => act(() => a.device.close())}>
             Close port
@@ -201,7 +204,7 @@ function Monitor({ id }: { id: string }) {
       </div>
       <div className="relative">
         <SerialTerminal device={a.device} />
-        {!printed && <p className="pointer-events-none absolute inset-x-3 top-2 font-mono text-[12px] text-muted-foreground">{status.open ? "Waiting for output…" : "Open the port to see what the device prints."}</p>}
+        {!printed && <p className="pointer-events-none absolute inset-x-3 top-2 font-mono text-xs text-muted-foreground">{status.open ? "Waiting for output…" : "Open the port to see what the device prints."}</p>}
       </div>
       <form
         className="flex gap-2"
@@ -212,7 +215,7 @@ function Monitor({ id }: { id: string }) {
           void act(() => a.device.writeText(sent));
         }}
       >
-        <input className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 font-mono text-sm" value={line} onChange={(e) => setLine(e.target.value)} placeholder={status.open ? "Send a line…" : "Open the port first"} disabled={!status.open} aria-label="Line to send" />
+        <Input className="h-8 min-w-0 flex-1 font-mono" value={line} onChange={(e) => setLine(e.target.value)} placeholder={status.open ? "Send a line…" : "Open the port first"} disabled={!status.open} aria-label="Line to send" />
         <Button type="submit" size="sm" variant="outline" disabled={!status.open}>
           Send
         </Button>
@@ -282,7 +285,7 @@ function DeviceCard({ c, onEdit, onSignIn, onRemove }: { c: Connection; onEdit: 
           </DangerButton>
         </div>
       </div>
-      {identity && <pre className="rounded-md bg-muted px-3 py-2 font-mono text-[12px] whitespace-pre-wrap">{identity}</pre>}
+      {identity && <pre className="rounded-md bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">{identity}</pre>}
       {a && <Monitor id={c.id} />}
     </article>
   );
@@ -309,7 +312,7 @@ export function DevicesPage() {
   const [editing, setEditing] = useState<Connection | null>(null);
   const [signingIn, setSigningIn] = useState<Connection | null>(null);
   const confirm = useConfirm();
-  usePageChrome("Compute");
+  usePageChrome("Compute › Devices");
   // Ports granted before are tied back to their devices when the page opens.
   useEffect(() => {
     if (list.length && devices.supported()) void devices.restore(list.map(connectionOf));
@@ -332,23 +335,26 @@ export function DevicesPage() {
         await devices.detach(c.id);
         await api.request(`/api/connections/${encodeURIComponent(c.id)}`, { method: "DELETE" });
         await queries.invalidateQueries({ queryKey: connectionsKey });
+        toast(`${c.name} removed`);
       },
     });
   if ((capabilities.data && !on) || isFeatureOff(error))
     return (
       <Page>
-        <ComputeTabs />
+        <PageHeader title="Compute">
+          <ComputeTabs />
+        </PageHeader>
         <ComputeOff page="devices" />
       </Page>
     );
   return (
     <Page>
       <PageHeader
-        title="Devices"
+        title="Compute"
         description="Boards and instruments plugged into your computer, reached through this browser over USB serial. In a chat the model can open the port, read and send, reset, identify the chip and flash firmware built in the workspace."
         actions={
           <Button onClick={add} disabled={!devices.supported()}>
-            <Plus /> Add a device
+            <Plus /> Add device
           </Button>
         }
       >
@@ -360,7 +366,11 @@ export function DevicesPage() {
       ) : isPending ? (
         <Loading />
       ) : list.length === 0 ? (
-        <EmptyState icon={Cpu} title="No devices yet" text="Plug a board in over USB and add it. Espressif chips can be identified and flashed; any serial device can be read and sent to." action={<Button onClick={add} disabled={!devices.supported()}>Add a device</Button>} />
+        <EmptyState icon={Cpu} title="No devices yet" text="Plug a board in over USB and add it. Espressif chips can be identified and flashed; any serial device can be read and sent to." action={
+            <Button onClick={add} disabled={!devices.supported()}>
+              <Plus /> Add device
+            </Button>
+          } />
       ) : (
         <div className="grid gap-3">
           {list.map((c) => (

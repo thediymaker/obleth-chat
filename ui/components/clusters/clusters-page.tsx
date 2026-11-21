@@ -363,7 +363,7 @@ function ClusterCard({ c, s, loading, onRefresh, manager }: { c: Cluster; s?: Cl
 }
 
 export function ClustersPage() {
-  usePageChrome("Compute");
+  usePageChrome("Compute › Clusters");
   const caps = useCapabilities();
   const on = !!caps.data?.features?.connections;
   const queries = useQueryClient();
@@ -392,7 +392,7 @@ export function ClustersPage() {
     })),
   });
   const add = (
-    <Button size="sm" onClick={() => manager.pick(["slurm", "kubernetes"])}>
+    <Button onClick={() => manager.pick(["slurm", "kubernetes"])}>
       <Plus /> Add cluster
     </Button>
   );

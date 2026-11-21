@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod appearance;
 pub mod apps;
 pub mod attachments;
 pub mod audit;
@@ -126,6 +127,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let operations = operations::router(state.clone());
     let retention = retention::router(state.clone());
     let banner = banner::router(state.clone());
+    let appearance = appearance::router(state.clone());
     let attachments = attachments::router(state.clone());
     let images = images::router(state.clone());
     let projects = projects::router(state.clone());
@@ -189,6 +191,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(operations)
         .merge(retention)
         .merge(banner)
+        .merge(appearance)
         .merge(attachments)
         .merge(images)
         .merge(projects)

@@ -223,10 +223,12 @@
   --color-signal: var(--signal);
   --color-signal-foreground: var(--signal-foreground);
 
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: var(--radius);
-  --radius-xl: 12px;
+  /* How round boxes are. A site can set the --corner-* properties (Administration ›
+     Appearance); without them these are Chat's own. */
+  --radius-sm: var(--corner-sm, 4px);
+  --radius-md: var(--corner-md, 6px);
+  --radius-lg: var(--corner-lg, var(--radius));
+  --radius-xl: var(--corner-xl, 12px);
 }
 
 @layer base {

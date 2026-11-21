@@ -5,7 +5,7 @@
 // and /settings/admin/groups/<id> for one group. Only administrators see any of it,
 // and nobody else's browser asks for administrator data.
 
-import { BarChart3, Box, Clock, Gauge, LayoutGrid, Server, Shield, Terminal, ThumbsUp, Users } from "lucide-react";
+import { BarChart3, Box, Clock, Gauge, LayoutGrid, Palette, Server, Shield, Terminal, ThumbsUp, Users } from "lucide-react";
 import Link from "next/link";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState } from "@/components/app-shell/page";
@@ -15,6 +15,7 @@ import { Pill } from "@/components/manage/kit";
 import { SectionHeading } from "@/components/settings/settings-frame";
 import { useSession } from "@/lib/session";
 import { ActivityTab } from "./activity-tab";
+import { AppearanceTab } from "./appearance-tab";
 import { FeedbackTab } from "./feedback-tab";
 import { GroupsTab } from "./groups-tab";
 import { InsightsTab } from "./insights-tab";
@@ -33,6 +34,7 @@ export const ADMIN_TABS = [
   ["workspaces", Terminal, "Workspaces"],
   ["feedback", ThumbsUp, "Feedback"],
   ["audit", Clock, "Activity"],
+  ["appearance", Palette, "Appearance"],
   ["system", Server, "System"],
 ] as const;
 export type AdminSection = (typeof ADMIN_TABS)[number][0];
@@ -76,6 +78,7 @@ export function AdminPage({ segments = [] }: { segments?: string[] }) {
       {section === "workspaces" && <WorkspacesTab />}
       {section === "feedback" && <FeedbackTab />}
       {section === "audit" && <ActivityTab />}
+      {section === "appearance" && <AppearanceTab />}
       {section === "system" && <SystemTab />}
     </div>
   );

@@ -1,13 +1,15 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { defaultBranding, normalizeBranding, type Branding } from "@/lib/branding";
 import { BRAND_ICON_NAMES } from "@/lib/icons";
+import { CORNER_PROPERTIES, cornerProperties, siteAppearance, withAppearance } from "@/lib/site-appearance";
 
 const Context = createContext<Branding>(defaultBranding);
 
 /** The site's branding. /site.config.js loads before the app starts, so it is
- * there on the first client render; the server renders the defaults. */
+ * there on the first client render; the server renders the defaults. What an
+ * administrator set in Administration › Appearance lies over the file's. */
 export function BrandingProvider({ children }: { children: React.ReactNode }) {
   const [branding, setBranding] = useState<Branding>(defaultBranding);
   useEffect(() => {
@@ -24,7 +26,18 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
       link.href = favicon;
     }
   }, []);
-  return <Context.Provider value={branding}>{children}</Context.Provider>;
+  const set = useSyncExternalStore(siteAppearance.subscribe, siteAppearance.get, siteAppearance.server);
+  const shown = useMemo(() => withAppearance(branding, set), [branding, set]);
+  // How round boxes are, on <html> for app/globals.css.
+  useEffect(() => {
+    const style = document.documentElement.style,
+      radii = cornerProperties(set.corners);
+    for (const name of CORNER_PROPERTIES) {
+      if (radii[name]) style.setProperty(name, radii[name]);
+      else style.removeProperty(name);
+    }
+  }, [set.corners]);
+  return <Context.Provider value={shown}>{children}</Context.Provider>;
 }
 
 export const useBranding = () => useContext(Context);

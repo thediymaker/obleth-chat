@@ -94,10 +94,7 @@ async fn send(
     let user = s.auth.require(&headers, true).await?;
     let pool = &s.store.pool;
     if mode(pool).await? == "off" {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Feedback is turned off on this site".into(),
-        ));
+        return Err(ApiError::denied("Feedback is turned off on this site"));
     }
     let feedback = clean(&body)?;
     let today: i64 = sqlx::query_scalar(
@@ -107,10 +104,9 @@ async fn send(
     .fetch_one(pool)
     .await?;
     if today >= DAILY_LIMIT {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!("You can send {DAILY_LIMIT} a day. Try again tomorrow."),
-        ));
+        return Err(ApiError::too_many(format!(
+            "You can send {DAILY_LIMIT} a day. Try again tomorrow."
+        )));
     }
     let id = Uuid::new_v4();
     sqlx::query(

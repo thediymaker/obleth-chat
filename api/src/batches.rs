@@ -87,12 +87,10 @@ pub fn router(state: AppState) -> Router {
 }
 
 fn gateway(state: &AppState) -> Result<&Gateway, ApiError> {
-    state.gateway.as_ref().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Batches need the gateway, which isn't set up here".into(),
-        )
-    })
+    state
+        .gateway
+        .as_ref()
+        .ok_or_else(crate::gateway::not_configured)
 }
 
 fn valid_id(id: &str) -> bool {
@@ -125,7 +123,7 @@ async fn refused(response: reqwest::Response) -> ApiError {
                 413 => StatusCode::PAYLOAD_TOO_LARGE,
                 _ => StatusCode::BAD_REQUEST,
             };
-            ApiError(code, message)
+            ApiError::new(code, message)
         }
         _ => upstream_error(response).await,
     }
@@ -151,10 +149,9 @@ async fn json_of(response: reqwest::Response) -> Result<Value, ApiError> {
         .await
         .map_err(|read| match read {
             crate::http::Read::Closed => crate::gateway::unavailable(),
-            crate::http::Read::TooLarge => ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The results are too large to put together here".into(),
-            ),
+            crate::http::Read::TooLarge => {
+                ApiError::upstream("The results are too large to put together here")
+            }
         })?;
     serde_json::from_slice(&bytes).map_err(|_| crate::gateway::unavailable())
 }
@@ -561,9 +558,9 @@ fn input_file(batch: &NewBatch) -> Result<(Vec<u8>, usize), ApiError> {
         out.push(b'\n');
         sent += 1;
         if out.len() > MAX_FILE {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "The prompts add up to more than one batch can hold. Split the spreadsheet.".into(),
+                "The prompts add up to more than one batch can hold. Split the spreadsheet.",
             ));
         }
     }
@@ -708,10 +705,7 @@ async fn create(
     let _turn = tokio::time::timeout(READING_WAIT, READING.acquire())
         .await
         .map_err(|_| {
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Other spreadsheets are being started. Try again in a moment.".into(),
-            )
+            ApiError::unavailable("Other spreadsheets are being started. Try again in a moment.")
         })?
         .map_err(|_| ApiError::internal())?;
     let body =
@@ -859,10 +853,9 @@ async fn update(
         Some(n) => {
             let n = n.trim();
             if n.chars().count() > MAX_NAME {
-                return Err(ApiError(
-                    StatusCode::BAD_REQUEST,
-                    format!("A name can be up to {MAX_NAME} characters"),
-                ));
+                return Err(ApiError::bad(format!(
+                    "A name can be up to {MAX_NAME} characters"
+                )));
             }
             (!n.is_empty()).then(|| n.to_string())
         }
@@ -919,9 +912,9 @@ async fn remove(
         let request = gw.http().get(gw.url(&format!("v1/batches/{id}")));
         let still = gw.send(&user, request.timeout(LOOKUP_TIMEOUT)).await?;
         if still.status().is_success() {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::NOT_IMPLEMENTED,
-                "This gateway can't delete batches yet".into(),
+                "This gateway can't delete batches yet",
             ));
         }
     }
@@ -1004,12 +997,9 @@ async fn read_outcomes(
     let mut line: Vec<u8> = Vec::new();
     while let Some(part) = stream.next().await {
         let part = part.map_err(|_| crate::gateway::unavailable())?;
-        *left = left.checked_sub(part.len()).ok_or_else(|| {
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The results are too large to put together here".into(),
-            )
-        })?;
+        *left = left
+            .checked_sub(part.len())
+            .ok_or_else(|| ApiError::upstream("The results are too large to put together here"))?;
         let mut rest = &part[..];
         while let Some(end) = rest.iter().position(|b| *b == b'\n') {
             line.extend_from_slice(&rest[..end]);
@@ -1164,10 +1154,7 @@ async fn results(
     let turn = tokio::time::timeout(DOWNLOAD_WAIT, DOWNLOADS.acquire())
         .await
         .map_err(|_| {
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Other results are being put together. Try again in a moment.".into(),
-            )
+            ApiError::unavailable("Other results are being put together. Try again in a moment.")
         })?
         .map_err(|_| ApiError::internal())?;
     let mut outcomes = HashMap::new();

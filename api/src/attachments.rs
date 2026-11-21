@@ -428,13 +428,16 @@ async fn upload(
             .and_then(|v| v.trim().parse::<u64>().ok())
             .or(size_hint)
             .ok_or_else(|| {
-                ApiError(
+                ApiError::new(
                     StatusCode::LENGTH_REQUIRED,
-                    "Send the upload with its size (Content-Length)".into(),
+                    "Send the upload with its size (Content-Length)",
                 )
             })?;
         if declared > most as u64 {
-            return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, too_large.clone()));
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                too_large.clone(),
+            ));
         }
         Ok::<_, ApiError>((user, declared as usize))
     };
@@ -565,13 +568,10 @@ async fn insert_in(
     .await?;
     let (max_files, quota) = (limits.max_files, limits.quota_bytes);
     if count >= max_files || bytes + i64::from(file.meta.size) > quota {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            format!(
+        return Err(ApiError::conflict(format!(
                 "Your file storage is full: you can keep {max_files} files and {} in all. Delete files you no longer need before uploading more.",
                 size_label(quota as usize)
-            ),
-        ));
+            )));
     }
     sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,object_key,sha256,extracted_text,parts,searched)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
         .bind(file.meta.id).bind(owner).bind(&file.meta.name).bind(&file.meta.mime_type)
@@ -718,7 +718,7 @@ async fn delete(
     .fetch_one(&mut *tx)
     .await?;
     if used {
-        return Err(ApiError(StatusCode::CONFLICT,"This file is used by a saved conversation. Delete those conversations before deleting the file.".into()));
+        return Err(ApiError::conflict("This file is used by a saved conversation. Delete those conversations before deleting the file."));
     }
     sqlx::query("DELETE FROM attachments WHERE id=$1 AND owner_id=$2")
         .bind(id)
@@ -860,9 +860,8 @@ pub async fn link_message(
             .fetch_one(&mut **tx)
             .await?;
     if linked {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "Files have already been attached to this message".into(),
+        return Err(ApiError::conflict(
+            "Files have already been attached to this message",
         ));
     }
     sqlx::query("INSERT INTO message_attachments(message_id,attachment_id,position) SELECT $1,id,(ordinality-1)::SMALLINT FROM UNNEST($2::UUID[]) WITH ORDINALITY AS files(id,ordinality)")

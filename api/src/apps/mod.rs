@@ -237,10 +237,7 @@ async fn create(
             Ok(Some(app)) => return Ok((StatusCode::CREATED, Json(json!({"app": app.view()})))),
             Ok(None) => continue,
             Err(sqlx::Error::Database(e)) if e.constraint() == Some("apps_project_id_key") => {
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    "This project already has an app".into(),
-                ))
+                return Err(ApiError::conflict("This project already has an app"))
             }
             Err(e) => return Err(e.into()),
         }
@@ -389,7 +386,7 @@ async fn execute(
     key: Option<Uuid>,
 ) -> Result<Outcome, ApiError> {
     let inputs = engine::inputs(&definition, given)
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let pool = &state.store.pool;
     let version = if trigger == "test" { 0 } else { app.version };
     let run: Uuid = sqlx::query_scalar(
@@ -477,12 +474,9 @@ async fn test(
     let (user, app) = editable(&state, &headers, &id, true).await?;
     let definition: Definition = serde_json::from_value(app.draft.clone())
         .map_err(|_| ApiError::bad("Save the steps again"))?;
-    let _slot = CALLS.try_acquire().map_err(|_| {
-        ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many runs at once; try again shortly".into(),
-        )
-    })?;
+    let _slot = CALLS
+        .try_acquire()
+        .map_err(|_| ApiError::too_many("Too many runs at once; try again shortly"))?;
     let outcome = execute(&state, &app, definition, &body.inputs, user, "test", None).await?;
     Ok(Json(outcome.view()))
 }
@@ -515,12 +509,7 @@ async fn call(
         None => None,
     }
     .filter(|u| u.role == Role::Admin)
-    .ok_or_else(|| {
-        ApiError(
-            StatusCode::FORBIDDEN,
-            "The person who made this key can no longer run apps".into(),
-        )
-    })?;
+    .ok_or_else(|| ApiError::denied("The person who made this key can no longer run apps"))?;
     let app = sqlx::query_as::<_, App>(&format!("SELECT {APP_COLUMNS} FROM apps WHERE id = $1"))
         .bind(&id)
         .fetch_optional(pool)
@@ -529,14 +518,11 @@ async fn call(
     let live = app
         .live
         .clone()
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "This app isn't published".into()))?;
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "This app isn't published"))?;
     let definition: Definition = serde_json::from_value(live).map_err(|_| ApiError::internal())?;
-    let _slot = CALLS.try_acquire().map_err(|_| {
-        ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many runs at once; try again shortly".into(),
-        )
-    })?;
+    let _slot = CALLS
+        .try_acquire()
+        .map_err(|_| ApiError::too_many("Too many runs at once; try again shortly"))?;
     let given = body.map(|Json(v)| v).unwrap_or(Value::Null);
     let outcome = execute(&state, &app, definition, &given, user, "api", Some(key)).await?;
     let body = json!({"runId": outcome.id, "status": outcome.status, "output": outcome.output, "error": outcome.error});
@@ -630,7 +616,7 @@ async fn live_app(
     let live = app
         .live
         .clone()
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "This app isn't published".into()))?;
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "This app isn't published"))?;
     let definition: Definition = serde_json::from_value(live).map_err(|_| ApiError::internal())?;
     Ok((user, app, definition))
 }
@@ -724,12 +710,9 @@ async fn chat(
         turns.reverse();
         given["history"] = serde_json::to_value(turns).map_err(|_| ApiError::internal())?;
     }
-    let _slot = CALLS.try_acquire().map_err(|_| {
-        ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many runs at once; try again shortly".into(),
-        )
-    })?;
+    let _slot = CALLS
+        .try_acquire()
+        .map_err(|_| ApiError::too_many("Too many runs at once; try again shortly"))?;
     let outcome = execute(&state, &app, definition, &given, user, "chat", None).await?;
     Ok(Json(
         json!({"runId": outcome.id, "status": outcome.status, "output": outcome.output, "error": outcome.error}),

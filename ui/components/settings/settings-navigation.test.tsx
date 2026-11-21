@@ -45,7 +45,7 @@ test("administration deep links stay denied without asking for administrator dat
 });
 
 test("a token refused for an old sign-in offers to sign in again", async () => {
-  let answer: () => unknown = () => new ApiError("Sign in again to create a token", 403);
+  let answer: () => unknown = () => new ApiError("Sign in again to create a token", 403, "stale_sign_in");
   const calls = mockApi((_path, options) => (options.method === "POST" ? answer() : {}));
   const { session } = renderPage(<TokensCard tokens={[]} onChange={() => {}} />);
   const create = async () => {

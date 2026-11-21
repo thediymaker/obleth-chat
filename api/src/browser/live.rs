@@ -10,7 +10,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap},
     response::Response,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -43,16 +43,10 @@ pub async fn open(
     // Cookies ride along on cross-site WebSockets, so only Chat's own pages may connect.
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
     if origin != Some(browsers.chat_origin()) {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Cross-origin WebSocket refused".into(),
-        ));
+        return Err(ApiError::denied("Cross-origin WebSocket refused"));
     }
     if !browsers.is_on(user.id, id).await {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "The browser is off in this chat".into(),
-        ));
+        return Err(ApiError::conflict("The browser is off in this chat"));
     }
     // Watching does not start a sleeping browser unless asked to.
     let running = browsers
@@ -60,15 +54,12 @@ pub async fn open(
         .await?
         .is_some_and(|b| b.status == "running");
     if !running && !matches!(query.wake.as_deref(), Some("1" | "true")) {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "The browser is asleep".into(),
-        ));
+        return Err(ApiError::conflict("The browser is asleep"));
     }
     let page = browsers
         .open(user.id, id)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+        .map_err(ApiError::upstream)?;
     Ok(upgrade.on_upgrade(move |client| bridge(client, page, browsers, user.id, id)))
 }
 

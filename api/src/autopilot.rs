@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::auth::grants::SIGN_IN_AGAIN;
 use crate::background::identity_of;
+use crate::error::code;
 use crate::lifecycle::TurnEnd;
 use crate::worker::{self, Start};
 use crate::{launch_turn, models, AppState, Launch, PAUSED};
@@ -178,7 +179,7 @@ pub async fn tick(s: &AppState) -> Result<(), sqlx::Error> {
             }
             // Without a way to reach the models for this person, nudging again
             // would only fail again: the chat waits until they sign in and write.
-            Err(error) if error.1.starts_with(SIGN_IN_AGAIN) => {
+            Err(error) if error.code() == Some(code::SIGN_IN_AGAIN) => {
                 tracing::info!(conversation = %id, "auto mode stopped: its owner must sign in again");
                 sqlx::query("UPDATE conversations SET auto_nudges = $2 WHERE id = $1")
                     .bind(id)

@@ -8,7 +8,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap},
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -34,10 +34,7 @@ pub async fn open(
     // Cookies ride along on cross-site WebSockets, so only Chat's own pages may connect.
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
     if origin != Some(sandboxes.config().chat_origin.as_str()) {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Cross-origin WebSocket refused".into(),
-        ));
+        return Err(ApiError::denied("Cross-origin WebSocket refused"));
     }
     let sandbox = sandboxes
         .get(user.id, id)
@@ -46,17 +43,14 @@ pub async fn open(
     let sandbox = sandboxes
         .ensure_running(&sandbox)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+        .map_err(ApiError::upstream)?;
     let script = tools::in_project(&sandboxes, &sandbox, SHELL);
     let shell = sandboxes
         .exec_socket(&sandbox, &["sh", "-c", &script])
         .await
         .map_err(|error| {
             tracing::warn!("could not open a workspace terminal: {error:#}");
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The terminal could not start".into(),
-            )
+            ApiError::upstream("The terminal could not start")
         })?;
     Ok(upgrade.on_upgrade(move |client| bridge(client, shell, sandboxes, sandbox)))
 }

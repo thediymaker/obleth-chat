@@ -88,10 +88,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-fn bad(message: &str) -> ApiError {
-    ApiError(StatusCode::BAD_REQUEST, message.into())
-}
-
 fn project_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"description":r.get::<String,_>("description"),
         "instructions":r.get::<String,_>("instructions"),"color":r.get::<String,_>("color"),"scope":r.get::<String,_>("scope"),
@@ -152,11 +148,11 @@ async fn check_scope(
     match scope {
         "personal" => Ok(None),
         "group" => {
-            let group = group.ok_or_else(|| bad("Choose a group to share it with"))?;
+            let group = group.ok_or_else(|| ApiError::bad("Choose a group to share it with"))?;
             crate::groups::may_share(pool, user, group, current).await?;
             Ok(Some(group))
         }
-        _ => Err(bad("Sharing must be personal or group")),
+        _ => Err(ApiError::bad("Sharing must be personal or group")),
     }
 }
 
@@ -166,28 +162,28 @@ fn clean(input: &Input) -> Result<(), ApiError> {
         .as_ref()
         .is_some_and(|n| n.trim().is_empty() || n.trim().chars().count() > 120)
     {
-        return Err(bad("Names are 1 to 120 characters"));
+        return Err(ApiError::bad("Names are 1 to 120 characters"));
     }
     if input
         .description
         .as_ref()
         .is_some_and(|d| d.chars().count() > 1000)
     {
-        return Err(bad("Descriptions are up to 1,000 characters"));
+        return Err(ApiError::bad("Descriptions are up to 1,000 characters"));
     }
     if input
         .instructions
         .as_ref()
         .is_some_and(|d| d.chars().count() > 20000)
     {
-        return Err(bad("Instructions are up to 20,000 characters"));
+        return Err(ApiError::bad("Instructions are up to 20,000 characters"));
     }
     if input
         .color
         .as_ref()
         .is_some_and(|c| !COLORS.contains(&c.as_str()))
     {
-        return Err(bad("Unknown color"));
+        return Err(ApiError::bad("Unknown color"));
     }
     Ok(())
 }
@@ -204,7 +200,7 @@ async fn create(
         .as_deref()
         .map(str::trim)
         .filter(|n| !n.is_empty())
-        .ok_or_else(|| bad("Give the project a name"))?;
+        .ok_or_else(|| ApiError::bad("Give the project a name"))?;
     let scope = body.scope.clone().unwrap_or_else(|| "personal".into());
     let group = check_scope(&s.store.pool, &user, &scope, body.group_id, None).await?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE owner_id=$1")
@@ -212,7 +208,9 @@ async fn create(
         .fetch_one(&s.store.pool)
         .await?;
     if count >= MAX_PROJECTS {
-        return Err(bad("You have 200 projects, the most there can be"));
+        return Err(ApiError::bad(
+            "You have 200 projects, the most there can be",
+        ));
     }
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO projects (id, owner_id, name, description, instructions, color, scope, group_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
@@ -315,10 +313,7 @@ pub(crate) async fn owned(pool: &PgPool, user: Uuid, id: Uuid) -> Result<(), Api
     .await?;
     match owner {
         Some(owner) if owner == user => Ok(()),
-        Some(_) => Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only the project's owner can change it".into(),
-        )),
+        Some(_) => Err(ApiError::denied("Only the project's owner can change it")),
         None => Err(ApiError::not_found()),
     }
 }
@@ -414,7 +409,7 @@ async fn set_collections(
     let pool = &s.store.pool;
     owned(pool, user.id, id).await?;
     if body.collection_ids.len() > MAX_COLLECTIONS {
-        return Err(bad("A project can search up to 8 collections"));
+        return Err(ApiError::bad("A project can search up to 8 collections"));
     }
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM project_collections WHERE project_id = $1")
@@ -483,7 +478,9 @@ async fn set_conversation_project(
     if let Some(project) = body.project_id {
         one(pool, user.id, project).await?;
         if crate::store::is_temporary(pool, user.id, id).await? {
-            return Err(bad("A temporary chat can't be moved into a project"));
+            return Err(ApiError::bad(
+                "A temporary chat can't be moved into a project",
+            ));
         }
     }
     let done =

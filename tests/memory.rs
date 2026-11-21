@@ -732,7 +732,7 @@ async fn people_see_change_and_delete_their_memories(pool: PgPool) {
     // Off on the server: the page says so, and nothing can be added.
     let (_, page) = call(&app, &person, "GET", "/api/memory", Value::Null).await;
     assert_eq!(page["available"], false);
-    let (status, _) = call(
+    let (status, refused) = call(
         &app,
         &person,
         "POST",
@@ -740,7 +740,8 @@ async fn people_see_change_and_delete_their_memories(pool: PgPool) {
         json!({"content": "You teach CHM 501"}),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(refused["error"]["code"], "feature_off");
     let (status, _) = call(
         &app,
         &person,

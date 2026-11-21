@@ -189,7 +189,7 @@ export function TokenDialog({ step, onStep, onCreated }: { step: TokenStep; onSt
       });
     } catch (e) {
       // Making a token needs a sign-in from the last few minutes: offer one instead of a dead end.
-      if (e instanceof ApiError && e.status === 403 && e.message === STALE_SIGN_IN) {
+      if (e instanceof ApiError && e.code === "stale_sign_in") {
         setStaleMessage(e.message);
         onStep("stale");
         return;

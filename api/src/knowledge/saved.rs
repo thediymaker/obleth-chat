@@ -2,7 +2,7 @@
 //! Each item is one searchable unit with its own embedding, found by `search_knowledge`
 //! alongside collection passages, and listed in Library.
 
-use super::{bad, knowledge, vector_literal, words, Hit, Knowledge};
+use super::{knowledge, vector_literal, words, Hit, Knowledge};
 use crate::paging::PageQuery;
 use crate::{auth::Identity, background::identity_of, error::ApiError, gateway::Gateway, AppState};
 use axum::{
@@ -97,7 +97,7 @@ impl Knowledge {
     ) -> Result<Value, ApiError> {
         let kind = input.kind.unwrap_or_else(|| "note".into());
         if !KINDS.contains(&kind.as_str()) {
-            return Err(bad("Kind must be code, note, link or excerpt"));
+            return Err(ApiError::bad("Kind must be code, note, link or excerpt"));
         }
         let title: String = input
             .title
@@ -113,7 +113,7 @@ impl Knowledge {
             .filter(|u| !u.is_empty());
         if let Some(url) = &url {
             if url.len() > 2048 || !(url.starts_with("https://") || url.starts_with("http://")) {
-                return Err(bad("Links must be http(s) addresses"));
+                return Err(ApiError::bad("Links must be http(s) addresses"));
             }
         }
         let title = if title.is_empty() {
@@ -123,12 +123,12 @@ impl Knowledge {
                         .find(|l| !l.trim().is_empty())
                         .map(|l| l.trim().chars().take(80).collect())
                 })
-                .ok_or_else(|| bad("Give it a title"))?
+                .ok_or_else(|| ApiError::bad("Give it a title"))?
         } else {
             title
         };
         if body.len() > MAX_BODY {
-            return Err(bad("Saved items are up to 64 KB"));
+            return Err(ApiError::bad("Saved items are up to 64 KB"));
         }
         let tags = clean_tags(&input.tags.unwrap_or_default());
         let language: String = input
@@ -150,7 +150,7 @@ impl Knowledge {
             .await?
             {
                 Some(true) => {
-                    return Err(bad(
+                    return Err(ApiError::bad(
                         "Nothing in a temporary chat can be saved to the Library",
                     ))
                 }
@@ -176,7 +176,7 @@ impl Knowledge {
             .fetch_one(&self.pool)
             .await?;
         if count >= MAX_ITEMS {
-            return Err(bad(
+            return Err(ApiError::bad(
                 "You have 5,000 saved items, the most there can be. Delete some first.",
             ));
         }
@@ -487,36 +487,38 @@ async fn list(
         Some(p) => Some(usable_project(&k.pool, user.id, p).await?),
         None => None,
     };
-    let scope = match project {
-        Some(p) => format!("s.project_id = '{p}'"),
-        None => "s.owner_id = $1".into(),
-    };
     let base = format!(
         "SELECT {COLUMNS} FROM saved_items s LEFT JOIN conversations c ON c.id = s.source_conversation_id AND c.owner_id = $1
-         WHERE {scope} AND ($2::text IS NULL OR s.kind=$2) AND ($3::text IS NULL OR $3 = ANY(s.tags))"
+         WHERE CASE WHEN $4::uuid IS NULL THEN s.owner_id = $1 ELSE s.project_id = $4 END
+           AND ($2::text IS NULL OR s.kind=$2) AND ($3::text IS NULL OR $3 = ANY(s.tags))"
     );
     let (items, more) = if query.trim().is_empty() {
         let rows = sqlx::query(&format!(
-            "{base} ORDER BY s.pinned DESC, s.created_at DESC LIMIT $4 OFFSET $5"
+            "{base} ORDER BY s.pinned DESC, s.created_at DESC LIMIT $5 OFFSET $6"
         ))
         .bind(user.id)
         .bind(&kind)
         .bind(&tag)
+        .bind(project)
         .bind(page.fetch())
         .bind(page.offset)
         .fetch_all(&k.pool)
         .await?;
         page.cut(rows.iter().map(item_json).collect())
     } else {
-        let gateway = s.gateway.as_ref().ok_or_else(crate::gateway::unavailable)?;
+        let gateway = s
+            .gateway
+            .as_ref()
+            .ok_or_else(crate::gateway::not_configured)?;
         let ranked = k
             .rank_saved(gateway, &user, &query, false, project, page.limit as usize)
             .await?;
         let ids: Vec<Uuid> = ranked.iter().map(|r| r.0).collect();
-        let rows = sqlx::query(&format!("{base} AND s.id = ANY($4)"))
+        let rows = sqlx::query(&format!("{base} AND s.id = ANY($5)"))
             .bind(user.id)
             .bind(&kind)
             .bind(&tag)
+            .bind(project)
             .bind(&ids)
             .fetch_all(&k.pool)
             .await?;
@@ -582,9 +584,8 @@ async fn update(
     let k = knowledge(&s)?;
     let current = k.item(user.id, id).await?;
     if current["ownerId"] != json!(user.id) {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only the person who saved it can change it".into(),
+        return Err(ApiError::denied(
+            "Only the person who saved it can change it",
         ));
     }
     let project: Option<Uuid> = match body.project_id {
@@ -601,15 +602,15 @@ async fn update(
         .map(|t| t.trim().chars().take(200).collect())
         .unwrap_or_else(|| text("title"));
     if title.is_empty() {
-        return Err(bad("Give it a title"));
+        return Err(ApiError::bad("Give it a title"));
     }
     let item_body = body.body.unwrap_or_else(|| text("body"));
     if item_body.len() > MAX_BODY {
-        return Err(bad("Saved items are up to 64 KB"));
+        return Err(ApiError::bad("Saved items are up to 64 KB"));
     }
     let kind = body.kind.unwrap_or_else(|| text("kind"));
     if !KINDS.contains(&kind.as_str()) {
-        return Err(bad("Kind must be code, note, link or excerpt"));
+        return Err(ApiError::bad("Kind must be code, note, link or excerpt"));
     }
     let tags = match body.tags {
         Some(tags) => clean_tags(&tags),

@@ -659,19 +659,15 @@ async fn cancel_run(
     let user = s.auth.require(&headers, true).await?;
     let (research, _) = run_of(&s.store.pool, user.id, run).await?;
     if research.owner_id != user.id {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only the person running this research can stop its runs".into(),
+        return Err(ApiError::denied(
+            "Only the person running this research can stop its runs",
         ));
     }
     let sb = s.sandboxes.as_ref().ok_or_else(ApiError::not_found)?;
     if cancel(&s.store.pool, sb, &research, run).await {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError(
-            StatusCode::CONFLICT,
-            "This run is not running".into(),
-        ))
+        Err(ApiError::conflict("This run is not running"))
     }
 }
 

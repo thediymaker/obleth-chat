@@ -203,13 +203,12 @@ async fn reserve_kind_in(
     let limits = limits_in(tx, owner).await?;
     let active:i64=sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM conversations WHERE owner_id=$1 AND active_generation IS NOT NULL AND generation_expires>NOW()) + (SELECT COUNT(*) FROM generation_usage WHERE user_id=$1 AND status='reserved' AND purpose='follow_up' AND reservation_expires>NOW())").bind(owner).fetch_one(&mut **tx).await?;
     if active >= limits.concurrent_requests {
-        return Err(ApiError(StatusCode::TOO_MANY_REQUESTS,format!("Your account allows {} responses at once. Stop or wait for a response before starting another.",limits.concurrent_requests)));
+        return Err(ApiError::too_many(format!("Your account allows {} responses at once. Stop or wait for a response before starting another.",limits.concurrent_requests)));
     }
     let (requests,tokens,reserved):(i64,i64,i64)=sqlx::query_as(&format!("SELECT COUNT(*),COALESCE(SUM(COALESCE(total_tokens,charged_tokens)),0)::bigint,COALESCE(SUM(CASE WHEN status='reserved' AND {LIVE} THEN reserved_output_tokens ELSE 0 END),0)::bigint FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')")).bind(owner).fetch_one(&mut **tx).await?;
     if limits.daily_requests.is_some_and(|limit| requests >= limit) {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Your daily Chat request limit has been reached. It resets at 00:00 UTC.".into(),
+        return Err(ApiError::too_many(
+            "Your daily Chat request limit has been reached. It resets at 00:00 UTC.",
         ));
     }
     if limits.daily_tokens.is_some_and(|limit| {
@@ -218,7 +217,7 @@ async fn reserve_kind_in(
             .saturating_add(i64::from(max_tokens))
             > limit
     }) {
-        return Err(ApiError(StatusCode::TOO_MANY_REQUESTS,"Your daily token allowance cannot reserve this output budget. Lower Maximum output tokens or wait until 00:00 UTC.".into()));
+        return Err(ApiError::too_many("Your daily token allowance cannot reserve this output budget. Lower Maximum output tokens or wait until 00:00 UTC."));
     }
     sqlx::query("INSERT INTO generation_usage(generation_id,user_id,reserved_output_tokens,context_bytes,purpose,reservation_expires,model)VALUES($1,$2,$3,$4,$5,CASE WHEN $6 THEN NOW()+make_interval(secs=>$7) ELSE NULL END,$8)").bind(generation).bind(owner).bind(i64::from(max_tokens)).bind(context_bytes).bind(leased.map_or("chat", |(purpose, _)| purpose)).bind(leased.is_some()).bind(leased.map_or(0, |(_, secs)| secs) as f64).bind(model).execute(&mut **tx).await?;
     Ok(())

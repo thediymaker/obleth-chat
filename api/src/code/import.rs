@@ -4,12 +4,12 @@
 //! the latest version. A token for a private repository is used for that fetch and
 //! never stored.
 
-use super::repo::{self, conflict, Repo, MAX_TRANSFER};
+use super::repo::{self, Repo, MAX_TRANSFER};
 use super::{author, workspace::Author};
 use crate::{agents, connections::mcp::is_public, error::ApiError, AppState};
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     routing::post,
     Json, Router,
 };
@@ -68,9 +68,8 @@ async fn import(
             .fetch_optional(pool)
             .await?;
     if owned.is_none() {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only the project's owner can start its code from a repository".into(),
+        return Err(ApiError::denied(
+            "Only the project's owner can start its code from a repository",
         ));
     }
     let token = body
@@ -162,7 +161,7 @@ pub async fn start_within(
         .await?
         .is_some()
     {
-        return Err(conflict("This project already has code"));
+        return Err(ApiError::conflict("This project already has code"));
     }
     let mut env: Vec<(String, String)> =
         vec![("GIT_CONFIG_COUNT".into(), source.config.len().to_string())];
@@ -268,7 +267,9 @@ pub async fn start_within(
     }
     let (main, commits) = match repo::advance(pool, project, user, None, &bundle).await? {
         repo::Advance::Moved { main, commits } => (main, commits),
-        repo::Advance::Stale { .. } => return Err(conflict("This project already has code")),
+        repo::Advance::Stale { .. } => {
+            return Err(ApiError::conflict("This project already has code"))
+        }
     };
     sqlx::query("UPDATE project_code SET origin_url = $2, origin_sha = $3, origin_history = $4 WHERE project_id = $1")
         .bind(project)

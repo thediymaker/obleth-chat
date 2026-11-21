@@ -622,16 +622,10 @@ fn resolve_from_catalog(
     let model = auto
         .as_ref()
         .or_else(|| models.iter().find(|m| m.id == requested_model))
-        .ok_or_else(|| {
-            ApiError(
-                StatusCode::FORBIDDEN,
-                "This model is not available to your account".into(),
-            )
-        })?;
+        .ok_or_else(|| ApiError::denied("This model is not available to your account"))?;
     if !model.available {
-        return Err(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "This model is currently unavailable. Choose another model or try again later.".into(),
+        return Err(ApiError::unavailable(
+            "This model is currently unavailable. Choose another model or try again later.",
         ));
     }
     let mut parameters = json!(model.defaults);
@@ -648,10 +642,9 @@ fn resolve_from_catalog(
             .get(key)
             .is_some_and(|value| value != &parameters[key])
         {
-            return Err(ApiError(
-                StatusCode::FORBIDDEN,
-                format!("Your administrator has locked {key} for this model"),
-            ));
+            return Err(ApiError::denied(format!(
+                "Your administrator has locked {key} for this model"
+            )));
         }
     }
     let mut parameters: GenerationParameters =
@@ -708,12 +701,10 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 fn gateway(state: &AppState) -> Result<&Gateway, ApiError> {
-    state.gateway.as_ref().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Gateway integration is not configured".into(),
-        )
-    })
+    state
+        .gateway
+        .as_ref()
+        .ok_or_else(crate::gateway::not_configured)
 }
 async fn catalog(
     State(state): State<AppState>,
@@ -784,25 +775,6 @@ async fn admin_catalog(
         json!({"models":effective_catalog(&state.store.pool,gateway(&state)?,&user,true).await?}),
     ))
 }
-async fn admin_transaction(
-    pool: &PgPool,
-    user: Uuid,
-) -> Result<Transaction<'_, Postgres>, ApiError> {
-    let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(7346281951102)")
-        .execute(&mut *tx)
-        .await?;
-    let allowed: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND enabled AND role='admin')",
-    )
-    .bind(user)
-    .fetch_one(&mut *tx)
-    .await?;
-    if !allowed {
-        return Err(ApiError::forbidden());
-    }
-    Ok(tx)
-}
 async fn save_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -819,7 +791,7 @@ async fn save_profile(
         .into_iter()
         .find(|model| model.id == id)
         .ok_or_else(ApiError::not_found)?;
-    let mut tx = admin_transaction(&state.store.pool, user.id).await?;
+    let mut tx = crate::operations::admin_transaction(&state.store.pool, user.id).await?;
     if !body.group_ids.is_empty() {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_groups WHERE id=ANY($1)")
             .bind(&body.group_ids)
@@ -924,7 +896,7 @@ async fn save_certification(
     };
     let certification = json!({"score": body.score, "passed": body.passed, "total": body.total, "suite": suite, "at": at});
     let name: String = id.chars().take(120).collect();
-    let mut tx = admin_transaction(&state.store.pool, user.id).await?;
+    let mut tx = crate::operations::admin_transaction(&state.store.pool, user.id).await?;
     let actions: String = sqlx::query_scalar(
         "INSERT INTO model_profiles (model_id,name,certification) VALUES($1,$2,$3) ON CONFLICT(model_id) DO UPDATE SET certification=EXCLUDED.certification,updated_at=NOW() RETURNING actions",
     )
@@ -956,7 +928,7 @@ async fn clear_certification(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let user = state.auth.require_admin(&headers, true).await?;
-    let mut tx = admin_transaction(&state.store.pool, user.id).await?;
+    let mut tx = crate::operations::admin_transaction(&state.store.pool, user.id).await?;
     let cleared = sqlx::query(
         "UPDATE model_profiles SET certification=NULL, updated_at=NOW() WHERE model_id=$1 AND certification IS NOT NULL",
     )
@@ -1004,7 +976,7 @@ async fn save_short_list(
     if models.iter().any(|id| !valid_model(id) || id == "auto") {
         return Err(ApiError::bad("Choose explicit gateway models"));
     }
-    let mut tx = admin_transaction(&state.store.pool, user.id).await?;
+    let mut tx = crate::operations::admin_transaction(&state.store.pool, user.id).await?;
     sqlx::query("DELETE FROM model_short_list WHERE NOT (model_id = ANY($1))")
         .bind(&models)
         .execute(&mut *tx)
@@ -1366,10 +1338,7 @@ async fn save_preset(
         Ok(Some(preset)) => preset,
         Ok(None) => return Err(ApiError::not_found()),
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "A preset with this name already exists".into(),
-            ))
+            return Err(ApiError::conflict("A preset with this name already exists"))
         }
         Err(error) => return Err(error.into()),
     };

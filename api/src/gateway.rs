@@ -239,10 +239,8 @@ impl Gateway {
             }
         }
         let signer = self.signer.as_ref().ok_or_else(|| {
-            ApiError(
-                StatusCode::FORBIDDEN,
-                "This account can't use the models here. Sign in with single sign-on instead."
-                    .into(),
+            ApiError::denied(
+                "This account can't use the models here. Sign in with single sign-on instead.",
             )
         })?;
         let mut value = reqwest::header::HeaderValue::from_str(&format!(
@@ -464,9 +462,8 @@ impl Gateway {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.starts_with("text/event-stream"))
         {
-            return Err(ChatFailure::Refused(ApiError(
-                StatusCode::BAD_GATEWAY,
-                "Gateway did not return a streaming response".into(),
+            return Err(ChatFailure::Refused(ApiError::upstream(
+                "Gateway did not return a streaming response",
             )));
         }
         Ok(response)
@@ -691,11 +688,12 @@ pub fn model_name(value: Option<String>) -> Result<Option<String>, ApiError> {
     }
     Ok(value)
 }
+/// Chat runs without a gateway: the feature needs one.
+pub fn not_configured() -> ApiError {
+    ApiError::feature_off("Gateway integration is not configured")
+}
 pub fn unavailable() -> ApiError {
-    ApiError(
-        StatusCode::BAD_GATEWAY,
-        "The gateway could not complete this request".into(),
-    )
+    ApiError::upstream("The gateway could not complete this request")
 }
 /// Why a chat request got no stream.
 #[derive(Debug)]
@@ -750,9 +748,9 @@ pub(crate) async fn upstream_error(response: Response) -> ApiError {
             .and_then(|body| reason(&body)),
     };
     if gave_up_waiting(status.as_u16(), reason.as_deref()) {
-        return ApiError(StatusCode::SERVICE_UNAVAILABLE, CAPACITY_TIMEOUT.into());
+        return ApiError::unavailable(CAPACITY_TIMEOUT);
     }
-    ApiError(
+    ApiError::new(
         if status.as_u16() == 429 {
             StatusCode::TOO_MANY_REQUESTS
         } else {

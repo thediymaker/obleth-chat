@@ -60,6 +60,11 @@ pub struct SandboxConfig {
     pub retention: Duration,
 }
 
+/// The server is not set up for workspaces.
+pub(crate) fn not_enabled() -> ApiError {
+    ApiError::feature_off("Workspaces are not enabled on this server")
+}
+
 impl SandboxConfig {
     /// Workspaces run in Chat's own namespace when Chat runs in Kubernetes with a
     /// service account token, or in OBLETH_CHAT_SANDBOX_NAMESPACE, unless
@@ -399,9 +404,8 @@ impl Sandboxes {
                 if confirmed_within(POD_CHECK_GRACE) {
                     return Ok(true);
                 }
-                return Err(ApiError(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "The workspace could not be reached. Try again in a moment.".into(),
+                return Err(ApiError::unavailable(
+                    "The workspace could not be reached. Try again in a moment.",
                 ));
             }
         };
@@ -525,9 +529,8 @@ impl Sandboxes {
                 .fetch_optional(pool)
                 .await?;
             let Some(port) = port else {
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    "You have too many workspaces. Delete some to create more.".into(),
+                return Err(ApiError::conflict(
+                    "You have too many workspaces. Delete some to create more.",
                 ));
             };
             sqlx::query("INSERT INTO sandboxes(id,conversation_id,owner_id,slug,pod_id,port) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
@@ -541,12 +544,8 @@ impl Sandboxes {
                 .await?;
             sandbox = self.get(owner, conversation).await?;
         }
-        let sandbox = sandbox.ok_or_else(|| {
-            ApiError(
-                StatusCode::CONFLICT,
-                "The workspace could not be created. Try again.".into(),
-            )
-        })?;
+        let sandbox = sandbox
+            .ok_or_else(|| ApiError::conflict("The workspace could not be created. Try again."))?;
         let this = self.clone();
         let starting = sandbox.clone();
         tokio::spawn(async move {
@@ -1140,21 +1139,16 @@ pub(crate) fn waiting_reason(pod: &Value) -> String {
         .collect()
 }
 
-fn unavailable() -> ApiError {
-    ApiError(StatusCode::NOT_FOUND, "Workspaces are not enabled".into())
-}
-
 async fn manager(
     s: &AppState,
     headers: &HeaderMap,
     mutation: bool,
 ) -> Result<(Sandboxes, Identity), ApiError> {
     let user = s.auth.require(headers, mutation).await?;
-    let sandboxes = s.sandboxes.clone().ok_or_else(unavailable)?;
+    let sandboxes = s.sandboxes.clone().ok_or_else(not_enabled)?;
     if !sandboxes.allowed(&user) {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Workspaces are available to administrators".into(),
+        return Err(ApiError::denied(
+            "Workspaces are available to administrators",
         ));
     }
     Ok((sandboxes, user))
@@ -1258,10 +1252,7 @@ async fn remove(
         .ok_or_else(ApiError::not_found)?;
     sandboxes.destroy(&sandbox).await.map_err(|error| {
         tracing::warn!("could not delete workspace: {error:#}");
-        ApiError(
-            StatusCode::BAD_GATEWAY,
-            "The workspace could not be deleted. Try again.".into(),
-        )
+        ApiError::upstream("The workspace could not be deleted. Try again.")
     })?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1285,9 +1276,9 @@ async fn preview_link(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let origin = sandboxes.preview_origin(&sandbox).ok_or_else(|| {
-        ApiError(
+        ApiError::new(
             StatusCode::NOT_FOUND,
-            "Previews are not set up on this server".into(),
+            "Previews are not set up on this server",
         )
     })?;
     // Bring the dev server back if it stopped, for example after the pod slept.
@@ -1338,10 +1329,7 @@ async fn running(sandboxes: &Sandboxes, user: &Identity, id: Uuid) -> Result<San
         .await?
         .ok_or_else(ApiError::not_found)?;
     if sandbox.status != "running" {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "The workspace is not running".into(),
-        ));
+        return Err(ApiError::conflict("The workspace is not running"));
     }
     Ok(sandbox)
 }
@@ -1356,7 +1344,7 @@ async fn files(
     let sandbox = running(&sandboxes, &user, id).await?;
     let entries = tools::list_entries(&sandboxes, &sandbox, &q.path)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+        .map_err(ApiError::upstream)?;
     Ok(Json(json!({"entries":entries})))
 }
 
@@ -1370,7 +1358,7 @@ async fn file(
     let sandbox = running(&sandboxes, &user, id).await?;
     let (content, truncated) = tools::read_text(&sandboxes, &sandbox, &q.path, 200_000)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+        .map_err(ApiError::upstream)?;
     Ok(Json(
         json!({"path":q.path,"content":content,"truncated":truncated}),
     ))
@@ -1408,7 +1396,7 @@ async fn download(
             "error" => "The workspace could not start. Open it to see why, then try again.",
             _ => "The workspace is asleep. Open it first, then download the project.",
         };
-        ApiError(StatusCode::CONFLICT, message.into())
+        ApiError::conflict(message)
     };
     if sandbox.status != "running" {
         return Err(not_running(&sandbox.status));
@@ -1437,9 +1425,9 @@ async fn download(
             tools::read_bytes(&sandboxes, &sandbox, one, tools::ARCHIVE_LIMIT).await
         {
             if truncated {
-                return Err(ApiError(
+                return Err(ApiError::new(
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    "This file is larger than 64 MB. Use the terminal to move it.".into(),
+                    "This file is larger than 64 MB. Use the terminal to move it.",
                 ));
             }
             return Ok(attachment(
@@ -1461,7 +1449,7 @@ async fn download(
                 false if e.contains("larger than") => StatusCode::PAYLOAD_TOO_LARGE,
                 false => StatusCode::BAD_GATEWAY,
             };
-            ApiError(status, e)
+            ApiError::new(status, e)
         })?;
     let name = match picked.is_empty() {
         true => format!("{}.zip", file_stem(&title)),
@@ -1506,18 +1494,17 @@ async fn restore_checkpoint(
             .fetch_one(&sandboxes.inner.pool)
             .await?;
     if busy {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "Wait for the reply to finish, or stop it, before restoring a checkpoint".into(),
+        return Err(ApiError::conflict(
+            "Wait for the reply to finish, or stop it, before restoring a checkpoint",
         ));
     }
     let sandbox = sandboxes
         .ensure_running(&sandbox)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+        .map_err(ApiError::upstream)?;
     let before = tools::restore(&sandboxes, &sandbox, &sha)
         .await
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     Ok(Json(json!({"before": before})))
 }
 
@@ -1538,11 +1525,11 @@ async fn raw(
     let sandbox = running(&sandboxes, &user, id).await?;
     let (bytes, truncated) = tools::read_bytes(&sandboxes, &sandbox, &q.path, RAW_LIMIT)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+        .map_err(ApiError::upstream)?;
     if truncated {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "Files over 10 MB open from the project download".into(),
+            "Files over 10 MB open from the project download",
         ));
     }
     let (content_type, disposition) = raw_type(&q.path);

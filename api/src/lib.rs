@@ -328,9 +328,9 @@ async fn metrics_endpoint(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     if !s.metrics.allows(&headers) {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
-            "Metrics need the configured bearer token".into(),
+            "Metrics need the configured bearer token",
         ));
     }
     Ok((
@@ -368,13 +368,12 @@ async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Val
     Json(value)
 }
 async fn jwks(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(s.gateway.as_ref().ok_or_else(not_configured)?.jwks()))
-}
-pub(crate) fn not_configured() -> ApiError {
-    ApiError(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Gateway integration is not configured".into(),
-    )
+    Ok(Json(
+        s.gateway
+            .as_ref()
+            .ok_or_else(gateway::not_configured)?
+            .jwks(),
+    ))
 }
 async fn list(
     State(s): State<AppState>,
@@ -601,12 +600,9 @@ async fn send(
     Json(mut body): Json<Send>,
 ) -> Result<Response, ApiError> {
     let user = s.auth.require(&headers, true).await?;
-    let gateway = s.gateway.clone().ok_or_else(not_configured)?;
+    let gateway = s.gateway.clone().ok_or_else(gateway::not_configured)?;
     if s.shutdown.is_cancelled() {
-        return Err(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Service is shutting down".into(),
-        ));
+        return Err(ApiError::unavailable("Service is shutting down"));
     }
     if body.regenerate_message_id.is_some() && body.edit_message_id.is_some() {
         return Err(ApiError::bad("Choose either edit or regenerate"));
@@ -701,12 +697,11 @@ pub(crate) async fn launch_turn(
         variant,
     } = launch;
     // A send Chat has no room for is refused before any catalog or tool discovery.
-    let permit = s.slots.clone().try_acquire_owned().map_err(|_| {
-        ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Chat is at capacity. Try again shortly.".into(),
-        )
-    })?;
+    let permit = s
+        .slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::too_many("Chat is at capacity. Try again shortly."))?;
     let resolved =
         models::resolve_request(&s.store.pool, &gateway, &user, &model, overrides).await?;
     let parameters = &resolved.parameters;

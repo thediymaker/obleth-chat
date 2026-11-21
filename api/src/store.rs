@@ -541,7 +541,7 @@ impl Store {
             .iter()
             .any(|message| message.status == "pending")
         {
-            return Err(conflict(
+            return Err(ApiError::conflict(
                 "Wait for the response to finish before branching it",
             ));
         }
@@ -650,7 +650,7 @@ impl Store {
         let saved_effort = match active {
             None => return Err(ApiError::not_found()),
             Some((Some(_), _)) => {
-                return Err(conflict(
+                return Err(ApiError::conflict(
                     "This conversation already has a response in progress",
                 ))
             }
@@ -937,7 +937,7 @@ impl Store {
             _ => {
                 // Preserve expiry recovery even when rejecting a late writer.
                 tx.commit().await?;
-                return Err(conflict("This response is no longer active"));
+                return Err(ApiError::conflict("This response is no longer active"));
             }
         }
         crate::operations::finish_with_output_in(
@@ -1048,7 +1048,7 @@ async fn delete_in(
     match active {
         None => return Err(ApiError::not_found()),
         Some(Some(_)) => {
-            return Err(conflict(
+            return Err(ApiError::conflict(
                 "Stop the response before deleting this conversation",
             ))
         }
@@ -1187,10 +1187,6 @@ fn validate_model(model: &str) -> Result<(), ApiError> {
         return Err(ApiError::bad("Choose a valid model"));
     }
     Ok(())
-}
-
-fn conflict(message: &str) -> ApiError {
-    ApiError(StatusCode::CONFLICT, message.into())
 }
 
 /// Copies messages, a path in order, into another chat as its selected path. With

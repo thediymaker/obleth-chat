@@ -99,9 +99,8 @@ impl Auth {
         .await?
         .ok_or_else(ApiError::unauthorized)?;
         if row.window_calls > CALLS_PER_MINUTE {
-            return Err(ApiError(
-                StatusCode::TOO_MANY_REQUESTS,
-                "This token is making too many calls. Wait a minute and try again.".into(),
+            return Err(ApiError::too_many(
+                "This token is making too many calls. Wait a minute and try again.",
             ));
         }
         // A token lasts no longer than the provider grant of the sign-in it was
@@ -166,10 +165,8 @@ async fn create(
     .fetch_optional(&auth.pool)
     .await?;
     let Some((session, true)) = session else {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Sign in again to create a token".into(),
-        ));
+        return Err(ApiError::denied("Sign in again to create a token")
+            .with_code(crate::error::code::STALE_SIGN_IN));
     };
     let name = input.name.trim();
     if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {

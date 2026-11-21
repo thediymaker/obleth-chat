@@ -434,10 +434,7 @@ mod tests {
             "request_failed"
         );
         assert_eq!(
-            failure_category(&ApiError(
-                axum::http::StatusCode::BAD_GATEWAY,
-                "arbitrary upstream body".into()
-            )),
+            failure_category(&ApiError::upstream("arbitrary upstream body")),
             "provider_unavailable"
         );
     }

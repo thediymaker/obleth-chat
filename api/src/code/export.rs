@@ -3,12 +3,12 @@
 //! it does not exist yet. The GitHub token is used for that push and never stored.
 
 use super::history::visible;
-use super::repo::{conflict, Repo};
+use super::repo::Repo;
 use crate::{error::ApiError, AppState};
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue},
     response::Response,
     routing::{get, post},
     Json, Router,
@@ -190,7 +190,7 @@ fn valid_name(name: &str, max: usize) -> bool {
 }
 
 fn github_error(message: &str) -> ApiError {
-    ApiError(StatusCode::BAD_GATEWAY, message.into())
+    ApiError::upstream(message)
 }
 
 /// Where GitHub is; tests point these at stand-ins.
@@ -333,7 +333,7 @@ async fn github(
                 || stderr.contains("fetch first")
                 || stderr.contains("non-fast-forward")
             {
-                conflict("That repository has other history. Choose a new name, or one this project was pushed to before")
+                ApiError::conflict("That repository has other history. Choose a new name, or one this project was pushed to before")
             } else if stderr.contains("403")
                 || stderr.contains("permission")
                 || stderr.contains("denied")

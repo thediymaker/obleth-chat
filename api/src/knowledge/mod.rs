@@ -617,7 +617,7 @@ async fn embed_batch(
     loop {
         match gateway.embeddings(owner, model, input).await {
             Ok(vectors) => return Ok(vectors),
-            Err(e) if e.1.starts_with(crate::auth::grants::SIGN_IN_AGAIN) => {
+            Err(e) if e.code() == Some(crate::error::code::SIGN_IN_AGAIN) => {
                 // Retrying can't help until the owner signs in, so say that.
                 anyhow::bail!(
                     "{}: the file's owner must sign in before it can be indexed",
@@ -668,16 +668,9 @@ pub fn router(state: AppState) -> Router {
 }
 
 fn knowledge(s: &AppState) -> Result<&Knowledge, ApiError> {
-    s.knowledge.as_ref().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Knowledge is not configured".into(),
-        )
-    })
-}
-
-fn bad(message: &str) -> ApiError {
-    ApiError(StatusCode::BAD_REQUEST, message.into())
+    s.knowledge
+        .as_ref()
+        .ok_or_else(|| ApiError::feature_off("Knowledge is not configured"))
 }
 
 async fn list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
@@ -742,22 +735,23 @@ async fn check_scope(
     match scope {
         "personal" => Ok(()),
         "everyone" if user.is_admin() => Ok(()),
-        "everyone" => Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only administrators can share a collection with everyone".into(),
+        "everyone" => Err(ApiError::denied(
+            "Only administrators can share a collection with everyone",
         )),
         "group" => {
-            let group = group.ok_or_else(|| bad("Choose a group to share with"))?;
+            let group = group.ok_or_else(|| ApiError::bad("Choose a group to share with"))?;
             crate::groups::may_share(pool, user, group, current).await
         }
-        _ => Err(bad("Unknown sharing choice")),
+        _ => Err(ApiError::bad("Unknown sharing choice")),
     }
 }
 
 fn clean_name(name: &str) -> Result<String, ApiError> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 120 {
-        return Err(bad("Give the collection a name of up to 120 characters"));
+        return Err(ApiError::bad(
+            "Give the collection a name of up to 120 characters",
+        ));
     }
     Ok(name.to_owned())
 }
@@ -786,7 +780,9 @@ async fn create(
     .fetch_one(&k.pool)
     .await?;
     if count >= 100 {
-        return Err(bad("You have 100 collections; delete one to make another"));
+        return Err(ApiError::bad(
+            "You have 100 collections; delete one to make another",
+        ));
     }
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO knowledge_collections (id, owner_id, name, description, scope, group_id) VALUES ($1,$2,$3,$4,$5,$6)")
@@ -834,9 +830,8 @@ async fn owned(pool: &PgPool, user: Uuid, id: Uuid) -> Result<(), ApiError> {
     if mine {
         Ok(())
     } else {
-        Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only the collection's owner can change it".into(),
+        Err(ApiError::denied(
+            "Only the collection's owner can change it",
         ))
     }
 }
@@ -959,7 +954,7 @@ async fn upload(
         .or_else(|| axum::body::HttpBody::size_hint(&body).exact());
     let limits = s.store.limits;
     let too_large = || {
-        ApiError(
+        ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
                 "Files can be at most {}. Choose a smaller file.",
@@ -984,7 +979,7 @@ async fn upload(
         owned(&k.pool, user.id, id).await?;
         let name = crate::attachments::clean_upload_name(&q.name)?;
         let kind = extract::kind(&name, given).ok_or_else(|| {
-            bad("Chat can read PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code files")
+            ApiError::bad("Chat can read PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, Markdown, text and code files")
         })?;
         if declared.is_some_and(|size| size > limits.max_file_bytes as u64) {
             return Err(too_large());
@@ -1006,7 +1001,7 @@ async fn upload(
             .await?;
     let body = crate::error::upload(body, limits.max_file_bytes, too_large().1).await?;
     if body.is_empty() {
-        return Err(bad("The file is empty"));
+        return Err(ApiError::bad("The file is empty"));
     }
     let mime = extract::mime_for(kind);
     let doc = Uuid::new_v4();
@@ -1068,19 +1063,15 @@ async fn upload(
 /// account is full.
 fn room(used: i64, count: i64, size: i64, quota: i64) -> Result<(), ApiError> {
     if used + size > quota {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            format!(
-                "This would go over your {} of knowledge storage",
-                size_label(quota as usize)
-            ),
-        ));
+        return Err(ApiError::conflict(format!(
+            "This would go over your {} of knowledge storage",
+            size_label(quota as usize)
+        )));
     }
     if count >= MAX_DOCUMENTS {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            format!("You have reached the limit of {MAX_DOCUMENTS} documents"),
-        ));
+        return Err(ApiError::conflict(format!(
+            "You have reached the limit of {MAX_DOCUMENTS} documents"
+        )));
     }
     Ok(())
 }
@@ -1113,9 +1104,8 @@ async fn remove_document(
     let k = knowledge(&s)?;
     let (_, mine) = visible_document(&k.pool, user.id, id).await?;
     if !mine {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only the collection's owner can remove documents".into(),
+        return Err(ApiError::denied(
+            "Only the collection's owner can remove documents",
         ));
     }
     sqlx::query("DELETE FROM knowledge_documents WHERE id=$1")
@@ -1134,9 +1124,8 @@ async fn retry(
     let k = knowledge(&s)?;
     let (_, mine) = visible_document(&k.pool, user.id, id).await?;
     if !mine {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only the collection's owner can retry documents".into(),
+        return Err(ApiError::denied(
+            "Only the collection's owner can retry documents",
         ));
     }
     let queued = sqlx::query("UPDATE knowledge_documents SET status='queued', attempts=0, error=NULL, updated_at=NOW() WHERE id=$1 AND status='failed'")
@@ -1211,12 +1200,10 @@ async fn search(
 ) -> Result<Json<Value>, ApiError> {
     let user = s.auth.require(&headers, true).await?;
     let k = knowledge(&s)?;
-    let gateway = s.gateway.as_ref().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Gateway integration is not configured".into(),
-        )
-    })?;
+    let gateway = s
+        .gateway
+        .as_ref()
+        .ok_or_else(crate::gateway::not_configured)?;
     let hits = k
         .search(
             gateway,
@@ -1289,7 +1276,7 @@ pub async fn set_for_conversation(
     ids: &[Uuid],
 ) -> Result<(), ApiError> {
     if ids.len() > 8 {
-        return Err(bad("A chat can search up to 8 collections"));
+        return Err(ApiError::bad("A chat can search up to 8 collections"));
     }
     let mut tx = pool.begin().await?;
     let owns: bool = sqlx::query_scalar(

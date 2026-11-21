@@ -43,16 +43,10 @@ async fn send(
     .fetch_optional(&s.store.pool)
     .await?;
     let generation = match generation {
-        None => {
-            return Err(ApiError(
-                StatusCode::NOT_FOUND,
-                "Conversation not found".into(),
-            ))
-        }
+        None => return Err(ApiError::not_found()),
         Some(None) => {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "The reply has finished; send your note as a message".into(),
+            return Err(ApiError::conflict(
+                "The reply has finished; send your note as a message",
             ))
         }
         Some(Some(generation)) => generation,

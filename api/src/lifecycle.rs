@@ -3,7 +3,7 @@
 use crate::{error::ApiError, store, AppState};
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     Json,
 };
 use serde::Deserialize;
@@ -42,9 +42,8 @@ pub async fn stop(
     .ok_or_else(ApiError::not_found)?;
     if let Some(active) = active {
         if active != body.generation_id {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "A different response is now running. Refresh before stopping it.".into(),
+            return Err(ApiError::conflict(
+                "A different response is now running. Refresh before stopping it.",
             ));
         }
         sqlx::query("UPDATE conversations SET generation_cancel_requested=TRUE WHERE id=$1 AND owner_id=$2 AND active_generation=$3")
@@ -225,10 +224,7 @@ pub async fn checkpoint(
     let changed=sqlx::query("UPDATE messages m SET content=$4,reasoning_content=COALESCE($5,m.reasoning_content),request_id=$6 FROM conversations c WHERE m.conversation_id=c.id AND c.id=$1 AND c.owner_id=$2 AND c.active_generation=$3 AND c.generation_expires>clock_timestamp() AND m.generation_id=$3 AND m.status='pending'")
         .bind(id).bind(owner).bind(generation).bind(content).bind(reasoning).bind(request_id).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "Response is no longer active".into(),
-        ));
+        return Err(ApiError::conflict("Response is no longer active"));
     }
     tx.commit().await?;
     Ok(())

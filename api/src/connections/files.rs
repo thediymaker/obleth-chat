@@ -760,9 +760,9 @@ async fn session_of(s: &crate::AppState, headers: &HeaderMap) -> Result<Session,
             .await?
             .ok_or_else(ApiError::unauthorized)?;
     if session.state == "ended" {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::GONE,
-            "This file session has ended".into(),
+            "This file session has ended",
         ));
     }
     Ok(session)
@@ -797,7 +797,7 @@ pub async fn hello(
             .bind(&why)
             .execute(&s.store.pool)
             .await?;
-        return Err(ApiError(StatusCode::CONFLICT, why));
+        return Err(ApiError::conflict(why));
     }
     sqlx::query("UPDATE cluster_sessions SET state='live', host=$2, agent_version=$3, started_at=NOW(), last_seen_at=NOW(), error=NULL WHERE id=$1")
         .bind(session.id)
@@ -833,9 +833,9 @@ pub async fn next(
                     .fetch_optional(&s.store.pool)
                     .await?;
             if state.as_deref() != Some("live") {
-                return Err(ApiError(
+                return Err(ApiError::new(
                     StatusCode::GONE,
-                    "This file session has ended".into(),
+                    "This file session has ended",
                 ));
             }
         }
@@ -890,10 +890,7 @@ pub async fn resolve(
     .execute(&s.store.pool)
     .await?;
     if done.rows_affected() == 0 {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "This call is no longer waiting".into(),
-        ));
+        return Err(ApiError::conflict("This call is no longer waiting"));
     }
     let _ = sqlx::query("UPDATE cluster_sessions SET last_seen_at=NOW() WHERE id=$1")
         .bind(session.id)

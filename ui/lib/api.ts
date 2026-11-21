@@ -3,10 +3,13 @@
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status = 0) {
+  /** The answer's stable `error.code`, for the few errors a client acts on. */
+  code?: string;
+  constructor(message: string, status = 0, code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -37,14 +40,16 @@ async function responseError(response: Response): Promise<ApiError> {
     response.status === 401
       ? "Your session has expired. Sign in again to continue."
       : `The request failed (${response.status}). Please try again.`;
+  let code: string | undefined;
   try {
-    // Every API answer is {"error":{"message":...}}; a proxy may return HTML instead.
-    const detail = (await response.json()).error?.message;
-    if (typeof detail === "string") message = detail;
+    // Every API answer is {"error":{"message":...}}, some with a "code"; a proxy may return HTML instead.
+    const error = (await response.json()).error;
+    if (typeof error?.message === "string") message = error.message;
+    if (typeof error?.code === "string") code = error.code;
   } catch {
     // Not JSON: the generic message stands.
   }
-  return new ApiError(message, response.status);
+  return new ApiError(message, response.status, code);
 }
 
 export class ApiClient {

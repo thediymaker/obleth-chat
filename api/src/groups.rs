@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     routing::get,
     Json, Router,
 };
@@ -59,9 +59,8 @@ pub async fn may_share(
     if member || user.is_admin() {
         Ok(())
     } else {
-        Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "You can share only with a group you are in".into(),
+        Err(ApiError::denied(
+            "You can share only with a group you are in",
         ))
     }
 }

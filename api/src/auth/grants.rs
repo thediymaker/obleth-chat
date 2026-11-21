@@ -75,7 +75,8 @@ impl From<String> for ProviderToken {
 
 /// No live grant is left for someone who signs in with the provider.
 pub fn sign_in_again() -> ApiError {
-    ApiError(StatusCode::UNAUTHORIZED, SIGN_IN_AGAIN.into())
+    ApiError::new(StatusCode::UNAUTHORIZED, SIGN_IN_AGAIN)
+        .with_code(crate::error::code::SIGN_IN_AGAIN)
 }
 pub const SIGN_IN_AGAIN: &str = "Sign in again to continue";
 

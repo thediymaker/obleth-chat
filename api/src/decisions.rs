@@ -434,13 +434,9 @@ struct Patch {
     check_actions: Option<bool>,
 }
 
-fn bad(message: impl Into<String>) -> ApiError {
-    ApiError::bad(message)
-}
-
 fn patch(body: &Value) -> Result<Patch, ApiError> {
     let fields = body.as_object().ok_or_else(|| {
-        bad("Send an object with endpoint, url, key, model, checkRuns, checkTree, checkReports, pickSections, checkMemories or checkActions")
+        ApiError::bad("Send an object with endpoint, url, key, model, checkRuns, checkTree, checkReports, pickSections, checkMemories or checkActions")
     })?;
     if let Some(key) = fields.keys().find(|k| {
         ![
@@ -457,7 +453,7 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
         ]
         .contains(&k.as_str())
     }) {
-        return Err(bad(format!("Unknown setting: {key}")));
+        return Err(ApiError::bad(format!("Unknown setting: {key}")));
     }
     let mut patch = Patch::default();
     if let Some(value) = fields.get("endpoint") {
@@ -465,13 +461,13 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
             Some("gateway") => "gateway",
             Some("custom") => "custom",
             Some("off") => "off",
-            _ => return Err(bad("endpoint must be gateway, custom or off")),
+            _ => return Err(ApiError::bad("endpoint must be gateway, custom or off")),
         });
     }
     match fields.get("url") {
         None | Some(Value::Null) => {}
-        Some(Value::String(url)) => patch.url = Some(endpoint_url(url).map_err(bad)?),
-        Some(_) => return Err(bad("url must be text")),
+        Some(Value::String(url)) => patch.url = Some(endpoint_url(url).map_err(ApiError::bad)?),
+        Some(_) => return Err(ApiError::bad("url must be text")),
     }
     match fields.get("key") {
         None => {}
@@ -484,7 +480,7 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
             patch.key = Some(Some(key.trim().to_owned()))
         }
         Some(_) => {
-            return Err(bad(format!(
+            return Err(ApiError::bad(format!(
                 "key must be text of at most {MAX_KEY} characters, or null to remove it"
             )))
         }
@@ -497,7 +493,7 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
             patch.model = Some(Some(model.trim().to_owned()))
         }
         Some(_) => {
-            return Err(bad(
+            return Err(ApiError::bad(
                 "model must be a model name, or null for the endpoint's default",
             ))
         }
@@ -514,7 +510,7 @@ fn patch(body: &Value) -> Result<Patch, ApiError> {
             *field = Some(
                 value
                     .as_bool()
-                    .ok_or_else(|| bad(format!("{name} must be true or false")))?,
+                    .ok_or_else(|| ApiError::bad(format!("{name} must be true or false")))?,
             );
         }
     }
@@ -556,7 +552,7 @@ impl Patch {
             row.check_actions = check_actions;
         }
         if row.endpoint == "custom" && row.url.is_none() {
-            return Err(bad("Enter the endpoint's URL"));
+            return Err(ApiError::bad("Enter the endpoint's URL"));
         }
         Ok(row)
     }
@@ -622,7 +618,7 @@ async fn save(
     let sealed = match patch.new_key() {
         Some(key) => {
             let secret = s.decisions.secret.as_ref().ok_or_else(|| {
-                bad("Saving a key needs OBLETH_CHAT_SECRET_KEY_FILE, which encrypts it")
+                ApiError::bad("Saving a key needs OBLETH_CHAT_SECRET_KEY_FILE, which encrypts it")
             })?;
             Some(secret.seal(KEY_FORMAT, KEY_AAD, key.as_bytes()))
         }

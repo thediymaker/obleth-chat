@@ -10,7 +10,6 @@
 
 use std::time::Duration;
 
-use axum::http::StatusCode;
 use futures_util::{stream, StreamExt, TryStreamExt};
 use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
@@ -120,9 +119,8 @@ impl Files {
             (Some(data), _) => Ok(data),
             (None, Some(key)) => {
                 let store = self.store.as_ref().ok_or_else(|| {
-                    ApiError(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "This file is kept in object storage, which is not configured".into(),
+                    ApiError::unavailable(
+                        "This file is kept in object storage, which is not configured",
                     )
                 })?;
                 store.get(&key, limit).await.map_err(unavailable)
@@ -360,10 +358,7 @@ pub async fn empty_trash(pool: &PgPool, store: &ObjectStore) {
 
 fn unavailable(error: anyhow::Error) -> ApiError {
     tracing::warn!("object storage failed: {error:#}");
-    ApiError(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "File storage is unavailable. Try again shortly.".into(),
-    )
+    ApiError::unavailable("File storage is unavailable. Try again shortly.")
 }
 
 #[cfg(test)]

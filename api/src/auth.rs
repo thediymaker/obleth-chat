@@ -514,9 +514,8 @@ impl Auth {
         if self.config.password_sign_in {
             Ok(())
         } else {
-            Err(ApiError(
-                StatusCode::FORBIDDEN,
-                "Passwords are turned off; sign in with single sign-on".into(),
+            Err(ApiError::denied(
+                "Passwords are turned off; sign in with single sign-on",
             ))
         }
     }
@@ -619,10 +618,7 @@ impl Auth {
             }
         }
         if identity.password_change_required && !allow_password_change {
-            return Err(ApiError(
-                StatusCode::FORBIDDEN,
-                "Change your password before continuing".into(),
-            ));
+            return Err(ApiError::denied("Change your password before continuing"));
         }
         Ok((identity.user, identity.grant_expired))
     }
@@ -660,28 +656,6 @@ impl Auth {
             return Err(ApiError::forbidden());
         }
         Ok(identity)
-    }
-
-    async fn lock_admin(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        admin_id: Uuid,
-    ) -> Result<(), ApiError> {
-        // A serialized recheck prevents simultaneous administrators disabling one
-        // another and prevents a revoked administrator finishing a queued mutation.
-        sqlx::query("SELECT pg_advisory_xact_lock(7346281951102)")
-            .execute(&mut **tx)
-            .await?;
-        let active: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND enabled AND role = 'admin' AND NOT password_change_required)",
-        )
-        .bind(admin_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        if !active {
-            return Err(ApiError::forbidden());
-        }
-        Ok(())
     }
 
     fn check_origin(&self, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -942,15 +916,12 @@ impl Auth {
 }
 
 fn too_many_requests() -> ApiError {
-    ApiError(
-        StatusCode::TOO_MANY_REQUESTS,
-        "Too many sign-in attempts; try again shortly".into(),
-    )
+    ApiError::too_many("Too many sign-in attempts; try again shortly")
 }
 
 /// The one answer to a username that is already in use, wherever a user is made.
 pub(super) fn username_taken() -> ApiError {
-    ApiError(StatusCode::CONFLICT, "Username already exists".into())
+    ApiError::conflict("Username already exists")
 }
 
 async fn throttle_window(tx: &mut Transaction<'_, Postgres>) -> Result<i64, ApiError> {
@@ -1373,9 +1344,9 @@ async fn login(
     let username = normalize_username(&input.username).unwrap_or_else(|_| "!invalid".into());
     auth.throttle("login", &client, Some(&username)).await?;
     if input.password.len() > 1024 {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
-            "Invalid username or password".into(),
+            "Invalid username or password",
         ));
     }
     let user = sqlx::query_as::<_, PasswordUser>("SELECT id, username, display_name, role, password_hash, enabled, password_change_required FROM users WHERE username = $1")
@@ -1390,9 +1361,9 @@ async fn login(
             .as_ref()
             .is_none_or(|u| !u.enabled || u.password_hash.is_none())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
-            "Invalid username or password".into(),
+            "Invalid username or password",
         ));
     }
     let mut tx = auth.pool.begin().await?;
@@ -1606,8 +1577,7 @@ async fn create_user(
         (None, false) => None,
     };
     let force_password_change = input.force_password_change && hash.is_some();
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     let result = sqlx::query_as::<_, Identity>("INSERT INTO users (id, username, display_name, role, password_hash, password_change_required) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, display_name, role")
         .bind(Uuid::new_v4()).bind(username).bind(display_name).bind(role).bind(hash).bind(force_password_change).fetch_one(&mut *tx).await;
     match result {
@@ -1658,8 +1628,7 @@ async fn update_user(
             "Administrators cannot disable their own account",
         ));
     }
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     let (enabled, role): (bool, Role) =
         sqlx::query_as("SELECT enabled,role FROM users WHERE id=$1 FOR UPDATE")
             .bind(id)
@@ -1715,8 +1684,7 @@ async fn reset_password(
     }
     validate_password(&input.new_password)?;
     let hash = auth.new_password_hash(input.new_password).await?;
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     // Administrators cannot silently add local credentials to an OIDC-only identity.
     if sqlx::query("UPDATE users SET password_hash = $1, password_change_required=$3, updated_at = NOW() WHERE id = $2 AND password_hash IS NOT NULL")
         .bind(hash).bind(id).bind(input.force_password_change).execute(&mut *tx).await?.rows_affected() == 0 { return Err(ApiError::not_found()); }
@@ -1753,7 +1721,7 @@ async fn link_oidc_identity(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
     let provider = auth.config.oidc.as_ref().ok_or_else(|| {
-        ApiError::bad("Single sign-on is not configured (OBLETH_CHAT_OIDC_ISSUER)")
+        ApiError::feature_off("Single sign-on is not configured (OBLETH_CHAT_OIDC_ISSUER)")
     })?;
     if input.subject.is_empty()
         || input.subject.len() > 255
@@ -1764,8 +1732,7 @@ async fn link_oidc_identity(
             "OIDC subject must be 1–255 printable ASCII characters",
         ));
     }
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     // The same lock as a first sign-in for this identity, so the two never race.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("oidc:{}:{}", provider.issuer, input.subject))
@@ -1790,18 +1757,16 @@ async fn link_oidc_identity(
         .fetch_one(&mut *tx)
         .await?;
         if linked {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "This account is already linked to a single sign-on identity".into(),
+            return Err(ApiError::conflict(
+                "This account is already linked to a single sign-on identity",
             ));
         }
     }
     let inserted = sqlx::query("INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3) ON CONFLICT (issuer, subject) DO NOTHING")
         .bind(&provider.issuer).bind(&input.subject).bind(input.user_id).execute(&mut *tx).await?.rows_affected();
     if inserted == 0 {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "This single sign-on identity is already linked to another account".into(),
+        return Err(ApiError::conflict(
+            "This single sign-on identity is already linked to another account",
         ));
     }
     // Pending invitation or recovery links must not add a local password afterwards.

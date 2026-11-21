@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 
-use super::{bad, knowledge, Knowledge};
+use super::{knowledge, Knowledge};
 use crate::audit::{self, Action, Target};
 use crate::{error::ApiError, gateway::valid_model, AppState};
 
@@ -286,7 +286,7 @@ fn prefix(value: &Value, key: &str) -> Result<Option<String>, ApiError> {
         {
             Ok(Some(text.clone()))
         }
-        _ => Err(bad(&format!(
+        _ => Err(ApiError::bad(format!(
             "{key} must be text of at most {MAX_PREFIX} characters, or null for the default"
         ))),
     }
@@ -301,27 +301,34 @@ async fn save(
     let k = knowledge(&s)?;
     let patch = body
         .as_object()
-        .ok_or_else(|| bad("Send an object with model, queryPrefix or documentPrefix"))?;
+        .ok_or_else(|| ApiError::bad("Send an object with model, queryPrefix or documentPrefix"))?;
     if let Some(key) = patch
         .keys()
         .find(|key| !["model", "queryPrefix", "documentPrefix"].contains(&key.as_str()))
     {
-        return Err(bad(&format!("Unknown setting: {key}")));
+        return Err(ApiError::bad(format!("Unknown setting: {key}")));
     }
     let model = match patch.get("model") {
         None => None,
         Some(Value::Null) => Some(None),
         Some(Value::String(model)) if valid_model(model) => {
             // A model the gateway doesn't serve would fail every document.
-            let gateway = s.gateway.as_ref().ok_or_else(crate::gateway::unavailable)?;
+            let gateway = s
+                .gateway
+                .as_ref()
+                .ok_or_else(crate::gateway::not_configured)?;
             if !gateway.embedding_models(&user).await?.contains(model) {
-                return Err(bad(&format!(
+                return Err(ApiError::bad(format!(
                     "The gateway lists no embedding model named {model}"
                 )));
             }
             Some(Some(model.clone()))
         }
-        Some(_) => return Err(bad("model must be a model name, or null for the default")),
+        Some(_) => {
+            return Err(ApiError::bad(
+                "model must be a model name, or null for the default",
+            ))
+        }
     };
     let query = patch
         .get("queryPrefix")

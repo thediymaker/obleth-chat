@@ -414,9 +414,8 @@ pub async fn resolve(
         .bind(conversation).bind(&call).bind(user.id).bind(body.ok).bind(output).bind(detail)
         .execute(&s.store.pool).await?;
     if done.rows_affected() == 0 {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "This step is no longer waiting for the device".into(),
+        return Err(ApiError::conflict(
+            "This step is no longer waiting for the device",
         ));
     }
     Ok(StatusCode::NO_CONTENT)

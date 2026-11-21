@@ -285,21 +285,21 @@ async fn stop(
             let sandboxes = s
                 .sandboxes
                 .as_ref()
-                .ok_or_else(|| ApiError::bad("Workspaces are off"))?;
+                .ok_or_else(crate::sandbox::not_enabled)?;
             sandboxes.stop_owner(body.owner_id).await
         }
         "browser" => {
             let browsers = s
                 .browsers
                 .as_ref()
-                .ok_or_else(|| ApiError::bad("The browser is off"))?;
+                .ok_or_else(crate::browser::not_enabled)?;
             browsers.stop_owner(body.owner_id).await
         }
         _ => return Err(ApiError::bad("Stop a workspace or a browser")),
     }
     .map_err(|error| {
         tracing::warn!(owner = %body.owner_id, "could not stop a {} pod: {error:#}", body.kind);
-        ApiError::bad("The pod could not be stopped. Try again.")
+        ApiError::upstream("The pod could not be stopped. Try again.")
     })?;
     if stopped {
         audit::record(

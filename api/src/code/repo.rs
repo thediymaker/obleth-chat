@@ -19,13 +19,9 @@ pub const MAX_PROJECT_BYTES: i64 = 256 * 1024 * 1024;
 const COMPACT_AFTER: i64 = 30;
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub fn conflict(message: &str) -> ApiError {
-    ApiError(StatusCode::CONFLICT, message.into())
-}
-
 fn failed(what: &str, detail: &str) -> ApiError {
     tracing::warn!(what, detail, "git failed");
-    ApiError(
+    ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("Could not {what} the project's code"),
     )
@@ -118,14 +114,11 @@ impl Repo {
             .await
             .map_err(|_| failed("read", "git timed out"))?
             .map_err(|e| {
-                ApiError(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        "Git is not installed on this server".into()
-                    } else {
-                        format!("Could not run git: {e}")
-                    },
-                )
+                ApiError::unavailable(if e.kind() == std::io::ErrorKind::NotFound {
+                    "Git is not installed on this server".into()
+                } else {
+                    format!("Could not run git: {e}")
+                })
             })?;
         Ok(Output {
             ok: output.status.success(),
@@ -248,7 +241,7 @@ impl Repo {
             ])
             .await?;
         if !merged.ok {
-            return Err(conflict(
+            return Err(ApiError::conflict(
                 "Later commits changed the same lines, so this cannot be undone by itself",
             ));
         }
@@ -371,7 +364,7 @@ pub async fn advance(
             .await?
             .ok;
         if !forward {
-            return Err(conflict(
+            return Err(ApiError::conflict(
                 "These changes do not include the project's latest code. Sync again to bring it in first",
             ));
         }

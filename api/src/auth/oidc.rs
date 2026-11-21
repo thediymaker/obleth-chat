@@ -315,10 +315,7 @@ impl Oidc {
 
 /// The provider could not be reached or did not answer properly.
 pub(super) fn provider_unavailable() -> ApiError {
-    ApiError(
-        StatusCode::BAD_GATEWAY,
-        "The single sign-on provider is unavailable; try again shortly".into(),
-    )
+    ApiError::upstream("The single sign-on provider is unavailable; try again shortly")
 }
 
 /// Why single sign-on did not complete, as the sign-in screen names it.
@@ -732,10 +729,7 @@ async fn finish_sign_in(
     if input.error.is_some() {
         return Err(SignInFailure::new(
             SignInError::NotCompleted,
-            ApiError(
-                StatusCode::UNAUTHORIZED,
-                "Single sign-on was not completed".into(),
-            ),
+            ApiError::new(StatusCode::UNAUTHORIZED, "Single sign-on was not completed"),
         ));
     }
     let code = input
@@ -752,7 +746,7 @@ async fn finish_sign_in(
         .await
         .map_err(|_| {
             tracing::warn!("OIDC authorization code exchange failed");
-            ApiError(StatusCode::UNAUTHORIZED, "Single sign-on failed".into())
+            ApiError::new(StatusCode::UNAUTHORIZED, "Single sign-on failed")
         })?;
     // Everything after the exchange runs here, so a failure can revoke the grant.
     let outcome: Result<Response, SignInFailure> = async {
@@ -803,10 +797,7 @@ async fn finish_sign_in(
         let refresh = match (&auth.grants, tokens.refresh_token()) {
             (Some(_), None) => {
                 tracing::warn!("the identity provider issued no refresh token; check offline_access");
-                return Err(ApiError(
-                    StatusCode::UNAUTHORIZED,
-                    "The single sign-on provider did not allow Chat to stay signed in".into(),
-                ).into());
+                return Err(ApiError::new(StatusCode::UNAUTHORIZED, "The single sign-on provider did not allow Chat to stay signed in").into());
             }
             (_, refresh) => refresh,
         };
@@ -864,16 +855,13 @@ async fn finish_sign_in(
             Some(_) => {
                 return Err(SignInFailure::new(
                     SignInError::AccountDisabled,
-                    ApiError(StatusCode::FORBIDDEN, "This account is disabled".into()),
+                    ApiError::denied("This account is disabled"),
                 ))
             }
             None if !provider.config.allow_signup => {
                 return Err(SignInFailure::new(
                     SignInError::NotProvisioned,
-                    ApiError(
-                        StatusCode::FORBIDDEN,
-                        "This single sign-on identity has not been provisioned; contact your administrator".into(),
-                    ),
+                    ApiError::denied("This single sign-on identity has not been provisioned; contact your administrator"),
                 ))
             }
             None => {

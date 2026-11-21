@@ -5,7 +5,6 @@
 
 use crate::error::ApiError;
 use crate::sandbox::{tools, Sandbox, Sandboxes};
-use axum::http::StatusCode;
 use serde::Serialize;
 use std::time::Duration;
 
@@ -30,7 +29,7 @@ pub struct Author {
 }
 
 fn gateway(error: String) -> ApiError {
-    ApiError(StatusCode::BAD_GATEWAY, error)
+    ApiError::upstream(error)
 }
 
 /// What a script printed, and how it ended.
@@ -275,7 +274,7 @@ pub async fn commit(sh: &impl Shell, author: &Author, message: &str) -> Result<b
     let (out, err, code) = run(sh, author, &script, &[message], None).await?;
     match code {
         Some(0) => Ok(out.contains("committed")),
-        Some(12) => Err(super::repo::conflict(
+        Some(12) => Err(super::ApiError::conflict(
             "Finish or stop the sync in progress first",
         )),
         _ => Err(gateway(format!(
@@ -339,11 +338,11 @@ if g rev-parse -q --verify HEAD^ >/dev/null; then g reset -q --soft HEAD^ || exi
     let (_, err, code) = run(sh, author, &script, &[], None).await?;
     match code {
         Some(0) => Ok(()),
-        Some(12) => Err(super::repo::conflict(
+        Some(12) => Err(super::ApiError::conflict(
             "Finish or stop the sync in progress first",
         )),
         Some(16) => Err(ApiError::bad("Nothing has been saved yet")),
-        Some(17) => Err(super::repo::conflict(
+        Some(17) => Err(super::ApiError::conflict(
             "That save is already in the project. Undo it from the project's history instead",
         )),
         Some(18) => Err(ApiError::bad(
@@ -462,7 +461,7 @@ g commit -q --no-edit --cleanup=strip || exit 13"#;
     let (out, err, code) = run(sh, author, script, &[], None).await?;
     match code {
         Some(0) => Ok(()),
-        Some(21) => Err(super::repo::conflict(&format!(
+        Some(21) => Err(super::ApiError::conflict(format!(
             "Some files still have both versions in them: {}",
             out.split_whitespace().collect::<Vec<_>>().join(", ")
         ))),
@@ -508,7 +507,7 @@ if g cat-file -e ":$stage:$2" 2>/dev/null; then g checkout -q "$1" -- "$2" && g 
     let (_, err, code) = run(sh, author, script, &[flag, path], None).await?;
     match code {
         Some(0) => Ok(()),
-        Some(15) => Err(super::repo::conflict("There is no sync in progress")),
+        Some(15) => Err(super::ApiError::conflict("There is no sync in progress")),
         _ => Err(gateway(format!(
             "Could not keep that version: {}",
             err.trim()
@@ -545,7 +544,7 @@ fi"#;
     let (_, err, code) = run(sh, author, script, &[path.unwrap_or("")], None).await?;
     match code {
         Some(0) => Ok(()),
-        Some(12) => Err(super::repo::conflict(
+        Some(12) => Err(super::ApiError::conflict(
             "Finish or stop the sync in progress first",
         )),
         Some(16) => Err(ApiError::bad(

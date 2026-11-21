@@ -213,7 +213,7 @@ impl Store {
                 || patch.reasoning_effort.is_some()
                 || patch.archived == Some(true))
         {
-            return Err(conflict("Stop the response before changing generation settings or archiving this conversation"));
+            return Err(ApiError::conflict("Stop the response before changing generation settings or archiving this conversation"));
         }
         let mut settings = original.settings;
         if let Some(p) = patch.settings {
@@ -259,7 +259,9 @@ impl Store {
         let original = read_conversation(&mut tx, owner, id).await?;
         refuse_temporary(&original, "branched")?;
         if original.messages.iter().any(|m| m.status == "pending") {
-            return Err(conflict("Stop the response before editing or retrying it"));
+            return Err(ApiError::conflict(
+                "Stop the response before editing or retrying it",
+            ));
         }
         require_conversation_capacity(&mut tx, owner).await?;
         let selected = original
@@ -340,7 +342,7 @@ impl Store {
             return Err(ApiError::not_found());
         }
         if rows.iter().any(Option::is_some) {
-            return Err(conflict(
+            return Err(ApiError::conflict(
                 "Stop active responses before updating these conversations",
             ));
         }
@@ -369,7 +371,7 @@ impl Store {
             let chat = read_conversation(&mut tx, owner, *id).await?;
             refuse_temporary(&chat, "exported")?;
             if chat.messages.iter().any(|m| m.status == "pending") {
-                return Err(conflict("Stop responses before exporting"));
+                return Err(ApiError::conflict("Stop responses before exporting"));
             }
             let ids = chat.messages.iter().map(|m| m.id).collect::<Vec<_>>();
             let archive = attachments::load_for_archive(&mut tx, owner, &ids, budget).await?;
@@ -641,10 +643,7 @@ impl Store {
 }
 fn search_error(error: sqlx::Error) -> ApiError {
     match error.as_database_error().and_then(|e| e.code()).as_deref() {
-        Some("57014") => ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Search took too long. Try a more specific search.".into(),
-        ),
+        Some("57014") => ApiError::unavailable("Search took too long. Try a more specific search."),
         _ => error.into(),
     }
 }

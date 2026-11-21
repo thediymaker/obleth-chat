@@ -1286,7 +1286,7 @@ pub fn router(state: AppState) -> Router {
 }
 
 fn off() -> ApiError {
-    ApiError(StatusCode::CONFLICT, "Memory is off on this server".into())
+    ApiError::feature_off("Memory is off on this server")
 }
 
 async fn read(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {

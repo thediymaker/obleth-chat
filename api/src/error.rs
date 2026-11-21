@@ -8,26 +8,75 @@ use axum::{
 };
 use serde_json::json;
 
+/// An error answer: its status, its message for people, and for the few errors
+/// clients act on, a stable `code` (see `code`). Build one with the constructors.
 #[derive(Debug)]
-pub struct ApiError(pub StatusCode, pub String);
+pub struct ApiError(pub StatusCode, pub String, Option<&'static str>);
+
+/// The stable codes an error answer may carry in `error.code`. Clients branch on
+/// these, never on the message, which may be reworded.
+pub mod code {
+    /// A feature the server is not set up for (503).
+    pub const FEATURE_OFF: &str = "feature_off";
+    /// The person's single sign-on grant is gone; they must sign in again (401).
+    pub const SIGN_IN_AGAIN: &str = "sign_in_again";
+    /// The action needs a sign-in from the last few minutes (403).
+    pub const STALE_SIGN_IN: &str = "stale_sign_in";
+}
+
 impl ApiError {
+    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self(status, message.into(), None)
+    }
+    /// 400: the request itself is wrong.
     pub fn bad(message: impl Into<String>) -> Self {
-        Self(StatusCode::BAD_REQUEST, message.into())
+        Self::new(StatusCode::BAD_REQUEST, message)
     }
     pub fn unauthorized() -> Self {
-        Self(StatusCode::UNAUTHORIZED, "Sign in to continue".into())
+        Self::new(StatusCode::UNAUTHORIZED, "Sign in to continue")
     }
     pub fn forbidden() -> Self {
-        Self(StatusCode::FORBIDDEN, "Access denied".into())
+        Self::new(StatusCode::FORBIDDEN, "Access denied")
+    }
+    /// 403 with the reason.
+    pub fn denied(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, message)
     }
     pub fn not_found() -> Self {
-        Self(StatusCode::NOT_FOUND, "Not found".into())
+        Self::new(StatusCode::NOT_FOUND, "Not found")
+    }
+    /// 409: the request clashes with what is there now.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, message)
+    }
+    /// 429: a limit was reached; later may work.
+    pub fn too_many(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, message)
+    }
+    /// 503: something Chat needs is busy or down.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
+    }
+    /// 503 with code `feature_off`: the server is not set up for this.
+    pub fn feature_off(message: impl Into<String>) -> Self {
+        Self::unavailable(message).with_code(code::FEATURE_OFF)
+    }
+    /// 502: a service Chat called failed.
+    pub fn upstream(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, message)
     }
     pub fn internal() -> Self {
-        Self(
+        Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "The service could not complete this request".into(),
+            "The service could not complete this request",
         )
+    }
+    pub fn with_code(mut self, code: &'static str) -> Self {
+        self.2 = Some(code);
+        self
+    }
+    pub fn code(&self) -> Option<&'static str> {
+        self.2
     }
 }
 /// Reads and drops the rest of a request that was refused before its body was
@@ -91,9 +140,9 @@ async fn read_within(
 ) -> Result<Vec<u8>, ApiError> {
     use futures_util::StreamExt;
     let stalled = || {
-        ApiError(
+        ApiError::new(
             StatusCode::REQUEST_TIMEOUT,
-            "The upload stopped arriving. Try again.".into(),
+            "The upload stopped arriving. Try again.",
         )
     };
     let mut stream = body.into_data_stream();
@@ -108,7 +157,7 @@ async fn read_within(
                 }
                 Ok(Some(Ok(chunk))) => {
                     if bytes.len() + chunk.len() > most {
-                        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, too_large));
+                        return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, too_large));
                     }
                     bytes.extend_from_slice(&chunk);
                 }
@@ -161,7 +210,11 @@ pub async fn envelope(request: Request, next: Next) -> Response {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error":{"message":self.1}}))).into_response()
+        let mut error = json!({"message":self.1});
+        if let Some(code) = self.2 {
+            error["code"] = json!(code);
+        }
+        (self.0, Json(json!({"error":error}))).into_response()
     }
 }
 impl From<sqlx::Error> for ApiError {
@@ -187,6 +240,35 @@ impl From<sqlx::Error> for ApiError {
             "database operation failed"
         );
         Self::internal()
+    }
+}
+
+#[cfg(test)]
+mod code_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    async fn body(error: ApiError) -> (StatusCode, serde_json::Value) {
+        let response = error.into_response();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn only_errors_clients_act_on_carry_a_code() {
+        let (status, json) = body(ApiError::bad("No")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json, json!({"error":{"message":"No"}}));
+        let (status, json) = body(ApiError::feature_off(
+            "Workspaces are not enabled on this server",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json,
+            json!({"error":{"message":"Workspaces are not enabled on this server","code":"feature_off"}})
+        );
     }
 }
 

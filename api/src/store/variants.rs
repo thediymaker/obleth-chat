@@ -55,7 +55,7 @@ impl Store {
         .await?
         .ok_or_else(ApiError::not_found)?;
         if active.is_some() {
-            return Err(conflict(
+            return Err(ApiError::conflict(
                 "Stop the active response before editing or regenerating",
             ));
         }
@@ -149,7 +149,7 @@ impl Store {
         .await?
         .ok_or_else(ApiError::not_found)?;
         if active.is_some() {
-            return Err(conflict(
+            return Err(ApiError::conflict(
                 "Stop the active response before switching versions",
             ));
         }

@@ -46,13 +46,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-fn unavailable() -> ApiError {
-    ApiError(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspaces are not enabled on this server".into(),
-    )
-}
-
 pub fn author(user: &Identity) -> Author {
     Author {
         name: user.display_name.clone(),
@@ -105,11 +98,13 @@ impl Chat {
 /// Everything a write needs: the chat's running workspace and its project.
 async fn chat(s: &AppState, headers: &HeaderMap, id: Uuid) -> Result<Chat, ApiError> {
     let user = s.auth.require(headers, true).await?;
-    let sandboxes = s.sandboxes.clone().ok_or_else(unavailable)?;
+    let sandboxes = s
+        .sandboxes
+        .clone()
+        .ok_or_else(crate::sandbox::not_enabled)?;
     if !sandboxes.allowed(&user) {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Workspaces are available to administrators".into(),
+        return Err(ApiError::denied(
+            "Workspaces are available to administrators",
         ));
     }
     let (project, ..) = chat_project(&s.store.pool, user.id, id)
@@ -125,7 +120,7 @@ async fn chat(s: &AppState, headers: &HeaderMap, id: Uuid) -> Result<Chat, ApiEr
         sandboxes
             .ensure_running(&sandbox)
             .await
-            .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?
+            .map_err(ApiError::upstream)?
     };
     Ok(Chat {
         sandboxes,
@@ -363,7 +358,7 @@ async fn exchange(
             repo::Advance::Stale { .. } => continue,
         }
     }
-    Err(repo::conflict(
+    Err(ApiError::conflict(
         "Others kept syncing at the same moment. Try again",
     ))
 }
@@ -381,7 +376,7 @@ pub async fn sync_chat(
     let who = author(user);
     let ws = workspace::status(sh, &who).await?;
     if ws.merging {
-        return Err(repo::conflict(
+        return Err(ApiError::conflict(
             "A sync is paused on a conflict. Finish it or stop it first",
         ));
     }
@@ -437,7 +432,7 @@ async fn save(
     let who = author(&c.user);
     let ws = workspace::status(&pod, &who).await?;
     if ws.merging {
-        return Err(repo::conflict(
+        return Err(ApiError::conflict(
             "A sync is paused on a conflict. Finish it or stop it first",
         ));
     }
@@ -594,7 +589,7 @@ pub async fn seed(
     let running = sandboxes
         .ensure_running(sandbox)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+        .map_err(ApiError::upstream)?;
     let pod = Pod {
         sandboxes,
         sandbox: &running,
@@ -684,7 +679,7 @@ async fn undo_commit(
             repo::Advance::Stale { .. } => continue,
         }
     }
-    Err(repo::conflict(
+    Err(ApiError::conflict(
         "Others kept syncing at the same moment. Try again",
     ))
 }
@@ -702,12 +697,15 @@ async fn diff(
 ) -> Result<Json<Value>, ApiError> {
     check_path(&q.path)?;
     let user = s.auth.require(&headers, false).await?;
-    let sb = s.sandboxes.as_ref().ok_or_else(unavailable)?;
+    let sb = s
+        .sandboxes
+        .as_ref()
+        .ok_or_else(crate::sandbox::not_enabled)?;
     let sandbox = sb
         .get(user.id, id)
         .await?
         .filter(|w| w.status == "running")
-        .ok_or_else(|| repo::conflict("The workspace is not running"))?;
+        .ok_or_else(|| ApiError::conflict("The workspace is not running"))?;
     let pod = Pod {
         sandboxes: sb,
         sandbox: &sandbox,

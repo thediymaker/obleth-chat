@@ -43,9 +43,9 @@ impl Store {
         body: impl AsRef<[u8]> + Send + 'static,
     ) -> Result<ImportSummary, ApiError> {
         if body.as_ref().len() > imports::MAX_IMPORT_BYTES {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "Choose an export of 200 MB or less".into(),
+                "Choose an export of 200 MB or less",
             ));
         }
         // The body is dropped once read; only the shaped chats stay.

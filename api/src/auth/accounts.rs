@@ -158,8 +158,7 @@ async fn admin_revoke_sessions(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     require_user(&mut tx, id).await?;
     let count = super::end_sign_ins(&mut tx, id).await?;
     audit::record(
@@ -215,7 +214,7 @@ fn group_input(input: GroupInput) -> Result<(String, String), ApiError> {
 fn group_error(error: sqlx::Error) -> ApiError {
     match error {
         sqlx::Error::Database(e) if e.is_unique_violation() => {
-            ApiError(StatusCode::CONFLICT, "Group name already exists".into())
+            ApiError::conflict("Group name already exists")
         }
         error => error.into(),
     }
@@ -236,8 +235,7 @@ async fn create_group(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
     let (name, description) = group_input(input)?;
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_groups")
         .fetch_one(&mut *tx)
         .await?;
@@ -341,8 +339,7 @@ async fn update_group(
             .map(|(_, d)| d)
         })
         .transpose()?;
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     let changed=sqlx::query("UPDATE user_groups SET name=COALESCE($2,name),description=COALESCE($3,description) WHERE id=$1").bind(id).bind(name).bind(description).execute(&mut *tx).await.map_err(group_error)?.rows_affected();
     if changed == 0 {
         return Err(ApiError::not_found());
@@ -364,8 +361,7 @@ async fn delete_group(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     // What was shared with the group goes back to its owner alone.
     for table in ["projects", "knowledge_collections"] {
         sqlx::query(&format!(
@@ -423,8 +419,7 @@ async fn change_member(
     add: bool,
 ) -> Result<StatusCode, ApiError> {
     let admin = auth.require_admin(&headers, true).await?;
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     require_user(&mut tx, user_id).await?;
     sqlx::query_scalar::<_, Uuid>("SELECT id FROM user_groups WHERE id=$1 FOR UPDATE")
         .bind(id)
@@ -621,8 +616,7 @@ async fn invite(
     let name = validate_display_name(input.display_name.as_deref().unwrap_or(&username))?;
     let role = Role::requested(input.role.as_deref())?.unwrap_or(Role::User);
     let hours = expiry(input.expires_in_hours)?;
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     let user=sqlx::query_as::<_,Identity>("INSERT INTO users(id,username,display_name,role) VALUES($1,$2,$3,$4) RETURNING id,username,display_name,role")
         .bind(Uuid::new_v4()).bind(username).bind(name).bind(role).fetch_one(&mut *tx).await.map_err(|e|match e{sqlx::Error::Database(e)if e.is_unique_violation()=>username_taken(),e=>e.into()})?;
     auth.group_policy.initial(&mut tx, user.id).await?;
@@ -656,8 +650,7 @@ async fn access_link(
         return Err(ApiError::bad("Link kind must be invite or reset"));
     }
     let hours = expiry(input.expires_in_hours)?;
-    let mut tx = auth.pool.begin().await?;
-    auth.lock_admin(&mut tx, admin.id).await?;
+    let mut tx = crate::operations::admin_transaction(&auth.pool, admin.id).await?;
     let (local, enabled): (bool, bool) = sqlx::query_as(
         "SELECT password_hash IS NOT NULL,enabled FROM users WHERE id=$1 FOR UPDATE",
     )

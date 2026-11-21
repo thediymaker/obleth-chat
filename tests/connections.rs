@@ -1419,7 +1419,8 @@ async fn clusters_can_be_turned_off_for_the_installation(pool: PgPool) {
         &admin,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"]["code"], "feature_off");
     // A cluster saved while they were on is hidden, and MCP servers still work.
     sqlx::query("INSERT INTO connections(id,owner_id,name,url,kind,options,tools) VALUES($1,NULL,'Old','http://127.0.0.1:1','slurm','{}','[]')")
         .bind(Uuid::new_v4())

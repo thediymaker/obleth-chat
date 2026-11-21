@@ -417,9 +417,9 @@ async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response,
         return Ok(enter(sb, slug, &key, request).await);
     }
     let signed_out = || {
-        ApiError(
+        ApiError::new(
             StatusCode::UNAUTHORIZED,
-            "Open this preview from its conversation in Chat.".into(),
+            "Open this preview from its conversation in Chat.",
         )
     };
     let (grant, expires) = cookie(request.headers(), cookie_name(sb))
@@ -432,18 +432,9 @@ async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response,
         .by_slug(slug)
         .await?
         .filter(|s| s.owner_id == grant.user)
-        .ok_or_else(|| {
-            ApiError(
-                StatusCode::NOT_FOUND,
-                "This workspace no longer exists.".into(),
-            )
-        })?;
-    let not_running = || {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "The preview is not running. Ask the assistant to start it.".into(),
-        )
-    };
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "This workspace no longer exists."))?;
+    let not_running =
+        || ApiError::unavailable("The preview is not running. Ask the assistant to start it.");
     let (Some(ip), Some(port), "running") = (
         sandbox.pod_ip.clone(),
         sandbox.preview_port,
@@ -461,9 +452,8 @@ async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response,
         Method::GET | Method::HEAD | Method::OPTIONS
     );
     if !safe && cross_origin(request.headers(), &origin) {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Only the preview itself can send this request.".into(),
+        return Err(ApiError::denied(
+            "Only the preview itself can send this request.",
         ));
     }
     sb.touch(&sandbox).await;
@@ -525,10 +515,8 @@ async fn proxy(sb: &Sandboxes, target: &str, request: Request) -> Result<Respons
         .send()
         .await
         .map_err(|_| {
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The preview server did not answer. Check the server logs in the conversation."
-                    .into(),
+            ApiError::upstream(
+                "The preview server did not answer. Check the server logs in the conversation.",
             )
         })?;
     let mut builder = Response::builder().status(response.status());
@@ -574,10 +562,7 @@ async fn websocket(
         .and_then(|v| v.to_str().ok())
         != Some(origin.as_str())
     {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Cross-origin WebSocket refused".into(),
-        ));
+        return Err(ApiError::denied("Cross-origin WebSocket refused"));
     }
     let (mut parts, _) = request.into_parts();
     let path = parts
@@ -618,12 +603,7 @@ async fn websocket(
     }
     let (server, handshake) = tokio_tungstenite::connect_async(upstream)
         .await
-        .map_err(|_| {
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The preview server refused the WebSocket".into(),
-            )
-        })?;
+        .map_err(|_| ApiError::upstream("The preview server refused the WebSocket"))?;
     let chosen = handshake
         .headers()
         .get(header::SEC_WEBSOCKET_PROTOCOL)

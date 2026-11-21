@@ -119,9 +119,9 @@ impl GroupPolicy {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             _ => {
-                return Err(ApiError(
+                return Err(ApiError::new(
                     StatusCode::UNAUTHORIZED,
-                    "OIDC groups claim must be an array of group names".into(),
+                    "OIDC groups claim must be an array of group names",
                 ))
             }
         };

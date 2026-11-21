@@ -22,7 +22,8 @@ use crate::{
         Identity,
     },
     error::ApiError,
-    launch_turn, launch_workspace, models, not_configured, AppState, Launch,
+    gateway::not_configured,
+    launch_turn, launch_workspace, models, AppState, Launch,
 };
 
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -437,10 +438,7 @@ async fn begin(
     let user = &token.user;
     let gateway = s.gateway.clone().ok_or_else(not_configured)?;
     if s.shutdown.is_cancelled() {
-        return Err(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Service is shutting down".into(),
-        ));
+        return Err(ApiError::unavailable("Service is shutting down"));
     }
     if args["workspace"].as_bool() == Some(true) {
         if !s.sandboxes.as_ref().is_some_and(|sb| sb.allowed(user)) {
@@ -450,7 +448,7 @@ async fn begin(
         }
         launch_workspace(s, user, id)
             .await
-            .map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, e))?;
+            .map_err(ApiError::unavailable)?;
     }
     let saved: models::ParameterOverrides =
         serde_json::from_value(s.store.saved_settings(user.id, id).await?)

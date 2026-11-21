@@ -42,6 +42,11 @@ const MAX_OFFERED: usize = 128;
 /// How long a tool call waits for Allow or Deny.
 pub const APPROVAL_WAIT: Duration = Duration::from_secs(15 * 60);
 
+/// The server is not set up for connections.
+fn not_configured() -> ApiError {
+    ApiError::feature_off("Connections are not configured")
+}
+
 #[derive(Clone)]
 pub struct Connections {
     pool: PgPool,
@@ -1384,20 +1389,13 @@ fn view(row: &Row, user: &Identity) -> Value {
     })
 }
 
-fn unavailable() -> ApiError {
-    ApiError(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Connections are not configured".into(),
-    )
-}
-
 async fn manager(
     s: &AppState,
     headers: &HeaderMap,
     mutation: bool,
 ) -> Result<(Connections, Identity), ApiError> {
     let user = s.auth.require(headers, mutation).await?;
-    Ok((s.connections.clone().ok_or_else(unavailable)?, user))
+    Ok((s.connections.clone().ok_or_else(not_configured)?, user))
 }
 
 fn clean_name(name: &str) -> Result<String, ApiError> {
@@ -1428,7 +1426,7 @@ fn clean_token(token: &str) -> Result<Option<String>, ApiError> {
 }
 
 fn unreachable_server(error: String) -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
         format!("Could not connect: {error}"),
     )
@@ -1436,10 +1434,9 @@ fn unreachable_server(error: String) -> ApiError {
 
 fn duplicate(error: sqlx::Error) -> ApiError {
     match &error {
-        sqlx::Error::Database(e) if e.code().as_deref() == Some("23505") => ApiError(
-            StatusCode::CONFLICT,
-            "A connection with this name already exists".into(),
-        ),
+        sqlx::Error::Database(e) if e.code().as_deref() == Some("23505") => {
+            ApiError::conflict("A connection with this name already exists")
+        }
         _ => error.into(),
     }
 }
@@ -1637,7 +1634,7 @@ async fn create(
         ApiError::bad("Choose an MCP server, a Slurm cluster, a Kubernetes cluster or a device")
     })?;
     if !connections.offered(kind) {
-        return Err(ApiError::bad(match kind {
+        return Err(ApiError::feature_off(match kind {
             Kind::Device => "Devices are turned off on this installation",
             _ => "Clusters are turned off on this installation",
         }));
@@ -2089,7 +2086,7 @@ async fn save_credential(
     let checked = connections
         .check(kind, &url, Some(token.clone()), &check_options, true)
         .await
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     if kind == Kind::Kubernetes {
         let given = body
             .namespace
@@ -2169,7 +2166,7 @@ async fn switch_chat_connection(
     owned(&connections.pool, user.id, conversation).await?;
     if let Some(auto) = body.auto {
         if auto && !connections.auto_mode {
-            return Err(ApiError::bad(
+            return Err(ApiError::feature_off(
                 "Auto mode is turned off on this installation",
             ));
         }
@@ -2240,9 +2237,8 @@ async fn decide(
         .bind(conversation).bind(&body.call_id).bind(user.id).bind(&body.decision)
         .fetch_optional(&mut *tx).await?;
     let Some(tool) = decided else {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "This step is no longer waiting for an answer".into(),
+        return Err(ApiError::conflict(
+            "This step is no longer waiting for an answer",
         ));
     };
     match (body.remember, body.decision.as_str(), tool) {

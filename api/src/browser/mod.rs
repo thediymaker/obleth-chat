@@ -676,6 +676,11 @@ impl Browsers {
     }
 }
 
+/// The server is not set up for the browser.
+pub(crate) fn not_enabled() -> ApiError {
+    ApiError::feature_off("The browser is not enabled on this server")
+}
+
 fn new_slug() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -691,14 +696,10 @@ async fn manager(
     mutation: bool,
 ) -> Result<(Browsers, Identity), ApiError> {
     let user = s.auth.require(headers, mutation).await?;
-    let browsers = s
-        .browsers
-        .clone()
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "The browser is not enabled".into()))?;
+    let browsers = s.browsers.clone().ok_or_else(not_enabled)?;
     if !browsers.allowed(&user) {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "The browser is available to administrators".into(),
+        return Err(ApiError::denied(
+            "The browser is available to administrators",
         ));
     }
     Ok((browsers, user))
@@ -844,7 +845,7 @@ async fn sleep_now(State(s): State<AppState>, headers: HeaderMap) -> Result<Stat
     if let Some(browser) = browsers.get(user.id).await? {
         browsers.sleep(&browser).await.map_err(|error| {
             tracing::warn!("could not stop a browser: {error:#}");
-            ApiError(StatusCode::BAD_GATEWAY, "The browser could not stop".into())
+            ApiError::upstream("The browser could not stop")
         })?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -855,10 +856,7 @@ async fn forget_all(State(s): State<AppState>, headers: HeaderMap) -> Result<Sta
     if let Some(browser) = browsers.get(user.id).await? {
         browsers.forget(&browser).await.map_err(|error| {
             tracing::warn!("could not delete a browser: {error:#}");
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                "The browser data could not be deleted".into(),
-            )
+            ApiError::upstream("The browser data could not be deleted")
         })?;
     }
     Ok(StatusCode::NO_CONTENT)

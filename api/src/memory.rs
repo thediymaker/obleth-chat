@@ -9,10 +9,11 @@
 //! Temporary chats are never read and never given memories.
 use crate::audit::{self, Action, Target};
 use crate::{
-    auth::{Identity, Role},
+    auth::Identity,
+    background::{identity_of, json_after_thinking, newest_within, settle, Claims, Failure},
     decisions::{self, Decisions},
     error::ApiError,
-    gateway::{valid_model, Gateway},
+    gateway::{model_name, Gateway},
     knowledge::{chat::Question, Knowledge},
     AppState,
 };
@@ -453,7 +454,7 @@ pub async fn read_quiet(s: &AppState, quiet: Duration) -> Result<usize, sqlx::Er
     .await?;
     let read: Vec<Result<bool, sqlx::Error>> = futures_util::stream::iter(due)
         .map(|(conversation, owner, reply)| async move {
-            let Some(user) = identity(pool, owner).await? else {
+            let Some(user) = identity_of(pool, owner).await? else {
                 return Ok(false);
             };
             match claim(s, &user, conversation).await? {
@@ -568,45 +569,19 @@ impl Claimed {
             user: &self.user,
         };
         let done = pass.learn(conversation, reply, self.read_through).await;
-        if let Err(error) = settle(&self.pool, conversation, done).await {
+        if let Err(error) = settle(&self.pool, &READS, conversation, done).await {
             tracing::warn!(conversation = %conversation, "memory pass: {error}");
         }
     }
 }
 
-enum Failure {
-    Database(sqlx::Error),
-    /// The gateway or the model gave no usable answer; the chat is read again later.
-    Answer(String),
-}
-
-impl From<sqlx::Error> for Failure {
-    fn from(error: sqlx::Error) -> Self {
-        Failure::Database(error)
-    }
-}
-
-async fn settle(pool: &PgPool, id: Uuid, done: Result<(), Failure>) -> Result<(), sqlx::Error> {
-    match done {
-        Ok(()) => Ok(()),
-        Err(failure) => {
-            if let Failure::Answer(why) = &failure {
-                tracing::info!(conversation = %id, "memory could not read a chat: {why}");
-            }
-            sqlx::query(
-                "UPDATE memory_reads SET claimed_until = NULL, failed_at = NOW(), attempts = LEAST(attempts + 1, 100)
-                 WHERE conversation_id = $1",
-            )
-            .bind(id)
-            .execute(pool)
-            .await?;
-            match failure {
-                Failure::Database(error) => Err(error),
-                Failure::Answer(_) => Ok(()),
-            }
-        }
-    }
-}
+/// Memory's claims: a chat whose answer failed is read again 5 minutes later for each
+/// failure, up to 100.
+const READS: Claims = Claims {
+    table: "memory_reads",
+    attempts: "LEAST(attempts + 1, 100)",
+    failed: "memory could not read a chat",
+};
 
 /// One pass over a chat, as its owner.
 struct Pass<'a> {
@@ -663,7 +638,7 @@ impl Pass<'_> {
             .filter(|r| r.1 == "user")
             .map(|r| r.2.clone())
             .collect();
-        let read = latest(&texts);
+        let read = newest_within(&texts, MESSAGE_CHARS, READ_CHARS, false);
         let answer: String = rows
             .iter()
             .rev()
@@ -1115,42 +1090,10 @@ fn same(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-/// The person's newest messages as the model reads them: as many of the latest as fit,
-/// in order, each one and all together cut short.
-fn latest(texts: &[String]) -> Vec<String> {
-    let mut left = READ_CHARS;
-    let mut out = vec![];
-    for text in texts
-        .iter()
-        .rev()
-        .map(|t| t.trim())
-        .filter(|t| !t.is_empty())
-    {
-        if left == 0 {
-            break;
-        }
-        let part: String = text.chars().take(MESSAGE_CHARS.min(left)).collect();
-        left -= part.chars().count();
-        out.push(part);
-    }
-    out.reverse();
-    out
-}
-
 /// The JSON object in a model's answer, after any thinking.
 fn answer_json(response: &Value) -> Option<Value> {
-    let text = response["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("");
-    let text = match text.rfind("</think>") {
-        Some(end) => &text[end + "</think>".len()..],
-        None => text,
-    };
-    let (open, close) = (text.find('{')?, text.rfind('}')?);
-    if close < open {
-        return None;
-    }
-    serde_json::from_str(&text[open..=close]).ok()
+    let text = response["choices"][0]["message"]["content"].as_str()?;
+    json_after_thinking(text, '{', '}')
 }
 
 fn topics_of(value: &Value) -> Vec<(String, String)> {
@@ -1308,7 +1251,7 @@ pub async fn embed_missing(
     .await?;
     let mut done = 0;
     for (id, owner, content, attempts) in rows {
-        let Some(user) = identity(pool, owner).await? else {
+        let Some(user) = identity_of(pool, owner).await? else {
             continue;
         };
         if let Some(vector) = embed(knowledge, gateway, &user, &[content], false)
@@ -1326,22 +1269,6 @@ pub async fn embed_missing(
         }
     }
     Ok(done)
-}
-
-async fn identity(pool: &PgPool, user: Uuid) -> Result<Option<Identity>, sqlx::Error> {
-    let row: Option<(Uuid, String, String, Role)> = sqlx::query_as(
-        "SELECT id, username, display_name, role FROM users WHERE id = $1 AND enabled",
-    )
-    .bind(user)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(id, username, display_name, role)| Identity {
-        id,
-        username,
-        display_name,
-        role,
-        session: None,
-    }))
 }
 
 // ---------------------------------------------------------------------------------
@@ -1881,13 +1808,7 @@ async fn admin_save(
     Json(body): Json<AdminPatch>,
 ) -> Result<Json<Value>, ApiError> {
     let admin = s.auth.require_admin(&headers, true).await?;
-    let model = body
-        .model
-        .map(|m| m.trim().to_owned())
-        .filter(|m| !m.is_empty());
-    if model.as_deref().is_some_and(|m| !valid_model(m)) {
-        return Err(ApiError::bad("Enter a model name of up to 160 characters"));
-    }
+    let model = model_name(body.model)?;
     if body.enabled && model.is_none() {
         return Err(ApiError::bad("Choose the model that keeps memories"));
     }
@@ -2020,7 +1941,7 @@ mod tests {
         let texts: Vec<String> = (0..10)
             .map(|i| format!("{i}{}", "x".repeat(1500)))
             .collect();
-        let read = latest(&texts);
+        let read = newest_within(&texts, MESSAGE_CHARS, READ_CHARS, false);
         assert_eq!(
             read.iter().map(|t| t.chars().count()).sum::<usize>(),
             READ_CHARS

@@ -4,7 +4,7 @@
 
 use super::{bad, knowledge, vector_literal, words, Hit, Knowledge};
 use crate::paging::PageQuery;
-use crate::{auth::Identity, error::ApiError, gateway::Gateway, AppState};
+use crate::{auth::Identity, background::identity_of, error::ApiError, gateway::Gateway, AppState};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -269,7 +269,7 @@ impl Knowledge {
         };
         let worked = !rows.is_empty();
         for row in rows {
-            let Ok(owner) = super::identity(&self.pool, row.get("owner_id")).await else {
+            let Ok(Some(owner)) = identity_of(&self.pool, row.get("owner_id")).await else {
                 continue;
             };
             let text = embed_text(

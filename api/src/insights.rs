@@ -11,9 +11,12 @@
 //! topic lines into workstreams. A group with fewer than five people shows totals only.
 use crate::audit::{self, Action, Target};
 use crate::{
-    auth::{Identity, Role},
+    auth::Identity,
+    background::{
+        after_thinking, identity_of, json_after_thinking, newest_within, settle, Claims, Failure,
+    },
     error::ApiError,
-    gateway::{valid_model, Gateway},
+    gateway::{model_name, Gateway},
     AppState,
 };
 use axum::{
@@ -314,7 +317,7 @@ pub async fn tick(s: &AppState) -> Result<usize, sqlx::Error> {
             let gateway = gateway.clone();
             let model = model.clone();
             async move {
-                let Some(user) = identity(pool, owner).await? else {
+                let Some(user) = identity_of(pool, owner).await? else {
                     // An account that is gone: the chat is passed over until it has a new
                     // message.
                     sqlx::query("UPDATE conversation_labels SET claimed_until = NULL, labeled_through = $2 WHERE conversation_id = $1")
@@ -325,7 +328,7 @@ pub async fn tick(s: &AppState) -> Result<usize, sqlx::Error> {
                     return Ok(());
                 };
                 let work = Work { label: true, rename: None };
-                settle(pool, id, describe(pool, &gateway, &model, id, &user, work).await).await
+                settle(pool, &LABELS, id, describe(pool, &gateway, &model, id, &user, work).await).await
             }
         })
         .buffer_unordered(AT_ONCE)
@@ -356,24 +359,13 @@ async fn claim(pool: &PgPool, id: Uuid, owner: Uuid) -> Result<bool, sqlx::Error
     Ok(mine.is_some())
 }
 
-/// Records a failed answer, so the chat is tried again later.
-async fn settle(pool: &PgPool, id: Uuid, done: Result<(), Failure>) -> Result<(), sqlx::Error> {
-    match done {
-        Ok(()) => Ok(()),
-        Err(Failure::Database(error)) => Err(error),
-        Err(Failure::Answer(why)) => {
-            tracing::info!(conversation = %id, "insights could not label a chat: {why}");
-            sqlx::query(
-                "UPDATE conversation_labels SET claimed_until = NULL, failed_at = NOW(), attempts = attempts + 1
-                 WHERE conversation_id = $1",
-            )
-            .bind(id)
-            .execute(pool)
-            .await
-            .map(|_| ())
-        }
-    }
-}
+/// Insights' claims: a chat whose answer failed is tried again an hour later for each
+/// failure, up to a day.
+const LABELS: Claims = Claims {
+    table: "conversation_labels",
+    attempts: "attempts + 1",
+    failed: "insights could not label a chat",
+};
 
 /// When a reply finishes: labels a chat that has none yet, and names a chat whose first
 /// reply this is and whose title is still the start of its first message. Starts the work
@@ -432,12 +424,9 @@ async fn start(s: &AppState, user: &Identity, conversation: Uuid) -> Result<bool
         let work = Work { label, rename };
         let done = describe(&pool, &gateway, &model, conversation, &user, work).await;
         let settled = if label {
-            settle(&pool, conversation, done).await
+            settle(&pool, &LABELS, conversation, done).await
         } else {
-            done.or_else(|f| match f {
-                Failure::Database(error) => Err(error),
-                Failure::Answer(_) => Ok(()),
-            })
+            done.or_else(Failure::passed_on)
         };
         if let Err(error) = settled {
             tracing::warn!(conversation = %conversation, "insights after a reply: {error}");
@@ -458,17 +447,6 @@ pub fn auto_title(title: &str, first: &str) -> bool {
 struct Work {
     label: bool,
     rename: Option<String>,
-}
-
-enum Failure {
-    Database(sqlx::Error),
-    /// The gateway or the model gave no usable answer; the chat is tried again later.
-    Answer(String),
-}
-impl From<sqlx::Error> for Failure {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
 }
 
 /// The labels for one chat, read from a verdicts answer.
@@ -540,7 +518,7 @@ async fn describe(
     .bind(id)
     .fetch_one(pool)
     .await?;
-    let read = capped(&texts);
+    let read = newest_within(&texts, MESSAGE_CHARS, CHAT_CHARS, true);
     if read.is_empty() {
         // Nothing to read: the chat is passed over until it has a new message.
         if work.label {
@@ -639,63 +617,12 @@ async fn describe(
     Ok(())
 }
 
-async fn identity(pool: &PgPool, user: Uuid) -> Result<Option<Identity>, sqlx::Error> {
-    let row: Option<(Uuid, String, String, Role)> = sqlx::query_as(
-        "SELECT id, username, display_name, role FROM users WHERE id = $1 AND enabled",
-    )
-    .bind(user)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(id, username, display_name, role)| Identity {
-        id,
-        username,
-        display_name,
-        role,
-        // Insights run on their own, without a sign-in.
-        session: None,
-    }))
-}
-
-/// The person's messages as the model reads them: the first one and as many of the latest
-/// as fit, in order, each one and all of them together cut to a few thousand characters.
-pub fn capped(texts: &[String]) -> Vec<String> {
-    let texts: Vec<&str> = texts
-        .iter()
-        .map(|t| t.trim())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let Some((first, rest)) = texts.split_first() else {
-        return Vec::new();
-    };
-    let cut = |text: &str, most: usize| text.chars().take(most).collect::<String>();
-    let first = cut(first, MESSAGE_CHARS.min(CHAT_CHARS));
-    let mut left = CHAT_CHARS - first.chars().count();
-    let mut latest = Vec::new();
-    for text in rest.iter().rev() {
-        if left == 0 {
-            break;
-        }
-        let part = cut(text, MESSAGE_CHARS.min(left));
-        left -= part.chars().count();
-        latest.push(part);
-    }
-    latest.reverse();
-    std::iter::once(first).chain(latest).collect()
-}
-
 /// The title and topic line from a naming answer. A title is one line of a few words.
 pub fn names(answer: &Value) -> (Option<String>, Option<String>) {
     let text = answer["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("");
-    let text = match text.rfind("</think>") {
-        Some(end) => &text[end + "</think>".len()..],
-        None => text,
-    };
-    let (Some(open), Some(close)) = (text.find('{'), text.rfind('}')) else {
-        return (None, None);
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&text[open..=close.max(open)]) else {
+    let Some(value) = json_after_thinking(text, '{', '}') else {
         return (None, None);
     };
     let clean = |key: &str, most: usize| {
@@ -715,11 +642,7 @@ pub fn names(answer: &Value) -> (Option<String>, Option<String>) {
 
 /// The first line of a completion, without thinking, quotes or a final full stop.
 pub fn topic_line(answer: &Value) -> Option<String> {
-    let text = answer["choices"][0]["message"]["content"].as_str()?;
-    let text = match text.rfind("</think>") {
-        Some(end) => &text[end + "</think>".len()..],
-        None => text,
-    };
+    let text = after_thinking(answer["choices"][0]["message"]["content"].as_str()?);
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     let line = line.trim_matches(|c: char| {
         c == '"' || c == '\'' || c == '*' || c == '`' || c == '.' || c.is_whitespace()
@@ -988,7 +911,7 @@ async fn summary(
         .fetch_one(pool)
         .await?;
     let run_as = match run_as {
-        Some(id) => identity(pool, id).await?.is_some(),
+        Some(id) => identity_of(pool, id).await?.is_some(),
         None => false,
     };
     let stalled = stalled(s.gateway.is_some(), &settings, run_as);
@@ -1143,14 +1066,6 @@ struct Patch {
     report_model: Option<String>,
 }
 
-fn model_name(value: Option<String>) -> Result<Option<String>, ApiError> {
-    let value = value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
-    if value.as_deref().is_some_and(|v| !valid_model(v)) {
-        return Err(ApiError::bad("Enter a model name of up to 160 characters"));
-    }
-    Ok(value)
-}
-
 async fn save(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1249,11 +1164,7 @@ struct Labelled {
 
 /// Workstream names and descriptions from a model's answer.
 pub fn read_workstreams(text: &str) -> Option<Vec<(String, String)>> {
-    let text = match text.rfind("</think>") {
-        Some(end) => &text[end + "</think>".len()..],
-        None => text,
-    };
-    let list: Value = serde_json::from_str(&text[text.find('[')?..=text.rfind(']')?]).ok()?;
+    let list = json_after_thinking(text, '[', ']')?;
     let mut out: Vec<(String, String)> = Vec::new();
     for item in list.as_array()? {
         let name: String = item["name"]
@@ -1352,7 +1263,7 @@ pub async fn workstreams_tick(s: &AppState) -> Result<(), sqlx::Error> {
     .fetch_one(pool)
     .await?;
     let user = match tick.run_as {
-        Some(id) => identity(pool, id).await?,
+        Some(id) => identity_of(pool, id).await?,
         None => None,
     };
     let (Some(gateway), Some(model), Some(user)) =
@@ -1784,7 +1695,7 @@ mod tests {
             long("h"),
             "late".into(),
         ];
-        let read = capped(&texts);
+        let read = newest_within(&texts, MESSAGE_CHARS, CHAT_CHARS, true);
         assert!(read.iter().all(|t| t.chars().count() <= MESSAGE_CHARS));
         assert_eq!(
             read.iter().map(|t| t.chars().count()).sum::<usize>(),
@@ -1798,8 +1709,11 @@ mod tests {
                 .any(|t| t.starts_with('b') || t.starts_with('c')),
             "the middle is left out"
         );
-        assert_eq!(capped(&["é".repeat(10)]), vec!["é".repeat(10)]);
-        assert!(capped(&[" ".into()]).is_empty());
+        assert_eq!(
+            newest_within(&["é".repeat(10)], MESSAGE_CHARS, CHAT_CHARS, true),
+            vec!["é".repeat(10)]
+        );
+        assert!(newest_within(&[" ".into()], MESSAGE_CHARS, CHAT_CHARS, true).is_empty());
     }
 
     #[test]

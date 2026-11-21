@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod audit;
 pub mod auth;
 pub mod autopilot;
+pub mod background;
 pub mod banner;
 pub mod batches;
 pub mod browser;

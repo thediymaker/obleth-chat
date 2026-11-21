@@ -17,12 +17,7 @@ use crate::attachments::size_label;
 use crate::config::env::text;
 use crate::connections::wakeups::Wakeups;
 use crate::paging::{Page, PageQuery};
-use crate::{
-    auth::{Identity, Role},
-    error::ApiError,
-    gateway::Gateway,
-    AppState,
-};
+use crate::{auth::Identity, error::ApiError, gateway::Gateway, AppState};
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -235,7 +230,9 @@ impl Knowledge {
         if job.attempts > 3 {
             anyhow::bail!("Processing stopped three times; delete the file and upload it again");
         }
-        let owner = identity(&self.pool, job.owner).await?;
+        let owner = crate::background::identity_of(&self.pool, job.owner)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("The owner's account is disabled"))?;
         let embedding = self.embedding().await?;
         let kind = extract::kind(&job.name, &job.mime)
             .ok_or_else(|| anyhow::anyhow!("This file type is not supported"))?;
@@ -641,26 +638,6 @@ async fn embed_batch(
 /// A gateway answer worth trying again: busy, a gateway error, or no answer in time.
 fn passing(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
-}
-
-async fn identity(pool: &PgPool, id: Uuid) -> anyhow::Result<Identity> {
-    let row =
-        sqlx::query("SELECT id, username, display_name, role FROM users WHERE id=$1 AND enabled")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("The owner's account is disabled"))?;
-    Ok(Identity {
-        id: row.get("id"),
-        username: row.get("username"),
-        display_name: row.get("display_name"),
-        role: if row.get::<String, _>("role") == "admin" {
-            Role::Admin
-        } else {
-            Role::User
-        },
-        session: None,
-    })
 }
 
 // ---- HTTP ----

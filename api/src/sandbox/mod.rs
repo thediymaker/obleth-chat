@@ -356,12 +356,7 @@ impl Sandboxes {
     /// Whether an account is enabled and may still use workspaces, for work that runs
     /// without anyone signed in.
     pub async fn owner_allowed(&self, owner: Uuid) -> Result<bool, ApiError> {
-        let user = sqlx::query_as::<_, Identity>(
-            "SELECT id,username,display_name,role FROM users WHERE id=$1 AND enabled",
-        )
-        .bind(owner)
-        .fetch_optional(&self.inner.pool)
-        .await?;
+        let user = crate::background::identity_of(&self.inner.pool, owner).await?;
         Ok(user.is_some_and(|user| self.allowed(&user)))
     }
 

@@ -122,23 +122,6 @@ fn digest(secret: &str) -> Vec<u8> {
     Sha256::digest(secret.as_bytes()).to_vec()
 }
 
-async fn person(pool: &PgPool, id: Uuid) -> Result<Option<Identity>, sqlx::Error> {
-    let row: Option<(Uuid, String, String, Role)> = sqlx::query_as(
-        "SELECT id, username, display_name, role FROM users WHERE id = $1 AND enabled",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(id, username, display_name, role)| Identity {
-        id,
-        username,
-        display_name,
-        role,
-        // A run is not tied to a browser sign-in.
-        session: None,
-    }))
-}
-
 async fn audit(
     pool: &PgPool,
     actor: Uuid,
@@ -528,7 +511,7 @@ async fn call(
     .await?;
     let (key, owner) = key.ok_or_else(ApiError::unauthorized)?;
     let user = match owner {
-        Some(owner) => person(pool, owner).await?,
+        Some(owner) => crate::background::identity_of(pool, owner).await?,
         None => None,
     }
     .filter(|u| u.role == Role::Admin)

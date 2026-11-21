@@ -683,6 +683,14 @@ fn now() -> Result<u64, ApiError> {
 pub fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 160 && !model.chars().any(char::is_control)
 }
+/// A model name from a settings form: blank is none, anything else must be valid.
+pub fn model_name(value: Option<String>) -> Result<Option<String>, ApiError> {
+    let value = value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    if value.as_deref().is_some_and(|v| !valid_model(v)) {
+        return Err(ApiError::bad("Enter a model name of up to 160 characters"));
+    }
+    Ok(value)
+}
 pub fn unavailable() -> ApiError {
     ApiError(
         StatusCode::BAD_GATEWAY,

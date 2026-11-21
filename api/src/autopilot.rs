@@ -12,7 +12,8 @@ use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::auth::{grants::SIGN_IN_AGAIN, Identity, Role};
+use crate::auth::grants::SIGN_IN_AGAIN;
+use crate::background::identity_of;
 use crate::lifecycle::TurnEnd;
 use crate::{launch_turn, models, AppState, Launch, PAUSED};
 
@@ -154,7 +155,7 @@ pub async fn tick(s: &AppState) -> Result<(), sqlx::Error> {
             continue;
         }
         let owner: Uuid = row.get("owner_id");
-        let Some(user) = identity(s, owner).await? else {
+        let Some(user) = identity_of(&s.store.pool, owner).await? else {
             continue;
         };
         let settings: Value = row.get("settings");
@@ -195,23 +196,6 @@ pub async fn tick(s: &AppState) -> Result<(), sqlx::Error> {
         }
     }
     Ok(())
-}
-
-async fn identity(s: &AppState, user: Uuid) -> Result<Option<Identity>, sqlx::Error> {
-    let row: Option<(Uuid, String, String, Role)> = sqlx::query_as(
-        "SELECT id, username, display_name, role FROM users WHERE id = $1 AND enabled",
-    )
-    .bind(user)
-    .fetch_optional(&s.store.pool)
-    .await?;
-    Ok(row.map(|(id, username, display_name, role)| Identity {
-        id,
-        username,
-        display_name,
-        role,
-        // Auto mode runs on its own, without a sign-in.
-        session: None,
-    }))
 }
 
 #[cfg(test)]

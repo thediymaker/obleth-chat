@@ -16,6 +16,7 @@ import { type Connection, KINDS, useConnections } from "@/components/connections
 import { DataTable, Meter, Pill, DangerButton } from "@/components/manage/kit";
 import { ComputeOff, ComputeTabs } from "@/components/workspace/compute";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useCapabilities } from "@/lib/queries";
@@ -303,9 +304,10 @@ function ClusterCard({ c, s, loading, onRefresh, manager }: { c: Cluster; s?: Cl
           </Button>
         )}
         {c.usable !== false && (
-          <Button size="sm" variant={c.active ? "outline" : "default"} aria-pressed={c.active} title={c.active ? "Offered to the model in your chats" : "Kept out of your chats"} onClick={() => manager.toggle(c)}>
-            {c.active ? "In my chats" : "Not in my chats"}
-          </Button>
+          <label className="flex items-center gap-2 text-sm" title={c.active ? "Offered to the model in your chats" : "Kept out of your chats"}>
+            <Switch checked={c.active} onCheckedChange={() => manager.toggle(c)} />
+            In my chats
+          </label>
         )}
         {c.shared && c.credential && (
           <>

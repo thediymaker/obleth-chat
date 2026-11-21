@@ -11,9 +11,9 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { Field, FormActions, FormDialog, FormError, Dropdown, Note, Section, TableWrap, TextAreaField, TextField, displayName, td, th, titleCase, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
+import { Field, FormActions, FormDialog, FormError, Dropdown, Note, Section, TableWrap, TextAreaField, TextField, displayName, td, th, titleCase, useConfirm, useSubmit, DangerButton, SearchForm } from "@/components/manage/kit";
 import { api } from "@/lib/api";
-import { type AdminUser, SearchForm } from "./people-tab";
+import { type AdminUser } from "./people-tab";
 import { useKept } from "./state";
 
 /** Accounts a member search offers at once. */

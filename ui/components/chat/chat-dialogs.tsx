@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { useLibraryDialogs } from "@/components/library/saved-dialogs";
-import { Columns, Confirm, Field, FormActions, FormDialog, FormError, useSubmit, Pill } from "@/components/manage/kit";
+import { Columns, Confirm, Field, FormActions, FormDialog, FormError, Pill, RadioCards, useSubmit } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dropdown } from "@/components/ui/dropdown";
@@ -346,19 +346,17 @@ export function ShareDialog({ id, close }: { id: string; close: () => void }) {
   }
   return (
     <FormDialog open onOpenChange={(o) => !o && close()} title="Share this chat" className="sm:max-w-lg">
-      <div className="grid gap-2" role="radiogroup" aria-label="Who can open it">
-        {CHOICES.map(([value, label, note]) => {
-          const off = value === "group" && !options.length;
-          return (
-            <label key={value} className={cn("flex cursor-pointer items-start gap-2.5 rounded-md border px-3 py-2", scope === value && "border-foreground bg-secondary", off && "cursor-not-allowed opacity-60")}>
-              <input type="radio" name="share-scope" value={value} checked={scope === value} disabled={off} onChange={() => save(value)} className="mt-1" />
-              <span>
-                <strong className="block text-md font-medium">{label}</strong>
-                <small className="text-sm text-muted-foreground">{off ? "You are not in any groups yet." : note}</small>
-              </span>
-            </label>
-          );
-        })}
+      <div className="grid gap-2">
+        <RadioCards
+          label="Who can open it"
+          name="share-scope"
+          value={scope}
+          onChange={(v) => save(v)}
+          options={CHOICES.map(([value, label, note]) => {
+            const off = value === "group" && !options.length;
+            return [value, label, off ? "You are not in any groups yet." : note, off] as const;
+          })}
+        />
         {options.length > 0 && scope === "group" && (
           <Dropdown aria-label="Group" value={share.groupId ?? undefined} onChange={(e) => save("group", e.target.value)}>
             {options.map((g) => (

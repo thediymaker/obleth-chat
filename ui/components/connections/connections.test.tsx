@@ -76,9 +76,11 @@ test("MCP servers lists yours and shared ones, and turns one off", async () => {
   expect(screen.getByText("Campus wiki")).toBeInTheDocument();
   expect(screen.queryByText("Lab")).toBeNull();
   expect(screen.getAllByText(/1 can make changes/).length).toBe(2);
-  await userEvent.click(screen.getByRole("button", { name: "Stop using Research tools in my chats" }));
+  const toggle = screen.getByRole("switch", { name: "Use Research tools in my chats" });
+  expect(toggle).toBeChecked();
+  await userEvent.click(toggle);
   await waitFor(() => expect(calls.find((c) => c.method === "PATCH")).toEqual({ path: "/api/connections/c1", method: "PATCH", body: { enabled: false } }));
-  expect(await screen.findByRole("button", { name: "Use Research tools in my chats" })).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("switch", { name: "Use Research tools in my chats" })).not.toBeChecked());
   await userEvent.click(screen.getAllByRole("button", { name: "2 tools" })[0]!);
   expect(screen.getByText("Asks first")).toBeInTheDocument();
 });

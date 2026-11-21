@@ -80,6 +80,16 @@ describe("All chats", () => {
     await waitFor(() => expect(request).toHaveBeenCalledWith("/api/conversations/c0", { method: "PATCH", body: { pinned: false } }));
   });
 
+  it("searches what is typed, with the visibility filter beside the box, and puts both in the URL", async () => {
+    serve(1);
+    renderWithQueries(<HistoryPage />);
+    await screen.findByText("Chat 0");
+    await userEvent.type(screen.getByRole("textbox", { name: "Search conversations" }), "gpu");
+    await userEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("/api/conversations?query=gpu&archived=false&limit=50&offset=0", expect.anything()));
+    expect(replace).toHaveBeenCalledWith("/history?query=gpu", { scroll: false });
+  });
+
   it("says when a search finds nothing", async () => {
     search = "query=nothing";
     request.mockImplementation(async (path: string) => (path === "/api/models" ? { models: [] } : { conversations: [], total: 0, hasMore: false }));

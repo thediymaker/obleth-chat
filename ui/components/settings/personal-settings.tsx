@@ -12,7 +12,7 @@ import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, Loading } from "@/components/app-shell/page";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { CheckField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, displayName, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
+import { CheckField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, SwitchField, TextAreaField, TextField, displayName, messageOf, useConfirm, useSubmit, DangerButton } from "@/components/manage/kit";
 import { SectionHeading } from "@/components/settings/settings-frame";
 import { SecurityCard, TokensCard, type ApiToken, type DeviceSession } from "@/components/settings/account-cards";
 import { BrowserCard } from "@/components/settings/browser-card";
@@ -98,9 +98,6 @@ export function PersonalSettings() {
     toast("Profile updated");
   });
   const defaults = useSubmit((form) => save({ defaultModel: String(form.get("default-model")), ...readGeneration(form, "default") }));
-  const appearance = useSubmit((form) =>
-    save({ density: form.get("appearance-compact") === "on" ? "compact" : "comfortable", focus: form.get("appearance-focus") === "on", context: form.get("appearance-context") === "on", modelSuggestions: form.get("appearance-suggestions") === "on" }),
-  );
   const favorites = useSubmit((form) => save({ favorites: models.filter((m) => m.id !== "auto" && form.get(`favorite-${m.id}`) === "on").map((m) => m.id) }));
 
   function applyPreset(x: Preset) {
@@ -208,26 +205,7 @@ export function PersonalSettings() {
           {browser && <BrowserCard />}
           <SecurityCard sessions={account.data?.sessions ?? []} loading={account.isFetching && !account.data} error={account.error} onRefresh={refresh} />
           <TokensCard tokens={account.data?.tokens ?? []} onChange={refresh} />
-          <Section title="Appearance">
-            <div className="grid gap-1.5">
-              <h3 className="text-md font-medium">Theme</h3>
-              <ThemeToggle labels className="w-fit" />
-              <Note>Saved in this browser. System follows your device.</Note>
-            </div>
-            <Note>Layout preferences are saved to your account across devices.</Note>
-            <form key={`${p.density}-${p.focus}-${p.context}-${p.modelSuggestions}`} onSubmit={appearance.onSubmit} className="grid gap-3">
-              <CheckField id="appearance-compact" label="Compact spacing" defaultChecked={p.density === "compact"} description="Fit more messages on screen." />
-              <CheckField id="appearance-focus" label="Focus mode" defaultChecked={!!p.focus} description="Collapse the main navigation." />
-              <CheckField id="appearance-context" label="Conversation context" defaultChecked={p.context !== false} description="Show model and generation details." />
-              <CheckField id="appearance-suggestions" label="Suggest a better suited model" defaultChecked={p.modelSuggestions !== false} description="When a chat on a model not certified for changes starts work on a cluster or in a workspace, offer a certified model once." />
-              <FormError message={appearance.error} />
-              <FormActions>
-                <Button type="submit" disabled={appearance.busy}>
-                  Save appearance
-                </Button>
-              </FormActions>
-            </form>
-          </Section>
+          <AppearanceCard key={`${p.density}-${p.focus}-${p.context}-${p.modelSuggestions}`} values={p} />
           <Section title="Your files" description="Private text, code, document and image attachments stored in your account.">
             <FormActions>
               <Button size="sm" variant="outline" onClick={() => setFiles(true)}>
@@ -265,6 +243,52 @@ export function PersonalSettings() {
         </div>
       </div>
     </div>
+  );
+}
+
+type Look = Pick<Preferences, "density" | "focus" | "context" | "modelSuggestions">;
+
+/** Theme and layout. Each switch saves as it is changed, and is held while it saves;
+ *  the card starts again from the saved values when they change. */
+function AppearanceCard({ values }: { values: Look }) {
+  const save = useSavePreferences();
+  const [look, setLook] = useState<Look>(values);
+  const [saving, setSaving] = useState(false);
+  async function change(next: Partial<Look>) {
+    const before = look;
+    setLook({ ...look, ...next });
+    setSaving(true);
+    try {
+      await save(next);
+    } catch (e) {
+      setLook(before);
+      toast(messageOf(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Section title="Appearance">
+      <div className="grid gap-1.5">
+        <h3 className="text-md font-medium">Theme</h3>
+        <ThemeToggle labels className="w-fit" />
+        <Note>Saved in this browser. System follows your device.</Note>
+      </div>
+      <Note>Layout preferences are saved to your account across devices as you change them.</Note>
+      <div className="grid gap-3">
+        <SwitchField id="appearance-compact" label="Compact spacing" description="Fit more messages on screen." checked={look.density === "compact"} disabled={saving} onCheckedChange={(on) => change({ density: on ? "compact" : "comfortable" })} />
+        <SwitchField id="appearance-focus" label="Focus mode" description="Collapse the main navigation." checked={!!look.focus} disabled={saving} onCheckedChange={(on) => change({ focus: on })} />
+        <SwitchField id="appearance-context" label="Conversation context" description="Show model and generation details." checked={look.context !== false} disabled={saving} onCheckedChange={(on) => change({ context: on })} />
+        <SwitchField
+          id="appearance-suggestions"
+          label="Suggest a better suited model"
+          description="When a chat on a model not certified for changes starts work on a cluster or in a workspace, offer a certified model once."
+          checked={look.modelSuggestions !== false}
+          disabled={saving}
+          onCheckedChange={(on) => change({ modelSuggestions: on })}
+        />
+      </div>
+    </Section>
   );
 }
 

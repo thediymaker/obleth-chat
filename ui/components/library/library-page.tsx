@@ -3,16 +3,15 @@
 // Library → Saved and Generated. Old library.js page(), savedView() and generatedView().
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Bookmark, Clock, ExternalLink, File, Folder, Image as ImageIcon, Lock, MessageSquare, Plus, Search, Trash2 } from "lucide-react";
+import { Bookmark, Clock, ExternalLink, File, Folder, Image as ImageIcon, Lock, MessageSquare, Plus, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import { Chips, DangerButton, Quota, useConfirm } from "@/components/manage/kit";
+import { Chips, DangerButton, Quota, SearchForm, useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { when, bytes } from "@/lib/format";
@@ -104,7 +103,6 @@ function SavedView({ openId }: { openId?: string }) {
   const params = useSearchParams();
   const project = params.get("project") || "";
   const [query, setQuery] = useState("");
-  const [typed, setTyped] = useState("");
   const [kind, setKind] = useState<"" | SavedKind>("");
   const [tag, setTag] = useState("");
   const filters = { q: query, kind, tag, project };
@@ -129,7 +127,6 @@ function SavedView({ openId }: { openId?: string }) {
   const chosen = all.find((p) => p.id === project);
   const setProject = (id: string) => {
     setQuery("");
-    setTyped("");
     setKind("");
     setTag("");
     router.replace(id ? `${path}?project=${encodeURIComponent(id)}` : path);
@@ -137,41 +134,13 @@ function SavedView({ openId }: { openId?: string }) {
   const filtered = !!(query || kind || tag || project);
   return (
     <>
-      <form
-        id="library-search"
-        className="mb-4 flex items-center gap-2 rounded-lg border bg-card px-3 py-1.5 focus-within:ring-2 focus-within:ring-ring/40"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setQuery(typed.trim());
-        }}
-      >
-        <Search className="size-4 shrink-0 text-muted-foreground" />
-        <Input
-          id="library-query"
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          placeholder="Search saved things, like “that throughput function”"
-          maxLength={500}
-          aria-label="Search saved things"
-          className="border-0 bg-transparent px-0 shadow-none focus-visible:ring-0 dark:bg-transparent"
-        />
+      <SearchForm id="library-query" label="Search saved things" placeholder="Search saved things, like “that throughput function”" maxLength={500} value={query} onSearch={setQuery} className="mb-4 sm:max-w-none">
         {query && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setQuery("");
-              setTyped("");
-            }}
-          >
+          <Button type="button" variant="ghost" onClick={() => setQuery("")}>
             Clear
           </Button>
         )}
-        <Button type="submit" variant="outline" size="sm">
-          Search
-        </Button>
-      </form>
+      </SearchForm>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <Chips
           label="Kind"

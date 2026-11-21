@@ -5,13 +5,12 @@
 // sign-on identities, signing someone out, and turning an account off.
 
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
-import { Link2, Plus, Search } from "lucide-react";
+import { Link2, Plus } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { CheckField, CopyField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, SelectField, TableWrap, TextField, displayName, td, th, titleCase, useConfirm, useSubmit, PersonAvatar } from "@/components/manage/kit";
+import { CheckField, CopyField, SearchForm, DetailRow, FormActions, FormDialog, FormError, Note, Pill, SelectField, TableWrap, TextField, displayName, td, th, titleCase, useConfirm, useSubmit, PersonAvatar } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useSession } from "@/lib/session";
@@ -53,28 +52,6 @@ function useAdminUsers(query: string) {
   });
   const users = (pages.data?.pages ?? []).flatMap((p) => p.users ?? []);
   return { ...pages, data: pages.data && { users, hasMore: pages.hasNextPage } };
-}
-
-/** A search box that applies on submit. */
-export function SearchForm({ id, label, placeholder, value, onSearch, maxLength = 128 }: { id: string; label: string; placeholder: string; value: string; onSearch: (q: string) => void; maxLength?: number }) {
-  return (
-    <form
-      role="search"
-      className="flex min-w-0 grow items-center gap-2 sm:max-w-md"
-      onSubmit={(e) => {
-        e.preventDefault();
-        onSearch(String(new FormData(e.currentTarget).get("query") || "").trim());
-      }}
-    >
-      <label className="sr-only" htmlFor={id}>
-        {label}
-      </label>
-      <Input key={value} id={id} name="query" placeholder={placeholder} maxLength={maxLength} defaultValue={value} />
-      <Button type="submit" size="sm" variant="outline">
-        <Search /> Search
-      </Button>
-    </form>
-  );
 }
 
 export function AccessLinkDialog({ link, onClose }: { link: AccessLink | null; onClose: () => void }) {

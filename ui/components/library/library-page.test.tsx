@@ -36,6 +36,20 @@ test("Show more asks for a larger page", async () => {
   expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
 });
 
+test("searching sends what was typed as q, and Clear drops it", async () => {
+  request.mockImplementation(async (path: string) => {
+    if (path.startsWith("/api/saved")) return { items: [item(1)], more: false, tags: [], kinds: [] };
+    if (path.startsWith("/api/projects")) return { projects: [] };
+    return {};
+  });
+  renderWithQueries(<LibraryPage tab="saved" />);
+  await screen.findByText("Note 1");
+  await userEvent.type(screen.getByRole("textbox", { name: "Search saved things" }), "throughput{Enter}");
+  await waitFor(() => expect(request.mock.calls.some(([path]) => path === "/api/saved?q=throughput")).toBe(true));
+  await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+  expect(screen.getByRole("textbox", { name: "Search saved things" })).toHaveValue("");
+});
+
 test("deleting a generated image asks first, on the danger button", async () => {
   request.mockImplementation(async (path: string, options?: { method?: string }) => {
     if (path.startsWith("/api/images/") && options?.method === "DELETE") return {};

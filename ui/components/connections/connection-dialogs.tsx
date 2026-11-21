@@ -10,6 +10,7 @@ import { Check, ChevronDown, Lock, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { CheckField, Field, FormActions, FormDialog, FormError, Note, Pill, TextField, useConfirm, useSubmit } from "@/components/manage/kit";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
@@ -53,7 +54,9 @@ export function useConnectionManager({ onChange }: { onChange?: (item: Connectio
     toggle: (c: Connection) =>
       run(async () => {
         const body = c.shared ? { optedOut: c.active } : { enabled: !c.active };
-        replace(await api.request<Connection>(path(c.id), { method: "PATCH", body }));
+        const item = await api.request<Connection>(path(c.id), { method: "PATCH", body });
+        replace(item);
+        toast(item.active ? `${item.name} is on in your chats` : `${item.name} is off in your chats`);
       }),
     refresh: (c: Connection) =>
       run(async () => {
@@ -456,9 +459,7 @@ export function ConnectionRow({ c, manager }: { c: Connection; manager: Connecti
           <small className="text-xs text-muted-foreground">{facts}</small>
         </div>
         {c.usable !== false && (
-          <Button size="xs" variant={c.active ? "outline" : "default"} aria-label={`${c.active ? "Stop using" : "Use"} ${c.name} in my chats`} onClick={() => manager.toggle(c)}>
-            {c.active ? "On" : "Off"}
-          </Button>
+          <Switch checked={c.active} onCheckedChange={() => manager.toggle(c)} aria-label={`Use ${c.name} in my chats`} title={c.active ? "Offered to the model in your chats" : "Kept out of your chats"} />
         )}
       </div>
       <Credential c={c} manager={manager} />

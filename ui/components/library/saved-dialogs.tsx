@@ -11,7 +11,6 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
@@ -22,7 +21,7 @@ import { useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { getSaved, host, KINDS, kindOf, parseTags, refreshSaved, type SavedItem, type SavedKind, savedPath, suggestTags, useSaved } from "./api";
 import { isNotFound } from "@/components/app-shell/page";
-import { Confirm, Field, FormActions, FormDialog, FormError, messageOf } from "@/components/manage/kit";
+import { CheckField, Confirm, Field, FormActions, FormDialog, FormError, messageOf } from "@/components/manage/kit";
 
 /** What the save dialog starts from: a new item (maybe from a chat) or one being edited. */
 export interface SaveDraft {
@@ -198,13 +197,7 @@ export function SaveDialog({ open, onOpenChange, draft, title }: { open: boolean
               ))}
             </div>
           )}
-          <label htmlFor="saved-searchable" className="flex items-start gap-2.5">
-            <Checkbox id="saved-searchable" checked={searchable} onCheckedChange={(v) => setSearchable(!!v)} className="mt-0.5" />
-            <span className="grid gap-0.5">
-              <strong className="text-md font-medium">Chats can find it</strong>
-              <small className="text-xs text-muted-foreground">Indexed like a document, so a later chat can find it when you ask about it.</small>
-            </span>
-          </label>
+          <CheckField id="saved-searchable" label="Chats can find it" description="Indexed like a document, so a later chat can find it when you ask about it." checked={searchable} onCheckedChange={setSearchable} />
           {draft.source ? (
             <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
               <MessageSquare className="size-3.5" /> From{" "}

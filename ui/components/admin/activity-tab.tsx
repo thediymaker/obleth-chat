@@ -8,12 +8,11 @@ import { ChevronDown, RefreshCw } from "lucide-react";
 import { Fragment, useState } from "react";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { Dropdown, Note } from "@/components/manage/kit";
+import { Dropdown, Note, SearchForm } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { AUDIT_KINDS, auditDay, auditDetails, auditSentence, auditTime, kindInfo, type AuditEvent, type Part } from "./audit";
-import { SearchForm } from "./people-tab";
 import { useKept } from "./state";
 
 export function Sentence({ parts }: { parts: Part[] }) {

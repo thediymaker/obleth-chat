@@ -4,10 +4,14 @@
 // pills, filter chips, stat tiles, meters, and confirmations. Forms are uncontrolled
 // and read with FormData.
 //
+// The save rule: an on/off that takes effect at once is a Switch (SwitchField). A card
+// with one or two independent controls saves each change as it is made and says so in
+// a toast; a card with several fields that belong together has a Save button.
+//
 // The dialog rule: a FormDialog's FormActions start with Cancel, which closes it; pass
 // `cancel={false}` only where the dialog's own button already closes it (Done, Close).
 
-import { Copy } from "lucide-react";
+import { Copy, Search } from "lucide-react";
 import { createContext, useCallback, useContext, useState } from "react";
 import {
   AlertDialog,
@@ -26,6 +30,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Dropdown, type DropdownProps } from "@/components/ui/dropdown";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { copyText } from "@/lib/clipboard";
 import { initials } from "@/lib/format";
@@ -221,6 +227,126 @@ export function CheckField({
         )}
       </div>
     </div>
+  );
+}
+
+/** An on/off that takes effect at once: a switch with a bold label and a line under it. */
+export function SwitchField({
+  id,
+  label,
+  description,
+  checked,
+  onCheckedChange,
+  disabled,
+  className,
+}: {
+  id: string;
+  label: React.ReactNode;
+  description?: React.ReactNode;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <div className={cn("flex items-start gap-3", className)}>
+      <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} className="mt-0.5" aria-describedby={description ? `${id}-help` : undefined} />
+      <div className="grid gap-0.5">
+        <Label htmlFor={id} className="leading-snug">
+          {label}
+        </Label>
+        {description && (
+          <p id={`${id}-help`} className="text-xs text-muted-foreground">
+            {description}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** A search box that applies on submit, sending `query`; `children` sit between the
+ *  box and the button, such as one more filter or Clear. */
+export function SearchForm({
+  id,
+  label,
+  placeholder,
+  value,
+  onSearch,
+  maxLength = 128,
+  className,
+  children,
+}: {
+  id: string;
+  label: string;
+  placeholder: string;
+  value: string;
+  onSearch: (query: string) => void;
+  maxLength?: number;
+  className?: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <form
+      role="search"
+      className={cn("flex min-w-0 grow flex-wrap items-center gap-2 sm:max-w-md", className)}
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSearch(String(new FormData(e.currentTarget).get("query") || "").trim());
+      }}
+    >
+      <label className="sr-only" htmlFor={id}>
+        {label}
+      </label>
+      <div className="relative min-w-0 flex-1 basis-56">
+        <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input key={value} id={id} name="query" placeholder={placeholder} maxLength={maxLength} defaultValue={value} className="pl-8" />
+      </div>
+      {children}
+      <Button type="submit" variant="outline">
+        Search
+      </Button>
+    </form>
+  );
+}
+
+/** One of a few choices, each a card with a bold name and a line under it; picking one
+ *  acts at once. `[value, name, note, off]` per choice. */
+export function RadioCards({
+  label,
+  name,
+  value,
+  onChange,
+  options,
+  disabled,
+}: {
+  label: string;
+  name: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: readonly (readonly [string, React.ReactNode, React.ReactNode, boolean?])[];
+  disabled?: boolean;
+}) {
+  return (
+    <RadioGroup aria-label={label} name={name} value={value} onValueChange={onChange} disabled={disabled} className="gap-2">
+      {options.map(([id, title, note, off]) => (
+        <Label
+          key={id}
+          htmlFor={`${name}-${id}`}
+          className={cn(
+            "flex cursor-pointer items-start gap-2.5 rounded-md border p-2.5 font-normal hover:bg-accent",
+            value === id && "border-line-strong bg-secondary",
+            (off || disabled) && "cursor-not-allowed opacity-60 hover:bg-transparent",
+          )}
+        >
+          <RadioGroupItem id={`${name}-${id}`} value={id} disabled={off} className="mt-0.5" />
+          <span className="grid gap-0.5">
+            <strong className="text-md font-medium">{title}</strong>
+            <small className="text-xs text-muted-foreground">{note}</small>
+          </span>
+        </Label>
+      ))}
+    </RadioGroup>
   );
 }
 

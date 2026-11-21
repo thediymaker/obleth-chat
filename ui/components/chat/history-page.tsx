@@ -11,12 +11,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import { Confirm, Field, FormActions, FormDialog, FormError, Pill } from "@/components/manage/kit";
+import { Confirm, Dropdown, Field, FormActions, FormDialog, FormError, Pill, SearchForm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   bulkConversations,
   exportChats,
@@ -54,7 +52,6 @@ export function HistoryPage() {
   const { data: models = [] } = useModels();
   const [query, setQuery] = useState(() => params.get("query")?.trim() ?? "");
   const [archived, setArchived] = useState<ArchivedFilter>(() => asFilter(params.get("archived")));
-  const [draftQuery, setDraftQuery] = useState(query);
   const [draftArchived, setDraftArchived] = useState<ArchivedFilter>(archived);
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -70,7 +67,6 @@ export function HistoryPage() {
     const a = asFilter(params.get("archived"));
     setQuery(q);
     setArchived(a);
-    setDraftQuery(q);
     setDraftArchived(a);
     setOffset(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the string stands for the
@@ -100,9 +96,7 @@ export function HistoryPage() {
   const modelName = (id: string) => models.find((m) => m.id === id)?.name || id;
   const n = selected.size;
 
-  function search(event: React.FormEvent) {
-    event.preventDefault();
-    const q = draftQuery.trim();
+  function search(q: string) {
     setQuery(q);
     setArchived(draftArchived);
     setOffset(0);
@@ -165,38 +159,15 @@ export function HistoryPage() {
           </Button>
         }
       />
-      <form onSubmit={search} className="mb-[22px] flex flex-wrap items-center gap-2.5" role="search">
-        <Label htmlFor="history-query" className="sr-only">
-          Search conversations
-        </Label>
-        <Input
-          id="history-query"
-          name="query"
-          className="h-10 min-w-0 flex-1 basis-56 text-base"
-          placeholder="Search titles and messages…"
-          maxLength={256}
-          value={draftQuery}
-          onChange={(e) => setDraftQuery(e.target.value)}
-        />
-        <Label htmlFor="history-archived" className="sr-only">
-          Conversation visibility
-        </Label>
-        <Select value={draftArchived} onValueChange={(v) => setDraftArchived(v as ArchivedFilter)}>
-          <SelectTrigger id="history-archived" className="w-[180px] text-base data-[size=default]:h-10" aria-label="Conversation visibility">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {FILTERS.map(([value, label]) => (
-              <SelectItem key={value} value={value}>
-                {label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Button type="submit" variant="outline" className="h-10">
-          Search
-        </Button>
-      </form>
+      <SearchForm id="history-query" label="Search conversations" placeholder="Search titles and messages…" maxLength={256} value={query} onSearch={search} className="mb-[22px] sm:max-w-none">
+        <Dropdown className="w-[180px]" aria-label="Conversation visibility" value={draftArchived} onChange={(e) => setDraftArchived(e.target.value as ArchivedFilter)}>
+          {FILTERS.map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </Dropdown>
+      </SearchForm>
       <ErrorBox error={list.error} onRetry={() => list.refetch()} />
       <div className="mt-[22px] mb-3 flex flex-wrap items-center justify-between gap-[15px]">
         <label className="flex items-center gap-[9px] text-md text-muted-foreground">

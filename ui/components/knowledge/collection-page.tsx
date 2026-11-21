@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Confirm, DataTable, messageOf, Pill } from "@/components/manage/kit";
+import { Confirm, DataTable, messageOf, Pill, RadioCards } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { count, when, bytes as formatBytes } from "@/lib/format";
 import { useSession } from "@/lib/session";
@@ -156,23 +156,8 @@ function Sharing({ detail }: { detail: CollectionDetail }) {
     ["everyone", "Everyone", isAdmin ? "Every account can search it" : "Administrators only", !isAdmin],
   ];
   return (
-    <div role="radiogroup" aria-label="Who can search it" className="grid gap-2">
-      {choices.map(([value, label, note, disabled]) => (
-        <label
-          key={value}
-          className={cn(
-            "flex cursor-pointer items-start gap-2.5 rounded-md border p-2.5 hover:bg-accent",
-            c.scope === value && "border-line-strong bg-secondary",
-            (disabled || busy) && "cursor-not-allowed opacity-60 hover:bg-transparent",
-          )}
-        >
-          <input type="radio" name="knowledge-scope" value={value} checked={c.scope === value} disabled={disabled || busy} onChange={() => setScope(value)} className="mt-1 accent-current" />
-          <span className="grid">
-            <strong className="text-md font-medium">{label}</strong>
-            <small className="text-xs text-muted-foreground">{note}</small>
-          </span>
-        </label>
-      ))}
+    <div className="grid gap-2">
+      <RadioCards label="Who can search it" name="knowledge-scope" value={c.scope} onChange={(v) => setScope(v as Scope)} options={choices} disabled={busy} />
       {groups.length > 0 && c.scope === "group" && (
         <Select value={c.groupId || undefined} onValueChange={(v) => setScope("group", v)} disabled={busy}>
           <SelectTrigger aria-label="Group" className="w-full">

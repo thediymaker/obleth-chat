@@ -11,11 +11,10 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, FeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import { FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, useConfirm, useSubmit, messageOf } from "@/components/manage/kit";
+import { CheckField, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, SwitchField, useConfirm, useSubmit, messageOf } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { initials, ago } from "@/lib/format";
@@ -52,6 +51,7 @@ export function MemoryPage() {
     client.setQueryData<MemoryState>(MEMORY_KEY, (old) => (old ? { ...old, ...next } : old));
     try {
       await saveChoices(next);
+      toast("Memory settings saved");
     } catch (e) {
       toast(messageOf(e));
       refreshMemory(client);
@@ -115,19 +115,19 @@ export function MemoryPage() {
         </div>
       ) : (
         <div className="mb-4 grid gap-3 rounded-lg border bg-card p-4 sm:grid-cols-2">
-          <Choice
+          <SwitchField
             id="memory-use"
             label="Use memory in chats"
-            text="Chats get the memories that fit what you ask, and the ones you pin."
+            description="Chats get the memories that fit what you ask, and the ones you pin."
             checked={data.useMemory}
-            onChange={(v) => choose({ useMemory: v, learn: data.learn })}
+            onCheckedChange={(v) => choose({ useMemory: v, learn: data.learn })}
           />
-          <Choice
+          <SwitchField
             id="memory-learn"
             label="Learn from my chats"
-            text="After a reply, Chat notes lasting things about you and your work. Temporary chats are never read."
+            description="After a reply, Chat notes lasting things about you and your work. Temporary chats are never read."
             checked={data.learn}
-            onChange={(v) => choose({ useMemory: data.useMemory, learn: v })}
+            onCheckedChange={(v) => choose({ useMemory: data.useMemory, learn: v })}
           />
           {paused && <p className="text-sm text-amber sm:col-span-2">Memory is paused. Chat neither uses nor learns memories until you turn one of these on.</p>}
         </div>
@@ -195,22 +195,6 @@ export function MemoryPage() {
       )}
       {adding && <AddMemory data={data} onClose={() => setAdding(false)} onAdded={(id) => select({ type: "memory", id })} />}
     </Page>
-  );
-}
-
-function Choice({ id, label, text, checked, onChange }: { id: string; label: string; text: string; checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <div className="flex items-start gap-3">
-      <Switch id={id} checked={checked} onCheckedChange={onChange} className="mt-0.5" aria-describedby={`${id}-help`} />
-      <div className="grid gap-0.5">
-        <label htmlFor={id} className="text-md font-medium">
-          {label}
-        </label>
-        <p id={`${id}-help`} className="text-sm text-muted-foreground">
-          {text}
-        </p>
-      </div>
-    </div>
   );
 }
 
@@ -605,9 +589,7 @@ function AddMemory({ data, onClose, onAdded }: { data: MemoryState; onClose: () 
           ))}
         </datalist>
         <SelectField id="memory-new-kind" label="Kind" defaultValue="" options={[["", "Let Chat choose"], ...KIND_OPTIONS]} />
-        <label className="flex items-center gap-2 text-sm">
-          <input type="checkbox" name="memory-new-pin" className="size-4" /> Pin it, so every chat gets it
-        </label>
+        <CheckField id="memory-new-pin" label="Pin it, so every chat gets it" />
         <FormError message={error} />
         <FormActions>
           <Button type="submit" disabled={busy}>

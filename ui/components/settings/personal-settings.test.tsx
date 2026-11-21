@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
+import { toast } from "sonner";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { PersonalSettings, shownPreferences } from "./personal-settings";
 import { usageDays } from "./usage-card";
@@ -8,6 +9,7 @@ import { usageText } from "@/components/chat/status-bar";
 import { useUsage } from "@/lib/queries";
 
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
+vi.mock("sonner", () => ({ toast: vi.fn() }));
 const push = vi.fn();
 vi.mock("next/navigation", () => ({ usePathname: () => "/settings", useRouter: () => ({ push, replace: vi.fn() }) }));
 
@@ -63,9 +65,14 @@ test("personal settings save defaults, appearance and favorites to the account",
   await waitFor(() => expect(screen.getByLabelText("Default model")).toHaveTextContent("GLM"));
   await userEvent.click(screen.getByRole("button", { name: "Save defaults" }));
   await waitFor(() => expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ defaultModel: "glm", systemPrompt: "", reasoningEffort: "medium", temperature: 0.3, topP: 1, maxTokens: 0 }));
-  await userEvent.click(screen.getByRole("checkbox", { name: "Compact spacing" }));
-  await userEvent.click(screen.getByRole("button", { name: "Save appearance" }));
-  await waitFor(() => expect(calls.filter((c) => c.method === "PATCH").at(-1)?.body).toEqual({ density: "compact", focus: false, context: true, modelSuggestions: true }));
+  // Appearance saves each switch as it changes, with no Save button.
+  expect(screen.queryByRole("button", { name: "Save appearance" })).toBeNull();
+  vi.mocked(toast).mockClear();
+  await userEvent.click(screen.getByRole("switch", { name: "Compact spacing" }));
+  await waitFor(() => expect(calls.filter((c) => c.method === "PATCH").at(-1)?.body).toEqual({ density: "compact" }));
+  await waitFor(() => expect(toast).toHaveBeenCalledWith("Preferences saved"));
+  await userEvent.click(screen.getByRole("switch", { name: "Conversation context" }));
+  await waitFor(() => expect(calls.filter((c) => c.method === "PATCH").at(-1)?.body).toEqual({ context: false }));
   expect(screen.getByRole("checkbox", { name: "Gemma" })).toBeChecked();
   await userEvent.click(screen.getByRole("checkbox", { name: /^GLM/ }));
   await userEvent.click(screen.getByRole("button", { name: "Save favorites" }));

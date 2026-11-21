@@ -13,12 +13,11 @@ import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { TimeBars } from "@/components/manage/bar-chart";
 import { INPUT, Legend, OUTPUT } from "@/components/manage/chart-legend";
-import { CheckField, Chips, FormActions, FormDialog, FormError, Meter, Dropdown, Note, Pill, Quota, Section, TableWrap, TextField, Tiles, displayName, td, th, useSubmit } from "@/components/manage/kit";
+import { CheckField, Chips, FormActions, FormDialog, FormError, Meter, Dropdown, Note, Pill, Quota, Section, TableWrap, TextField, Tiles, displayName, td, th, useSubmit, SearchForm } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { when, num, count, compact, PERIOD_DAYS } from "@/lib/format";
 import { ChangeNote, GroupPicker, KindBar, KindLegend } from "./parts";
 import { KINDS, change, percent, share } from "./insights";
-import { SearchForm } from "./people-tab";
 import { useKept } from "./state";
 import { METRICS, PURPOSES, SORTS, USAGE_PERIODS, allowance, buckets, periodName, sortPeople, type Limits, type Metric, type Sort, type UsageOverview, type UsagePerson } from "./usage";
 

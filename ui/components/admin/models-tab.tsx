@@ -10,12 +10,11 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { CheckField, Columns, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TableWrap, TextAreaField, TextField, td, th, useSubmit } from "@/components/manage/kit";
+import { CheckField, Columns, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TableWrap, TextAreaField, TextField, td, th, useSubmit, SearchForm } from "@/components/manage/kit";
 import { GenerationFields, readGeneration, type Generation } from "@/components/settings/generation";
 import { api } from "@/lib/api";
 import { keys, useCapabilities } from "@/lib/queries";
 import { useAdminGroups, type AdminGroup } from "./groups-tab";
-import { SearchForm } from "./people-tab";
 import { useKept } from "./state";
 
 export interface AdminModel {

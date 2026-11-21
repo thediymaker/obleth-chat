@@ -138,10 +138,17 @@ pub async fn run_once(pool: &PgPool) -> Result<Option<RunReport>, ApiError> {
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(7346281951103)")
         .fetch_one(&mut *tx)
         .await?;
+    // Not this replica's turn, or not time yet: end the transaction here. A dropped
+    // transaction is rolled back later, after its connection goes back to the pool,
+    // so the advisory lock could still be held when the next pass asks for it.
     if !acquired {
+        tx.rollback().await?;
         return Ok(None);
     }
-    let Some(raw)=sqlx::query_scalar::<_,Value>("SELECT policy FROM retention_policy WHERE id=TRUE AND (last_run IS NULL OR last_run<=NOW()-INTERVAL '1 hour') FOR UPDATE").fetch_optional(&mut *tx).await? else { return Ok(None); };
+    let Some(raw)=sqlx::query_scalar::<_,Value>("SELECT policy FROM retention_policy WHERE id=TRUE AND (last_run IS NULL OR last_run<=NOW()-INTERVAL '1 hour') FOR UPDATE").fetch_optional(&mut *tx).await? else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
     validate(&raw).map_err(|_| ApiError::internal())?;
     let policy: Policy = serde_json::from_value(raw).map_err(|_| ApiError::internal())?;
     let mut report = RunReport::default();

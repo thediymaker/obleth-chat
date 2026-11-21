@@ -15,7 +15,7 @@ export function IntentTabs({ intents, value, onChange }: { intents: IntentInfo[]
   const shown = intents.find((i) => i.id === value) ?? intents[0]!;
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-0.5">
-      <div role="radiogroup" aria-label="What this chat is for" className="flex items-center gap-1">
+      <div role="radiogroup" aria-label="What this chat is for" className="flex flex-wrap items-center gap-1">
         {intents.map((intent) => (
           <button
             key={intent.id}
@@ -25,7 +25,7 @@ export function IntentTabs({ intents, value, onChange }: { intents: IntentInfo[]
             data-intent={intent.id}
             onClick={() => onChange(intent.id)}
             className={cn(
-              "h-8 rounded-md border px-3 text-md whitespace-nowrap transition-colors",
+              "h-8 rounded-md border px-3 text-md whitespace-nowrap transition-colors max-[560px]:px-2.5",
               intent.id === shown.id ? "border-line-strong bg-secondary font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-raised hover:text-foreground",
             )}
           >
@@ -33,7 +33,7 @@ export function IntentTabs({ intents, value, onChange }: { intents: IntentInfo[]
           </button>
         ))}
       </div>
-      <p className="min-w-0 flex-1 text-sm leading-normal text-muted-foreground" data-intent-hint>
+      <p className="min-w-0 flex-1 text-sm leading-normal text-muted-foreground max-[760px]:basis-full" data-intent-hint>
         {shown.hint}
       </p>
     </div>

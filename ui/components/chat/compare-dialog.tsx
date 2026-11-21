@@ -52,7 +52,7 @@ function Side({ versions, id, other, side, onPick, onKeep, busy }: { versions: R
           ))}
         </dl>
       )}
-      <div className="min-h-40 flex-1 overflow-y-auto px-4 py-3">
+      <div className="min-h-40 flex-1 overflow-y-auto px-4 py-3 max-[760px]:min-h-0 max-[760px]:overflow-visible">
         {version.content.trim() ? <Markdown text={version.content} /> : <p className="text-sm text-muted-foreground">{version.status === "completed" ? "This version has no text." : `This version did not finish (${version.status}).`}</p>}
       </div>
       <footer className="flex items-center justify-end border-t px-3 py-2">
@@ -111,7 +111,8 @@ export function CompareDialog({ chatId, messageId, open, onOpenChange }: { chatI
         ) : !pair ? (
           <p className="py-10 text-center text-sm text-muted-foreground">This reply has one version. Ask another model below to get a second.</p>
         ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-2 gap-3 max-[760px]:grid-cols-1 max-[760px]:overflow-y-auto">
+          // Side by side; on a phone, one under the other, each at its full height, and the pair scrolls.
+          <div className="grid min-h-0 flex-1 grid-cols-2 gap-3 max-[760px]:block max-[760px]:space-y-3 max-[760px]:overflow-y-auto">
             <Side versions={versions} id={pair[0]} other={versions.find((v) => v.id === pair[1])} side="left" busy={busy} onKeep={keep} onPick={(id) => setPicked([id, pair[1]])} />
             <Side versions={versions} id={pair[1]} other={versions.find((v) => v.id === pair[0])} side="right" busy={busy} onKeep={keep} onPick={(id) => setPicked([pair[0], id])} />
           </div>

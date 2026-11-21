@@ -228,7 +228,8 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
     write(next.text, next.caret);
   };
   return (
-    <div className="relative">
+    // min-w-0: in Home's grid the box may be narrower than its toolbar's full width, which then shrinks the model button.
+    <div className="relative min-w-0">
       {menu && (
         <ComposerMenu id="composer-menu" label={menu.kind === "command" ? "Actions" : "Point at something"} items={entries} active={active} query={menu.query} below={home} onActive={setMarked} onPick={pick} />
       )}

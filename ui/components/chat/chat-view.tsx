@@ -176,20 +176,23 @@ export function ChatHome() {
         {offered.length > 1 && <IntentTabs intents={offered} value={intent.id} onChange={choose} />}
         <Composer home placeholder={intent.placeholder} />
       </div>
-      <div className="mt-6 grid grid-cols-3 gap-3 max-[760px]:gap-2">
+      {/* Three across; on a phone, one under the other with the icon beside the text. */}
+      <div className="mt-6 grid grid-cols-3 gap-3 max-[760px]:gap-2 max-[560px]:grid-cols-1">
         {intent.starters.map(([icon, title, copy, prompt]) => (
           <button
             key={title}
             type="button"
             data-starter
             onClick={() => store.starter(prompt, intent.workspace)}
-            className="flex flex-col items-start rounded-lg border bg-card px-4 py-[18px] text-left transition-colors hover:border-line-strong hover:bg-raised max-[760px]:px-3 max-[760px]:py-3.5"
+            className="flex flex-col items-start rounded-lg border bg-card px-4 py-[18px] text-left transition-colors hover:border-line-strong hover:bg-raised max-[760px]:px-3 max-[760px]:py-3.5 max-[560px]:flex-row max-[560px]:items-center max-[560px]:gap-3 max-[560px]:py-3"
           >
-            <span className="mb-3.5 flex size-[30px] items-center justify-center rounded-md border bg-background text-text-2">
+            <span className="mb-3.5 flex size-[30px] shrink-0 items-center justify-center rounded-md border bg-background text-text-2 max-[560px]:mb-0">
               <NamedIcon name={icon} className="size-[18px]" />
             </span>
-            <h3 className="mb-1.5 text-base leading-[normal] font-medium">{title}</h3>
-            <p className="text-sm leading-[1.6] text-muted-foreground">{copy}</p>
+            <span className="min-w-0">
+              <h3 className="mb-1.5 text-base leading-[normal] font-medium max-[560px]:mb-0.5">{title}</h3>
+              <p className="text-sm leading-[1.6] text-muted-foreground max-[560px]:leading-normal">{copy}</p>
+            </span>
           </button>
         ))}
       </div>

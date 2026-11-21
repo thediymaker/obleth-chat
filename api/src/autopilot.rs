@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::auth::{grants::SIGN_IN_AGAIN, Identity, Role};
-use crate::{launch_turn, models, AppState, Launch};
+use crate::lifecycle::TurnEnd;
+use crate::{launch_turn, models, AppState, Launch, PAUSED};
 
 /// Nudges in a row before Chat leaves the chat for the person.
 pub const MAX_NUDGES: i32 = 10;
@@ -21,7 +22,6 @@ pub const MAX_NUDGES: i32 = 10;
 const PROGRESS_STEPS: i32 = 10;
 /// Only chats active this recently are nudged, so an old failure stays put.
 const RECENT_HOURS: i32 = 12;
-const PAUSED: &str = "Say \"continue\" to pick up where it left off._";
 
 /// What the watchdog tells the model, and why.
 #[derive(Debug, PartialEq)]
@@ -56,9 +56,9 @@ pub fn nudge_for(
         return None;
     }
     match status {
-        "interrupted" | "error" if error != Some("Response stopped") => Some(Nudge::Stopped(
-            error.unwrap_or("it was interrupted").to_owned(),
-        )),
+        "interrupted" | "error" if error != Some(&TurnEnd::Stopped.message()) => Some(
+            Nudge::Stopped(error.unwrap_or("it was interrupted").to_owned()),
+        ),
         "completed" if content.trim_end().ends_with(PAUSED) => Some(Nudge::Paused),
         "completed" if runs_going => Some(Nudge::RunsGoing),
         _ => None,
@@ -220,9 +220,10 @@ mod tests {
 
     #[test]
     fn nudges_only_what_stopped_without_the_person() {
+        let ended = TurnEnd::SessionEnded;
         assert_eq!(
-            nudge_for("interrupted", Some("Sign-in session ended"), "", false),
-            Some(Nudge::Stopped("Sign-in session ended".into()))
+            nudge_for(ended.status(), Some(&ended.message()), "", false),
+            Some(Nudge::Stopped(ended.message().into()))
         );
         assert_eq!(
             nudge_for(
@@ -235,8 +236,9 @@ mod tests {
                 "Gateway stream ended before completion".into()
             ))
         );
+        let stopped = TurnEnd::Stopped;
         assert_eq!(
-            nudge_for("interrupted", Some("Response stopped"), "", true),
+            nudge_for(stopped.status(), Some(&stopped.message()), "", true),
             None,
             "the person pressed Stop"
         );
@@ -244,7 +246,9 @@ mod tests {
             nudge_for(
                 "completed",
                 None,
-                "Done.\n\n_Paused because the model sent nothing for 10 minutes. Say \"continue\" to pick up where it left off._",
+                &format!(
+                    "Done.\n\n_Paused because the model sent nothing for 10 minutes. {PAUSED}"
+                ),
                 false
             ),
             Some(Nudge::Paused)

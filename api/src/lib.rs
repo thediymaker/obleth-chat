@@ -61,6 +61,7 @@ use axum::{
 use error::ApiError;
 use futures_util::StreamExt;
 use gateway::{Decoder, Gateway};
+use lifecycle::TurnEnd;
 use metrics::Metrics;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -771,10 +772,11 @@ const SESSION_CHECK_EVERY: Duration = Duration::from_secs(15);
 /// no step or time limit: it runs while the model keeps answering, until it is
 /// done or stopped.
 const STALL_SECS: u64 = 10 * 60;
+/// How a paused tool turn's note ends. Auto mode resumes a reply that ends with it.
+pub(crate) const PAUSED: &str = "Say \"continue\" to pick up where it left off._";
 /// A chat in Auto mode runs unattended: a step the model stalled on is retried
 /// this many times before the turn pauses.
 const UNATTENDED_STALL_RETRIES: usize = 2;
-const STALLED: &str = "The model sent nothing for";
 /// What Chat tells a model that ends a reply right after changing files.
 const CHECK_NOTE: &str = "[Chat: you changed files and have not run anything since, and your draft reply was not shown. Check the work the way the person would before answering: run its tests or build, or make sure its server is running and request the page or endpoint (for example with curl), and fix what fails. Then write your full final reply. If it cannot be checked here, say why in one line.]";
 /// Bytes of tool output kept in the request history; older outputs are elided.
@@ -786,8 +788,11 @@ const TOOL_ARGUMENT_BYTES: usize = 160 * 1024;
 const KEPT_STEPS: usize = 150;
 /// Steps in a row that may stop at the output limit before the turn gives up.
 const MAX_CUTS: u32 = 3;
-/// Steps in a row that may lose their connection to the model and be tried again.
+/// Steps in a row that may lose their connection to the model and be tried again,
+/// whether the stream broke off or the request found the gateway failing.
 const MAX_DROPS: u32 = 2;
+/// How long a step waits before sending a request the gateway failed again.
+const RETRY_WAIT: Duration = Duration::from_secs(1);
 
 /// Whether a stream's error event reports a server-side failure (a 5xx code),
 /// which is worth trying again, rather than a problem with the request.
@@ -2030,9 +2035,19 @@ async fn run_generation(
                 )
                 .await
                 {
-                    Ok(response) => break response.map_err(|e| e.1)?,
+                    Ok(Ok(response)) => break response,
+                    // The gateway could not be reached or failed: a drop, sent again as is.
+                    Ok(Err(gateway::ChatFailure::Transient(error))) if drops < MAX_DROPS => {
+                        drops += 1;
+                        tracing::warn!(
+                            status = error.0.as_u16(),
+                            "gateway failed a step; retrying"
+                        );
+                        tokio::time::sleep(RETRY_WAIT).await;
+                    }
+                    Ok(Err(failure)) => return Err(failure.into_error().1.into()),
                     Err(_) if unattended && stalls < UNATTENDED_STALL_RETRIES => stalls += 1,
-                    Err(_) => return Err(format!("{STALLED} {} minutes", STALL_SECS / 60)),
+                    Err(_) => return Err(TurnEnd::Stalled),
                 }
             };
             if let Some(found) = response
@@ -2057,7 +2072,7 @@ async fn run_generation(
                     chunk=stream.next()=>match chunk {Some(chunk)=>{heard=Instant::now();chunk},None=>break},
                     _=checkpoint.tick()=>{
                         if heard.elapsed() > Duration::from_secs(STALL_SECS) {
-                            return Err(format!("{STALLED} {} minutes", STALL_SECS / 60));
+                            return Err(TurnEnd::Stalled);
                         }
                         let total=content.len()+reasoning_content.len();
                         if lifecycle::checkpoint_due(total,saved_bytes,saved_at.elapsed()) {
@@ -2067,7 +2082,7 @@ async fn run_generation(
                                 // A transient database error retries on a later tick; the
                                 // control loop bounds how long work runs without the database.
                                 Err(e) if e.0==StatusCode::INTERNAL_SERVER_ERROR=>tracing::warn!("could not checkpoint chat generation; retrying"),
-                                Err(_)=>return Err("The response could not save progress".to_string()),
+                                Err(_)=>return Err("The response could not save progress".into()),
                             }
                         }
                         continue;
@@ -2101,7 +2116,8 @@ async fn run_generation(
                                 format!("Gateway reported an error during generation: {why}")
                             }
                             None => "Gateway reported an error during generation".to_string(),
-                        });
+                        }
+                        .into());
                     }
                     if resolved.model == "auto" && served.is_none() {
                         if let Some(model) = v
@@ -2208,7 +2224,7 @@ async fn run_generation(
                             if !tool_turn {
                                 return Err(
                                     "This model requested tools. Turn on the workspace to let it use them."
-                                        .to_string(),
+                                        .into(),
                                 );
                             }
                             accumulate_tool_calls(&mut calls, deltas)?;
@@ -2235,9 +2251,7 @@ async fn run_generation(
                             if content.len() + reasoning_content.len() + delta.len()
                                 > store::MAX_RESPONSE_BYTES
                             {
-                                return Err(
-                                    "The response exceeded the 1 MiB storage limit".to_string()
-                                );
+                                return Err("The response exceeded the 1 MiB storage limit".into());
                             }
                             if first {
                                 s.metrics
@@ -2276,7 +2290,7 @@ async fn run_generation(
             }
             if overthought {
                 if overthinks >= MAX_OVERTHINKS {
-                    return Err("The model kept thinking without writing anything. Try a lower thinking effort or another model.".to_string());
+                    return Err("The model kept thinking without writing anything. Try a lower thinking effort or another model.".into());
                 }
                 overthinks += 1;
                 if payload.get("reasoning_effort").is_some() {
@@ -2295,7 +2309,7 @@ async fn run_generation(
             // model carries on from what it had written; what the person saw stays.
             if !done {
                 if drops >= MAX_DROPS {
-                    return Err("The connection to the model kept dropping".to_string());
+                    return Err("The connection to the model kept dropping".into());
                 }
                 drops += 1;
                 let text = content[step_start..].to_owned();
@@ -2359,7 +2373,7 @@ async fn run_generation(
                     continue;
                 }
                 if cut_call {
-                    return Err(format!("The model kept stopping at {limit} in the middle of a tool call. Raise the output limit in Parameters, or lower thinking effort."));
+                    return Err(format!("The model kept stopping at {limit} in the middle of a tool call. Raise the output limit in Parameters, or lower thinking effort.").into());
                 }
             } else {
                 cuts = 0;
@@ -3235,7 +3249,7 @@ async fn run_generation(
                 lifecycle::save_activity(&s.store.pool, user.id, id, generation_id, &activity).await
             {
                 if e.0 != StatusCode::INTERNAL_SERVER_ERROR {
-                    return Err("The response could not save progress".to_string());
+                    return Err("The response could not save progress".into());
                 }
             }
             // The reply ends at the questions; the answers start the next turn.
@@ -3262,10 +3276,9 @@ async fn run_generation(
         let trimmed = content.trim_end().len();
         content.truncate(trimmed);
         if content.is_empty() && reasoning_content.is_empty() && activity.is_empty() {
-            Err(
-                "The model returned an empty response. Retry or choose a different model."
-                    .to_string(),
-            )
+            Err(TurnEnd::from(
+                "The model returned an empty response. Retry or choose a different model.",
+            ))
         } else {
             Ok(())
         }
@@ -3284,14 +3297,14 @@ async fn run_generation(
                 lifecycle::check(&s.store.pool, user.id, id, generation_id).await
             };
             match state {
-                Ok(Some(reason)) => break reason.to_owned(),
+                Ok(Some(end)) => break end,
                 Ok(None) if renew => renewed = Instant::now(),
                 Ok(None) => {}
                 // Ride out a database blip while the lease is still comfortably valid.
                 Err(_) if renewed.elapsed() < lifecycle::LEASE_GRACE => {
                     tracing::warn!("could not check chat generation lease; retrying")
                 }
-                Err(_) => break "The response lost its database connection".into(),
+                Err(_) => break TurnEnd::from("The response lost its database connection"),
             }
             // A turn in Auto mode outlives the browser session that started it, so
             // research keeps going overnight; Stop or disabling the account ends it.
@@ -3306,14 +3319,14 @@ async fn run_generation(
                 {
                     Some((
                         s.auth.require(headers, false).await.map(|_| ()),
-                        "Sign-in session ended",
+                        TurnEnd::SessionEnded,
                     ))
                 }
                 // A token is revoked to stop what it can do, so that holds in
                 // Auto mode too.
                 Started::Token(token) if due => Some((
                     s.auth.token_live(*token).await,
-                    "The API token that started this was revoked",
+                    TurnEnd::from("The API token that started this was revoked"),
                 )),
                 _ => None,
             };
@@ -3322,7 +3335,7 @@ async fn run_generation(
                 Some((Err(e), _)) if e.0 == StatusCode::INTERNAL_SERVER_ERROR => {
                     recheck_session = true
                 }
-                Some((Err(_), ended)) => break ended.into(),
+                Some((Err(_), ended)) => break ended,
                 None => {}
             }
             ticks += 1;
@@ -3338,15 +3351,15 @@ async fn run_generation(
             Some(limit) => tokio::time::timeout(Duration::from_secs(limit), work)
                 .await
                 .unwrap_or_else(|_| {
-                    Err(format!(
+                    Err(TurnEnd::Failed(format!(
                         "Generation reached the {}-minute time limit",
                         limit / 60
-                    ))
+                    )))
                 }),
             None => work.await,
         }
     };
-    let mut result = tokio::select! {reason=control=>Err(reason),result=bounded=>result,_=s.shutdown.cancelled()=>Err("Service shutting down".into())};
+    let mut result = tokio::select! {end=control=>Err(end),result=bounded=>result,_=s.shutdown.cancelled()=>Err(TurnEnd::ShuttingDown)};
     // Steps that never finished are shown as stopped, while the lease still allows writes.
     if !activity.is_empty() {
         for entry in &mut activity {
@@ -3367,44 +3380,28 @@ async fn run_generation(
     }
     // A tool turn the model stalls on pauses: what it did is kept and replayed, and
     // "continue" resumes it.
-    if tool_turn {
-        if let Err(reason) = &result {
-            let why = reason.starts_with(STALLED).then(|| {
-                format!(
-                    "Paused because the model sent nothing for {} minutes",
-                    STALL_SECS / 60
-                )
-            });
-            if let Some(why) = why {
-                let note = format!(
-                    "{}_{why}. Say \"continue\" to pick up where it left off._",
-                    if content.trim().is_empty() {
-                        ""
-                    } else {
-                        "\n\n"
-                    },
-                );
-                let note = note
-                    .trim_start_matches(|c| content.ends_with("\n\n") && c == '\n')
-                    .to_owned();
-                content.push_str(&note);
-                emit(&mut tx, "delta", json!({"content":note}));
-                result = Ok(());
-            }
-        }
+    if tool_turn && result == Err(TurnEnd::Stalled) {
+        let note = format!(
+            "{}_Paused because the model sent nothing for {} minutes. {PAUSED}",
+            if content.trim().is_empty() {
+                ""
+            } else {
+                "\n\n"
+            },
+            STALL_SECS / 60,
+        );
+        let note = note
+            .trim_start_matches(|c| content.ends_with("\n\n") && c == '\n')
+            .to_owned();
+        content.push_str(&note);
+        emit(&mut tx, "delta", json!({"content":note}));
+        result = Ok(());
     }
     let mut status = match &result {
         Ok(()) => "completed",
-        Err(e)
-            if e == "Response stopped"
-                || e == "Response is no longer active"
-                || e == "Service shutting down"
-                || e == "Sign-in session ended" =>
-        {
-            "interrupted"
-        }
-        _ => "error",
+        Err(end) => end.status(),
     };
+    let error = result.as_ref().err().map(TurnEnd::message);
     // Drop any replay note the model copied into its own reply.
     let cleaned = store::strip_records(&content);
     let rewritten = (cleaned != content).then(|| cleaned.clone());
@@ -3423,7 +3420,7 @@ async fn run_generation(
                 usage.clone(),
                 request_id.as_deref(),
                 finish_reason.as_deref(),
-                result.as_ref().err().map(String::as_str),
+                error.as_deref(),
             ),
         )
         .await
@@ -3503,7 +3500,7 @@ async fn run_generation(
             "error",
             json!({"message":"The response could not be saved. Reload before sending another message."}),
         );
-    } else if let Err(message) = result {
+    } else if let Some(message) = error {
         emit(&mut tx, "error", json!({"message":message}));
     }
     emit(&mut tx, "done", {

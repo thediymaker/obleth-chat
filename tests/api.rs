@@ -85,6 +85,25 @@ async fn fake_chat(
         .lock()
         .unwrap()
         .push(json!({"claims":claims,"body":body,"effort":headers.get("x-obleth-effort").and_then(|v| v.to_str().ok())}));
+    // A gateway that fails a request outright: once, every time, or refusing it.
+    let attempts = f
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|seen| {
+            seen["body"]["messages"].as_array().unwrap().last().unwrap()["content"] == mode
+        })
+        .count();
+    let failure = match mode.as_str() {
+        "flaky" if attempts == 1 => Some((StatusCode::SERVICE_UNAVAILABLE, "upstream hiccup")),
+        "down" => Some((StatusCode::SERVICE_UNAVAILABLE, "upstream hiccup")),
+        "refused" => Some((StatusCode::BAD_REQUEST, "bad input")),
+        _ => None,
+    };
+    if let Some((status, reason)) = failure {
+        return (status, Json(json!({"error":{"message":reason}}))).into_response();
+    }
     // Auto is the gateway's router: the stream names the model it chose.
     let served = (body["model"] == "auto").then_some("routed-model");
     let stream = async_stream::stream! {
@@ -114,6 +133,7 @@ async fn fake_chat(
         [("x-obleth-request-id", "fixture-request")],
         Sse::new(stream),
     )
+        .into_response()
 }
 async fn fixture(pool: PgPool) -> (Router, AppState, Fake, tokio::task::JoinHandle<()>) {
     let pem = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)
@@ -555,6 +575,69 @@ async fn disconnect_keeps_running_explicit_stop_saves_partial_and_broken_stream_
     );
     assert_eq!(saved.messages[5].content, "Hello α");
     assert_eq!(state.metrics.streams.get(), 0);
+    task.abort();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_gateway_failure_at_step_start_is_sent_again_like_a_drop(pool: PgPool) {
+    let (app, state, fake, task) = fixture(pool).await;
+    let (cookie, csrf, session) = login(&app, "test-admin").await;
+    let owner = Uuid::parse_str(session["user"]["id"].as_str().unwrap()).unwrap();
+    let id = conversation(&app, &cookie, &csrf).await;
+    // (message, stored status, stored error, requests the gateway saw)
+    let cases = [
+        // Failing once is carried on.
+        ("flaky", "completed", None, 2),
+        // Failing every time ends the reply after MAX_DROPS more tries.
+        (
+            "down",
+            "error",
+            Some("The gateway could not complete this request: upstream hiccup"),
+            3,
+        ),
+        // A refusal is not sent again.
+        (
+            "refused",
+            "error",
+            Some("The gateway could not complete this request: bad input"),
+            1,
+        ),
+    ];
+    for (turn, (mode, status, error, requests)) in cases.into_iter().enumerate() {
+        let response = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/conversations/{id}/messages"),
+                json!({"content":mode,"model":"fixture-model"}),
+                &cookie,
+                &csrf,
+            ))
+            .await
+            .unwrap();
+        let _ = response.into_body().collect().await.unwrap();
+        let saved = state
+            .store
+            .get(owner, Uuid::parse_str(&id).unwrap())
+            .await
+            .unwrap();
+        let reply = &saved.messages[2 * turn + 1];
+        assert_eq!(reply.status, status, "{mode}");
+        assert_eq!(reply.error_message.as_deref(), error, "{mode}");
+        if status == "completed" {
+            assert_eq!(reply.content, "Hello α");
+        }
+        let seen = fake
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| {
+                seen["body"]["messages"].as_array().unwrap().last().unwrap()["content"] == mode
+            })
+            .count();
+        assert_eq!(seen, requests, "{mode}");
+    }
     task.abort();
 }
 

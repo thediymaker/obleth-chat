@@ -410,6 +410,7 @@ impl Gateway {
     ) -> Result<Response, ApiError> {
         self.chat_escalating(user, conversation, body, None, None)
             .await
+            .map_err(ChatFailure::into_error)
     }
     /// A chat request that can tell `auto` the model it gave this conversation
     /// is failing (`x-obleth-auto-escalate`, such as `tool_loop`), so the
@@ -423,7 +424,7 @@ impl Gateway {
         body: &Value,
         escalate: Option<&'static str>,
         own_system: Option<usize>,
-    ) -> Result<Response, ApiError> {
+    ) -> Result<Response, ChatFailure> {
         let mut extra = effort_header(body);
         if let Some(signal) = escalate.filter(|_| body["model"] == "auto") {
             extra.insert(
@@ -434,15 +435,28 @@ impl Gateway {
         if let Some(bytes) = own_system.filter(|_| body["model"] == "auto") {
             extra.insert("x-obleth-classify-system", bytes.into());
         }
-        let request = self
+        let authorization = self
+            .authorization(user)
+            .await
+            .map_err(ChatFailure::Refused)?;
+        let response = self
             .client
             .post(self.url("v1/chat/completions"))
+            .header(reqwest::header::AUTHORIZATION, authorization)
             .header("x-obleth-session-id", conversation.to_string())
             .headers(extra)
-            .json(body);
-        let response = self.send(user, request).await?;
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| ChatFailure::Transient(unavailable()))?;
         if !response.status().is_success() {
-            return Err(upstream_error(response).await);
+            let failed = response.status().is_server_error();
+            let error = upstream_error(response).await;
+            return Err(if failed && error.1 != CAPACITY_TIMEOUT {
+                ChatFailure::Transient(error)
+            } else {
+                ChatFailure::Refused(error)
+            });
         }
         if !response
             .headers()
@@ -450,10 +464,10 @@ impl Gateway {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.starts_with("text/event-stream"))
         {
-            return Err(ApiError(
+            return Err(ChatFailure::Refused(ApiError(
                 StatusCode::BAD_GATEWAY,
                 "Gateway did not return a streaming response".into(),
-            ));
+            )));
         }
         Ok(response)
     }
@@ -675,6 +689,25 @@ pub fn unavailable() -> ApiError {
         "The gateway could not complete this request".into(),
     )
 }
+/// Why a chat request got no stream.
+#[derive(Debug)]
+pub enum ChatFailure {
+    /// The request did not reach the gateway, or the gateway failed (a 5xx other
+    /// than giving up on capacity): worth sending again.
+    Transient(ApiError),
+    /// Refused, rate limited, out of capacity, or not a stream: sending it again
+    /// would not help.
+    Refused(ApiError),
+}
+
+impl ChatFailure {
+    pub fn into_error(self) -> ApiError {
+        match self {
+            ChatFailure::Transient(error) | ChatFailure::Refused(error) => error,
+        }
+    }
+}
+
 /// A gateway answer's JSON body, refusing one larger than `max`.
 async fn json_body(response: Response, max: usize) -> Result<Value, ApiError> {
     let bytes = crate::http::read_capped(response, max)

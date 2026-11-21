@@ -72,6 +72,63 @@ pub const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(10);
 /// still leaves time to save output before the 45-second lease expires.
 pub const LEASE_GRACE: Duration = Duration::from_secs(30);
 
+/// How a turn ended without finishing. The reply stores and shows `message()`; its
+/// status comes from the variant, so rewording a message changes no behaviour.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TurnEnd {
+    /// The person pressed Stop.
+    Stopped,
+    /// Another reply took the chat over, or the lease ran out.
+    Superseded,
+    ShuttingDown,
+    /// The sign-in that started the turn ended.
+    SessionEnded,
+    /// The model sent nothing for STALL_SECS. A tool turn pauses instead.
+    Stalled,
+    Failed(String),
+}
+
+impl TurnEnd {
+    pub fn message(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            TurnEnd::Stopped => "Response stopped".into(),
+            TurnEnd::Superseded => "Response is no longer active".into(),
+            TurnEnd::ShuttingDown => "Service shutting down".into(),
+            TurnEnd::SessionEnded => "Sign-in session ended".into(),
+            TurnEnd::Stalled => format!(
+                "The model sent nothing for {} minutes",
+                crate::STALL_SECS / 60
+            )
+            .into(),
+            TurnEnd::Failed(message) => message.as_str().into(),
+        }
+    }
+
+    /// The stored status: a turn something else ended is interrupted, one that went
+    /// wrong is an error.
+    pub fn status(&self) -> &'static str {
+        match self {
+            TurnEnd::Stopped
+            | TurnEnd::Superseded
+            | TurnEnd::ShuttingDown
+            | TurnEnd::SessionEnded => "interrupted",
+            TurnEnd::Stalled | TurnEnd::Failed(_) => "error",
+        }
+    }
+}
+
+impl From<String> for TurnEnd {
+    fn from(message: String) -> Self {
+        TurnEnd::Failed(message)
+    }
+}
+
+impl From<&str> for TurnEnd {
+    fn from(message: &str) -> Self {
+        TurnEnd::Failed(message.to_owned())
+    }
+}
+
 /// Renew only a currently valid lease. An expired worker cannot revive itself
 /// and overwrite a replacement response. None means keep working.
 pub async fn heartbeat(
@@ -79,7 +136,7 @@ pub async fn heartbeat(
     owner: Uuid,
     id: Uuid,
     generation: Uuid,
-) -> Result<Option<&'static str>, ApiError> {
+) -> Result<Option<TurnEnd>, ApiError> {
     let updated = sqlx::query("UPDATE conversations c SET generation_expires=clock_timestamp()+make_interval(secs=>$4) WHERE id=$1 AND owner_id=$2 AND active_generation=$3 AND generation_expires>clock_timestamp() AND NOT generation_cancel_requested AND EXISTS(SELECT 1 FROM users u WHERE u.id=c.owner_id AND u.enabled)")
         .bind(id).bind(owner).bind(generation).bind(store::GENERATION_LEASE_SECONDS as f64).execute(pool).await?.rows_affected();
     if updated == 1 {
@@ -94,7 +151,7 @@ pub async fn check(
     owner: Uuid,
     id: Uuid,
     generation: Uuid,
-) -> Result<Option<&'static str>, ApiError> {
+) -> Result<Option<TurnEnd>, ApiError> {
     let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversations c WHERE id=$1 AND owner_id=$2 AND active_generation=$3 AND generation_expires>clock_timestamp() AND NOT generation_cancel_requested AND EXISTS(SELECT 1 FROM users u WHERE u.id=c.owner_id AND u.enabled))")
         .bind(id).bind(owner).bind(generation).fetch_one(pool).await?;
     if valid {
@@ -108,13 +165,13 @@ async fn ended(
     owner: Uuid,
     id: Uuid,
     generation: Uuid,
-) -> Result<&'static str, ApiError> {
+) -> Result<TurnEnd, ApiError> {
     let cancelled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=$1 AND owner_id=$2 AND active_generation=$3 AND generation_cancel_requested)")
         .bind(id).bind(owner).bind(generation).fetch_one(pool).await?;
     Ok(if cancelled {
-        "Response stopped"
+        TurnEnd::Stopped
     } else {
-        "Response is no longer active"
+        TurnEnd::Superseded
     })
 }
 
@@ -175,4 +232,28 @@ pub async fn checkpoint(
     }
     tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TurnEnd;
+
+    #[test]
+    fn a_turn_end_s_status_follows_the_variant_not_its_words() {
+        for end in [
+            TurnEnd::Stopped,
+            TurnEnd::Superseded,
+            TurnEnd::ShuttingDown,
+            TurnEnd::SessionEnded,
+        ] {
+            assert_eq!(end.status(), "interrupted", "{end:?}");
+        }
+        assert_eq!(TurnEnd::Stalled.status(), "error");
+        // Any wording of a failure, even one that reads like a stop, stays an error.
+        assert_eq!(TurnEnd::from("Response stopped").status(), "error");
+        assert_eq!(
+            TurnEnd::Stalled.message(),
+            "The model sent nothing for 10 minutes"
+        );
+    }
 }

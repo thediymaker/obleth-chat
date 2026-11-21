@@ -7,6 +7,7 @@ Each release's section is also its GitHub Release notes.
 **Changes**
 
 - **Every answer Chat reads from the gateway has a size limit.** The model list, model details and load were read through three copies of the same capped loop, while embeddings, verdicts and whole completions were read without a limit. They now share one reader with the one Slurm and Kubernetes answers use, which also refuses an answer whose length is over the limit before reading it: 2 MiB for the model list and details, 1 MiB for load, 16 MiB for a completion or verdict, and 256 KiB per input for embeddings. A larger answer fails as a gateway error. Batches and decision endpoints use the same reader.
+- **A gateway failure as a step starts no longer ends a long agent turn.** When the request for a step could not reach the gateway or the gateway answered with a server error, the turn ended there, while the same failure partway through a step was sent again. Both now count as a dropped connection: the step is sent again after a second, up to two times in a row, before the turn ends with the gateway's message. A refusal, a quota or rate limit, and the gateway giving up on a full model still end the turn at once. How a turn ended is now carried as a kind rather than recognised by its sentence, so the stored messages are unchanged.
 
 ## v1.7.0
 

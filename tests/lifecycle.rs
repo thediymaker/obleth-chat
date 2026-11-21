@@ -1,5 +1,8 @@
 use axum::http::StatusCode;
-use obleth_chat::{lifecycle, store::Store};
+use obleth_chat::{
+    lifecycle::{self, TurnEnd},
+    store::Store,
+};
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
@@ -297,7 +300,7 @@ async fn check_reports_stop_and_expiry_without_renewing(pool: PgPool) {
         lifecycle::check(&pool, owner, chat.id, Uuid::new_v4())
             .await
             .unwrap(),
-        Some("Response is no longer active")
+        Some(TurnEnd::Superseded)
     );
     sqlx::query("UPDATE users SET enabled=FALSE WHERE id=$1")
         .bind(owner)
@@ -308,7 +311,7 @@ async fn check_reports_stop_and_expiry_without_renewing(pool: PgPool) {
         lifecycle::check(&pool, owner, chat.id, turn.generation_id)
             .await
             .unwrap(),
-        Some("Response is no longer active")
+        Some(TurnEnd::Superseded)
     );
     sqlx::query("UPDATE users SET enabled=TRUE WHERE id=$1")
         .bind(owner)
@@ -324,7 +327,7 @@ async fn check_reports_stop_and_expiry_without_renewing(pool: PgPool) {
         lifecycle::check(&pool, owner, chat.id, turn.generation_id)
             .await
             .unwrap(),
-        Some("Response stopped")
+        Some(TurnEnd::Stopped)
     );
     sqlx::query(
         "UPDATE conversations SET generation_cancel_requested=FALSE,generation_expires=NOW()-INTERVAL '1 second' WHERE id=$1",
@@ -337,7 +340,7 @@ async fn check_reports_stop_and_expiry_without_renewing(pool: PgPool) {
         lifecycle::check(&pool, owner, chat.id, turn.generation_id)
             .await
             .unwrap(),
-        Some("Response is no longer active")
+        Some(TurnEnd::Superseded)
     );
 }
 

@@ -70,13 +70,19 @@ pub async fn schedule(
             &mut usage,
         );
         let result = tokio::select! {
-            result = tokio::time::timeout(operations::FOLLOW_UP_TIMEOUT, work) => result.unwrap_or_else(|_| Err(ApiError::bad("Follow-up generation timed out"))),
-            _ = state.shutdown.cancelled() => Err(ApiError::bad("Service shutting down")),
-            _ = revoked(&state.store.pool, user.id, assistant) => Err(ApiError::bad("Follow-up generation superseded")),
+            result = tokio::time::timeout(operations::FOLLOW_UP_TIMEOUT, work) => match result {
+                Ok(result) => result.map_err(Unfinished::Failed),
+                Err(_) => Err(Unfinished::TimedOut),
+            },
+            _ = state.shutdown.cancelled() => Err(Unfinished::ShuttingDown),
+            _ = revoked(&state.store.pool, user.id, assistant) => Err(Unfinished::Superseded),
         };
-        if let Err(error) = &result {
-            let reason = failure_category(error);
-            if matches!(reason, "superseded" | "shutdown") {
+        if let Err(unfinished) = &result {
+            let reason = unfinished.category();
+            if matches!(
+                unfinished,
+                Unfinished::Superseded | Unfinished::ShuttingDown
+            ) {
                 tracing::debug!(reason, "Optional follow-up generation did not complete");
             } else {
                 tracing::warn!(reason, "Optional follow-up generation did not complete");
@@ -91,7 +97,7 @@ pub async fn schedule(
                 user.id,
                 conversation,
                 assistant,
-                result,
+                result.ok(),
                 usage.as_ref(),
             ),
         )
@@ -126,13 +132,30 @@ pub async fn schedule(
     true
 }
 
-// Only fixed categories reach logs. Never log provider errors, request bodies,
-// model output, credentials, or a user's question through ApiError formatting.
+/// Why a follow-up did not finish.
+enum Unfinished {
+    TimedOut,
+    ShuttingDown,
+    /// A newer reply or a deleted chat took its place.
+    Superseded,
+    Failed(ApiError),
+}
+
+impl Unfinished {
+    /// Only fixed categories reach logs. Never log provider errors, request bodies,
+    /// model output, credentials, or a user's question through ApiError formatting.
+    fn category(&self) -> &'static str {
+        match self {
+            Unfinished::TimedOut => "timeout",
+            Unfinished::ShuttingDown => "shutdown",
+            Unfinished::Superseded => "superseded",
+            Unfinished::Failed(error) => failure_category(error),
+        }
+    }
+}
+
 fn failure_category(error: &ApiError) -> &'static str {
     match error.1.as_str() {
-        "Follow-up generation timed out" => "timeout",
-        "Service shutting down" => "shutdown",
-        "Follow-up generation superseded" => "superseded",
         "Follow-up response too large" => "response_size_limit",
         "Follow-up stream interrupted" => "stream_interrupted",
         "Invalid follow-up stream" | "Invalid follow-up response" => "invalid_stream",
@@ -362,7 +385,7 @@ async fn settle(
     owner: Uuid,
     conversation: Uuid,
     assistant: Uuid,
-    result: Result<Vec<String>, ApiError>,
+    questions: Option<Vec<String>>,
     usage: Option<&Value>,
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await?;
@@ -371,9 +394,13 @@ async fn settle(
         .bind(owner)
         .fetch_optional(&mut *tx)
         .await?;
-    let status = if result.is_ok() { "completed" } else { "error" };
+    let status = if questions.is_some() {
+        "completed"
+    } else {
+        "error"
+    };
     operations::finish_in(&mut tx, assistant, usage, status).await?;
-    let questions = json!(result.unwrap_or_default());
+    let questions = json!(questions.unwrap_or_default());
     sqlx::query(
         "UPDATE messages m SET follow_ups=CASE WHEN c.selected_leaf_id=m.id
              AND c.active_generation IS NULL AND u.enabled THEN $4 ELSE '[]'::jsonb END,
@@ -398,10 +425,8 @@ mod tests {
 
     #[test]
     fn failure_categories_never_include_arbitrary_error_details() {
-        assert_eq!(
-            failure_category(&ApiError::bad("Follow-up generation timed out")),
-            "timeout"
-        );
+        assert_eq!(Unfinished::TimedOut.category(), "timeout");
+        assert_eq!(Unfinished::ShuttingDown.category(), "shutdown");
         assert_eq!(
             failure_category(&ApiError::bad("arbitrary provider text or credential")),
             "request_failed"

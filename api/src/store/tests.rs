@@ -116,3 +116,112 @@ async fn deleting_a_chat_finds_message_links_through_indexes() {
     assert_eq!(left, 0);
     db.close().await;
 }
+
+/// Migration 088's length checks keep the longest browser and device-call values
+/// the code writes, and refuse longer ones.
+#[tokio::test]
+async fn text_length_checks_keep_what_the_code_writes() {
+    let Some(db) = Database::before(88).await else {
+        return;
+    };
+    let (owner, chat, connection) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, role) VALUES ($1, 'ana', 'Ana', 'user')",
+    )
+    .bind(owner)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO conversations (id, owner_id, title, model) VALUES ($1, $2, 'Device', 'm')",
+    )
+    .bind(chat)
+    .bind(owner)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO connections (id, owner_id, name, url, kind) VALUES ($1, $2, 'Board', 'browser://device', 'device')")
+        .bind(connection)
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let browser = |slug: &str, ip: String, error: String| {
+        sqlx::query("INSERT INTO browsers (id, owner_id, slug, pod_ip, error_message) VALUES ($1, $2, $3, $4, $5)")
+            .bind(Uuid::new_v4())
+            .bind(owner)
+            .bind(slug.to_owned())
+            .bind(ip)
+            .bind(error)
+    };
+    let call = |tool: String, output: String, detail: String| {
+        sqlx::query("INSERT INTO device_calls (generation_id, call_id, conversation_id, owner_id, connection_id, tool_name, ok, output, detail) VALUES ($1, 'c', $2, $3, $4, $5, TRUE, $6, $7)")
+            .bind(Uuid::new_v4())
+            .bind(chat)
+            .bind(owner)
+            .bind(connection)
+            .bind(tool)
+            .bind(output)
+            .bind(detail)
+    };
+    // Rows at each limit, written before the checks exist, still validate.
+    browser("a1b2c3d4e5f6g7h8", "f".repeat(64), "é".repeat(1000))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    call("t".repeat(128), "é".repeat(65536), "x".repeat(8192))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    db.migrate().await.unwrap();
+
+    sqlx::query("DELETE FROM browsers")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let refused = |error: sqlx::Error| {
+        error
+            .as_database_error()
+            .unwrap()
+            .constraint()
+            .unwrap()
+            .to_owned()
+    };
+    for (insert, check) in [
+        (
+            browser("A1B2C3D4E5F6G7H8", "ip".into(), "e".into()),
+            "browsers_slug_check",
+        ),
+        (
+            browser("a1b2c3d4e5f6g7h", "ip".into(), "e".into()),
+            "browsers_slug_check",
+        ),
+        (
+            browser("a1b2c3d4e5f6g7h8", "f".repeat(65), "e".into()),
+            "browsers_pod_ip_check",
+        ),
+        (
+            browser("a1b2c3d4e5f6g7h8", "ip".into(), "e".repeat(1001)),
+            "browsers_error_message_check",
+        ),
+        (
+            call(String::new(), "o".into(), "d".into()),
+            "device_calls_tool_name_check",
+        ),
+        (
+            call("t".repeat(129), "o".into(), "d".into()),
+            "device_calls_tool_name_check",
+        ),
+        (
+            call("read".into(), "o".repeat(65537), "d".into()),
+            "device_calls_output_check",
+        ),
+        (
+            call("read".into(), "o".into(), "d".repeat(8193)),
+            "device_calls_detail_check",
+        ),
+    ] {
+        assert_eq!(refused(insert.execute(&db.pool).await.unwrap_err()), check);
+    }
+    db.close().await;
+}

@@ -2,8 +2,10 @@
 //! database TEST_DATABASE_URL names, with every migration applied, and drops it
 //! when done, so tests run side by side and leave nothing behind.
 
+use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::borrow::Cow;
 use std::env;
 use uuid::Uuid;
 
@@ -18,6 +20,32 @@ impl Database {
     /// A pool on its own schema with every migration applied, or None without
     /// TEST_DATABASE_URL (the test then skips).
     pub async fn new() -> Option<Self> {
+        // Every migration, so handlers that touch other features' tables (deleting a
+        // group clears its shares, for one) work as they do in production.
+        Self::migrated(&crate::MIGRATOR).await
+    }
+    /// Like `new`, with only the migrations numbered below `version`, so a test can
+    /// write rows a migration then has to keep; `migrate` applies the rest.
+    pub async fn before(version: i64) -> Option<Self> {
+        let migrations = crate::MIGRATOR
+            .migrations
+            .iter()
+            .filter(|m| m.version < version)
+            .cloned()
+            .collect();
+        Self::migrated(&Migrator {
+            migrations: Cow::Owned(migrations),
+            ignore_missing: false,
+            locking: true,
+            no_tx: false,
+        })
+        .await
+    }
+    /// Applies every migration not yet applied.
+    pub async fn migrate(&self) -> Result<(), sqlx::migrate::MigrateError> {
+        crate::MIGRATOR.run(&self.pool).await
+    }
+    async fn migrated(migrator: &Migrator) -> Option<Self> {
         let Ok(url) = env::var("TEST_DATABASE_URL") else {
             eprintln!("Skipping Postgres test: set TEST_DATABASE_URL to run");
             return None;
@@ -50,9 +78,7 @@ impl Database {
             .connect(&url)
             .await
             .unwrap();
-        // Every migration, so handlers that touch other features' tables (deleting a
-        // group clears its shares, for one) work as they do in production.
-        crate::MIGRATOR.run(&pool).await.unwrap();
+        migrator.run(&pool).await.unwrap();
         Some(Self {
             pool,
             admin,

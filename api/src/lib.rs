@@ -803,16 +803,6 @@ const MAX_DROPS: u32 = 2;
 /// How long a step waits before sending a request the gateway failed again.
 const RETRY_WAIT: Duration = Duration::from_secs(1);
 
-/// Whether a stream's error event reports a server-side failure (a 5xx code),
-/// which is worth trying again, rather than a problem with the request.
-fn server_failure(error: &Value) -> bool {
-    let code = match &error["code"] {
-        Value::Number(n) => n.as_u64(),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    };
-    code.is_some_and(|c| (500..600).contains(&c))
-}
 /// Bytes a tool step may think before it writes anything. Past it, the step is
 /// stopped and tried again at low effort, up to MAX_OVERTHINKS times in a row:
 /// some models plan a whole program in their thinking and never start writing it.
@@ -2098,36 +2088,42 @@ async fn run_generation(
                     }
                 };
                 let Ok(chunk) = chunk else { break };
-                for event in decoder.push(&chunk).map_err(str::to_string)? {
-                    if event == "[DONE]" {
-                        done = true;
-                        break 'outer;
-                    }
-                    let v: Value = serde_json::from_str(&event)
-                        .map_err(|_| "Gateway returned an invalid stream event".to_string())?;
-                    if v.get("error").is_some() {
-                        let why = gateway::reason(event.as_bytes());
+                for event in decoder.events(&chunk)? {
+                    let v = match event {
+                        gateway::Event::Done => {
+                            done = true;
+                            break 'outer;
+                        }
                         // A server-side failure partway through, such as the upstream
                         // connection breaking, is a drop: the step is tried again.
-                        if server_failure(&v["error"]) {
+                        gateway::Event::Failed {
+                            retry: true,
+                            reason,
+                        } => {
                             tracing::warn!(
-                                reason = why.as_deref().unwrap_or(""),
+                                reason = reason.as_deref().unwrap_or(""),
                                 "gateway stream broke off"
                             );
                             break 'outer;
                         }
-                        tracing::warn!(
-                            reason = why.as_deref().unwrap_or(""),
-                            "gateway reported an error during generation"
-                        );
-                        return Err(match why {
-                            Some(why) => {
-                                format!("Gateway reported an error during generation: {why}")
+                        gateway::Event::Failed {
+                            retry: false,
+                            reason,
+                        } => {
+                            tracing::warn!(
+                                reason = reason.as_deref().unwrap_or(""),
+                                "gateway reported an error during generation"
+                            );
+                            return Err(match reason {
+                                Some(why) => {
+                                    format!("Gateway reported an error during generation: {why}")
+                                }
+                                None => "Gateway reported an error during generation".to_string(),
                             }
-                            None => "Gateway reported an error during generation".to_string(),
+                            .into());
                         }
-                        .into());
-                    }
+                        gateway::Event::Chunk(v) => v,
+                    };
                     if resolved.model == "auto" && served.is_none() {
                         if let Some(model) = v
                             .get("model")
@@ -2146,26 +2142,13 @@ async fn run_generation(
                             emit(&mut tx, "model", json!({"model":model}));
                         }
                     }
-                    if let Some(u) = v.get("usage").filter(|v| v.is_object()) {
-                        let mut clean = usage
-                            .take()
-                            .and_then(|u: Value| u.as_object().cloned())
-                            .unwrap_or_default();
-                        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
-                            if let Some(n) = u
-                                .get(key)
-                                .and_then(Value::as_u64)
-                                .filter(|n| *n <= 1_000_000_000)
-                            {
-                                // Agent steps are separate requests; the turn reports their sum.
-                                let previous = if steps > 1 {
-                                    clean.get(key).and_then(Value::as_u64).unwrap_or(0)
-                                } else {
-                                    0
-                                };
-                                clean.insert(key.into(), json!(previous + n));
-                            }
-                        }
+                    if let Some(u) = gateway::usage_of(&v) {
+                        // Agent steps are separate requests; the turn reports their sum.
+                        let mut clean = match usage.take() {
+                            Some(previous) if steps > 1 => previous,
+                            _ => json!({}),
+                        };
+                        gateway::add_usage(&mut clean, u);
                         // Measured energy and carbon, when the gateway reports them: the sum too.
                         for key in ["energy_wh", "co2_g"] {
                             if let Some(n) = u
@@ -2178,7 +2161,7 @@ async fn run_generation(
                                 } else {
                                     0.0
                                 };
-                                clean.insert(key.into(), json!(previous + n));
+                                clean[key] = json!(previous + n);
                             }
                         }
                         // Time spent writing, from each step's first token to its last.
@@ -2192,12 +2175,10 @@ async fn run_generation(
                             } else {
                                 0
                             };
-                            clean.insert("generation_ms".into(), json!(previous + ms));
+                            clean["generation_ms"] = json!(previous + ms);
                             if steps <= 1 {
-                                clean.insert(
-                                    "first_token_ms".into(),
-                                    json!(from.duration_since(asked).as_millis() as u64),
-                                );
+                                clean["first_token_ms"] =
+                                    json!(from.duration_since(asked).as_millis() as u64);
                             }
                         }
                         // The last step alone is what the model holds: the context meter's size.
@@ -2210,11 +2191,11 @@ async fn run_generation(
                                 .and_then(Value::as_u64)
                                 .filter(|n| *n <= 1_000_000_000)
                             {
-                                clean.insert(last.into(), json!(n));
+                                clean[last] = json!(n);
                             }
                         }
-                        clean.insert("steps".into(), json!(steps.max(1)));
-                        usage = Some(Value::Object(clean));
+                        clean["steps"] = json!(steps.max(1));
+                        usage = Some(clean);
                     }
                     if let Some(choice) = v
                         .get("choices")
@@ -3577,21 +3558,6 @@ mod draft_tests {
         }
         w.ran();
         assert!(w.looping().is_none());
-    }
-
-    #[test]
-    fn only_server_side_stream_errors_are_tried_again() {
-        assert!(server_failure(
-            &json!({"message":"upstream stream ended","code":502})
-        ));
-        assert!(server_failure(
-            &json!({"message":"overloaded","code":"503"})
-        ));
-        assert!(!server_failure(
-            &json!({"message":"bad tool schema","code":400})
-        ));
-        assert!(!server_failure(&json!({"message":"no code"})));
-        assert!(!server_failure(&json!("boom")));
     }
 
     #[test]

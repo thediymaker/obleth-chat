@@ -3,7 +3,7 @@
 use crate::{
     auth::Identity,
     error::ApiError,
-    gateway::{Decoder, Gateway},
+    gateway::{self, Decoder, Gateway},
     models::{self, ParameterOverrides},
     operations, AppState,
 };
@@ -158,7 +158,7 @@ fn failure_category(error: &ApiError) -> &'static str {
     match error.1.as_str() {
         "Follow-up response too large" => "response_size_limit",
         "Follow-up stream interrupted" => "stream_interrupted",
-        "Invalid follow-up stream" | "Invalid follow-up response" => "invalid_stream",
+        "Invalid follow-up stream" => "invalid_stream",
         "Follow-up provider error" => "provider_error",
         "Follow-up tools are unsupported" => "unsupported_tools",
         "Follow-up stream did not finish" => "incomplete_stream",
@@ -315,19 +315,21 @@ async fn generate(
             return Err(ApiError::bad("Follow-up response too large"));
         }
         for event in decoder
-            .push(&chunk)
+            .events(&chunk)
             .map_err(|_| ApiError::bad("Invalid follow-up stream"))?
         {
-            if event == "[DONE]" {
-                finished = true;
-                break 'body;
-            }
-            let data: Value = serde_json::from_str(&event)
-                .map_err(|_| ApiError::bad("Invalid follow-up response"))?;
-            if data.get("error").is_some() {
-                return Err(ApiError::bad("Follow-up provider error"));
-            }
-            if let Some(reported) = data.get("usage").filter(|v| v.is_object()) {
+            let data = match event {
+                gateway::Event::Done => {
+                    finished = true;
+                    break 'body;
+                }
+                // The provider's own words are never shown or logged here.
+                gateway::Event::Failed { .. } => {
+                    return Err(ApiError::bad("Follow-up provider error"))
+                }
+                gateway::Event::Chunk(data) => data,
+            };
+            if let Some(reported) = gateway::usage_of(&data) {
                 *usage = Some(reported.clone());
             }
             if data.pointer("/choices/0/delta/tool_calls").is_some() {

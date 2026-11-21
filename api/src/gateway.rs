@@ -803,6 +803,43 @@ pub fn text_deltas(choice: &Value) -> Vec<(&'static str, &str)> {
 /// URLs (the gateway attaches up to 3 MiB), so this is well above that.
 pub const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
+/// What one event of a gateway chat stream says.
+#[derive(Debug, PartialEq)]
+pub enum Event {
+    /// `[DONE]`: the stream finished.
+    Done,
+    /// The provider failed. `retry` marks a server-side failure (a 5xx code), which
+    /// is worth trying again; `reason` is its message, cut short and kept to one line.
+    Failed { retry: bool, reason: Option<String> },
+    /// A chunk of the answer.
+    Chunk(Value),
+}
+
+/// Whether a stream's error event reports a server-side failure (a 5xx code),
+/// which is worth trying again, rather than a problem with the request.
+fn server_failure(error: &Value) -> bool {
+    let code = match &error["code"] {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    };
+    code.is_some_and(|c| (500..600).contains(&c))
+}
+
+/// The usage a stream chunk reports, if any.
+pub fn usage_of(chunk: &Value) -> Option<&Value> {
+    chunk.get("usage").filter(|u| u.is_object())
+}
+
+/// Adds one request's token counts to a running total.
+pub fn add_usage(total: &mut Value, step: &Value) {
+    for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+        if let Some(n) = step[key].as_u64().filter(|n| *n <= 1_000_000_000) {
+            total[key] = json!(total[key].as_u64().unwrap_or(0) + n);
+        }
+    }
+}
+
 /// Incremental, bounded SSE parser. Keeps incomplete UTF-8 in bytes until a full line arrives.
 #[derive(Default)]
 pub struct Decoder {
@@ -844,6 +881,27 @@ impl Decoder {
         }
         self.buffer.drain(..consumed);
         Ok(events)
+    }
+
+    /// The chat stream events in the next bytes, parsed.
+    pub fn events(&mut self, bytes: &[u8]) -> Result<Vec<Event>, &'static str> {
+        self.push(bytes)?
+            .into_iter()
+            .map(|data| {
+                if data == "[DONE]" {
+                    return Ok(Event::Done);
+                }
+                let value: Value = serde_json::from_str(&data)
+                    .map_err(|_| "Gateway returned an invalid stream event")?;
+                Ok(match value.get("error") {
+                    Some(error) => Event::Failed {
+                        retry: server_failure(error),
+                        reason: reason(data.as_bytes()),
+                    },
+                    None => Event::Chunk(value),
+                })
+            })
+            .collect()
     }
 }
 /// Whether a model takes images: its own vision, or the gateway's vision boon, which
@@ -1047,6 +1105,95 @@ mod tests {
             .push(&vec![b'x'; MAX_EVENT_BYTES + 1])
             .is_err());
     }
+    /// A recorded stream, sent in pieces that split its lines.
+    fn decoded(stream: &str) -> Vec<Event> {
+        let mut decoder = Decoder::default();
+        let mut events = vec![];
+        for piece in stream.as_bytes().chunks(5) {
+            events.extend(decoder.events(piece).unwrap());
+        }
+        events
+    }
+
+    #[test]
+    fn decodes_a_normal_stream_with_its_usage() {
+        let events = decoded(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+            ": keep-alive\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n",
+            "data: [DONE]\n\n",
+        ));
+        assert_eq!(events.len(), 3);
+        let Event::Chunk(first) = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(text_deltas(&first["choices"][0]), [("delta", "Hi")]);
+        assert_eq!(usage_of(first), None);
+        let Event::Chunk(last) = &events[1] else {
+            panic!("{events:?}")
+        };
+        let mut total = json!({"total_tokens": 10});
+        add_usage(&mut total, usage_of(last).unwrap());
+        assert_eq!(
+            total,
+            json!({"prompt_tokens":3,"completion_tokens":1,"total_tokens":14})
+        );
+        assert_eq!(events[2], Event::Done);
+    }
+
+    #[test]
+    fn decodes_error_events_scrubbed_and_told_apart() {
+        let events = decoded(concat!(
+            "data: {\"error\":{\"message\":\"upstream\\u0007 broke\\noff.\",\"code\":502}}\n\n",
+            "data: {\"error\":{\"message\":\"bad tool schema\",\"code\":\"400\"}}\n\n",
+            "data: {\"error\":\"boom\"}\n\n",
+        ));
+        assert_eq!(
+            events,
+            [
+                Event::Failed {
+                    retry: true,
+                    reason: Some("upstream  broke off".into())
+                },
+                Event::Failed {
+                    retry: false,
+                    reason: Some("bad tool schema".into())
+                },
+                Event::Failed {
+                    retry: false,
+                    reason: Some("boom".into())
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stream_that_ends_early_has_no_done_and_keeps_its_partial_event() {
+        let mut decoder = Decoder::default();
+        let events = decoder
+            .events(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choi")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Event::Chunk(_)));
+        assert!(decoder.events(b"ces\":[]}\n").unwrap().is_empty());
+        assert!(Decoder::default().events(b"data: {nope}\n\n").is_err());
+    }
+
+    #[test]
+    fn only_server_side_stream_errors_are_tried_again() {
+        assert!(server_failure(
+            &json!({"message":"upstream stream ended","code":502})
+        ));
+        assert!(server_failure(
+            &json!({"message":"overloaded","code":"503"})
+        ));
+        assert!(!server_failure(
+            &json!({"message":"bad tool schema","code":400})
+        ));
+        assert!(!server_failure(&json!({"message":"no code"})));
+        assert!(!server_failure(&json!("boom")));
+    }
+
     #[test]
     fn rejects_invalid_utf8() {
         assert!(Decoder::default()

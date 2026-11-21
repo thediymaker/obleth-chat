@@ -84,6 +84,10 @@ async fn chat(
         .and_then(|m| m["content"].as_str())
         .map(str::to_owned);
     let stream = async_stream::stream! {
+        if task.contains("Fail loudly") {
+            yield Ok::<_, Infallible>(Event::default().data(json!({"error":{"message":"bad\u{7}thing\nhappened.","code":400}}).to_string()));
+            return;
+        }
         if wrap_up {
             yield Ok::<_, Infallible>(Event::default().data(json!({"choices":[{"delta":{"content":"Wrapped up what I found."}}]}).to_string()));
             yield Ok(Event::default().data(json!({"choices":[{"delta":{},"finish_reason":"stop"}]}).to_string()));
@@ -331,6 +335,21 @@ async fn workers_explore_at_once_and_report(pool: PgPool) {
         .as_str()
         .unwrap()
         .contains("no tools or files"));
+
+    // A provider's error reaches the card on one line, without control characters.
+    let (progress, _updates) = tokio::sync::mpsc::unbounded_channel();
+    let failed = agents::run(
+        &chatting,
+        &json!({"tasks":[{"title":"Fail","task":"Fail loudly."}]}).to_string(),
+        progress,
+    )
+    .await;
+    assert_eq!(
+        failed.extra["agents"][0]["doing"],
+        "The worker model reported an error: bad thing happened",
+        "{}",
+        failed.output
+    );
 }
 
 #[tokio::test]

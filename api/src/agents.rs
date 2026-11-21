@@ -470,14 +470,6 @@ async fn settle(pool: &PgPool, generation: Uuid, usage: &Value, ok: bool) {
     }
 }
 
-fn add_usage(total: &mut Value, step: &Value) {
-    for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
-        if let Some(n) = step[key].as_u64().filter(|n| *n <= 1_000_000_000) {
-            total[key] = json!(total[key].as_u64().unwrap_or(0) + n);
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn steps<S: Shell>(
     ctx: &Ctx<'_, S>,
@@ -520,7 +512,7 @@ async fn steps<S: Shell>(
         }
         let (content, calls, reported) = request(ctx, &payload).await?;
         if let Some(reported) = reported {
-            add_usage(usage, &reported);
+            gateway::add_usage(usage, &reported);
         }
         update(board, progress, i, |a| {
             a["steps"] = json!(step);
@@ -581,29 +573,20 @@ async fn request<S: Shell>(
             return Err("The worker's answer was too long".into());
         }
         for event in decoder
-            .push(&chunk)
+            .events(&chunk)
             .map_err(|_| "The worker's stream was invalid".to_string())?
         {
-            if event == "[DONE]" {
-                return Ok((content, calls, usage));
-            }
-            let v: Value = serde_json::from_str(&event)
-                .map_err(|_| "The worker's stream was invalid".to_string())?;
-            if let Some(error) = v.get("error") {
-                let message: String = error["message"]
-                    .as_str()
-                    .or(error.as_str())
-                    .unwrap_or("")
-                    .chars()
-                    .take(300)
-                    .collect();
-                return Err(if message.is_empty() {
-                    "The worker model reported an error".into()
-                } else {
-                    format!("The worker model reported an error: {message}")
-                });
-            }
-            if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+            let v = match event {
+                gateway::Event::Done => return Ok((content, calls, usage)),
+                gateway::Event::Failed { reason, .. } => {
+                    return Err(match reason {
+                        Some(reason) => format!("The worker model reported an error: {reason}"),
+                        None => "The worker model reported an error".into(),
+                    })
+                }
+                gateway::Event::Chunk(v) => v,
+            };
+            if let Some(u) = gateway::usage_of(&v) {
                 usage = Some(u.clone());
             }
             let Some(choice) = v.pointer("/choices/0") else {
@@ -625,19 +608,29 @@ async fn request<S: Shell>(
     Err("The worker's stream ended early".into())
 }
 
+/// What a message adds to a request: its text and its tool calls' arguments.
+fn size(message: &Value) -> usize {
+    let calls = message["tool_calls"].as_array().map_or(0, |calls| {
+        calls
+            .iter()
+            .filter_map(|c| c["function"]["arguments"].as_str())
+            .map(str::len)
+            .sum()
+    });
+    message["content"].as_str().map_or(0, str::len) + calls
+}
+
 /// Past KEPT_BYTES, the oldest tool output gives way to a note.
 fn trim(messages: &mut [Value]) {
-    let size = |m: &[Value]| m.iter().map(|v| v.to_string().len()).sum::<usize>();
-    let mut total = size(messages);
+    const REMOVED: &str = "[Older output removed to save room. Run the tool again if you need it.]";
+    let mut total: usize = messages.iter().map(size).sum();
     for m in messages.iter_mut() {
         if total <= KEPT_BYTES {
             break;
         }
         if m["role"] == "tool" && m["content"].as_str().is_some_and(|c| c.len() > 200) {
-            let before = m.to_string().len();
-            m["content"] =
-                json!("[Older output removed to save room. Run the tool again if you need it.]");
-            total = total + m.to_string().len() - before;
+            total -= size(m) - REMOVED.len();
+            m["content"] = json!(REMOVED);
         }
     }
 }

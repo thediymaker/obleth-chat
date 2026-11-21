@@ -40,8 +40,7 @@ fn text(value: &Value, max: usize) -> String {
 /// Checks a call's arguments and returns the questions as the page shows them, or
 /// what the model must fix.
 pub fn parse(arguments: &str) -> Result<Vec<Value>, String> {
-    let args: Value = serde_json::from_str(arguments)
-        .map_err(|_| "The arguments were not valid JSON.".to_string())?;
+    let args = arguments_of(arguments)?;
     let items = args["questions"]
         .as_array()
         .filter(|q| !q.is_empty())
@@ -85,6 +84,11 @@ pub fn parse(arguments: &str) -> Result<Vec<Value>, String> {
     Ok(questions)
 }
 
+/// A tool's arguments, or what the model must fix.
+fn arguments_of(arguments: &str) -> Result<Value, String> {
+    serde_json::from_str(arguments).map_err(|_| "The arguments were not valid JSON.".to_string())
+}
+
 /// The activity entry the page shows as the card.
 pub fn entry(call_id: &str, questions: Vec<Value>) -> Value {
     let summary = if questions.len() == 1 {
@@ -118,10 +122,12 @@ pub fn workspace_definition() -> Value {
 }
 
 /// The card for a workspace request, or what the model must fix.
-pub fn workspace_entry(call_id: &str, arguments: &str) -> Value {
-    let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+pub fn workspace_entry(call_id: &str, arguments: &str) -> Result<Value, String> {
+    let args = arguments_of(arguments)?;
     let reason = text(&args["reason"], 240);
-    json!({"id":call_id,"kind":"workspace","tool":WORKSPACE_TOOL,"status":"asked","summary":"Asked for a workspace","reason":reason})
+    Ok(
+        json!({"id":call_id,"kind":"workspace","tool":WORKSPACE_TOOL,"status":"asked","summary":"Asked for a workspace","reason":reason}),
+    )
 }
 
 /// Offered when the person may run research but this chat isn't doing any: the
@@ -142,11 +148,14 @@ pub fn research_definition() -> Value {
         "required":["goal"],"additionalProperties":false}}})
 }
 
-/// The card for a research suggestion. `in_project` says the chat's own project can
-/// hold the research; otherwise the button makes a new project for it.
-pub fn research_entry(call_id: &str, arguments: &str, in_project: bool) -> Value {
-    let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
-    json!({"id":call_id,"kind":"research","tool":RESEARCH_TOOL,"status":"asked","summary":"Suggested research","goal":text(&args["goal"], 200),"metric":text(&args["metric"], 120),"inProject":in_project})
+/// The card for a research suggestion, or what the model must fix. `in_project` says
+/// the chat's own project can hold the research; otherwise the button makes a new
+/// project for it.
+pub fn research_entry(call_id: &str, arguments: &str, in_project: bool) -> Result<Value, String> {
+    let args = arguments_of(arguments)?;
+    Ok(
+        json!({"id":call_id,"kind":"research","tool":RESEARCH_TOOL,"status":"asked","summary":"Suggested research","goal":text(&args["goal"], 200),"metric":text(&args["metric"], 120),"inProject":in_project}),
+    )
 }
 
 /// Offered in a chat that isn't in a project: the model can suggest starting a project
@@ -170,8 +179,7 @@ pub fn project_definition() -> Value {
 
 /// The card for a project suggestion, or what the model must fix.
 pub fn project_entry(call_id: &str, arguments: &str) -> Result<Value, String> {
-    let args: Value = serde_json::from_str(arguments)
-        .map_err(|_| "The arguments were not valid JSON.".to_string())?;
+    let args = arguments_of(arguments)?;
     let name = text(&args["name"], 80);
     if name.is_empty() {
         return Err("Give the project a name.".into());
@@ -249,8 +257,7 @@ pub fn app_entry(
     model: &str,
     in_project: bool,
 ) -> Result<Value, String> {
-    let args: Value = serde_json::from_str(arguments)
-        .map_err(|_| "The arguments were not valid JSON.".to_string())?;
+    let args = arguments_of(arguments)?;
     let name = text(&args["name"], 120);
     if name.is_empty() {
         return Err("Give the app a name.".into());
@@ -286,10 +293,11 @@ mod tests {
         let entry = workspace_entry(
             "call_1",
             &json!({"reason":"To build the app\u{7} and show a preview."}).to_string(),
-        );
+        )
+        .unwrap();
         assert_eq!(entry["kind"], "workspace");
         assert_eq!(entry["reason"], "To build the app and show a preview.");
-        assert_eq!(workspace_entry("call_2", "not json")["reason"], "");
+        assert_eq!(workspace_entry("call_2", "{}").unwrap()["reason"], "");
     }
 
     #[test]
@@ -312,12 +320,23 @@ mod tests {
             "call_1",
             &json!({"goal":"Make decode faster","metric":"tokens per second"}).to_string(),
             false,
-        );
+        )
+        .unwrap();
         assert_eq!(entry["kind"], "research");
         assert_eq!(entry["goal"], "Make decode faster");
         assert_eq!(entry["metric"], "tokens per second");
         assert_eq!(entry["inProject"], false);
-        assert_eq!(research_entry("call_2", "{}", true)["metric"], "");
+        assert_eq!(research_entry("call_2", "{}", true).unwrap()["metric"], "");
+    }
+
+    #[test]
+    fn every_suggestion_says_what_to_fix_when_its_arguments_are_not_json() {
+        let bad = "The arguments were not valid JSON.";
+        assert_eq!(workspace_entry("call_1", "not json").unwrap_err(), bad);
+        assert_eq!(research_entry("call_1", "{", false).unwrap_err(), bad);
+        assert_eq!(project_entry("call_1", "[").unwrap_err(), bad);
+        assert_eq!(app_entry("call_1", "", "model", true).unwrap_err(), bad);
+        assert_eq!(parse("not json").unwrap_err(), bad);
     }
 
     #[test]

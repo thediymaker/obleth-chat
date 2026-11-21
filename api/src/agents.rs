@@ -15,7 +15,7 @@ use crate::{
     models::{self, ParameterOverrides},
     operations,
     sandbox::tools::Outcome,
-    ToolCall,
+    turn::parse::{accumulate_tool_calls, ToolCall},
 };
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -589,7 +589,7 @@ async fn request<S: Shell>(
                 .pointer("/delta/tool_calls")
                 .and_then(Value::as_array)
             {
-                crate::accumulate_tool_calls(&mut calls, deltas)?;
+                accumulate_tool_calls(&mut calls, deltas)?;
             }
             for (channel, delta) in gateway::text_deltas(choice) {
                 if channel == "delta" {

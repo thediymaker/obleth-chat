@@ -1,10 +1,12 @@
 //! Real PostgreSQL and local HTTP checks for the optional auxiliary request.
+mod common;
 use axum::{
     extract::State,
     response::{sse::Event, Sse},
     routing::{get, post},
     Json, Router,
 };
+use common::Chats;
 use obleth_chat::{
     auth::{Auth, AuthConfig, Identity, Role},
     gateway::Gateway,

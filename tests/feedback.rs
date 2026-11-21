@@ -1,11 +1,13 @@
 //! Thumbs up and down on replies: only the owner rates, viewers never see a rating, and
 //! administrators see models, reasons and comments without chats or people.
+mod common;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use common::Chats;
 use http_body_util::BodyExt;
 use obleth_chat::{
     auth::{Auth, AuthConfig},

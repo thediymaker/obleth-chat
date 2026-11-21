@@ -1,11 +1,13 @@
 //! Temporary chats: left out of history and search, never shared, exported, branched or
 //! moved into a project, deleted when their owner leaves them or after a quiet day.
+mod common;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use common::Chats;
 use http_body_util::BodyExt;
 use obleth_chat::{
     auth::{Auth, AuthConfig},

@@ -1,10 +1,12 @@
 //! These integration tests require DATABASE_URL pointing to a disposable PostgreSQL
 //! database. sqlx creates an isolated database for each test and runs all migrations.
 
+mod common;
 use axum::http::StatusCode;
+use common::Chats;
 use obleth_chat::store::{
-    ReasoningEffort, Store, MAX_CONTEXT_BYTES, MAX_CONVERSATIONS_PER_USER, MAX_CONVERSATION_BYTES,
-    MAX_HISTORY, MAX_RESPONSE_BYTES,
+    ConversationPatch, ReasoningEffort, Store, MAX_CONTEXT_BYTES, MAX_CONVERSATIONS_PER_USER,
+    MAX_CONVERSATION_BYTES, MAX_HISTORY, MAX_RESPONSE_BYTES,
 };
 use serde_json::json;
 use sqlx::PgPool;
@@ -59,7 +61,14 @@ async fn every_conversation_operation_enforces_owner(pool: PgPool) {
     );
     assert_eq!(
         store
-            .update(bob, conversation.id, None, Some(ReasoningEffort::High))
+            .patch(
+                bob,
+                conversation.id,
+                ConversationPatch {
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap_err()
             .0,
@@ -67,7 +76,14 @@ async fn every_conversation_operation_enforces_owner(pool: PgPool) {
     );
     assert_eq!(
         store
-            .update(alice, conversation.id, None, Some(ReasoningEffort::High))
+            .patch(
+                alice,
+                conversation.id,
+                ConversationPatch {
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap_err()
             .0,
@@ -264,6 +280,7 @@ async fn reasoning_migration_defaults_and_database_constraints_protect_legacy_wr
     .unwrap();
     let message_id = Uuid::new_v4();
     sqlx::query("INSERT INTO messages (id, conversation_id, ordinal, role, content, status) VALUES ($1, $2, 0, 'user', 'Legacy question', 'completed')").bind(message_id).bind(id).execute(&pool).await.unwrap();
+    common::link_written_messages(&pool).await;
     let store = Store::new(pool.clone());
     let saved = store.get(owner, id).await.unwrap();
     assert_eq!(saved.reasoning_effort, "medium");
@@ -636,6 +653,7 @@ async fn context_and_history_limits_reject_without_appending_messages(pool: PgPo
         sqlx::query("INSERT INTO messages (id, conversation_id, ordinal, role, content, status) VALUES ($1, $2, $3, 'user', 'x', 'completed')")
             .bind(Uuid::new_v4()).bind(full.id).bind(ordinal as i32).execute(&pool).await.unwrap();
     }
+    common::link_written_messages(&pool).await;
     let error = store
         .start_turn(owner, full.id, "Next", "model", "", 1.0, 512)
         .await

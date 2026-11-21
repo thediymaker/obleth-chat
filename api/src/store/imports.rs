@@ -173,37 +173,32 @@ impl Store {
             let message_ids: Vec<Uuid> = chat.messages.iter().map(|_| Uuid::new_v4()).collect();
             leaves.push(message_ids[chat.leaf]);
             for (ordinal, m) in chat.messages.drain(..).enumerate() {
-                rows.id.push(message_ids[ordinal]);
-                rows.conversation.push(conversation);
-                rows.ordinal.push(ordinal as i32);
-                rows.role.push(m.role.as_str());
-                rows.status.push(if m.error.is_some() {
-                    "error"
-                } else {
-                    "completed"
+                rows.push(NewMessage {
+                    id: message_ids[ordinal],
+                    conversation,
+                    ordinal: ordinal as i32,
+                    status: if m.error.is_some() {
+                        "error"
+                    } else {
+                        "completed"
+                    }
+                    .into(),
+                    generation: (m.role == imports::Role::Assistant).then(Uuid::new_v4),
+                    role: m.role.as_str().into(),
+                    content: m.content,
+                    reasoning: m.reasoning,
+                    settings: m.model.map(|model| json!({"model": model})),
+                    usage: None,
+                    finish_reason: None,
+                    error: m.error,
+                    created: Some(m.created_at),
+                    parent: m.parent.map(|p| message_ids[p]),
+                    child: m.selected_child.map(|c| message_ids[c]),
                 });
-                rows.generation
-                    .push((m.role == imports::Role::Assistant).then(Uuid::new_v4));
-                rows.model.push(m.model);
-                rows.error.push(m.error);
-                rows.created.push(m.created_at);
-                rows.parent.push(m.parent.map(|p| message_ids[p]));
-                rows.child.push(m.selected_child.map(|c| message_ids[c]));
-                rows.content.push(m.content);
-                rows.reasoning.push(m.reasoning);
             }
         }
-        // Parent and selected-child links point within the same statement's rows.
-        sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,error_message,created_at,parent_message_id,selected_child_id)
-            SELECT u.id,u.conversation_id,u.ordinal,u.role,u.content,u.reasoning,u.status,u.generation_id,
-              CASE WHEN u.model IS NULL THEN NULL ELSE jsonb_build_object('model',u.model) END,u.error,u.created_at,u.parent,u.child
-            FROM unnest($1::uuid[],$2::uuid[],$3::integer[],$4::text[],$5::text[],$6::text[],$7::text[],$8::uuid[],$9::text[],$10::text[],$11::timestamptz[],$12::uuid[],$13::uuid[])
-              AS u(id,conversation_id,ordinal,role,content,reasoning,status,generation_id,model,error,created_at,parent,child)")
-            .bind(&rows.id).bind(&rows.conversation).bind(&rows.ordinal).bind(&rows.role).bind(&rows.content).bind(&rows.reasoning)
-            .bind(&rows.status).bind(&rows.generation).bind(&rows.model).bind(&rows.error).bind(&rows.created).bind(&rows.parent).bind(&rows.child)
-            .execute(&mut *tx).await?;
-        sqlx::query("UPDATE conversations c SET selected_leaf_id=u.leaf FROM unnest($2::uuid[],$3::uuid[]) AS u(id,leaf) WHERE c.id=u.id AND c.owner_id=$1")
-            .bind(owner).bind(&ids).bind(&leaves).execute(&mut *tx).await?;
+        rows.insert(&mut tx).await?;
+        set_leaves(&mut tx, owner, &ids, &leaves).await?;
         tx.commit().await?;
         summary.already_imported += already;
         summary.over_limit += over;
@@ -212,21 +207,89 @@ impl Store {
     }
 }
 
+/// One message to write with `MessageRows`.
+pub(super) struct NewMessage {
+    pub id: Uuid,
+    pub conversation: Uuid,
+    pub ordinal: i32,
+    pub role: String,
+    pub content: String,
+    pub reasoning: String,
+    pub status: String,
+    pub generation: Option<Uuid>,
+    pub settings: Option<Value>,
+    pub usage: Option<Value>,
+    pub finish_reason: Option<String>,
+    pub error: Option<String>,
+    /// None is now.
+    pub created: Option<DateTime<Utc>>,
+    pub parent: Option<Uuid>,
+    pub child: Option<Uuid>,
+}
+
+/// Messages of whole transcripts, written in one statement with their links.
 #[derive(Default)]
-struct MessageRows {
+pub(super) struct MessageRows {
     id: Vec<Uuid>,
     conversation: Vec<Uuid>,
     ordinal: Vec<i32>,
-    role: Vec<&'static str>,
+    role: Vec<String>,
     content: Vec<String>,
     reasoning: Vec<String>,
-    status: Vec<&'static str>,
+    status: Vec<String>,
     generation: Vec<Option<Uuid>>,
-    model: Vec<Option<String>>,
+    settings: Vec<Option<Value>>,
+    usage: Vec<Option<Value>>,
+    finish_reason: Vec<Option<String>>,
     error: Vec<Option<String>>,
-    created: Vec<DateTime<Utc>>,
+    created: Vec<Option<DateTime<Utc>>>,
     parent: Vec<Option<Uuid>>,
     child: Vec<Option<Uuid>>,
+}
+
+impl MessageRows {
+    pub(super) fn push(&mut self, m: NewMessage) {
+        self.id.push(m.id);
+        self.conversation.push(m.conversation);
+        self.ordinal.push(m.ordinal);
+        self.role.push(m.role);
+        self.content.push(m.content);
+        self.reasoning.push(m.reasoning);
+        self.status.push(m.status);
+        self.generation.push(m.generation);
+        self.settings.push(m.settings);
+        self.usage.push(m.usage);
+        self.finish_reason.push(m.finish_reason);
+        self.error.push(m.error);
+        self.created.push(m.created);
+        self.parent.push(m.parent);
+        self.child.push(m.child);
+    }
+
+    /// Parent and selected-child links point within the same statement's rows.
+    pub(super) async fn insert(&self, tx: &mut Transaction<'_, Postgres>) -> Result<(), ApiError> {
+        sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,usage,finish_reason,error_message,created_at,parent_message_id,selected_child_id)
+            SELECT u.id,u.conversation_id,u.ordinal,u.role,u.content,u.reasoning,u.status,u.generation_id,u.settings,u.usage,u.finish_reason,u.error,COALESCE(u.created_at,NOW()),u.parent,u.child
+            FROM unnest($1::uuid[],$2::uuid[],$3::integer[],$4::text[],$5::text[],$6::text[],$7::text[],$8::uuid[],$9::jsonb[],$10::jsonb[],$11::text[],$12::text[],$13::timestamptz[],$14::uuid[],$15::uuid[])
+              AS u(id,conversation_id,ordinal,role,content,reasoning,status,generation_id,settings,usage,finish_reason,error,created_at,parent,child)")
+            .bind(&self.id).bind(&self.conversation).bind(&self.ordinal).bind(&self.role).bind(&self.content).bind(&self.reasoning)
+            .bind(&self.status).bind(&self.generation).bind(&self.settings).bind(&self.usage).bind(&self.finish_reason).bind(&self.error)
+            .bind(&self.created).bind(&self.parent).bind(&self.child)
+            .execute(&mut **tx).await?;
+        Ok(())
+    }
+}
+
+/// Points each conversation at the last message of its selected path.
+pub(super) async fn set_leaves(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    conversations: &[Uuid],
+    leaves: &[Uuid],
+) -> Result<(), ApiError> {
+    sqlx::query("UPDATE conversations c SET selected_leaf_id=u.leaf FROM unnest($2::uuid[],$3::uuid[]) AS u(id,leaf) WHERE c.id=u.id AND c.owner_id=$1")
+        .bind(owner).bind(conversations).bind(leaves).execute(&mut **tx).await?;
+    Ok(())
 }
 
 fn text_bytes(chat: &ImportedChat) -> usize {

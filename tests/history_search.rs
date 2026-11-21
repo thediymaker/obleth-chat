@@ -1,4 +1,6 @@
 //! Regressions for PostgreSQL's 1 MiB tsvector limit and complete-message search.
+mod common;
+use common::Chats;
 use obleth_chat::store::{HistoryQuery, Store, MAX_RESPONSE_BYTES};
 use sqlx::PgPool;
 use uuid::Uuid;

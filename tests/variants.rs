@@ -1,5 +1,7 @@
 //! Regeneration and edits change a selected path, never the sidebar conversation.
+mod common;
 use axum::http::StatusCode;
+use common::Chats;
 use obleth_chat::{
     store::{ReasoningEffort, Store, MAX_RESPONSE_BYTES},
     MIGRATOR,
@@ -554,7 +556,7 @@ async fn migration_preserves_existing_linear_message_ids_and_selected_history(po
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn variant_context_reads_selected_path_snapshots_and_initializes_imports(pool: PgPool) {
+async fn variant_context_reads_selected_path_snapshots_and_imports(pool: PgPool) {
     let owner = user(&pool).await;
     let bob = user(&pool).await;
     let store = Store::new(pool.clone());
@@ -669,7 +671,7 @@ async fn variant_context_reads_selected_path_snapshots_and_initializes_imports(p
         ("First", "fixture")
     );
     assert_eq!(current.settings["temperature"], json!(0.7));
-    // Imports initialize their path lazily; a variant preview may be the first read.
+    // An import is written with its path, so a variant preview can be its first read.
     let archive = store.export(owner, &[chat]).await.unwrap();
     let copy = store.import(owner, archive).await.unwrap()[0].id;
     let ids: Vec<Uuid> =
@@ -678,13 +680,13 @@ async fn variant_context_reads_selected_path_snapshots_and_initializes_imports(p
             .fetch_all(&pool)
             .await
             .unwrap();
-    let uninitialized: bool =
-        sqlx::query_scalar("SELECT selected_leaf_id IS NULL FROM conversations WHERE id=$1")
+    let leaf: Option<Uuid> =
+        sqlx::query_scalar("SELECT selected_leaf_id FROM conversations WHERE id=$1")
             .bind(copy)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(uninitialized);
+    assert_eq!(leaf, ids.last().copied());
     let imported = store
         .variant_context(owner, copy, ids[1], "regenerate")
         .await

@@ -1,10 +1,12 @@
 //! Optional retention must never delete user data until an administrator opts in.
+mod common;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use common::Chats;
 use http_body_util::BodyExt;
 use obleth_chat::{
     auth::{Auth, AuthConfig},

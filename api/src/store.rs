@@ -233,30 +233,6 @@ impl Store {
         self
     }
 
-    pub async fn list(&self, owner: Uuid) -> Result<Vec<ConversationSummary>, ApiError> {
-        let mut tx = self.owner_transaction(owner).await?;
-        recover_expired_in(&mut tx, owner).await?;
-        let rows = sqlx::query_as::<_, ConversationSummary>(
-            "SELECT id, title, model, reasoning_effort, updated_at, settings, archived, pinned, parent_id FROM conversations
-             WHERE owner_id = $1 AND NOT temporary ORDER BY updated_at DESC, id",
-        )
-        .bind(owner)
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(rows)
-    }
-
-    pub async fn create(
-        &self,
-        owner: Uuid,
-        title: &str,
-        model: &str,
-    ) -> Result<Conversation, ApiError> {
-        self.create_with_effort(owner, title, model, ReasoningEffort::default())
-            .await
-    }
-
     pub async fn create_with_effort(
         &self,
         owner: Uuid,
@@ -298,8 +274,7 @@ impl Store {
     }
 
     /// The chat as one consistent snapshot, read without the owner's lock. A chat whose
-    /// reply lease has expired, or whose imported messages are not linked yet, is put
-    /// right first, under the lock.
+    /// reply lease has expired is put right first, under the lock.
     pub async fn get(&self, owner: Uuid, id: Uuid) -> Result<Conversation, ApiError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -308,8 +283,7 @@ impl Store {
         let (enabled, repair): (bool, bool) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM users WHERE id = $2 AND enabled),
                     EXISTS(SELECT 1 FROM conversations c WHERE c.id = $1 AND c.owner_id = $2
-             AND ((c.active_generation IS NOT NULL AND c.generation_expires <= clock_timestamp())
-                  OR (c.selected_leaf_id IS NULL AND EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id = c.id))))",
+             AND c.active_generation IS NOT NULL AND c.generation_expires <= clock_timestamp())",
         )
         .bind(id)
         .bind(owner)
@@ -340,60 +314,6 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
             .ok_or_else(ApiError::not_found)
-    }
-
-    pub async fn rename(
-        &self,
-        owner: Uuid,
-        id: Uuid,
-        title: &str,
-    ) -> Result<Conversation, ApiError> {
-        self.update(owner, id, Some(title), None).await
-    }
-
-    pub async fn update(
-        &self,
-        owner: Uuid,
-        id: Uuid,
-        title: Option<&str>,
-        reasoning_effort: Option<ReasoningEffort>,
-    ) -> Result<Conversation, ApiError> {
-        if title.is_none() && reasoning_effort.is_none() {
-            return Err(ApiError::bad("Provide a title or reasoning effort"));
-        }
-        if let Some(title) = title {
-            validate_title(title)?;
-        }
-        let mut tx = self.owner_transaction(owner).await?;
-        recover_expired_in(&mut tx, owner).await?;
-        let active: Option<Option<Uuid>> = sqlx::query_scalar(
-            "SELECT active_generation FROM conversations WHERE id = $1 AND owner_id = $2 FOR UPDATE",
-        ).bind(id).bind(owner).fetch_optional(&mut *tx).await?;
-        match active {
-            None => return Err(ApiError::not_found()),
-            Some(Some(_)) if reasoning_effort.is_some() => {
-                return Err(conflict(
-                    "Stop the response before changing reasoning effort",
-                ));
-            }
-            _ => {}
-        }
-        let changed = sqlx::query(
-            "UPDATE conversations SET title = COALESCE($3, title), reasoning_effort = COALESCE($4, reasoning_effort), updated_at = clock_timestamp()
-             WHERE id = $1 AND owner_id = $2",
-        )
-        .bind(id)
-        .bind(owner)
-        .bind(title.map(str::trim))
-        .bind(reasoning_effort.map(ReasoningEffort::as_str))
-        .execute(&mut *tx)
-        .await?;
-        if changed.rows_affected() == 0 {
-            return Err(ApiError::not_found());
-        }
-        let conversation = read_conversation(&mut tx, owner, id).await?;
-        tx.commit().await?;
-        Ok(conversation)
     }
 
     pub async fn delete(&self, owner: Uuid, id: Uuid) -> Result<(), ApiError> {
@@ -649,88 +569,6 @@ impl Store {
         let conversation = read_conversation(&mut tx, owner, branch_id).await?;
         tx.commit().await?;
         Ok(conversation)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn start_turn(
-        &self,
-        owner: Uuid,
-        id: Uuid,
-        content: &str,
-        model: &str,
-        system_prompt: &str,
-        temperature: f64,
-        max_tokens: i32,
-    ) -> Result<Turn, ApiError> {
-        self.start_turn_with_effort(
-            owner,
-            id,
-            content,
-            model,
-            system_prompt,
-            temperature,
-            max_tokens,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn start_turn_with_effort(
-        &self,
-        owner: Uuid,
-        id: Uuid,
-        content: &str,
-        model: &str,
-        system_prompt: &str,
-        temperature: f64,
-        max_tokens: i32,
-        reasoning_effort: Option<ReasoningEffort>,
-    ) -> Result<Turn, ApiError> {
-        self.start_turn_configured(
-            owner,
-            id,
-            content,
-            model,
-            system_prompt,
-            temperature,
-            max_tokens,
-            reasoning_effort,
-            1.0,
-            model,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn start_turn_configured(
-        &self,
-        owner: Uuid,
-        id: Uuid,
-        content: &str,
-        model: &str,
-        system_prompt: &str,
-        temperature: f64,
-        max_tokens: i32,
-        reasoning_effort: Option<ReasoningEffort>,
-        top_p: f64,
-        requested_model: &str,
-    ) -> Result<Turn, ApiError> {
-        self.start_turn_attached(
-            owner,
-            id,
-            content,
-            model,
-            system_prompt,
-            temperature,
-            max_tokens,
-            reasoning_effort,
-            top_p,
-            requested_model,
-            &[],
-            false,
-        )
-        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1041,57 +879,6 @@ impl Store {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn finish_turn(
-        &self,
-        owner: Uuid,
-        id: Uuid,
-        generation_id: Uuid,
-        content: &str,
-        status: &str,
-        usage: Option<Value>,
-        request_id: Option<&str>,
-    ) -> Result<(), ApiError> {
-        self.finish_turn_with_reasoning(
-            owner,
-            id,
-            generation_id,
-            content,
-            "",
-            status,
-            usage,
-            request_id,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn finish_turn_with_reasoning(
-        &self,
-        owner: Uuid,
-        id: Uuid,
-        generation_id: Uuid,
-        content: &str,
-        reasoning_content: &str,
-        status: &str,
-        usage: Option<Value>,
-        request_id: Option<&str>,
-    ) -> Result<(), ApiError> {
-        self.finish_turn_detailed(
-            owner,
-            id,
-            generation_id,
-            content,
-            reasoning_content,
-            status,
-            usage,
-            request_id,
-            None,
-            None,
-        )
-        .await
-    }
-
     /// Records the model the gateway's Auto router chose for a reply.
     pub async fn set_served_model(&self, message: Uuid, model: &str) -> Result<(), ApiError> {
         validate_model(model)?;
@@ -1189,25 +976,6 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(())
-    }
-
-    pub async fn interrupt_turn(
-        &self,
-        owner: Uuid,
-        id: Uuid,
-        generation_id: Uuid,
-        partial_content: &str,
-    ) -> Result<(), ApiError> {
-        self.finish_turn(
-            owner,
-            id,
-            generation_id,
-            partial_content,
-            "interrupted",
-            None,
-            None,
-        )
-        .await
     }
 
     pub async fn recover_expired(&self, owner: Uuid) -> Result<u64, ApiError> {
@@ -1384,7 +1152,6 @@ async fn read_path(
     owner: Uuid,
     id: Uuid,
 ) -> Result<Vec<Message>, ApiError> {
-    variants::initialize_path_in(tx, id).await?;
     let mut messages = sqlx::query_as::<_, Message>(
         "WITH RECURSIVE path AS (
            SELECT m.*,0 AS depth FROM messages m JOIN conversations c ON c.selected_leaf_id=m.id
@@ -1426,9 +1193,10 @@ fn conflict(message: &str) -> ApiError {
     ApiError(StatusCode::CONFLICT, message.into())
 }
 
-/// Copies messages into another chat. With `settings`, the copy is made for someone
-/// else: each reply keeps only those settings keys and only the activity that is
-/// shown to a viewer, so the owner's memories do not travel with it.
+/// Copies messages, a path in order, into another chat as its selected path. With
+/// `settings`, the copy is made for someone else: each reply keeps only those
+/// settings keys and only the activity that is shown to a viewer, so the owner's
+/// memories do not travel with it.
 async fn copy_selected_messages(
     tx: &mut Transaction<'_, Postgres>,
     source: Uuid,
@@ -1437,17 +1205,26 @@ async fn copy_selected_messages(
     settings: Option<&[&str]>,
 ) -> Result<(), ApiError> {
     let copies = ids.iter().map(|_| Uuid::new_v4()).collect::<Vec<_>>();
-    sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,usage,request_id,finish_reason,error_message,created_at,follow_ups,follow_ups_status,activity)
+    // Parent and selected-child links point within the same statement's rows.
+    sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,usage,request_id,finish_reason,error_message,created_at,follow_ups,follow_ups_status,activity,parent_message_id,selected_child_id)
       SELECT mapping.new_id,$2,(mapping.position-1)::integer,m.role,m.content,m.reasoning_content,m.status,CASE WHEN m.role='assistant' THEN gen_random_uuid() ELSE NULL END,
         CASE WHEN $5::text[] IS NULL THEN m.settings WHEN jsonb_typeof(m.settings)='object' THEN (SELECT COALESCE(jsonb_object_agg(e.key,e.value),'{}'::jsonb) FROM jsonb_each(m.settings) e WHERE e.key=ANY($5)) END,
         m.usage,m.request_id,m.finish_reason,m.error_message,m.created_at,m.follow_ups,CASE WHEN m.follow_ups_status='pending' THEN 'idle' ELSE m.follow_ups_status END,
-        CASE WHEN $6::text[] IS NULL THEN m.activity ELSE (SELECT COALESCE(jsonb_agg(entry.value ORDER BY entry.position),'[]'::jsonb) FROM jsonb_array_elements(m.activity) WITH ORDINALITY entry(value,position) WHERE entry.value->>'kind' IS NULL OR NOT (entry.value->>'kind'=ANY($6))) END
-      FROM unnest($3::uuid[],$4::uuid[]) WITH ORDINALITY mapping(old_id,new_id,position) JOIN messages m ON m.id=mapping.old_id WHERE m.conversation_id=$1")
+        CASE WHEN $6::text[] IS NULL THEN m.activity ELSE (SELECT COALESCE(jsonb_agg(entry.value ORDER BY entry.position),'[]'::jsonb) FROM jsonb_array_elements(m.activity) WITH ORDINALITY entry(value,position) WHERE entry.value->>'kind' IS NULL OR NOT (entry.value->>'kind'=ANY($6))) END,
+        mapping.parent,mapping.child
+      FROM (SELECT u.*,lag(u.new_id) OVER (ORDER BY u.position) AS parent,lead(u.new_id) OVER (ORDER BY u.position) AS child
+            FROM unnest($3::uuid[],$4::uuid[]) WITH ORDINALITY u(old_id,new_id,position)) mapping
+      JOIN messages m ON m.id=mapping.old_id WHERE m.conversation_id=$1")
         .bind(source).bind(destination).bind(ids).bind(&copies).bind(settings)
         .bind(settings.map(|_| &OWNER_ACTIVITY[..]))
         .execute(&mut **tx).await?;
     sqlx::query("INSERT INTO message_attachments(message_id,attachment_id,position) SELECT mapping.new_id,ma.attachment_id,ma.position FROM unnest($1::uuid[],$2::uuid[]) mapping(old_id,new_id) JOIN message_attachments ma ON ma.message_id=mapping.old_id")
         .bind(ids).bind(&copies).execute(&mut **tx).await?;
+    sqlx::query("UPDATE conversations SET selected_leaf_id=$2 WHERE id=$1")
+        .bind(destination)
+        .bind(copies.last())
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 

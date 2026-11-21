@@ -1,4 +1,5 @@
 //! End-to-end router + real HTTP gateway tests. Requires a disposable DATABASE_URL.
+mod common;
 use axum::{
     body::Body,
     extract::State,
@@ -7,6 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use common::Chats;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use obleth_chat::{

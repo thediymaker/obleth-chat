@@ -1,4 +1,5 @@
 //! Real database checks for private files, durable references, and concurrent quotas.
+mod common;
 use axum::{
     body::Body,
     http::{HeaderMap, Request, StatusCode},
@@ -8,6 +9,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
+use common::Chats;
 use http_body_util::BodyExt;
 use obleth_chat::{
     attachments::{self, ArchivedAttachment},

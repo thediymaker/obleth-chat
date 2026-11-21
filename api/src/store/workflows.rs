@@ -1,3 +1,4 @@
+use super::imports::{set_leaves, MessageRows, NewMessage};
 use super::*;
 use crate::models::ParameterOverrides;
 use sqlx::Row;
@@ -560,13 +561,33 @@ impl Store {
                 "Import would exceed the 1,000 conversation limit",
             ));
         }
-        let mut imported = Vec::new();
-        for chat in archive.conversations {
-            let id = Uuid::new_v4();
-            sqlx::query("INSERT INTO conversations(id,owner_id,title,model,reasoning_effort,settings) VALUES($1,$2,$3,$4,$5,$6)")
-                .bind(id).bind(owner).bind(chat.title.trim()).bind(&chat.model).bind(chat.reasoning_effort.as_str()).bind(json!(chat.settings)).execute(&mut *tx).await?;
+        let ids: Vec<Uuid> = archive
+            .conversations
+            .iter()
+            .map(|_| Uuid::new_v4())
+            .collect();
+        sqlx::query("INSERT INTO conversations(id,owner_id,title,model,reasoning_effort,settings)
+            SELECT u.id,$1,u.title,u.model,u.reasoning_effort,u.settings
+            FROM unnest($2::uuid[],$3::text[],$4::text[],$5::text[],$6::jsonb[]) AS u(id,title,model,reasoning_effort,settings)")
+            .bind(owner)
+            .bind(&ids)
+            .bind(archive.conversations.iter().map(|c| c.title.trim()).collect::<Vec<_>>())
+            .bind(archive.conversations.iter().map(|c| c.model.as_str()).collect::<Vec<_>>())
+            .bind(archive.conversations.iter().map(|c| c.reasoning_effort.as_str()).collect::<Vec<_>>())
+            .bind(archive.conversations.iter().map(|c| json!(c.settings)).collect::<Vec<_>>())
+            .execute(&mut *tx)
+            .await?;
+        let mut rows = MessageRows::default();
+        let (mut linked, mut files, mut positions) = (vec![], vec![], vec![]);
+        let (mut chats, mut leaves) = (vec![], vec![]);
+        for (chat, &id) in archive.conversations.into_iter().zip(&ids) {
+            let message_ids: Vec<Uuid> = chat.messages.iter().map(|_| Uuid::new_v4()).collect();
+            if let Some(&leaf) = message_ids.last() {
+                chats.push(id);
+                leaves.push(leaf);
+            }
             for (ordinal, m) in chat.messages.into_iter().enumerate() {
-                let message_id = Uuid::new_v4();
+                let message = message_ids[ordinal];
                 let file_ids = attachments::import_in(
                     &mut tx,
                     &self.files,
@@ -575,21 +596,45 @@ impl Store {
                     &m.attachments,
                 )
                 .await?;
-                sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,reasoning_content,status,generation_id,settings,usage,finish_reason,error_message) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
-                    .bind(message_id).bind(id).bind(ordinal as i32).bind(&m.role).bind(m.content).bind(m.reasoning_content).bind(m.status)
-                    .bind(if m.role=="assistant"{Some(Uuid::new_v4())}else{None}).bind(m.settings).bind(m.usage).bind(m.finish_reason).bind(m.error_message).execute(&mut *tx).await?;
-                attachments::link_message(&mut tx, owner, message_id, &file_ids).await?;
+                for (position, file) in file_ids.into_iter().enumerate() {
+                    linked.push(message);
+                    files.push(file);
+                    positions.push(position as i16);
+                }
+                rows.push(NewMessage {
+                    id: message,
+                    conversation: id,
+                    ordinal: ordinal as i32,
+                    generation: (m.role == "assistant").then(Uuid::new_v4),
+                    role: m.role,
+                    content: m.content,
+                    reasoning: m.reasoning_content,
+                    status: m.status,
+                    settings: m.settings,
+                    usage: m.usage,
+                    finish_reason: m.finish_reason,
+                    error: m.error_message,
+                    created: None,
+                    parent: ordinal.checked_sub(1).map(|p| message_ids[p]),
+                    child: message_ids.get(ordinal + 1).copied(),
+                });
             }
-            imported.push(
-                sqlx::query_as::<_, ConversationSummary>(&format!(
-                    "SELECT {SUMMARY} FROM conversations WHERE id=$1 AND owner_id=$2"
-                ))
-                .bind(id)
-                .bind(owner)
-                .fetch_one(&mut *tx)
-                .await?,
-            );
         }
+        rows.insert(&mut tx).await?;
+        sqlx::query("INSERT INTO message_attachments(message_id,attachment_id,position) SELECT * FROM unnest($1::uuid[],$2::uuid[],$3::smallint[])")
+            .bind(&linked)
+            .bind(&files)
+            .bind(&positions)
+            .execute(&mut *tx)
+            .await?;
+        set_leaves(&mut tx, owner, &chats, &leaves).await?;
+        let imported = sqlx::query_as::<_, ConversationSummary>(&format!(
+            "SELECT {SUMMARY} FROM conversations WHERE owner_id=$2 AND id=ANY($1) ORDER BY array_position($1,id)"
+        ))
+        .bind(&ids)
+        .bind(owner)
+        .fetch_all(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(imported)
     }

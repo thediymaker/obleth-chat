@@ -1,4 +1,6 @@
 //! History brought over from other apps, read from small synthetic exports.
+mod common;
+use common::Chats;
 use std::io::Write;
 
 use axum::http::StatusCode;

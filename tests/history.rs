@@ -1,5 +1,7 @@
 //! Real database checks for preservation, ownership, atomic bulk operations, and imports.
+mod common;
 use axum::http::StatusCode;
+use common::Chats;
 use obleth_chat::store::{ConversationPatch, HistoryQuery, Store};
 use serde_json::json;
 use sqlx::PgPool;
@@ -14,6 +16,29 @@ async fn user(pool: &PgPool) -> Uuid {
         .await
         .unwrap();
     id
+}
+/// Checks a chat's messages form one path in order, ending at its selected leaf.
+async fn assert_linked(pool: &PgPool, conversation: Uuid) -> Vec<Uuid> {
+    let rows: Vec<(Uuid, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id,parent_message_id,selected_child_id FROM messages WHERE conversation_id=$1 ORDER BY ordinal",
+    )
+    .bind(conversation)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    for (i, (_, parent, child)) in rows.iter().enumerate() {
+        assert_eq!(*parent, i.checked_sub(1).map(|p| ids[p]), "parent of {i}");
+        assert_eq!(*child, ids.get(i + 1).copied(), "child of {i}");
+    }
+    let leaf: Option<Uuid> =
+        sqlx::query_scalar("SELECT selected_leaf_id FROM conversations WHERE id=$1")
+            .bind(conversation)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(leaf, ids.last().copied());
+    ids
 }
 async fn exchange(s: &Store, u: Uuid, c: Uuid, question: &str, answer: &str) -> Uuid {
     let turn = s
@@ -133,6 +158,48 @@ async fn search_pages_pins_archive_and_isolation(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn the_path_migration_links_chats_left_unlinked(pool: PgPool) {
+    let alice = user(&pool).await;
+    let s = Store::new(pool.clone());
+    let linked = s.create(alice, "Linked", "fixture").await.unwrap();
+    exchange(&s, alice, linked.id, "question", "answer").await;
+    let before = assert_linked(&pool, linked.id).await;
+    // Written as older imports and copies left them: no links and no leaf.
+    let old = s.create(alice, "Old import", "fixture").await.unwrap();
+    for (ordinal, role) in ["user", "assistant", "user", "assistant"]
+        .into_iter()
+        .enumerate()
+    {
+        sqlx::query("INSERT INTO messages(id,conversation_id,ordinal,role,content,status,generation_id) VALUES($1,$2,$3,$4,$5,'completed',$6)")
+            .bind(Uuid::new_v4())
+            .bind(old.id)
+            .bind(ordinal as i32)
+            .bind(role)
+            .bind(format!("message {ordinal}"))
+            .bind((role == "assistant").then(Uuid::new_v4))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let empty = s.create(alice, "Empty", "fixture").await.unwrap();
+    let migration = include_str!("../migrations/087_initialize_paths.sql");
+    sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    let ids = assert_linked(&pool, old.id).await;
+    assert_eq!(ids.len(), 4);
+    let chat = s.get(alice, old.id).await.unwrap();
+    let contents: Vec<&str> = chat.messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(
+        contents,
+        ["message 0", "message 1", "message 2", "message 3"]
+    );
+    assert_eq!(assert_linked(&pool, linked.id).await, before);
+    assert!(assert_linked(&pool, empty.id).await.is_empty());
+    // A second run finds nothing to do.
+    sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    assert_eq!(assert_linked(&pool, old.id).await, ids);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn edit_and_regenerate_preserve_original_and_parameters(pool: PgPool) {
     let alice = user(&pool).await;
     let bob = user(&pool).await;
@@ -155,6 +222,7 @@ async fn edit_and_regenerate_preserve_original_and_parameters(pool: PgPool) {
         Some("length")
     );
     assert_ne!(fork.conversation.messages[0].id, original.messages[0].id);
+    assert_linked(&s.pool, fork.conversation.id).await;
     let edited = s
         .fork_turn(
             alice,
@@ -196,6 +264,7 @@ async fn bulk_is_atomic_and_portable_import_creates_private_copies(pool: PgPool)
     let copies = s.import(bob, archive).await.unwrap();
     assert_ne!(copies[0].id, c.id);
     let copy = s.get(bob, copies[0].id).await.unwrap();
+    assert_eq!(assert_linked(&s.pool, copy.id).await.len(), 2);
     assert_eq!(copy.messages[1].content, "answer");
     assert_eq!(copy.messages[1].reasoning_content, "thinking");
     assert_eq!(copy.messages[1].finish_reason.as_deref(), Some("length"));

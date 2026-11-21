@@ -1,4 +1,6 @@
+mod common;
 use axum::http::StatusCode;
+use common::Chats;
 use obleth_chat::{
     lifecycle::{self, TurnEnd},
     store::Store,

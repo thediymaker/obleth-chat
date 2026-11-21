@@ -59,7 +59,6 @@ impl Store {
                 "Stop the active response before editing or regenerating",
             ));
         }
-        initialize_path_in(&mut tx, id).await?;
         // read_messages' walk and bound, without content, attachments or versions.
         let path:Vec<(Uuid,String,Option<Value>)>=sqlx::query_as("WITH RECURSIVE path AS(
           SELECT m.id,m.parent_message_id,m.role,m.settings,0 AS depth FROM messages m JOIN conversations c ON c.selected_leaf_id=m.id WHERE c.id=$1 AND c.owner_id=$2 AND m.conversation_id=c.id
@@ -210,23 +209,6 @@ impl Store {
     }
 }
 
-/// Newly imported or explicitly copied linear transcripts initialize lazily under
-/// their owner's lock. Existing production transcripts are backfilled by 010.
-pub(super) async fn initialize_path_in(
-    tx: &mut Transaction<'_, Postgres>,
-    id: Uuid,
-) -> Result<(), ApiError> {
-    let uninitialized: bool =
-        sqlx::query_scalar("SELECT selected_leaf_id IS NULL AND EXISTS(SELECT 1 FROM messages WHERE conversation_id=$1) FROM conversations WHERE id=$1")
-            .bind(id)
-            .fetch_one(&mut **tx)
-            .await?;
-    if uninitialized {
-        sqlx::query("WITH links AS(SELECT id,lag(id) OVER(ORDER BY ordinal) AS parent,lead(id) OVER(ORDER BY ordinal) AS child FROM messages WHERE conversation_id=$1) UPDATE messages m SET parent_message_id=l.parent,selected_child_id=l.child FROM links l WHERE m.id=l.id").bind(id).execute(&mut **tx).await?;
-        sqlx::query("UPDATE conversations SET selected_leaf_id=(SELECT id FROM messages WHERE conversation_id=$1 ORDER BY ordinal DESC LIMIT 1) WHERE id=$1").bind(id).execute(&mut **tx).await?;
-    }
-    Ok(())
-}
 pub(super) async fn populate_versions(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,

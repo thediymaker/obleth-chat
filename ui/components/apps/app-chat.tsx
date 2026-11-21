@@ -14,8 +14,8 @@ import { Brand } from "@/components/brand";
 import { Markdown } from "@/components/chat/markdown-view";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { PersonAvatar } from "@/components/manage/kit";
 import { ApiError } from "@/lib/api";
-import { initials } from "@/lib/format";
 import { useUser } from "@/lib/session";
 import { appPageKey, type AppPage, chatPagePath, type ChatTurn, chatWithApp, getAppPage } from "./api";
 
@@ -180,9 +180,7 @@ function Conversation({ app }: { app: AppPage }) {
               <div className="mb-2 flex items-center gap-2 text-md font-semibold">
                 {e.role === "user" ? (
                   <>
-                    <span aria-hidden className="inline-flex size-6 items-center justify-center rounded-full bg-secondary text-2xs font-semibold">
-                      {initials(user.display_name || user.username)}
-                    </span>
+                    <PersonAvatar size="sm" name={user.display_name || user.username} />
                     You
                   </>
                 ) : (

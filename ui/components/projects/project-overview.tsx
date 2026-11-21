@@ -13,7 +13,7 @@ import { kindLabel, kindOf, refreshSaved, savedPath } from "@/components/library
 import { useLibraryDialogs } from "@/components/library/saved-dialogs";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import { count, initials, when, bytes } from "@/lib/format";
+import { count, when, bytes } from "@/lib/format";
 import { keys, useFeature } from "@/lib/queries";
 import { useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
@@ -22,7 +22,7 @@ import { ACCEPT, DEFAULT_MAX_FILE, refreshKnowledge, uploadDocument, useCollecti
 import { CollectionsPicker, NewProjectCollection } from "./collections-picker";
 import { useProjectFrame } from "./project-frame";
 import { useRouter } from "next/navigation";
-import { messageOf } from "@/components/manage/kit";
+import { messageOf, PersonAvatar } from "@/components/manage/kit";
 
 export function Section({ title, aside, children, className }: { title: React.ReactNode; aside?: React.ReactNode; children: React.ReactNode; className?: string }) {
   return (
@@ -205,7 +205,7 @@ export function ProjectOverview() {
   const people = (
     <Section title="People">
       <div className="flex items-center gap-2.5 text-md">
-        <span className="flex size-6 items-center justify-center rounded-full bg-secondary text-2xs font-semibold">{initials(p.ownerName || "?")}</span>
+        <PersonAvatar size="sm" name={p.ownerName} />
         <span className="grow">{mine ? "You" : p.ownerName}</span>
         <span className="text-xs text-faint">owner</span>
       </div>

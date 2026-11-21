@@ -12,13 +12,11 @@ import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { ErrorBox, Loading, Page, isNotFound, NotFound } from "@/components/app-shell/page";
 import { chatDraft } from "@/components/projects/chat-draft";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Confirm, messageOf } from "@/components/manage/kit";
+import { Confirm, DataTable, messageOf, Pill } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { count, when, bytes as formatBytes } from "@/lib/format";
 import { useSession } from "@/lib/session";
@@ -27,12 +25,12 @@ import { ACCEPT, collectionPath, DEFAULT_MAX_FILE, DOCUMENTS_PAGE, fileUrl, know
 import { CollectionDialog } from "./collection-dialog";
 
 function Status({ d }: { d: KnowledgeDocument }) {
-  if (d.status === "queued") return <Badge variant="outline">Waiting</Badge>;
+  if (d.status === "queued") return <Pill>Waiting</Pill>;
   if (d.status === "processing")
     return (
-      <Badge variant="secondary" className="text-blue">
+      <Pill className="text-blue">
         {d.stage === "embedding" && d.total ? `Indexing ${Math.floor((100 * d.done) / d.total)}%` : "Reading"}
-      </Badge>
+      </Pill>
     );
   if (d.status === "ready")
     return (
@@ -44,9 +42,9 @@ function Status({ d }: { d: KnowledgeDocument }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Badge variant="outline" className="border-amber/50 text-amber" tabIndex={0}>
+        <Pill tone="amber" tabIndex={0}>
           {d.status === "needs_ocr" ? "Needs text recognition" : "Failed"}
-        </Badge>
+        </Pill>
       </TooltipTrigger>
       {tip && <TooltipContent className="max-w-xs">{tip}</TooltipContent>}
     </Tooltip>
@@ -113,7 +111,7 @@ function TrySearch({ detail }: { detail: CollectionDetail }) {
                   {r.name}
                   {r.page ? ` · page ${r.page}` : ""}
                 </a>
-                <Badge variant="outline">{r.matched}</Badge>
+                <Pill>{r.matched}</Pill>
               </div>
               {r.section && <span className="text-xs text-faint">{r.section}</span>}
               <p className="text-sm text-text-2">{r.excerpt}</p>
@@ -277,58 +275,50 @@ function Documents({ detail, maxFileBytes, onMore }: { detail: CollectionDetail;
       )}
       {uploading.length > 0 && <Loading compact label={`Uploading ${uploading.join(", ")}…`} />}
       {docs.length ? (
-        <div className="overflow-hidden rounded-lg border bg-card">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead className="hidden sm:table-cell">Pages</TableHead>
-                <TableHead className="hidden sm:table-cell">Passages</TableHead>
-                <TableHead className="hidden md:table-cell">Size</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="hidden lg:table-cell">Added</TableHead>
-                <TableHead className="w-0">
-                  <span className="sr-only">Actions</span>
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {docs.map((d) => (
-                <TableRow key={d.id}>
-                  <TableCell className="max-w-44 whitespace-normal sm:max-w-64">
-                    <a href={fileUrl(d.id)} target="_blank" rel="noopener noreferrer" className="inline-flex max-w-full items-center gap-2 hover:underline">
-                      <FileIcon className="size-4 shrink-0 text-muted-foreground" />
-                      <span className="truncate">{d.name}</span>
-                    </a>
-                    {d.status === "failed" && d.error && <small className="block text-xs text-amber">{d.error}</small>}
-                  </TableCell>
-                  <TableCell className="hidden sm:table-cell">{d.pages ?? "—"}</TableCell>
-                  <TableCell className="hidden sm:table-cell">{d.status === "ready" ? d.passages.toLocaleString() : "—"}</TableCell>
-                  <TableCell className="hidden md:table-cell">{formatBytes(d.size)}</TableCell>
-                  <TableCell>
-                    <Status d={d} />
-                  </TableCell>
-                  <TableCell className="hidden text-muted-foreground lg:table-cell">{when(d.createdAt)}</TableCell>
-                  <TableCell>
-                    {c.mine && (
-                      <div className="flex items-center justify-end gap-1">
-                        {d.status === "failed" && (
-                          <Button variant="ghost" size="xs" onClick={() => retry(d)}>
-                            Retry
-                          </Button>
-                        )}
-                        <Button variant="ghost" size="icon-sm" aria-label={`Remove ${d.name}`} title="Remove" onClick={() => setRemoving(d)}>
-                          <Trash2 />
-                        </Button>
-                      </div>
+        <div className="grid gap-2">
+          <DataTable
+            label="Documents"
+            columns={[
+              "Name",
+              { head: "Pages", className: "hidden sm:table-cell" },
+              { head: "Passages", className: "hidden sm:table-cell" },
+              { head: "Size", className: "hidden md:table-cell" },
+              "Status",
+              { head: "Added", className: "hidden text-muted-foreground lg:table-cell" },
+              { head: <span className="sr-only">Actions</span>, className: "w-0" },
+            ]}
+            rows={docs.map((d) => ({
+              key: d.id,
+              cells: [
+                <div className="max-w-44 sm:max-w-64">
+                  <a href={fileUrl(d.id)} target="_blank" rel="noopener noreferrer" className="inline-flex max-w-full items-center gap-2 hover:underline">
+                    <FileIcon className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{d.name}</span>
+                  </a>
+                  {d.status === "failed" && d.error && <small className="block text-xs text-amber">{d.error}</small>}
+                </div>,
+                d.pages ?? "—",
+                d.status === "ready" ? d.passages.toLocaleString() : "—",
+                formatBytes(d.size),
+                <Status d={d} />,
+                when(d.createdAt),
+                c.mine && (
+                  <div className="flex items-center justify-end gap-1">
+                    {d.status === "failed" && (
+                      <Button variant="ghost" size="xs" onClick={() => retry(d)}>
+                        Retry
+                      </Button>
                     )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+                    <Button variant="ghost" size="icon-sm" aria-label={`Remove ${d.name}`} title="Remove" onClick={() => setRemoving(d)}>
+                      <Trash2 />
+                    </Button>
+                  </div>
+                ),
+              ],
+            }))}
+          />
           {onMore && (
-            <div className="border-t p-2">
+            <div>
               <Button variant="ghost" size="sm" onClick={onMore}>
                 Show more documents
               </Button>
@@ -396,9 +386,9 @@ export function CollectionPage({ id }: { id: string }) {
       </nav>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
-          <Badge variant="outline" className="mb-2.5">
+          <Pill className="mb-2.5">
             {c.mine ? scopeLabel(c) : `${scopeLabel(c)} · read only`}
-          </Badge>
+          </Pill>
           <h1 className="text-[26px] leading-tight font-semibold tracking-tight">{c.name}</h1>
           {c.description && <p className="mt-1.5 text-sm text-muted-foreground">{c.description}</p>}
           <p className="mt-1 text-sm text-faint">

@@ -4,12 +4,11 @@
 // builder, try the draft, publish it, and hand out keys for its API.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Box, Braces, Copy, ExternalLink, KeyRound, MessageSquare, MousePointerClick, Plus, RefreshCw, Settings2 } from "lucide-react";
+import { Braces, Copy, ExternalLink, KeyRound, MessageSquare, MousePointerClick, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ErrorBox, Eyebrow, Loading } from "@/components/app-shell/page";
-import { Confirm, Field, FormActions, FormDialog, FormError, messageOf } from "@/components/manage/kit";
-import { Badge } from "@/components/ui/badge";
+import { Confirm, CopyField, Field, FormActions, FormDialog, FormError, messageOf, Pill } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -43,7 +42,7 @@ import { blank, type Definition, freshId, insertStep, isInside, listAt, moveStep
 import { curlExample } from "./step-draft";
 import { StepIcon } from "./step-icon";
 import { InputsEditor, StepEditor } from "./step-editor";
-import { Json, StatusBadge, Trace, TryPanel } from "./try-panel";
+import { Json, RunStatus, Trace, TryPanel } from "./try-panel";
 
 export function AppTab({ projectId }: { projectId: string }) {
   const client = useQueryClient();
@@ -233,15 +232,15 @@ function AppEditor({ app, projectId }: { app: App; projectId: string }) {
   }
 
   const status = !app.live ? (
-    <Badge variant="outline">Draft</Badge>
+    <Pill>Draft</Pill>
   ) : app.changed ? (
-    <Badge variant="outline" className="border-amber/50 text-amber">
+    <Pill tone="amber">
       v{app.version} live · draft changed
-    </Badge>
+    </Pill>
   ) : (
-    <Badge variant="outline" className="border-success/50 text-success">
+    <Pill tone="accent">
       v{app.version} live
-    </Badge>
+    </Pill>
   );
 
   async function act(work: () => Promise<App>, message: (a: App) => string) {
@@ -543,9 +542,8 @@ function ApiCard({ app, keys: list, onChanged }: { app: App; keys: { id: string;
         </form>
       </FormDialog>
       <FormDialog open={!!secret} onOpenChange={(o) => !o && setSecret("")} title="Your new key" description="Copy it now: Chat keeps only a hash and can’t show it again." className="sm:max-w-lg">
-        <Input id="app-key-secret" readOnly value={secret} className="font-mono text-sm" onFocus={(e) => e.currentTarget.select()} />
+        <CopyField id="app-key-secret" label="Key" value={secret} copyLabel="Copy key" done="Key copied" />
         <FormActions cancel={false}>
-          <CopyButton text={secret} />
           <Button onClick={() => setSecret("")}>Done</Button>
         </FormActions>
       </FormDialog>
@@ -564,15 +562,6 @@ function ApiCard({ app, keys: list, onChanged }: { app: App; keys: { id: string;
     </section>
   );
 }
-
-const runBadge = (r: AppRun) => (
-  <Badge
-    variant="outline"
-    className={cn("w-16 justify-center", r.status === "completed" ? "border-success/50 text-success" : r.status === "running" ? "text-muted-foreground" : "border-destructive/50 text-destructive-foreground")}
-  >
-    {r.status === "completed" ? "OK" : r.status === "running" ? "Running" : "Failed"}
-  </Badge>
-);
 
 function RunsCard({ app, runs, onRefresh }: { app: App; runs: AppRun[]; onRefresh: () => void }) {
   const [open, setOpen] = useState<AppRun | null>(null);
@@ -600,7 +589,7 @@ function RunsCard({ app, runs, onRefresh }: { app: App; runs: AppRun[]; onRefres
           <div className="-mx-2 grid">
             {runs.slice(0, 10).map((r) => (
               <button key={r.id} type="button" onClick={() => show(r)} className="flex items-center gap-3 rounded-md px-2 py-1.5 text-left text-md hover:bg-accent">
-                {runBadge(r)}
+                <RunStatus status={r.status} className="w-20 justify-center" />
                 <span className="grow">{runLabel(r)}</span>
                 <span className="text-xs text-faint">
                   {r.ms == null ? "" : `${r.ms} ms · `}
@@ -620,7 +609,7 @@ function RunsCard({ app, runs, onRefresh }: { app: App; runs: AppRun[]; onRefres
         title={open ? `${runLabel(open, true)} · ${when(open.startedAt)}` : ""}
         description={
           <span className="flex items-center gap-2">
-            {open && <StatusBadge status={open.status} />}
+            {open && <RunStatus status={open.status} />}
             {open?.ms != null && <span>{open.ms} ms</span>}
           </span>
         }
@@ -738,7 +727,7 @@ function DetailsDialog({ open, onOpenChange, app, onSaved, onDeleted }: { open: 
           <FormError message={error} />
           <div className="flex flex-wrap items-center justify-between gap-2">
             <Button type="button" variant="outline" className="text-destructive-foreground" onClick={() => setDeleting(true)}>
-              <Box /> Delete app
+              <Trash2 /> Delete app
             </Button>
             <FormActions>
               <Button type="submit" disabled={busy}>

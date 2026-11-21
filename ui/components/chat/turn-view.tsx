@@ -8,8 +8,8 @@
 
 import { Bookmark, Check, ChevronDown, Clock, Download, File, Globe, MessageSquare, Orbit, PanelLeft, Play, Terminal, Users } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Pill } from "@/components/manage/kit";
 import { clock } from "@/lib/chat/composer";
 import { steerDraft } from "@/lib/chat/steer-draft";
 import { changeOf, FILE_TOOLS, filterOf, gist, isLive, runState, stagesOf, stats as statsOf, steerPlaceholder, stepMark, stepTime, browsing, TOOL_ICONS, workOf, type Row, type Stats, type Work } from "@/lib/chat/turn";
@@ -537,7 +537,7 @@ function AskCard({ s, now }: { s: ActivityEntry; now: number }) {
           {change.items.map((c, i) => (
             <div key={i} className="rounded-md border bg-card px-2.5 py-2">
               <div className="flex flex-wrap items-center gap-2 text-md">
-                <Badge variant={c.verb === "Delete" || c.verb === "Cancel" ? "destructive" : "secondary"}>{c.verb}</Badge>
+                <Pill tone={c.verb === "Delete" || c.verb === "Cancel" ? "danger" : ""}>{c.verb}</Pill>
                 <span className="break-all font-mono text-[12px]">{c.what}</span>
                 {c.where && <span className="text-sm text-muted-foreground">in {c.where}</span>}
               </div>

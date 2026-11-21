@@ -11,7 +11,7 @@ import { toast } from "sonner";
 import { FEEDBACK_KINDS } from "@/components/app-shell/feedback-dialog";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
-import { Chips, Note, Pill, Section, TableWrap, td, th } from "@/components/manage/kit";
+import { Chips, DataTable, Note, Pill, Section } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { keys } from "@/lib/queries";
 import { when, count, num } from "@/lib/format";
@@ -44,30 +44,11 @@ export function FeedbackView({ data: f, days }: { data: FeedbackSummary; days: n
   if (!f.models.length) return <EmptyState title="No feedback yet" text={`Nobody rated a reply in the last ${days} days.`} />;
   return (
     <>
-      <TableWrap>
-        <table className="w-full min-w-[480px]">
-          <thead className="border-b bg-muted/40">
-            <tr>
-              <th className={th}>Model</th>
-              <th className={th}>Up</th>
-              <th className={th}>Down</th>
-              <th className={th}>Share up</th>
-            </tr>
-          </thead>
-          <tbody>
-            {f.models.map((m) => (
-              <tr key={m.model} className="border-b border-line-soft last:border-0">
-                <td className={td}>
-                  <strong className="font-medium">{m.model}</strong>
-                </td>
-                <td className={td}>{num(m.up)}</td>
-                <td className={td}>{num(m.down)}</td>
-                <td className={td}>{Math.round(m.upShare * 100)}%</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </TableWrap>
+      <DataTable
+        minWidth="min-w-[480px]"
+        columns={["Model", "Up", "Down", "Share up"]}
+        rows={f.models.map((m) => ({ key: m.model, cells: [<strong className="font-medium">{m.model}</strong>, num(m.up), num(m.down), `${Math.round(m.upShare * 100)}%`] }))}
+      />
       <div className="grid gap-4 lg:grid-cols-2">
         <Section title="Why replies got a thumbs down">
           {f.reasons.length ? (

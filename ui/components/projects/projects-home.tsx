@@ -6,8 +6,8 @@ import { useState } from "react";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { projectDot } from "@/components/app-shell/sidebar";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Pill } from "@/components/manage/kit";
 import { count, when } from "@/lib/format";
 import { useFeature, useProjects } from "@/lib/queries";
 import { useSession } from "@/lib/session";
@@ -33,9 +33,9 @@ function ProjectCard({ p, knowledge }: { p: Project; knowledge: boolean }) {
     >
       <div className="flex items-start justify-between gap-2">
         <ProjectMark color={p.color} />
-        <Badge variant={p.scope === "group" ? "secondary" : "outline"} className="max-w-[60%] truncate">
+        <Pill className="max-w-[60%] truncate">
           {p.mine ? sharing(p) : `${p.groupName || "Shared"} · ${p.ownerName}`}
-        </Badge>
+        </Pill>
       </div>
       <h2 className="text-base font-semibold">{p.name}</h2>
       <p className="line-clamp-2 grow text-sm text-muted-foreground">{p.description || (p.instructions ? p.instructions.slice(0, 140) : "No description yet.")}</p>

@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockApi, renderPage } from "@/components/manage/test-utils";
 import { fakeStore } from "@/components/workspace/test-store";
@@ -32,7 +32,7 @@ beforeEach(() => {
 
 describe("the Research tab", () => {
   it("shows the goal, the tree and a node's run, and stops a run", async () => {
-    const calls = mockApi((path) => (path.startsWith("/api/research/runs/r2/cancel") ? {} : path.startsWith("/api/research/runs/") ? { run: { log: "step 1\nstep 2", canCancel: true, diff: "+fast\n-slow" } } : research), { workspaces: true });
+    const calls = mockApi((path) => (path.startsWith("/api/research/runs/r2/cancel") ? {} : path.startsWith("/api/research/runs/") ? { run: { log: "step 1\nstep 2", canCancel: true, diff: "@@ -1 +1 @@\n-slow\n+fast" } } : research), { workspaces: true });
     renderPage(<ProjectResearch projectId="p1" />);
     expect(await screen.findByText("Make decode faster")).toBeInTheDocument();
     expect(screen.getByText("ms ↓ lower is better")).toBeInTheDocument();
@@ -43,7 +43,10 @@ describe("the Research tab", () => {
     fireEvent.click(screen.getByRole("button", { name: /Cache the keys/ }));
     expect(await screen.findByRole("heading", { name: "Cache the keys" })).toBeInTheDocument();
     expect(await screen.findByText(/step 2/)).toBeInTheDocument();
-    expect(screen.getByText("+fast")).toBeInTheDocument();
+    // The change is drawn by the shared diff view, as in the Git tab.
+    const change = screen.getByRole("table", { name: "Changes" });
+    expect(within(change).getByText("fast").closest("[role=row]")).toHaveClass("bg-success/12");
+    expect(within(change).getByText("slow").closest("[role=row]")).toHaveClass("bg-destructive/12");
     fireEvent.click(screen.getByRole("button", { name: "Stop this run" }));
     await waitFor(() => expect(calls).toContainEqual({ path: "/api/research/runs/r2/cancel", method: "POST", body: undefined }));
   });

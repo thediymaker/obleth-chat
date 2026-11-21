@@ -20,7 +20,7 @@ import { ratable } from "@/lib/chat/feedback";
 import type { ChatStore } from "@/lib/chat/store";
 import { appliesWork, gist, isLive, latest } from "@/lib/chat/turn";
 import type { Message as ChatMessage } from "@/lib/chat/types";
-import { initials, num, when, count, duration } from "@/lib/format";
+import { num, when, count, duration } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "./chat-provider";
@@ -29,6 +29,7 @@ import { citeHtml, KnowledgeSources } from "@/components/knowledge/chat-knowledg
 import { SavedNotes } from "@/components/library/saved-notes";
 import { MemoryCards } from "@/components/memory/memory-cards";
 import { conversationProjectId } from "@/components/projects/api";
+import { PersonAvatar } from "@/components/manage/kit";
 import { codeTitle, Markdown } from "./markdown-view";
 import { AppOffer, ModelOffer, ProjectOffer, QuestionCard, ResearchOffer, WorkspaceOffer } from "./question-cards";
 import { SteerForm, TurnAfter, TurnBefore } from "./turn-view";
@@ -330,10 +331,6 @@ function AnswerContent({ m, index }: { m: ChatMessage; index: number }) {
   );
 }
 
-function Avatar({ text }: { text: string }) {
-  return <span className="flex size-6 items-center justify-center rounded-full bg-secondary text-2xs font-semibold">{text}</span>;
-}
-
 /** Everything a message's look depends on, so an unchanged one is not drawn again. */
 export function messageSignature(store: ChatStore, m: ChatMessage, index: number, count: number) {
   return JSON.stringify([
@@ -400,7 +397,7 @@ export const MessageView = memo(
         <div className="mb-2 flex items-center gap-2 text-md font-semibold @min-[961px]:-ml-8 max-[760px]:ml-0">
           {m.role === "user" ? (
             <>
-              <Avatar text={initials(shared ? owner : name)} />
+              <PersonAvatar size="sm" name={shared ? owner : name} />
               {shared ? owner : "You"}
             </>
           ) : (

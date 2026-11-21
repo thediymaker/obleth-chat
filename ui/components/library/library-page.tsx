@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import { DangerButton, useConfirm, messageOf } from "@/components/manage/kit";
+import { Chips, DangerButton, Quota, useConfirm } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -19,7 +19,7 @@ import { when, bytes } from "@/lib/format";
 import { useProjects } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { host, KINDS, kindLabel, kindOf, type SavedItem, type SavedKind, useGeneratedImages, useSaved, SAVED_PAGE } from "./api";
-import { LibraryTabs, StorageMeter } from "./library-shell";
+import { LibraryTabs } from "./library-shell";
 import { useLibraryDialogs } from "./saved-dialogs";
 
 function Preview({ item }: { item: SavedItem }) {
@@ -134,22 +134,6 @@ function SavedView({ openId }: { openId?: string }) {
     setTag("");
     router.replace(id ? `${path}?project=${encodeURIComponent(id)}` : path);
   };
-  const chip = (value: "" | SavedKind, label: string, Icon: React.ComponentType<{ className?: string }>, n: number) => (
-    <button
-      key={value || "all"}
-      type="button"
-      aria-pressed={kind === value}
-      onClick={() => setKind(value)}
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground",
-        kind === value && "border-line-strong bg-secondary text-foreground",
-      )}
-    >
-      <Icon className="size-3.5" />
-      {label}
-      {n > 0 && <span className="text-2xs text-faint">{n}</span>}
-    </button>
-  );
   const filtered = !!(query || kind || tag || project);
   return (
     <>
@@ -189,10 +173,12 @@ function SavedView({ openId }: { openId?: string }) {
         </Button>
       </form>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap gap-1.5">
-          {chip("", "All", Bookmark, total)}
-          {(Object.entries(KINDS) as [SavedKind, (typeof KINDS)[SavedKind]][]).map(([k, [Icon, label]]) => chip(k, label, Icon, countOf(k)))}
-        </div>
+        <Chips
+          label="Kind"
+          value={kind}
+          onChange={setKind}
+          options={[["", "All", { icon: Bookmark, count: total || undefined }], ...(Object.entries(KINDS) as [SavedKind, (typeof KINDS)[SavedKind]][]).map(([k, [Icon, label]]) => [k, label, { icon: Icon, count: countOf(k) || undefined }] as const)]}
+        />
         {all.length > 0 && (
           <Select value={project || ALL} onValueChange={(v) => setProject(v === ALL ? "" : v)}>
             <SelectTrigger aria-label="Project" className="w-56">
@@ -297,7 +283,7 @@ function GeneratedView() {
       {confirm.element}
       {data?.usage && (
         <div className="mb-4 flex justify-end">
-          <StorageMeter label="Generated images" used={data.usage.used} limit={data.usage.limit} format={bytes} />
+          <Quota label="Generated images" value={data.usage.used} max={data.usage.limit} caption={`${bytes(data.usage.used)} of ${bytes(data.usage.limit)}`} />
         </div>
       )}
       <ErrorBox error={error} onRetry={() => refetch()} />

@@ -13,7 +13,7 @@ import { EmptyState, ErrorBox, Eyebrow, isFeatureOff, Loading, Page, PageHeader 
 import { useChatStore } from "@/components/chat/chat-provider";
 import { useConnectionManager } from "@/components/connections/connection-dialogs";
 import { type Connection, KINDS, useConnections } from "@/components/connections/connections";
-import { Meter, Pill, TableWrap, td, th, DangerButton } from "@/components/manage/kit";
+import { DataTable, Meter, Pill, DangerButton } from "@/components/manage/kit";
 import { ComputeOff, ComputeTabs } from "@/components/workspace/compute";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -39,36 +39,6 @@ function Stat({ label, value, note, meter }: { label: string; value: React.React
       {meter && meter.total > 0 && <Meter value={Math.min(meter.used, meter.total)} max={meter.total} label={`${label}: ${value}`} />}
       {note && <small className="text-xs text-muted-foreground">{note}</small>}
     </div>
-  );
-}
-
-function Table({ heads, rows, empty }: { heads: string[]; rows: React.ReactNode[][]; empty: string }) {
-  if (!rows.length) return <p className="text-sm text-muted-foreground">{empty}</p>;
-  return (
-    <TableWrap>
-      <table className="w-full text-left">
-        <thead>
-          <tr className="border-b">
-            {heads.map((h) => (
-              <th key={h} className={th}>
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} className="border-b last:border-b-0">
-              {r.map((c, j) => (
-                <td key={j} className={td}>
-                  {c}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </TableWrap>
   );
 }
 
@@ -133,9 +103,9 @@ function Slurm({ s, session, onEnd }: { s: SlurmStatus; session?: FileSession | 
         <Stat label="Queue" value={`${number(s.queue?.running)} running`} note={`${number(s.queue?.pending)} pending`} />
       </div>
       <Part title={`Your jobs as ${s.user}`} count={jobs.length}>
-        <Table
-          heads={["Job", "State", "Partition", "Time", "Nodes or reason"]}
-          rows={jobs.map((j) => [
+        <DataTable
+          columns={["Job", "State", "Partition", "Time", "Nodes or reason"]}
+          rows={jobs.map((j) => ({ key: j.id, cells: [
             <>
               <strong className="font-medium">{j.id}</strong>
               <Sub>{j.name}</Sub>
@@ -146,15 +116,15 @@ function Slurm({ s, session, onEnd }: { s: SlurmStatus; session?: FileSession | 
               {j.elapsed} <small className="text-muted-foreground">of {j.timeLimit}</small>
             </>,
             j.nodes || j.reason || "–",
-          ])}
+          ] }))}
           empty="No running or pending jobs of yours."
         />
       </Part>
       {session !== undefined && onEnd && <FileSessionPart session={session} onEnd={onEnd} />}
       <Part title="Recent jobs" count={recent.length}>
-        <Table
-          heads={["Job", "State", "Partition", "Ran", "Ended", "Exit code"]}
-          rows={recent.map((j) => [
+        <DataTable
+          columns={["Job", "State", "Partition", "Ran", "Ended", "Exit code"]}
+          rows={recent.map((j) => ({ key: j.id, cells: [
             <>
               <strong className="font-medium">{j.id}</strong>
               <Sub>{j.name}</Sub>
@@ -164,14 +134,14 @@ function Slurm({ s, session, onEnd }: { s: SlurmStatus; session?: FileSession | 
             j.elapsed,
             j.ended ? when(j.ended * 1000) : "–",
             j.exit ?? "–",
-          ])}
+          ] }))}
           empty="No jobs of yours ended in the last 7 days."
         />
       </Part>
       <Part title="Partitions" count={parts.length}>
-        <Table
-          heads={["Partition", "State", "Idle nodes", "Idle CPUs", ...(gpus ? ["Idle GPUs"] : []), "Max time"]}
-          rows={parts.map((p) => [<strong className="font-medium">{p.name}</strong>, <State text={p.state} />, idle(p.idleNodes, p.nodes), idle(p.idleCpus, p.cpus), ...(gpus ? [p.gpus ? idle(p.idleGpus, p.gpus) : "–"] : []), p.maxTime])}
+        <DataTable
+          columns={["Partition", "State", "Idle nodes", "Idle CPUs", ...(gpus ? ["Idle GPUs"] : []), "Max time"]}
+          rows={parts.map((p) => ({ key: p.name, cells: [<strong className="font-medium">{p.name}</strong>, <State text={p.state} />, idle(p.idleNodes, p.nodes), idle(p.idleCpus, p.cpus), ...(gpus ? [p.gpus ? idle(p.idleGpus, p.gpus) : "–"] : []), p.maxTime] }))}
           empty="No partitions."
         />
         {!!parts.length && <p className="text-sm text-muted-foreground">Idle means free to start a job now. Nodes that are down, drained or in maintenance never count as idle.</p>}
@@ -191,7 +161,7 @@ function Kubernetes({ k }: { k: KubernetesStatus }) {
       </Part>
     ) : (
       <Part title={title} count={(value || []).length}>
-        <Table heads={heads} rows={(value || []).map(map)} empty={empty} />
+        <DataTable columns={heads} rows={(value || []).map((v, i) => ({ key: i, cells: map(v) }))} empty={empty} />
       </Part>
     );
   const other = k.homeNamespace && k.homeNamespace !== k.namespace;

@@ -11,7 +11,7 @@ import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Eyebrow, Loading, Page, PageHeader, isNotFound, NotFound } from "@/components/app-shell/page";
 import { projectDot } from "@/components/app-shell/sidebar";
 import { Button } from "@/components/ui/button";
-import { Note } from "@/components/manage/kit";
+import { Note, PersonAvatar } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { count, initials } from "@/lib/format";
 import { useUser } from "@/lib/session";
@@ -181,9 +181,7 @@ export function GroupsPage({ id = "" }: { id?: string }) {
               {d.moreMembers && <p className="text-xs text-faint">The first 500 are listed.</p>}
               {d.members.map((m) => (
                 <div key={m.id} className="flex items-center gap-2.5 py-1">
-                  <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-full bg-secondary text-2xs font-semibold">
-                    {initials(m.displayName || m.username)}
-                  </span>
+                  <PersonAvatar name={m.displayName || m.username} className="size-7" />
                   <span className="min-w-0 grow truncate text-md">{m.id === me.id ? "You" : m.displayName || m.username}</span>
                   <span className="shrink-0 text-sm text-faint">{m.username}</span>
                 </div>

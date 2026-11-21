@@ -8,7 +8,7 @@ import dynamic from "next/dynamic";
 import { useState } from "react";
 import { INPUT, Legend, OUTPUT } from "@/components/manage/chart-legend";
 import { Eyebrow } from "@/components/app-shell/page";
-import { Meter, Note, Quota, Section, TableWrap, Tiles, td, th } from "@/components/manage/kit";
+import { DataTable, Meter, Note, Quota, Section, Tiles } from "@/components/manage/kit";
 import type { Model, OwnUsage, UsageCounts } from "@/lib/queries";
 import { compact, num } from "@/lib/format";
 
@@ -140,31 +140,13 @@ export function UsageCard({ usage, models }: { usage: OwnUsage; models: Model[] 
             <ChevronDown className={table ? "size-3.5 rotate-180" : "size-3.5"} /> Show as a table
           </button>
           {table && (
-            <TableWrap>
-              <table className="w-full">
-                <thead className="border-b">
-                  <tr>
-                    <th className={th}>Date (UTC)</th>
-                    <th className={th}>Requests</th>
-                    <th className={th}>Input</th>
-                    <th className={th}>Output</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {usage.daily
-                    .slice()
-                    .reverse()
-                    .map((d) => (
-                      <tr key={d.date} className="border-b border-line-soft last:border-0">
-                        <td className={td}>{d.date}</td>
-                        <td className={td}>{Number(d.requests || 0)}</td>
-                        <td className={td}>{num(d.promptTokens)}</td>
-                        <td className={td}>{num(d.completionTokens)}</td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            </TableWrap>
+            <DataTable
+              columns={["Date (UTC)", "Requests", "Input", "Output"]}
+              rows={usage.daily
+                .slice()
+                .reverse()
+                .map((d) => ({ key: d.date, cells: [d.date, Number(d.requests || 0), num(d.promptTokens), num(d.completionTokens)] }))}
+            />
           )}
         </div>
       )}

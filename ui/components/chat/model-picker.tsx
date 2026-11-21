@@ -6,9 +6,9 @@
 
 import { Bookmark, Box, Check, ChevronDown, ChevronRight, Search, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Slider } from "@/components/ui/slider";
+import { Pill } from "@/components/manage/kit";
 import { EFFORT_DESCRIPTIONS, EFFORTS, effortLabel } from "@/lib/chat/composer";
 import { chooserModels } from "@/lib/chat/model-choices";
 import { cn } from "@/lib/utils";
@@ -159,8 +159,8 @@ export function ModelPicker() {
                 <span className="min-w-0 flex-1">
                   <strong className="flex flex-wrap items-center gap-1.5 text-md font-medium">
                     {m.name || m.id}
-                    {m.isDefault && <Badge variant="secondary">Default</Badge>}
-                    {m.metadata?.supportsVision && <Badge variant="secondary">Vision</Badge>}
+                    {m.isDefault && <Pill>Default</Pill>}
+                    {m.metadata?.supportsVision && <Pill>Vision</Pill>}
                     {label && <span className="sr-only">. {label}</span>}
                   </strong>
                   {detail && <small className="block truncate text-xs text-muted-foreground">{detail}</small>}

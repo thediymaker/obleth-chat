@@ -12,7 +12,6 @@ import { usePageChrome } from "@/components/app-shell/chrome";
 import { Copy as BrandCopy } from "@/components/brand";
 import { KnowledgePill } from "@/components/knowledge/chat-knowledge";
 import { ProjectPill } from "@/components/projects/chat-project";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuShortcut, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -29,6 +28,7 @@ import { MessageView, messageSignature } from "./message";
 import { SelectionBar } from "./selection-bar";
 import { SidePane } from "./side-pane";
 import { NotFound } from "@/components/app-shell/page";
+import { Pill } from "@/components/manage/kit";
 
 function Alert({ message, onRetry }: { message: string; onRetry?: () => void }) {
   if (!message) return null;
@@ -310,12 +310,12 @@ export function ChatPage({ id }: { id: string }) {
         <div data-conversation-header className="flex h-[52px] shrink-0 items-center justify-between gap-4 border-b border-line-soft px-6 max-[760px]:h-12 max-[760px]:px-4">
           <div className="flex min-w-0 items-center gap-[9px]">
             <h2 className="truncate text-base leading-[normal] font-medium tracking-normal text-text-2">{c.title}</h2>
-            {sh && <Badge variant="secondary">Shared by {sh.ownerName}</Badge>}
-            {!sh && c.temporary && <Badge variant="secondary">Temporary</Badge>}
-            {!sh && c.archived && <Badge variant="secondary">Archived</Badge>}
+            {sh && <Pill>Shared by {sh.ownerName}</Pill>}
+            {!sh && c.temporary && <Pill>Temporary</Pill>}
+            {!sh && c.archived && <Pill>Archived</Pill>}
             {!sh && c.shareScope && c.shareScope !== "none" && (
               <button type="button" title="Change who can see it" onClick={() => store.openDialog({ kind: "share", id: c.id })}>
-                <Badge>Shared</Badge>
+                <Pill tone="accent">Shared</Pill>
               </button>
             )}
           </div>

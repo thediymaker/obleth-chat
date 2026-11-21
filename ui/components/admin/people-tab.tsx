@@ -11,25 +11,7 @@ import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  CheckField,
-  CopyField,
-  DetailRow,
-  FormActions,
-  FormDialog,
-  FormError,
-  Note,
-  Pill,
-  SelectField,
-  TableWrap,
-  TextField,
-  displayName,
-  td,
-  th,
-  titleCase,
-  useConfirm,
-  useSubmit,
-} from "@/components/manage/kit";
+import { CheckField, CopyField, DetailRow, FormActions, FormDialog, FormError, Note, Pill, SelectField, TableWrap, TextField, displayName, td, th, titleCase, useConfirm, useSubmit, PersonAvatar } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useSession } from "@/lib/session";
@@ -278,9 +260,7 @@ export function PeopleTab() {
                 <tr key={u.id} className="border-b border-line-soft last:border-0">
                   <td className={td}>
                     <div className="flex items-center gap-2.5">
-                      <span aria-hidden className="grid size-8 shrink-0 place-items-center rounded-full bg-secondary text-2xs font-semibold">
-                        {displayName(u).slice(0, 2).toUpperCase()}
-                      </span>
+                      <PersonAvatar name={displayName(u)} />
                       <div className="grid min-w-0">
                         <strong className="flex items-center gap-1.5 truncate font-medium">
                           {displayName(u)} {u.id === session.user?.id && <Pill>You</Pill>}

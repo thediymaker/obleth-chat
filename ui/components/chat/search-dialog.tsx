@@ -8,9 +8,9 @@ import { ArrowRight, MessageSquare, Pin } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Badge } from "@/components/ui/badge";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Pill } from "@/components/manage/kit";
 import { fetchHistory, type HistoryChat } from "@/lib/chat/history";
 import { ago } from "@/lib/format";
 import { keys, useConversations, useModels } from "@/lib/queries";
@@ -62,7 +62,7 @@ export function SearchDialog({ open, onOpenChange }: { open: boolean; onOpenChan
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
           <span className="truncate">{chat.title}</span>
-          {chat.archived && <Badge variant="secondary">Archived</Badge>}
+          {chat.archived && <Pill>Archived</Pill>}
         </span>
         <span className="block truncate text-xs text-muted-foreground">
           {modelName(chat.model)}

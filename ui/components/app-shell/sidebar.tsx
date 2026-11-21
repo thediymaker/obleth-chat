@@ -8,7 +8,7 @@ import { ChatMenuItems } from "@/components/chat/chat-menu";
 import { NEW_CHAT_EVENT } from "@/components/chat/chat-provider";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { initials } from "@/lib/format";
+import { PersonAvatar } from "@/components/manage/kit";
 import { useCapabilities, useConversations, useProjects } from "@/lib/queries";
 import { useSession, useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
@@ -185,7 +185,7 @@ export function Sidebar({ onNavigate, onSearch, onFeedback }: { onNavigate?: () 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button type="button" className="group/profile flex w-full items-center gap-2.5 border-t border-sidebar-border px-1.5 pt-3 pb-3.5 text-left">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-medium text-text-2">{initials(name)}</span>
+              <PersonAvatar name={name} className="size-7" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-md font-medium group-hover/profile:text-foreground">{name}</span>
                 <span className="mt-0.5 block truncate text-xs text-muted-foreground">{user.role} · Personal</span>

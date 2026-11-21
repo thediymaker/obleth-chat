@@ -10,8 +10,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Loading } from "@/components/app-shell/page";
 import { useLibraryDialogs } from "@/components/library/saved-dialogs";
-import { Columns, Confirm, Field, FormActions, FormDialog, FormError, useSubmit } from "@/components/manage/kit";
-import { Badge } from "@/components/ui/badge";
+import { Columns, Confirm, Field, FormActions, FormDialog, FormError, useSubmit, Pill } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dropdown } from "@/components/ui/dropdown";
@@ -29,7 +28,7 @@ import { useChat } from "./chat-provider";
 import { NamedIcon } from "./icon";
 
 function Locked({ on }: { on: boolean }) {
-  return on ? <Badge variant="secondary">Locked</Badge> : null;
+  return on ? <Pill>Locked</Pill> : null;
 }
 
 function RenameDialog({ dialog, close }: { dialog: Extract<ChatDialog, { kind: "rename" }>; close: () => void }) {

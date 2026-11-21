@@ -86,7 +86,6 @@ export interface LineVersion extends CommitEntry {
 
 export const LETTER: Record<string, string> = { added: "A", modified: "M", deleted: "D", conflict: "!" };
 export const short = (sha: string | null | undefined) => String(sha || "").slice(0, 7);
-export const initial = (name: string | null | undefined) => String(name || "?").trim().slice(0, 1).toUpperCase() || "?";
 /** A project name as a repository or file name. */
 export const slug = (name: string | null | undefined) =>
   String(name || "project")

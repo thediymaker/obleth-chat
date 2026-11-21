@@ -11,8 +11,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import { Confirm, Field, FormActions, FormDialog, FormError } from "@/components/manage/kit";
-import { Badge } from "@/components/ui/badge";
+import { Confirm, Field, FormActions, FormDialog, FormError, Pill } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -238,7 +237,7 @@ export function HistoryPage() {
                   <span className="flex items-center gap-2 text-base leading-[1.6] font-medium decoration-muted-foreground underline-offset-[3px] group-hover/item:underline">
                     {chat.pinned && <Pin className="size-3.5 shrink-0 text-muted-foreground" aria-label="Pinned" />}
                     <span className="truncate">{chat.title}</span>
-                    {chat.archived && <Badge variant="secondary">Archived</Badge>}
+                    {chat.archived && <Pill>Archived</Pill>}
                   </span>
                   <span className="mt-1 flex flex-wrap gap-x-2 text-sm text-faint">
                     <span className="truncate">{modelName(chat.model)}</span>

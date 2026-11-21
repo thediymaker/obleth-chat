@@ -19,6 +19,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -27,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { copyText } from "@/lib/clipboard";
+import { initials } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { FormError } from "./form-error";
 
@@ -42,11 +44,11 @@ export const displayName = (user: { displayName?: string | null; display_name?: 
 
 export type Tone = "" | "accent" | "amber" | "danger";
 
-/** A small status label. */
-export function Pill({ children, tone = "", className, title }: { children: React.ReactNode; tone?: Tone; className?: string; title?: string }) {
+/** A small label for a status or a kind: the one such component, in four tones. */
+export function Pill({ children, tone = "", className, ...rest }: React.ComponentProps<"span"> & { tone?: Tone }) {
   return (
     <span
-      title={title}
+      {...rest}
       data-tone={tone || undefined}
       className={cn(
         "inline-flex h-5 shrink-0 items-center rounded-full border px-2 text-2xs font-medium whitespace-nowrap text-muted-foreground",
@@ -60,6 +62,18 @@ export function Pill({ children, tone = "", className, title }: { children: Reac
     </span>
   );
 }
+
+/** A person's initials in a circle, such as "JD" for Jane Doe. */
+export function PersonAvatar({ name, size = "default", className }: { name: string | null | undefined; size?: "sm" | "default"; className?: string }) {
+  return (
+    <Avatar aria-hidden size={size} className={className}>
+      <AvatarFallback className="bg-secondary text-2xs font-semibold text-text-2">{initials(name || "?")}</AvatarFallback>
+    </Avatar>
+  );
+}
+
+/** The earlier name for a Pill. */
+export const Badge = Pill;
 
 /** A card with a heading, an optional line under it and actions on the right. */
 export function Section({
@@ -406,6 +420,12 @@ export function useConfirm() {
   return { ask, element, clear: () => setPending(null) };
 }
 
+/** What a chip can show beside its name: an icon before it and a count after it. */
+export interface ChipExtra {
+  icon?: React.ComponentType<{ className?: string }>;
+  count?: number;
+}
+
 /** Filter chips such as a period: one is on at a time. */
 export function Chips<T extends string | number>({
   options,
@@ -414,7 +434,7 @@ export function Chips<T extends string | number>({
   label,
   className,
 }: {
-  options: readonly (readonly [T, string])[];
+  options: readonly (readonly [T, string] | readonly [T, string, ChipExtra])[];
   value: T;
   onChange: (value: T) => void;
   label: string;
@@ -422,20 +442,25 @@ export function Chips<T extends string | number>({
 }) {
   return (
     <div role="group" aria-label={label} className={cn("inline-flex flex-wrap items-center gap-1", className)}>
-      {options.map(([id, name]) => (
-        <button
-          key={String(id)}
-          type="button"
-          aria-pressed={id === value}
-          onClick={() => onChange(id)}
-          className={cn(
-            "h-7 rounded-full border px-3 text-sm text-muted-foreground transition-colors hover:text-foreground",
-            id === value && "border-line-strong bg-secondary text-foreground",
-          )}
-        >
-          {name}
-        </button>
-      ))}
+      {options.map(([id, name, extra]) => {
+        const Icon = extra?.icon;
+        return (
+          <button
+            key={String(id)}
+            type="button"
+            aria-pressed={id === value}
+            onClick={() => onChange(id)}
+            className={cn(
+              "inline-flex h-7 items-center gap-1.5 rounded-full border px-3 text-sm text-muted-foreground transition-colors hover:text-foreground",
+              id === value && "border-line-strong bg-secondary text-foreground",
+            )}
+          >
+            {Icon && <Icon className="size-3.5" />}
+            {name}
+            {extra?.count != null && <span className="text-2xs text-faint tabular-nums">{extra.count}</span>}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -488,10 +513,21 @@ export function Meter({ value, max, tone = "blue", className, label, level }: { 
   );
 }
 
-/** A quota: full at the limit, amber from 80%. */
-export function Quota({ value, max, label, className }: { value: number; max: number; label: string; className?: string }) {
+/** A quota: full at the limit, amber from 80%. With a `caption` (such as "2 MB of
+ *  10 MB") the label and caption sit on a line above the bar. */
+export function Quota({ value, max, label, caption, className }: { value: number; max: number; label: string; caption?: React.ReactNode; className?: string }) {
   const f = max > 0 ? value / max : 0;
-  return <Meter value={Math.min(value, max)} max={Math.max(1, max)} label={label} tone={f >= 1 ? "danger" : f >= 0.8 ? "amber" : "blue"} className={className} level={f >= 1 ? "full" : f >= 0.8 ? "near" : ""} />;
+  const meter = <Meter value={Math.min(value, max)} max={Math.max(1, max)} label={label} tone={f >= 1 ? "danger" : f >= 0.8 ? "amber" : "blue"} className={caption ? undefined : className} level={f >= 1 ? "full" : f >= 0.8 ? "near" : ""} />;
+  if (!caption) return meter;
+  return (
+    <div className={cn("grid min-w-52 gap-1.5", className)}>
+      <div className="flex justify-between gap-4 text-xs text-muted-foreground">
+        <span>{label}</span>
+        <span>{caption}</span>
+      </div>
+      {meter}
+    </div>
+  );
 }
 
 /** A read-only value with a copy button. */
@@ -520,3 +556,55 @@ export function TableWrap({ children, className }: { children: React.ReactNode; 
 /** Shared table cell classes, so every admin table reads alike. */
 export const th = "h-9 px-3 text-left align-middle text-xs font-medium whitespace-nowrap text-muted-foreground";
 export const td = "px-3 py-2.5 align-middle text-md";
+
+/** A column of a DataTable: its heading, and classes for its cells such as
+ *  "hidden sm:table-cell" to leave it out on a phone. */
+export interface Column {
+  head: React.ReactNode;
+  className?: string;
+}
+export interface Row {
+  key: React.Key;
+  cells: React.ReactNode[];
+}
+
+/** A table of rows under headings, scrolling sideways on a phone; with no rows it says
+ *  `empty` in one row across the columns. `minWidth` such as "min-w-[640px]" keeps
+ *  wide tables readable. */
+export function DataTable({ columns, rows, empty = "Nothing here yet.", minWidth, className, label }: { columns: (Column | string)[]; rows: Row[]; empty?: React.ReactNode; minWidth?: string; className?: string; label?: string }) {
+  const cols = columns.map((c) => (typeof c === "string" ? { head: c } : c));
+  return (
+    <TableWrap className={className}>
+      <table aria-label={label} className={cn("w-full text-left", minWidth)}>
+        <thead className="border-b bg-muted/40">
+          <tr>
+            {cols.map((c, i) => (
+              <th key={i} className={cn(th, c.className)}>
+                {c.head}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length ? (
+            rows.map((r) => (
+              <tr key={r.key} className="border-b border-line-soft last:border-0">
+                {r.cells.map((cell, i) => (
+                  <td key={i} className={cn(td, cols[i]?.className)}>
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td colSpan={cols.length} className={cn(td, "py-6 text-center text-sm text-muted-foreground")}>
+                {empty}
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </TableWrap>
+  );
+}

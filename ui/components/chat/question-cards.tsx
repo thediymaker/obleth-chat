@@ -11,11 +11,11 @@ import { Box, Check, CircleHelp, FlaskConical, Folder, Sparkles, Terminal } from
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { researchAllowed, startResearch } from "@/components/research/start";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { conversationProjectId } from "@/components/projects/api";
 import { useChatProject } from "@/components/projects/chat-project";
 import { NewProjectDialog } from "@/components/projects/project-dialog";
+import { Pill } from "@/components/manage/kit";
 import type { ChatStore } from "@/lib/chat/store";
 import type { ActivityEntry, Message } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
@@ -185,7 +185,7 @@ export function QuestionCard({ m, index }: { m: Message; index: number }) {
                 <strong className="block text-md font-medium">{o.label}</strong>
                 {o.description && <small className="block text-sm text-muted-foreground">{o.description}</small>}
               </span>
-              {o.recommended && <Badge variant="secondary">Recommended</Badge>}
+              {o.recommended && <Pill>Recommended</Pill>}
             </button>
           );
         })}

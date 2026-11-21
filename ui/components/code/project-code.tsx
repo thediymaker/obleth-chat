@@ -14,7 +14,7 @@ import { memo, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Eyebrow, Loading } from "@/components/app-shell/page";
 import { type SectionTab, SectionTabs } from "@/components/app-shell/section-tabs";
-import { Dropdown, Pill, Quota, useConfirm } from "@/components/manage/kit";
+import { Dropdown, Pill, Quota, useConfirm, PersonAvatar } from "@/components/manage/kit";
 import { useNewChatInProject, useProjectFrame } from "@/components/projects/project-frame";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,7 @@ import { useFeature } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { DiffStat, DiffView } from "./diff-view";
 import { ExportDialog, ImportDialog, codeKeys } from "./export-dialog";
-import { type BlameGroup, type ChangedFile, type ChatRef, type CodeOverview, type CodeRoute, type CommitDetail, type CommitEntry, type CompareResult, type LineVersion, codeHref, codeRoute, initial, projectCodePath, short, undoInChatPrompt } from "./model";
+import { type BlameGroup, type ChangedFile, type ChatRef, type CodeOverview, type CodeRoute, type CommitDetail, type CommitEntry, type CompareResult, type LineVersion, codeHref, codeRoute, projectCodePath, short, undoInChatPrompt } from "./model";
 import { useStartInProject } from "./start-chat";
 import { ago, bytes, count } from "@/lib/format";
 
@@ -44,10 +44,6 @@ function ChatLink({ chat }: { chat?: ChatRef | null }) {
   ) : (
     <span>{chat.ownerName}’s chat</span>
   );
-}
-
-function Avatar({ name }: { name?: string | null }) {
-  return <span className="grid size-6 shrink-0 place-items-center rounded-full bg-secondary text-2xs font-medium">{initial(name)}</span>;
 }
 
 function CommitRow({ projectId, e, selected = "" }: { projectId: string; e: CommitEntry; selected?: string }) {
@@ -168,7 +164,7 @@ function Overview({ projectId, o, log, onExport }: { projectId: string; o: CodeO
             {o.chats.length ? (
               o.chats.map((w) => (
                 <div key={w.chat.id} className="flex items-center gap-2.5 py-1">
-                  <Avatar name={w.chat.ownerName} />
+                  <PersonAvatar size="sm" name={w.chat.ownerName} />
                   <span className="min-w-0 flex-1">
                     <strong className="block truncate text-md font-medium">
                       {w.chat.readable ? (
@@ -526,7 +522,7 @@ function Blame({ projectId, path }: { projectId: string; path: string }) {
               return (
                 <div key={`${g.sha}:${g.start}`} className="border-b last:border-b-0">
                   <div className="flex items-center gap-2 bg-muted/50 px-2 py-1.5">
-                    <Avatar name={g.author} />
+                    <PersonAvatar size="sm" name={g.author} />
                     <span className="min-w-0 flex-1">
                       <Link href={codeHref(projectId, { view: "history", sha: g.sha })} className="block truncate text-sm hover:underline">
                         {g.subject}

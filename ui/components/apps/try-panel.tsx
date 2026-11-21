@@ -5,12 +5,11 @@
 
 import { CircleAlert, CircleCheck, Play, X } from "lucide-react";
 import { useState } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { FormError, Field as FormField, messageOf } from "@/components/manage/kit";
+import { FormError, Field as FormField, messageOf, Pill, type Tone } from "@/components/manage/kit";
 import { cn } from "@/lib/utils";
 import type { TraceEntry } from "./layout";
 import { type Field, pretty } from "./model";
@@ -21,12 +20,14 @@ export function Json({ value, className }: { value: unknown; className?: string 
   return <pre className={cn("max-h-80 overflow-auto rounded-md bg-code p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words", className)}>{pretty(value)}</pre>;
 }
 
-export function StatusBadge({ status }: { status: string }) {
-  const ok = status === "completed";
+/** A run's status as a Pill: completed, running, or anything else as failed. */
+const RUN_STATUS: Record<string, [string, Tone]> = { completed: ["Completed", "accent"], running: ["Running", ""] };
+export function RunStatus({ status, className }: { status: string; className?: string }) {
+  const [label, tone] = RUN_STATUS[status] ?? ["Failed", "danger"];
   return (
-    <Badge variant="outline" className={cn(ok ? "border-success/50 text-success" : status === "running" ? "text-muted-foreground" : "border-destructive/50 text-destructive-foreground")}>
-      {ok ? "Completed" : status === "running" ? "Running" : "Failed"}
-    </Badge>
+    <Pill tone={tone} className={className}>
+      {label}
+    </Pill>
   );
 }
 
@@ -120,7 +121,7 @@ export function TryPanel({ inputs, result, onRun, onClear }: { inputs: Field[]; 
       {result && (
         <div className="grid gap-3" aria-live="polite">
           <div className="flex items-center justify-between">
-            <StatusBadge status={result.status} />
+            <RunStatus status={result.status} />
             <span className="text-xs text-faint">{result.ms} ms</span>
           </div>
           {result.error ? <p className="text-sm text-destructive-foreground">{result.error}</p> : <Json value={result.output} />}

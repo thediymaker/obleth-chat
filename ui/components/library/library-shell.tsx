@@ -40,21 +40,3 @@ function LibraryOff({ page, title }: { page: keyof typeof OFF; title: string }) 
     </Page>
   );
 }
-
-/** A storage meter: used of limit. */
-export function StorageMeter({ label, used, limit, format }: { label: string; used: number; limit: number; format: (n: number) => string }) {
-  const share = limit ? Math.min(100, (100 * used) / limit) : 0;
-  return (
-    <div className="grid min-w-52 gap-1.5">
-      <div className="flex justify-between gap-4 text-xs text-muted-foreground">
-        <span>{label}</span>
-        <span>
-          {format(used)} of {format(limit)}
-        </span>
-      </div>
-      <div role="progressbar" aria-label="Storage used" aria-valuemin={0} aria-valuemax={limit} aria-valuenow={Math.min(used, limit)} className="h-1.5 overflow-hidden rounded-full bg-secondary">
-        <div className={share > 90 ? "h-full bg-amber" : "h-full bg-foreground/70"} style={{ width: `${share}%` }} />
-      </div>
-    </div>
-  );
-}

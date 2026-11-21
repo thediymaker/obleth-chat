@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chartOf, checkText, diffLineKind, facts, fmt, minutes, placementText, type ProjectResearchData } from "./model";
+import { chartOf, checkText, facts, fmt, minutes, placementText, type ProjectResearchData } from "./model";
 
 const data = (direction = "min"): ProjectResearchData => ({
   research: { goal: "Faster decode", metric: "ms", direction, runCommand: "python bench.py" },
@@ -69,8 +69,5 @@ describe("research words", () => {
     expect(placementText({ fits: 0.9 }).text).toBe("Fits where it is · 90% that it fits");
     expect(placementText({ fits: 0.3 }).text).toBe("Unsure it fits here · 30% that it fits");
     expect(placementText({ fits: 0.3, confirmed: true }).doubt).toBe(true);
-  });
-  it("colors a run's change", () => {
-    expect(["+a", "+++ b", "-c", "--- d", "@@ -1 +1 @@", " e"].map(diffLineKind)).toEqual(["add", "", "del", "", "hunk", ""]);
   });
 });

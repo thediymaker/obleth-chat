@@ -22,6 +22,14 @@ test("the people tab shows when each person last signed in", async () => {
   expect(screen.getByText("You")).toBeInTheDocument();
 });
 
+test("a person's avatar shows the first letters of their names", async () => {
+  forgetKept();
+  mockApi(() => ({ users: [{ id: "u3", username: "jdoe", display_name: "Jane Doe", role: "user", enabled: true, last_sign_in_at: null }], hasMore: false }));
+  renderPage(<PeopleTab />);
+  const row = (await screen.findByText("Jane Doe")).closest("tr")!;
+  expect(within(row).getByText("JD")).toBeInTheDocument();
+});
+
 test("searching asks the server, and changing a role is confirmed first", async () => {
   forgetKept();
   const calls = mockApi((path, options) => (options.method === "PATCH" ? {} : { users, hasMore: path.includes("q=") }));

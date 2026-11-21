@@ -12,11 +12,10 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, Eyebrow } from "@/components/app-shell/page";
 import { chatDraft, useChatDraft } from "@/components/projects/chat-draft";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
-import { messageOf } from "@/components/manage/kit";
+import { messageOf, Pill } from "@/components/manage/kit";
 import { api } from "@/lib/api";
 import { count } from "@/lib/format";
 import { useFeature } from "@/lib/queries";
@@ -78,7 +77,7 @@ export function KnowledgePicker({ open, onOpenChange, conversationId }: { open: 
                 <span className="min-w-0 grow">
                   <span className="flex items-center gap-1.5">
                     <span className="truncate text-md font-medium">{c.name}</span>
-                    {!c.mine && <Badge variant="outline">{scopeLabel(c)}</Badge>}
+                    {!c.mine && <Pill>{scopeLabel(c)}</Pill>}
                   </span>
                   <span className="block text-xs text-muted-foreground">
                     {count(c.documents, "document")}

@@ -11,6 +11,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Eyebrow, Loading } from "@/components/app-shell/page";
+import { DiffView } from "@/components/code/diff-view";
 import { useStartInProject } from "@/components/code/start-chat";
 import { Pill } from "@/components/manage/kit";
 import { useProjectFrame } from "@/components/projects/project-frame";
@@ -18,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useFeature } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { type Experiment, type ProjectResearchData, type Run, type RunDetail, chartOf, checkText, diffLineKind, facts, fmt, minutes, placementText } from "./model";
+import { type Experiment, type ProjectResearchData, type Run, type RunDetail, chartOf, checkText, facts, fmt, minutes, placementText } from "./model";
 
 const card = "rounded-lg border bg-card p-4";
 export const researchKey = (projectId: string) => ["project-research", projectId] as const;
@@ -326,19 +327,7 @@ function Detail({ projectId, data, e, picked, onPick }: { projectId: string; dat
           {run?.diff && (
             <div className="grid gap-1.5">
               <Eyebrow>Change from parent</Eyebrow>
-              <pre className="max-h-80 overflow-auto rounded-md bg-code p-2 font-mono text-[12px] leading-relaxed">
-                {run.diff
-                  .split("\n")
-                  .slice(0, 400)
-                  .map((l, i) => {
-                    const k = diffLineKind(l);
-                    return (
-                      <span key={i} className={cn("block", k === "add" && "bg-success/12 text-success", k === "del" && "bg-destructive/12 text-destructive-foreground", k === "hunk" && "text-muted-foreground")}>
-                        {l || " "}
-                      </span>
-                    );
-                  })}
-              </pre>
+              <DiffView text={run.diff} className="max-h-80 overflow-y-auto rounded-md" />
             </div>
           )}
           <div className="grid gap-1.5">

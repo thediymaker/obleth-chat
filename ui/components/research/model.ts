@@ -163,5 +163,3 @@ export function placementText(d: NonNullable<Experiment["placement"]>) {
   return d.confirmed ? { text: found, doubt: true } : { text: `${(d.fits || 0) >= 0.5 ? "Fits where it is" : "Unsure it fits here"} · ${found}`, doubt: false };
 }
 
-/** A diff line's look in a run's change. */
-export const diffLineKind = (l: string) => (l.startsWith("+") && !l.startsWith("+++") ? "add" : l.startsWith("-") && !l.startsWith("---") ? "del" : l.startsWith("@@") ? "hunk" : "");

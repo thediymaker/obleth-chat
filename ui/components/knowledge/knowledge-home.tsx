@@ -7,9 +7,9 @@ import Link from "next/link";
 import { useState } from "react";
 import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, Loading, Page, PageHeader } from "@/components/app-shell/page";
-import { LibraryTabs, StorageMeter } from "@/components/library/library-shell";
-import { Badge } from "@/components/ui/badge";
+import { LibraryTabs } from "@/components/library/library-shell";
 import { Button } from "@/components/ui/button";
+import { Chips, Pill, Quota } from "@/components/manage/kit";
 import { count, bytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { type Collection, scopeLabel, useCollections } from "./api";
@@ -29,9 +29,9 @@ function CollectionCard({ c }: { c: Collection }) {
         <span className="flex size-9 items-center justify-center rounded-lg border bg-muted">
           <BookOpen className="size-4 text-text-2" />
         </span>
-        <Badge variant={c.scope === "personal" ? "outline" : "secondary"} className="max-w-[65%] truncate">
+        <Pill className="max-w-[65%] truncate">
           {c.mine ? scopeLabel(c) : `${scopeLabel(c)} · read only`}
-        </Badge>
+        </Pill>
       </div>
       <h2 className="text-base font-semibold">{c.name}</h2>
       <p className="line-clamp-2 grow text-sm text-muted-foreground">{c.description || (c.mine ? "Add documents to search them in chats." : `Shared by ${c.ownerName}.`)}</p>
@@ -59,17 +59,6 @@ export function KnowledgeHome() {
       <Plus /> New collection
     </Button>
   );
-  const tabButton = (value: Tab, label: string, n: number) => (
-    <button
-      type="button"
-      aria-pressed={tab === value}
-      onClick={() => setTab(value)}
-      className={cn("inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground", tab === value && "bg-secondary text-foreground")}
-    >
-      {label}
-      <span className="rounded-full bg-background/60 px-1.5 text-2xs">{n}</span>
-    </button>
-  );
   return (
     <Page wide>
       <PageHeader title="Library" description="Your knowledge, connected: documents your chats search and cite, a home for the context that makes an answer yours." actions={newButton}>
@@ -78,12 +67,17 @@ export function KnowledgeHome() {
       <ErrorBox error={error} onRetry={() => refetch()} />
       {all.length > 0 && (
         <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
-          <div className="flex flex-wrap gap-1">
-            {tabButton("all", "All collections", all.length)}
-            {tabButton("mine", "Personal", mine.length)}
-            {tabButton("shared", "Shared with me", shared.length)}
-          </div>
-          {data?.usage && <StorageMeter label="Storage" used={data.usage.used} limit={data.usage.limit} format={bytes} />}
+          <Chips
+            label="Collections"
+            value={tab}
+            onChange={setTab}
+            options={[
+              ["all", "All collections", { count: all.length }],
+              ["mine", "Personal", { count: mine.length }],
+              ["shared", "Shared with me", { count: shared.length }],
+            ]}
+          />
+          {data?.usage && <Quota label="Storage" value={data.usage.used} max={data.usage.limit} caption={`${bytes(data.usage.used)} of ${bytes(data.usage.limit)}`} />}
         </div>
       )}
       {isPending ? (

@@ -8,6 +8,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, FlaskConical, Square, Terminal } from "lucide-react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Eyebrow, Loading } from "@/components/app-shell/page";
@@ -361,14 +362,16 @@ export function ProjectResearch({ projectId }: { projectId: string }) {
     },
     refetchInterval: (query) => (query.state.data?.runs.some((r) => r.status === "running") ? 5000 : false),
   });
+  // A link to one run (?run=, from the project's log) opens it on its node.
+  const linked = useSearchParams().get("run");
   const [selected, setSelected] = useState<string | null>(null);
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(linked);
   if (q.isPending) return <Loading label="Loading research…" />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const data = q.data;
   if (!data) return <Start projectId={projectId} mine={!!detail.project.mine} />;
   const f = facts(data);
-  const node = data.experiments.some((e) => e.id === selected) ? selected : f.defaultNode();
+  const node = data.experiments.some((e) => e.id === selected) ? selected : (data.runs.find((r) => r.id === picked)?.experimentId ?? f.defaultNode());
   const e = data.experiments.find((x) => x.id === node);
   return (
     <div>

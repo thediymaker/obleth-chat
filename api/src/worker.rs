@@ -15,7 +15,8 @@ pub const RETENTION: Duration = Duration::from_secs(60 * 60);
 pub const MEMORY: Duration = Duration::from_secs(30);
 /// Insights label chats and place workstreams (insights.rs).
 pub const INSIGHTS: Duration = Duration::from_secs(60);
-/// Notebook guides are made for new documents in projects (notebook/guides.rs).
+/// Notebook guides are made for new documents in projects, and notebook items a
+/// stopped replica left running are taken up (notebook/).
 pub const NOTEBOOK: Duration = Duration::from_secs(20);
 /// Auto mode's watchdog nudges stopped turns (autopilot.rs).
 pub const AUTO_MODE: Duration = Duration::from_secs(60);

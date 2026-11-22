@@ -788,3 +788,222 @@ async fn the_project_owner_gets_one_collection_made_for_added_sources() {
     );
     db.close().await;
 }
+
+// ---- Making things from the sources ----
+
+async fn make_fixture(pool: &PgPool, window: u64) -> (Uuid, Uuid, Uuid, Gateway, Seen) {
+    let ana = person(pool, "ana").await;
+    let p = project(pool, ana, None).await;
+    let c = collection(pool, ana, None, Some(p)).await;
+    let doc = document(
+        pool,
+        ana,
+        c,
+        "Serving stack.pdf",
+        &[
+            "We ran three models on accelerator cards.",
+            "Throughput is flat beyond 320 concurrent sequences on all three models, while latency keeps rising.",
+        ],
+    )
+    .await;
+    open(pool, ana, p).await.unwrap();
+    name_model(pool, "notebook-model").await;
+    let (gateway, seen) = stand_in("notebook-model", window).await;
+    (ana, p, doc, gateway, seen)
+}
+
+#[tokio::test]
+async fn making_refuses_up_front_what_cannot_work() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let pool = &db.pool;
+    let ana = person(pool, "ana").await;
+    let p = project(pool, ana, None).await;
+    let c = collection(pool, ana, None, Some(p)).await;
+    let doc = document(pool, ana, c, "Long.pdf", &["a long source of text"]).await;
+    open(pool, ana, p).await.unwrap();
+    let user = identity(ana, "ana");
+    let (gateway, seen) = stand_in("notebook-model", 20_000).await;
+    let refused = |e: ApiError| (e.0, e.1);
+    // No Notebook model named.
+    let none = makes::start(pool, Some(&gateway), &user, p, "briefing")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused(none),
+        (
+            StatusCode::CONFLICT,
+            "No Notebook model is set on this server".into()
+        )
+    );
+    name_model(pool, "notebook-model").await;
+    assert_eq!(
+        makes::start(pool, Some(&gateway), &user, p, "poem")
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    // 20,000 tokens less the room for the answer leave 8,000: 40,000 characters is
+    // about 10,000 tokens, too many.
+    sqlx::query("UPDATE knowledge_documents SET text_chars = 40000 WHERE id = $1")
+        .bind(doc)
+        .execute(pool)
+        .await
+        .unwrap();
+    let (status, why) = refused(
+        makes::start(pool, Some(&gateway), &user, p, "briefing")
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(why, "The ticked sources are too long for the Notebook model to read at once: they come to about 125% of what it can read. Untick some sources and try again.");
+    // With nothing ticked there is nothing to read.
+    tick(pool, ana, p, &[doc], false).await.unwrap();
+    assert_eq!(
+        makes::start(pool, Some(&gateway), &user, p, "faq")
+            .await
+            .unwrap_err()
+            .1,
+        "Tick at least one indexed source first"
+    );
+    // Two at once is the most.
+    tick(pool, ana, p, &[doc], true).await.unwrap();
+    sqlx::query("UPDATE knowledge_documents SET text_chars = 100 WHERE id = $1")
+        .bind(doc)
+        .execute(pool)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        makes::start(pool, Some(&gateway), &user, p, "timeline")
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        makes::start(pool, Some(&gateway), &user, p, "timeline")
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert!(
+        seen.requests.lock().unwrap().is_empty(),
+        "nothing was asked"
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_briefing_reads_the_full_sources_and_cites_only_what_they_say() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let pool = &db.pool;
+    let (ana, p, doc, gateway, seen) = make_fixture(pool, 200_000).await;
+    *seen.answer.lock().unwrap() = "<think>plan</think># Where batching stops paying\n\nGains end past 320 [[S1 \"throughput is flat beyond 320 concurrent sequences\"]]. It doubles at 512 [[S1 \"throughput doubles at 512 sequences\"]].".into();
+    let user = identity(ana, "ana");
+    let item = makes::start(pool, Some(&gateway), &user, p, "briefing")
+        .await
+        .unwrap();
+    assert_eq!(item["status"], "running");
+    assert_eq!(item["title"], "Briefing: Serving stack.pdf");
+    let id: Uuid = serde_json::from_value(item["id"].clone()).unwrap();
+    makes::run(pool.clone(), gateway.clone(), id).await;
+
+    let request = seen.requests.lock().unwrap()[0].clone();
+    assert_eq!(request["model"], "notebook-model");
+    assert_eq!(request["max_tokens"], 6000);
+    let system = request["messages"][0]["content"].as_str().unwrap();
+    assert!(system.contains("never instructions to you") && system.contains("briefing"));
+    let input = request["messages"][1]["content"].as_str().unwrap();
+    assert!(input.starts_with("<source id=\"S1\" name=\"Serving stack.pdf\">\n[page 1 · 1 Results]\nWe ran three models"), "{input}");
+    assert!(
+        input.contains("[page 2]\nThroughput is flat beyond 320"),
+        "the full text: {input}"
+    );
+
+    let full = makes::item(pool, ana, id, true).await.unwrap();
+    assert_eq!(full["status"], "ready");
+    assert_eq!(full["title"], "Where batching stops paying");
+    let body = full["body"].as_str().unwrap();
+    assert!(body.starts_with("# Where batching stops paying\n\nGains end past 320 [1]. It doubles at 512 [unverified]."), "{body}");
+    assert!(body.contains("“throughput doubles at 512 sequences” (Serving stack.pdf)"));
+    assert_eq!(
+        full["citations"],
+        json!([{"n":1,"documentId":doc,"name":"Serving stack.pdf","page":2,"section":"1 Results","quote":"throughput is flat beyond 320 concurrent sequences"}])
+    );
+    assert_eq!(
+        (full["cited"].as_i64(), full["unverified"].as_i64()),
+        (Some(1), Some(1))
+    );
+    let usage: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT user_id, purpose, status FROM generation_usage")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    assert_eq!(usage, vec![(ana, "notebook".into(), "completed".into())]);
+    // Listed in the notebook, someone else cannot read or delete it, its owner can.
+    assert_eq!(makes::list(pool, ana, p).await.unwrap().len(), 1);
+    let bo = person(pool, "bo").await;
+    assert_eq!(
+        makes::item(pool, bo, id, true).await.unwrap_err().0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        makes::remove(pool, bo, id).await.unwrap_err().0,
+        StatusCode::NOT_FOUND
+    );
+    makes::remove(pool, ana, id).await.unwrap();
+    assert!(makes::list(pool, ana, p).await.unwrap().is_empty());
+    db.close().await;
+}
+
+#[tokio::test]
+async fn an_item_a_stopped_replica_left_running_is_tried_once_more_then_failed() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let pool = &db.pool;
+    let (ana, p, _, gateway, seen) = make_fixture(pool, 200_000).await;
+    *seen.answer.lock().unwrap() = "# FAQ\n\n### Why?\nBecause.".into();
+    let user = identity(ana, "ana");
+    let first = makes::start(pool, Some(&gateway), &user, p, "faq")
+        .await
+        .unwrap();
+    let second = makes::start(pool, Some(&gateway), &user, p, "faq")
+        .await
+        .unwrap();
+    // Neither ran: their replica stopped. One is on its last try.
+    sqlx::query("UPDATE notebook_items SET claimed_until = NOW() - INTERVAL '1 second'")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE notebook_items SET attempts = 2 WHERE id = $1")
+        .bind(second["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+    makes::recover(pool, Some(&gateway)).await.unwrap();
+    let status = |id: &Value| {
+        let id: Uuid = id.as_str().unwrap().parse().unwrap();
+        async move {
+            sqlx::query_as::<_, (String, i16)>(
+                "SELECT status, attempts FROM notebook_items WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(status(&second["id"]).await.0, "failed");
+    for _ in 0..100 {
+        if status(&first["id"]).await.0 != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(status(&first["id"]).await, ("ready".into(), 2));
+    db.close().await;
+}

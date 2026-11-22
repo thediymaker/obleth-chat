@@ -1,12 +1,15 @@
 //! A project's notebook: the project's documents with a tick each, kept per person, a
 //! chat whose knowledge search is limited to the ticked documents, and, when an
 //! administrator names a Notebook model, a short guide to each new document and a
-//! meter of how much of that model's window the ticked documents take.
+//! meter of how much of that model's window the ticked documents take, and things made
+//! from the ticked documents' full text (makes.rs) with checked quotations (quotes.rs).
 //!
 //! Every document goes through the knowledge visibility rules: a notebook lists, ticks
 //! and searches only documents in the project's collections that the person may open.
 
 pub mod guides;
+pub mod makes;
+pub mod quotes;
 
 use crate::audit::{self, Action, Target};
 use crate::knowledge::VISIBLE as COLLECTION_VISIBLE;
@@ -403,6 +406,11 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/{id}/notebook/collection",
             post(make_collection),
         )
+        .route("/api/projects/{id}/notebook/items", post(make_item))
+        .route(
+            "/api/notebook/items/{id}",
+            get(read_item).delete(remove_item),
+        )
         .route("/api/conversations/{id}/notebook", put(set_chat))
         .route("/api/admin/notebook", get(admin_read).put(admin_save))
         .with_state(state)
@@ -506,6 +514,7 @@ pub async fn view(s: &AppState, user: &Identity, project: Uuid) -> Result<Value,
         "meter": meter,
         "addTo": add_to,
         "canMakeCollection": mine && add_to.is_empty(),
+        "items": makes::list(pool, user.id, project).await?,
     }))
 }
 
@@ -726,6 +735,54 @@ async fn make_collection(
     Ok(Json(json!({"collectionId":collection})))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MakeInput {
+    kind: String,
+}
+
+/// Starts making a briefing, FAQ, study guide or timeline from the ticked sources; it
+/// is written in the background.
+async fn make_item(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<MakeInput>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let user = s.auth.require(&headers, true).await?;
+    knowledge_on(&s)?;
+    let gateway = s
+        .gateway
+        .clone()
+        .ok_or_else(crate::gateway::not_configured)?;
+    let item = makes::start(&s.store.pool, Some(&gateway), &user, id, &body.kind).await?;
+    let made: Uuid =
+        serde_json::from_value(item["id"].clone()).map_err(|_| ApiError::internal())?;
+    tokio::spawn(makes::run(s.store.pool.clone(), gateway, made));
+    Ok((StatusCode::CREATED, Json(json!({"item":item}))))
+}
+
+async fn read_item(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let user = s.auth.require(&headers, false).await?;
+    Ok(Json(
+        json!({"item":makes::item(&s.store.pool, user.id, id, true).await?}),
+    ))
+}
+
+async fn remove_item(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let user = s.auth.require(&headers, true).await?;
+    makes::remove(&s.store.pool, user.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn admin_json(settings: &Settings, s: &AppState) -> Value {
     json!({"model":settings.model,"gateway":s.gateway.is_some(),"knowledge":s.knowledge.is_some()})
 }
@@ -760,9 +817,13 @@ async fn admin_save(
     Ok(Json(admin_json(&saved, &s)))
 }
 
-/// The worker: guides for new documents in projects' collections, on one timer.
+/// The worker, on one timer: guides for new documents in projects' collections, and
+/// items a stopped replica left running.
 pub async fn worker(s: AppState, shutdown: tokio_util::sync::CancellationToken) {
     let pass = || async {
+        if let Err(error) = makes::recover(&s.store.pool, s.gateway.as_ref()).await {
+            tracing::warn!("notebook items: {error}");
+        }
         if let Err(error) = guides::pass(&s.store.pool, s.gateway.as_ref()).await {
             tracing::warn!("notebook guides: {error}");
         }

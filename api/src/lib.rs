@@ -8,6 +8,7 @@ pub mod autopilot;
 pub mod background;
 pub mod banner;
 pub mod batches;
+pub mod board;
 pub mod browser;
 pub mod code;
 pub mod config;
@@ -148,6 +149,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let attachments = attachments::router(state.clone());
     let images = images::router(state.clone());
     let projects = projects::router(state.clone());
+    let board = board::router(state.clone());
     let groups = groups::router(state.clone());
     let shares = shares::router(state.clone());
     let code = code::router(state.clone());
@@ -213,6 +215,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(attachments)
         .merge(images)
         .merge(projects)
+        .merge(board)
         .merge(groups)
         .merge(shares)
         .merge(code)
@@ -1190,6 +1193,16 @@ async fn run_generation(
     if let Some(project) = &project {
         preamble.push(project.prompt());
     }
+    // A chat in a project works its board: models that call tools change it, and
+    // every model sees it, with the card this chat works in full.
+    let board_tools = asks && project.is_some();
+    if let Some(project) = &project {
+        if let Some(view) =
+            board::tools::prompt(&s.store.pool, user.id, project.id, id, board_tools).await
+        {
+            preamble.push(view);
+        }
+    }
     if let Some((sandbox, sandboxes)) = &workspace {
         let instructions = models::agent_instructions(&s.store.pool, user.id).await;
         let context = sandbox::tools::project_context(sandboxes, sandbox).await;
@@ -1341,6 +1354,9 @@ async fn run_generation(
     }
     if knowledge_turn.as_ref().is_some_and(|t| t.library) {
         tools.push(knowledge::chat::save_definition(memory_learns));
+    }
+    if board_tools {
+        tools.extend(board::tools::definitions());
     }
     if asks {
         tools.push(questions::definition());
@@ -1900,6 +1916,7 @@ async fn run_generation(
                     && c.name != browser::tools::REQUEST
                     && c.name != connections::device::REQUEST
                     && c.name != agents::TOOL
+                    && !board::tools::is_tool(&c.name)
                     && !(browsing.is_some() && browser::tools::is_tool(&c.name))
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
             });
@@ -2207,6 +2224,41 @@ async fn run_generation(
                             output
                         }
                         _ => no_such_tool(&call.name),
+                    };
+                    tool_result(&mut payload, &call.id, output);
+                    continue;
+                }
+                if board::tools::is_tool(&call.name) {
+                    // Like save_item, these change only the project's own board, so
+                    // they run without asking.
+                    let output = match project.as_ref().filter(|_| board_tools) {
+                        Some(project) => {
+                            let args: Value =
+                                serde_json::from_str(&call.arguments).unwrap_or(json!({}));
+                            let mut entry = json!({"id":call.id,"tool":call.name,"summary":board::tools::summary(&call.name, &args),"status":"running","startedAt":chrono::Utc::now()});
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry.clone());
+                            let began = Instant::now();
+                            let ctx = board::tools::Ctx {
+                                pool: &s.store.pool,
+                                user: user.id,
+                                conversation: id,
+                                project: project.id,
+                            };
+                            let ran = board::tools::run(&ctx, &call.name, &call.arguments).await;
+                            entry["status"] = json!(if ran.ok { "completed" } else { "error" });
+                            entry["summary"] = json!(ran.summary);
+                            entry["detail"] = json!(ran.output);
+                            entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                            entry["projectId"] = json!(project.id);
+                            if let Some(card) = ran.card {
+                                entry["cardId"] = json!(card);
+                            }
+                            record(&mut activity, &entry, false);
+                            emit(&mut tx, "tool", entry);
+                            ran.output
+                        }
+                        None => no_such_tool(&call.name),
                     };
                     tool_result(&mut payload, &call.id, output);
                     continue;

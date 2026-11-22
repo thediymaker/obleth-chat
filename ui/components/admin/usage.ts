@@ -8,7 +8,7 @@ export const USAGE_PERIODS = [
   [90, "90 days"],
 ] as const;
 import { PERIOD_DAYS } from "@/lib/format";
-export const PURPOSES: Record<string, string> = { chat: "Chat replies", follow_up: "Suggested follow-ups", agent: "Agents", log: "Project log" };
+export const PURPOSES: Record<string, string> = { chat: "Chat replies", follow_up: "Suggested follow-ups", agent: "Agents", log: "Project log", notebook: "Notebook" };
 export const SORTS = [
   ["totalTokens", "Tokens"],
   ["requests", "Requests"],

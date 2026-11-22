@@ -201,6 +201,31 @@ pub async fn reserve_log_in(
     )
     .await
 }
+/// A notebook request (a source's guide, or something made from a notebook's
+/// sources), on one row leased for `lease_seconds`. The caller holds the enabled
+/// owner's users row lock. It runs in the background, so it counts toward the daily
+/// limits but not the account's responses at once.
+pub async fn reserve_notebook_in(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    generation: Uuid,
+    model: &str,
+    max_tokens: i32,
+    context_bytes: usize,
+    lease_seconds: i64,
+) -> Result<(), ApiError> {
+    recover_in(tx, owner).await?;
+    reserve_kind_in(
+        tx,
+        owner,
+        generation,
+        model,
+        max_tokens,
+        context_bytes,
+        Some(("notebook", lease_seconds)),
+    )
+    .await
+}
 async fn reserve_kind_in(
     tx: &mut Transaction<'_, Postgres>,
     owner: Uuid,
@@ -323,10 +348,10 @@ impl Counts {
     }
 }
 /// A reservation still held: a chat turn its conversation still leases, or a follow-up,
-/// worker or log request inside its own lease. Rows aliased `g` in `generation_usage`.
+/// worker, log or notebook request inside its own lease. Rows aliased `g` in `generation_usage`.
 macro_rules! live {
     () => {
-        "((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent','log') AND g.reservation_expires>NOW()))"
+        "((g.purpose='chat' AND EXISTS(SELECT 1 FROM conversations c WHERE c.active_generation=g.generation_id AND c.generation_expires>NOW())) OR (g.purpose IN ('follow_up','agent','log','notebook') AND g.reservation_expires>NOW()))"
     };
 }
 const LIVE: &str = live!();

@@ -18,6 +18,7 @@ import { useFeature } from "@/lib/queries";
 import { useSession, type Banner } from "@/lib/session";
 import { LogCard, type LogSettings } from "./log-card";
 import { MemoryCard, type MemorySettings } from "./memory-card";
+import { NotebookCard, type NotebookSettings } from "./notebook-card";
 
 // ---- About ----
 
@@ -641,6 +642,7 @@ export function SystemTab() {
   const health = useQuery({ queryKey: ["admin", "health"], queryFn: () => api.request<Health>("/api/admin/health").catch(() => null) });
   const decisions = useQuery({ queryKey: ["admin", "decisions"], queryFn: () => orError<Decisions>("/api/admin/decisions") });
   const memory = useQuery({ queryKey: ["admin", "memory"], queryFn: () => orError<MemorySettings>("/api/admin/memory") });
+  const notebook = useQuery({ queryKey: ["admin", "notebook"], queryFn: () => orError<NotebookSettings>("/api/admin/notebook"), enabled: knowledge });
   const banner = useQuery({ queryKey: ["admin", "banner"], queryFn: () => orError<BannerSettings & { error?: string }>("/api/admin/banner") });
   const log = useQuery({ queryKey: ["admin", "log"], queryFn: () => orError<LogSettings>("/api/admin/log") });
   const set = <T,>(key: string) => (value: T) => queries.setQueryData(["admin", key], value);
@@ -729,6 +731,15 @@ export function SystemTab() {
                   queries.invalidateQueries({ queryKey: ["capabilities"] });
                 }}
               />
+            ))}
+          {knowledge &&
+            notebook.data &&
+            (notebook.data.error ? (
+              <Section title="Notebook">
+                <ErrorBox error={notebook.data.error} />
+              </Section>
+            ) : (
+              <NotebookCard key={JSON.stringify(notebook.data)} notebook={notebook.data} onSaved={set<NotebookSettings>("notebook")} />
             ))}
           <Section title="Set where Chat runs" description="The rest is configured with environment variables when Chat is deployed. These guides show how.">
             <div className="grid gap-1">

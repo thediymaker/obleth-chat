@@ -83,8 +83,8 @@ CREATE INDEX project_log_notes_day_id_created_at_idx ON project_log_notes (day_i
 CREATE INDEX research_runs_finished_at_idx ON research_runs (finished_at) WHERE finished_at IS NOT NULL;
 
 -- Writing a day is a request of its own in the usage ledger, inside a lease. The list
--- keeps 'compare', which another change adds in migration 091.
+-- keeps 'compare', which another change adds in migration 091, and 'notebook' from 093.
 ALTER TABLE generation_usage DROP CONSTRAINT generation_usage_purpose_check;
 ALTER TABLE generation_usage ADD CONSTRAINT generation_usage_purpose_check
-    CHECK (purpose IN ('chat', 'follow_up', 'agent', 'compare', 'log')) NOT VALID;
+    CHECK (purpose IN ('chat', 'follow_up', 'agent', 'compare', 'notebook', 'log')) NOT VALID;
 ALTER TABLE generation_usage VALIDATE CONSTRAINT generation_usage_purpose_check;

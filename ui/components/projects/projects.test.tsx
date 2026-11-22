@@ -52,7 +52,7 @@ describe("a new chat's draft", () => {
         ["PUT", "/api/conversations/chat%201/knowledge", { collectionIds: ["c1", "c2"] }],
       ]),
     );
-    expect(chatDraft.get()).toEqual({ project: null, collections: [] });
+    expect(chatDraft.get()).toEqual({ project: null, collections: [], card: null });
     calls.length = 0;
     await applyChatDraft("chat 2");
     expect(calls).toEqual([]);

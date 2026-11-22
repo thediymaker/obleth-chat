@@ -131,15 +131,22 @@ export function ProjectContextSection({ conversationId }: { conversationId: stri
   );
 }
 
-/** "New chat in <project>" over a new chat's composer, with a way out of the project. */
+/** "New chat in <project>" over a new chat's composer, with the board card it works and a way out of the project. */
 export function ProjectComposerChip({ onClear }: { onClear?: () => void }) {
   const p = useChatProject(null);
+  const { card } = useChatDraft();
   if (!p) return null;
   return (
     <div className="flex items-center gap-2 text-sm text-muted-foreground">
       <ProjectDot color={p.color} />
       <span className="truncate">
         New chat in <strong className="font-medium text-foreground">{p.name}</strong>
+        {card && (
+          <>
+            {" "}
+            for the card <strong className="font-medium text-foreground">“{card.title}”</strong>
+          </>
+        )}
       </span>
       <Button
         variant="ghost"

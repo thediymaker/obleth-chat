@@ -4,7 +4,7 @@
 // (Overview, Code, Research, App) that the server and features allow.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Box, Pencil, Plus } from "lucide-react";
+import { ArrowLeft, Box, Code, FlaskConical, LayoutDashboard, NotebookText, Pencil, Plus, ScrollText, SquareKanban } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
@@ -93,14 +93,14 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   const base = `/projects/${encodeURIComponent(p.id)}`;
   const facts = [p.description, count(p.chats, "chat"), knowledge ? count(p.saved, "saved item") : ""].filter(Boolean).join(" · ");
   const list = [
-    { href: base, label: "Overview" },
-    { href: `${base}/board`, label: "Board" },
-    ...(tabs.notebook ? [{ href: `${base}/notebook`, label: "Notebook", prefix: true }] : []),
-    ...(tabs.log ? [{ href: `${base}/log`, label: "Log" }] : []),
+    { href: base, label: "Overview", icon: LayoutDashboard },
+    { href: `${base}/board`, label: "Board", icon: SquareKanban },
+    ...(tabs.notebook ? [{ href: `${base}/notebook`, label: "Notebook", icon: NotebookText, prefix: true }] : []),
+    ...(tabs.log ? [{ href: `${base}/log`, label: "Log", icon: ScrollText }] : []),
     // History, Files and Compare live under /code and keep it highlighted.
-    ...(tabs.code ? [{ href: `${base}/code`, label: "Code", prefix: true }] : []),
-    ...(tabs.research ? [{ href: `${base}/research`, label: "Research" }] : []),
-    ...(tabs.app ? [{ href: `${base}/app`, label: "App" }] : []),
+    ...(tabs.code ? [{ href: `${base}/code`, label: "Code", icon: Code, prefix: true }] : []),
+    ...(tabs.research ? [{ href: `${base}/research`, label: "Research", icon: FlaskConical }] : []),
+    ...(tabs.app ? [{ href: `${base}/app`, label: "App", icon: Box }] : []),
   ];
   // The app and the notebook's three panes take the wider page.
   const wide = path.endsWith("/app") || path.includes("/notebook");
@@ -153,7 +153,7 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
           </>
         }
       >
-        {list.length > 1 && <SectionTabs label="Project" tabs={list} />}
+        {list.length > 1 && <SectionTabs label="Project" tabs={list} compact />}
       </PageHeader>
       <FrameContext.Provider value={{ detail: d, edit: () => setEditing(true) }}>{children}</FrameContext.Provider>
       {mine && <ProjectDialog open={editing} onOpenChange={setEditing} project={p} />}

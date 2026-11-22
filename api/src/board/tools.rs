@@ -269,7 +269,10 @@ fn full(card: &Card, conversation: Uuid) -> String {
         if card.answer.is_empty() {
             text.push_str("Not answered yet.\n");
         } else {
-            text.push_str(&format!("The person answered: {}\n", card.answer));
+            text.push_str(&format!(
+                "The person answered: {}. Go on with that answer.\n",
+                card.answer.trim_end_matches('.')
+            ));
         }
     }
     text.trim_end().to_owned()
@@ -582,9 +585,6 @@ pub async fn prompt(
     if let Some(card) = here {
         text.push_str("\n\n## The card this chat is working on\n");
         text.push_str(&full(card, conversation));
-        if card.answered_at.is_some() && card.status == "doing" && !card.answer.is_empty() {
-            text.push_str("\nGo on with the work using that answer.");
-        }
     }
     if cards.is_empty() {
         text.push_str("\n\nThe board has no cards yet.");
@@ -736,7 +736,7 @@ mod tests {
             .await
             .unwrap();
         assert!(view.contains("The person answered: A key"), "{view}");
-        assert!(view.contains("Go on with the work using that answer."));
+        assert!(view.contains("in Now"), "{view}");
 
         let done = f
             .run(UPDATE, json!({"card": short, "move_to": "done"}))

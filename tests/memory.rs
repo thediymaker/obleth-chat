@@ -625,7 +625,17 @@ async fn a_turn_embeds_its_question_once_for_knowledge_and_memory(pool: PgPool) 
     let question = Question::new(&[("user".to_owned(), format!("Which {marker} model?"))]);
     let user = identity(&newcomer);
     let (turn, recalled) = tokio::join!(
-        knowledge.prepare(&gateway, &user, empty, &[], &question, true, false, None),
+        knowledge.prepare(
+            &gateway,
+            &user,
+            empty,
+            &[],
+            &question,
+            true,
+            false,
+            None,
+            None
+        ),
         memory::recall(&state, &gateway, &user, empty, &question)
     );
     assert!(turn.is_none() && !recalled.is_some_and(|r| r.recalled()));
@@ -656,7 +666,7 @@ async fn a_turn_embeds_its_question_once_for_knowledge_and_memory(pool: PgPool) 
     let user = identity(&person);
     let attached = [collection];
     let (turn, recalled) = tokio::join!(
-        knowledge.prepare(&gateway, &user, id, &attached, &question, true, false, None),
+        knowledge.prepare(&gateway, &user, id, &attached, &question, true, false, None, None),
         memory::recall(&state, &gateway, &user, id, &question)
     );
     assert!(turn.is_some());

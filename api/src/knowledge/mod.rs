@@ -363,10 +363,16 @@ impl Knowledge {
             };
             job.claimed = renewed;
         }
-        let finished = sqlx::query("UPDATE knowledge_documents SET status='ready', stage='', passages=$2, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$3")
+        // The stored passages' length, overlaps included, which a notebook's meter adds up.
+        let text_chars: i64 = passages
+            .iter()
+            .map(|p| p.text.chars().count().min(7900) as i64)
+            .sum();
+        let finished = sqlx::query("UPDATE knowledge_documents SET status='ready', stage='', passages=$2, text_chars=$4, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$3")
             .bind(job.id)
             .bind(passages.len() as i32)
             .bind(job.claimed)
+            .bind(text_chars)
             .execute(&self.pool)
             .await?;
         if finished.rows_affected() == 0 {
@@ -435,6 +441,20 @@ impl Knowledge {
         query: &str,
         limit: usize,
     ) -> Result<Vec<Hit>, ApiError> {
+        self.search_in(gateway, user, collections, None, query, limit)
+            .await
+    }
+
+    /// `search`, limited to `documents` when given (a notebook's ticked sources).
+    pub async fn search_in(
+        &self,
+        gateway: &Gateway,
+        user: &Identity,
+        collections: &[Uuid],
+        documents: Option<&[Uuid]>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Hit>, ApiError> {
         let query = query.trim();
         if query.is_empty() || collections.is_empty() {
             return Ok(vec![]);
@@ -451,15 +471,17 @@ impl Knowledge {
             .pop()
             .map(vector_literal)
             .ok_or_else(ApiError::internal)?;
-        self.passages(&allowed, &vector, &words(&text), limit).await
+        self.passages(&allowed, documents, &vector, &words(&text), limit)
+            .await
     }
 
-    /// `search` for a turn's question, whose vector memory may already have made.
+    /// `search_in` for a turn's question, whose vector memory may already have made.
     pub async fn search_question(
         &self,
         gateway: &Gateway,
         user: &Identity,
         collections: &[Uuid],
+        documents: Option<&[Uuid]>,
         question: &chat::Question,
         limit: usize,
     ) -> Result<Vec<Hit>, ApiError> {
@@ -473,14 +495,16 @@ impl Knowledge {
         let Some(vector) = question.vector(self, gateway, user).await else {
             return Ok(vec![]);
         };
-        self.passages(&allowed, vector, &words(&question.text), limit)
+        self.passages(&allowed, documents, vector, &words(&question.text), limit)
             .await
     }
 
-    /// Passages in `allowed` collections nearest `vector` and best for `words`.
-    async fn passages(
+    /// Passages in `allowed` collections, and in `documents` when given, nearest
+    /// `vector` and best for `words`.
+    pub(crate) async fn passages(
         &self,
         allowed: &[Uuid],
+        documents: Option<&[Uuid]>,
         vector: &str,
         words: &str,
         limit: usize,
@@ -494,12 +518,12 @@ impl Knowledge {
             "WITH vec AS (
                 SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::halfvec) AS r
                 FROM (SELECT id, embedding FROM knowledge_passages WHERE collection_id = ANY($1)
-                      ORDER BY embedding <=> $2::halfvec LIMIT 40) v
+                      AND ($5::uuid[] IS NULL OR document_id = ANY($5)) ORDER BY embedding <=> $2::halfvec LIMIT 40) v
              ), kw AS (
                 SELECT id, ROW_NUMBER() OVER (ORDER BY rank DESC) AS r FROM (
                     SELECT p.id, ts_rank_cd(p.tsv, q) AS rank
                     FROM knowledge_passages p, to_tsquery('english', $3) q
-                    WHERE $3 <> '' AND p.collection_id = ANY($1) AND p.tsv @@ q
+                    WHERE $3 <> '' AND p.collection_id = ANY($1) AND ($5::uuid[] IS NULL OR p.document_id = ANY($5)) AND p.tsv @@ q
                     ORDER BY rank DESC LIMIT 40) k
              ), fused AS (
                 SELECT id, SUM(1.0 / (60 + r)) AS score, BOOL_OR(src = 'v') AS by_meaning, BOOL_OR(src = 'k') AS by_words
@@ -513,6 +537,7 @@ impl Knowledge {
         .bind(vector)
         .bind(words)
         .bind(limit as i64)
+        .bind(documents)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;

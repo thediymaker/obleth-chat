@@ -195,6 +195,11 @@ async fn main() -> Result<()> {
         state.clone(),
         state.shutdown.clone(),
     ));
+    // Guides for new documents in projects, while a Notebook model is named.
+    tokio::spawn(obleth_chat::notebook::worker(
+        state.clone(),
+        state.shutdown.clone(),
+    ));
     tokio::spawn(obleth_chat::retention::temporary_worker(
         state.store.clone(),
         state.shutdown.clone(),

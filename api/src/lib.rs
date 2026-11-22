@@ -28,6 +28,7 @@ pub mod mcp;
 pub mod memory;
 pub mod metrics;
 pub mod models;
+pub mod notebook;
 pub mod operations;
 pub mod paging;
 pub mod pause;
@@ -166,6 +167,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let apps = apps::router(state.clone());
     let mcp = mcp::router(state.clone());
     let memory = memory::router(state.clone());
+    let notebook = notebook::router(state.clone());
     let batches = batches::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
@@ -231,6 +233,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(apps)
         .merge(mcp)
         .merge(memory)
+        .merge(notebook)
         .merge(batches)
         .fallback_service(web(branding_dir, ui_url, sandboxes.as_ref()))
         .layer(DefaultBodyLimit::max(128 * 1024))
@@ -1046,7 +1049,17 @@ async fn run_generation(
     );
     let knowledge_search = async {
         let k = s.knowledge.as_ref()?;
-        let attached = attached_documents(&s, k, &user, id, &turn).await;
+        // A notebook chat searches only the documents its owner ticked.
+        let notebook = notebook::restriction(&s.store.pool, user.id, id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("could not read a notebook chat's sources: {error}");
+                None
+            });
+        let attached = match notebook {
+            Some(_) => vec![],
+            None => attached_documents(&s, k, &user, id, &turn).await,
+        };
         let tools = resolved.capabilities.supports_function_calling != Some(false);
         let library = resolved.capabilities.supports_function_calling == Some(true);
         k.prepare(
@@ -1058,6 +1071,7 @@ async fn run_generation(
             tools,
             library,
             project.as_ref(),
+            notebook,
         )
         .await
     };

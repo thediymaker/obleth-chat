@@ -106,6 +106,7 @@ export function auditSentence(e: AuditEvent): Part[] {
       return [actor, image ? (m.removed ? ` removed ${image}` : ` set ${image}`) : " changed the branding"];
     },
     "memory.update": () => [actor, m.enabled === false ? " turned memory off" : " changed the memory settings"],
+    "log.update": () => [actor, m.enabled === false ? " turned the project log off" : " changed the project log settings"],
     "feedback.button": () => [actor, m.mode === "off" ? " turned the Feedback button off" : m.mode === "sidebar" ? " put the Feedback button in the sidebar" : " highlighted the Feedback button"],
     "knowledge.embedding.update": () => [actor, " changed the knowledge search model"],
     "retention.update": () => [actor, " changed data retention"],

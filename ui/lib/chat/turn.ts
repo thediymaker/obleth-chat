@@ -12,7 +12,7 @@ export const TOOL_ICONS: Record<string, string> = {
   experiment_create: "branch", experiment_checkout: "branch", experiment_run: "play", experiment_wait: "clock", run_log: "file",
   read_paper: "book", report_check: "shield", delegate: "users", output_limit: "info", connection: "info", thinking_limit: "info",
   check: "check", browser_search: "search", browser_open: "globe", browser_click: "cursor", browser_type: "edit", browser_read: "file",
-  browser_scroll: "down", browser_back: "globe", pause_work: "pause", board_list: "grid", board_add: "plus", board_update: "check",
+  browser_scroll: "down", browser_back: "globe", pause_work: "pause", board_list: "grid", board_add: "plus", board_update: "check", project_log: "book",
 };
 const RESEARCH = new Set(["research_setup", "research_status", "experiment_create", "experiment_checkout", "experiment_run", "experiment_wait", "run_log", "read_paper", "report_check"]);
 const BOARD = new Set(["board_list", "board_add", "board_update"]);

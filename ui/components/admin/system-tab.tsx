@@ -1,7 +1,8 @@
 "use client";
 
 // Administration › System: which Chat this is, the banner, data retention, knowledge
-// search's embedding model, decisions, memory, and guides for everything set where Chat runs.
+// search's embedding model, decisions, memory, the project log, and guides for
+// everything set where Chat runs.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, BookOpen, Box, ExternalLink, Link2, Lock, Settings, Shield, Terminal } from "lucide-react";
@@ -15,6 +16,7 @@ import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useFeature } from "@/lib/queries";
 import { useSession, type Banner } from "@/lib/session";
+import { LogCard, type LogSettings } from "./log-card";
 import { MemoryCard, type MemorySettings } from "./memory-card";
 
 // ---- About ----
@@ -640,6 +642,7 @@ export function SystemTab() {
   const decisions = useQuery({ queryKey: ["admin", "decisions"], queryFn: () => orError<Decisions>("/api/admin/decisions") });
   const memory = useQuery({ queryKey: ["admin", "memory"], queryFn: () => orError<MemorySettings>("/api/admin/memory") });
   const banner = useQuery({ queryKey: ["admin", "banner"], queryFn: () => orError<BannerSettings & { error?: string }>("/api/admin/banner") });
+  const log = useQuery({ queryKey: ["admin", "log"], queryFn: () => orError<LogSettings>("/api/admin/log") });
   const set = <T,>(key: string) => (value: T) => queries.setQueryData(["admin", key], value);
   const pages: [typeof Box, string, string, string][] = [
     [Box, "Connect the gateway", "/connect-gateway", "Model access and inference through Obleth"],
@@ -708,6 +711,21 @@ export function SystemTab() {
                 memory={memory.data}
                 onSaved={(saved) => {
                   set<MemorySettings>("memory")(saved);
+                  queries.invalidateQueries({ queryKey: ["capabilities"] });
+                }}
+              />
+            ))}
+          {log.data &&
+            (log.data.error ? (
+              <Section title="Project log">
+                <ErrorBox error={log.data.error} />
+              </Section>
+            ) : (
+              <LogCard
+                key={`log-${JSON.stringify(log.data)}`}
+                log={log.data}
+                onSaved={(saved) => {
+                  set<LogSettings>("log")(saved);
                   queries.invalidateQueries({ queryKey: ["capabilities"] });
                 }}
               />

@@ -7,7 +7,7 @@ import { ProjectResearch } from "./project-research";
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
 vi.mock("@/components/chat/chat-provider", () => import("@/components/workspace/test-store"));
 const push = vi.fn();
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: vi.fn() }), usePathname: () => "/projects/p1/research" }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: vi.fn() }), usePathname: () => "/projects/p1/research", useSearchParams: () => new URLSearchParams() }));
 vi.mock("sonner", () => ({ toast: vi.fn() }));
 let mine = true;
 vi.mock("@/components/projects/project-frame", () => ({ useProjectFrame: () => ({ detail: { project: { id: "p1", name: "Decode", mine } } }) }));

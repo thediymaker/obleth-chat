@@ -31,14 +31,15 @@ export function useProjectFrame() {
   return value;
 }
 
-export type ProjectTab = "overview" | "code" | "research" | "app";
+export type ProjectTab = "overview" | "log" | "code" | "research" | "app";
 
 /** Which tabs a project shows: Code with the code feature, Research with workspaces, App for administrators on their own projects. */
 export function useProjectTabs(detail?: ProjectDetail): Record<ProjectTab, boolean> {
   const code = useFeature("code");
   const research = useFeature("workspaces");
   const { isAdmin } = useSession();
-  return { overview: true, code, research, app: isAdmin && !!detail?.project.mine };
+  const log = useFeature("myLog");
+  return { overview: true, log, code, research, app: isAdmin && !!detail?.project.mine };
 }
 
 /** Starts a new chat that goes into the project once it is sent. */
@@ -93,6 +94,7 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   const list = [
     { href: base, label: "Overview" },
     { href: `${base}/board`, label: "Board" },
+    ...(tabs.log ? [{ href: `${base}/log`, label: "Log" }] : []),
     // History, Files and Compare live under /code and keep it highlighted.
     ...(tabs.code ? [{ href: `${base}/code`, label: "Code", prefix: true }] : []),
     ...(tabs.research ? [{ href: `${base}/research`, label: "Research" }] : []),

@@ -50,13 +50,16 @@ export interface Notebook {
   addTo: string[];
   /** The project's owner can have a collection made for added sources. */
   canMakeCollection: boolean;
+  /** What the person made from the sources here, newest first. */
+  items: NotebookItem[];
 }
 
 export const notebookPath = (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}/notebook`;
 export const notebookKey = (projectId: string) => ["notebook", projectId] as const;
 export const notebookHref = (projectId: string, chatId?: string | null) => `/projects/${encodeURIComponent(projectId)}/notebook${chatId ? `/${encodeURIComponent(chatId)}` : ""}`;
 
-const working = (n: Notebook) => n.collections.some((g) => g.documents.some((d) => d.status === "queued" || d.status === "processing" || d.guide?.status === "running"));
+const working = (n: Notebook) =>
+  n.items?.some((i) => i.status === "running") || n.collections.some((g) => g.documents.some((d) => d.status === "queued" || d.status === "processing" || d.guide?.status === "running"));
 
 /** The notebook, asked again every few seconds while a source is indexed or its guide written. */
 export function useNotebook(projectId: string) {
@@ -125,3 +128,52 @@ export function noteBody(content: string, items: { n: number; name: string; page
   const lines = items.filter((s) => cited.has(s.n)).map((s) => `[${s.n}] ${s.name}${s.page ? `, page ${s.page}` : ""}`);
   return lines.length ? `${content.trim()}\n\nSources\n${lines.join("\n")}` : content.trim();
 }
+
+/** Something made from the sources, as the notebook lists it; opened, with its text and citations. */
+export interface NotebookItem {
+  id: string;
+  kind: string;
+  title: string;
+  status: "running" | "ready" | "failed";
+  sources: { id: string; name: string }[];
+  /** Verified quotations, shown as [n]. */
+  cited: number;
+  /** Quotations not found in their source, never shown as citations. */
+  unverified: number;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  body?: string;
+  citations?: Citation[];
+}
+export interface Citation {
+  n: number;
+  documentId: string;
+  name: string;
+  page: number | null;
+  section: string | null;
+  quote: string;
+}
+
+/** What can be made: kind, name, and a few words on it. */
+export const KINDS: [string, string, string][] = [
+  ["briefing", "Briefing", "Two pages"],
+  ["faq", "FAQ", "What people ask"],
+  ["study_guide", "Study guide", "With questions"],
+  ["timeline", "Timeline", "Who found what, when"],
+];
+
+/** Starts making `kind` from the ticked sources. */
+export const startItem = (projectId: string, kind: string) => api.request<{ item: NotebookItem }>(`${notebookPath(projectId)}/items`, { method: "POST", body: { kind } });
+export const removeItem = (id: string) => api.request(`/api/notebook/items/${encodeURIComponent(id)}`, { method: "DELETE" });
+export function useNotebookItem(id: string | null) {
+  return useQuery({
+    queryKey: ["notebook-item", id],
+    queryFn: async () => (await api.request<{ item: NotebookItem }>(`/api/notebook/items/${encodeURIComponent(id!)}`)).item,
+    enabled: !!id,
+  });
+}
+/** An item's citations as the chat's sources, so [n] link and quote the same way. */
+export const citationItems = (item: NotebookItem) => (item.citations ?? []).map((c) => ({ n: c.n, documentId: c.documentId, name: c.name, page: c.page, section: c.section, excerpt: c.quote }));
+/** Why nothing can be made while the ticked sources do not fit. */
+export const meterRefusal = (m: Meter) => `The ticked sources are too long for the Notebook model to read at once: they come to about ${m.percent}% of what it can read. Untick some sources to make something from them.`;

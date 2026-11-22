@@ -2,8 +2,9 @@
 
 // A project's Notebook tab: the project's sources with a tick each (kept per person),
 // a chat that answers from the ticked ones with numbered citations, and, beside it,
-// what the notebook keeps. Three panes that stack on a phone. The chat is the real
-// chat (the store, its messages and composer), shown at /projects/<id>/notebook/<chat>.
+// things made from the sources (studio.tsx). Three panes that stack on a phone. The
+// chat is the real chat (the store, its messages and composer), shown at
+// /projects/<id>/notebook/<chat>.
 
 import { useQueryClient } from "@tanstack/react-query";
 import { BookOpen, ChevronDown, ExternalLink, FilePlus2, Plus, Upload } from "lucide-react";
@@ -19,7 +20,6 @@ import { ACCEPT, fileUrl, refreshKnowledge, uploadDocument } from "@/components/
 import { CitationContext, type CitationFocus, sourcesOf } from "@/components/knowledge/chat-knowledge";
 import { Status } from "@/components/knowledge/collection-page";
 import { Meter as Bar, messageOf, Note } from "@/components/manage/kit";
-import { useProjectFrame } from "@/components/projects/project-frame";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -29,8 +29,8 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { count, when } from "@/lib/format";
 import { keys } from "@/lib/queries";
-import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
+import { StudioPane } from "./studio";
 import { makeCollection, meterText, type Notebook, noteBody, notebookHref, notebookKey, type Source, setOnlySources, setTicked, sourceMeta, startChat, suggestions, useNotebook } from "./api";
 
 /** The most characters of pasted text, as the server reads a text file. */
@@ -69,7 +69,7 @@ export function ProjectNotebook({ projectId, chatId }: { projectId: string; chat
     <div data-notebook className="grid overflow-hidden rounded-xl border bg-background lg:grid-cols-[minmax(250px,300px)_minmax(0,1fr)_minmax(240px,290px)]">
       <SourcesPane projectId={projectId} n={n} />
       <AnswersPane projectId={projectId} chatId={chatId} n={n} />
-      <StudioPane n={n} />
+      <StudioPane projectId={projectId} n={n} />
     </div>
   );
 }
@@ -449,48 +449,5 @@ function NotebookMessages({ projectId }: { projectId: string }) {
         </Fragment>
       ))}
     </div>
-  );
-}
-
-// ---- What the notebook keeps ----
-
-function StudioPane({ n }: { n: Notebook }) {
-  const { detail } = useProjectFrame();
-  const { isAdmin } = useSession();
-  const notes = detail.saved.filter((s) => s.kind === "note" || s.kind === "excerpt").slice(0, 8);
-  return (
-    <aside aria-label="In this notebook" className="grid content-start gap-4 px-4 py-4 lg:border-l">
-      {isAdmin && !n.model.set && <AdminHint />}
-      <section className="grid gap-2">
-        <Eyebrow>Notes in this project</Eyebrow>
-        {notes.length ? (
-          <ul className="grid gap-1">
-            {notes.map((s) => (
-              <li key={s.id}>
-                <Link href={`/library/${encodeURIComponent(s.id)}`} className="grid gap-0.5 rounded-md border px-3 py-2 hover:bg-accent">
-                  <span className="truncate text-md">{s.title}</span>
-                  <span className="text-xs text-muted-foreground">{when(String(s.createdAt || ""))}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-muted-foreground">Answers you save as a note appear here.</p>
-        )}
-      </section>
-    </aside>
-  );
-}
-
-/** Where an administrator names the Notebook model, while none is named. */
-function AdminHint() {
-  return (
-    <Note data-admin-hint>
-      Name a Notebook model in{" "}
-      <Link href="/settings/admin/system" className="underline underline-offset-2">
-        Administration › System
-      </Link>{" "}
-      to give each new source a short guide and suggested questions.
-    </Note>
   );
 }

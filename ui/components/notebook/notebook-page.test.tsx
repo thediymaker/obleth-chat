@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { polyfillLayout, renderWithQueries } from "@/components/chat/test-queries";
-import type { Notebook, Source } from "./api";
+import type { Notebook, NotebookItem, Source } from "./api";
 import { noteBody, suggestions } from "./api";
 
 const h = vi.hoisted(() => ({
@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
       await action();
     },
     saveFromChat: vi.fn(),
+    openDialog: vi.fn(),
   },
 }));
 
@@ -29,6 +30,7 @@ vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api"
 vi.mock("@/lib/session", () => ({ useSession: () => ({ phase: "ready", isAdmin: h.admin }), useUser: () => ({ id: "u1", role: "user" }), useSignedIn: () => true }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: h.push, replace: h.replace }), usePathname: () => "/projects/p1/notebook", useParams: () => ({ id: "p1" }), useSearchParams: () => new URLSearchParams() }));
 vi.mock("@/components/chat/chat-provider", () => ({ useChat: () => h.store, useChatContent: () => h.store, useChatStore: () => h.store }));
+vi.mock("@/components/chat/markdown-view", () => ({ Markdown: ({ text, cite }: { text: string; cite?: (html: string) => string }) => <div dangerouslySetInnerHTML={{ __html: cite ? cite(`<p>${text}</p>`) : text }} /> }));
 vi.mock("@/components/chat/composer", () => ({ Composer: ({ placeholder }: { placeholder: string }) => <textarea aria-label="Message" placeholder={placeholder} /> }));
 // A reply as the chat draws it: its text with each [n] linked, and its sources card.
 vi.mock("@/components/chat/message", async () => {
@@ -100,6 +102,7 @@ function notebook(more: Partial<Notebook> = {}): Notebook {
     meter: { chars: 244000, tokens: 61000, capacity: 100000, percent: 61, fits: true },
     addTo: ["k1"],
     canMakeCollection: false,
+    items: [],
     ...more,
   };
 }
@@ -214,4 +217,70 @@ test("suggested questions take turns between sources, and notes list what they c
   expect(suggestions(n)).toEqual(["Where does throughput flatten?", "Q2a", "Which models were tried?", "Q2b"]);
   expect(noteBody("No citations here.", [])).toBe("No citations here.");
   expect(noteBody("A [2] and B [1, 2].", [{ n: 1, name: "a.pdf" }, { n: 2, name: "b.pdf", page: 3 }, { n: 3, name: "c.pdf" }])).toBe("A [2] and B [1, 2].\n\nSources\n[1] a.pdf\n[2] b.pdf, page 3");
+});
+
+// ---- Make from the sources ----
+
+const item = (id: string, more: Partial<NotebookItem> = {}): NotebookItem => ({
+  id,
+  kind: "briefing",
+  title: `Briefing ${id}`,
+  status: "ready",
+  sources: [{ id: "serving", name: "serving.pdf" }],
+  cited: 1,
+  unverified: 0,
+  error: null,
+  createdAt: "2026-11-20T10:00:00Z",
+  finishedAt: "2026-11-20T10:02:00Z",
+  ...more,
+});
+
+test("without a Notebook model there are no tiles to make anything", async () => {
+  h.request.mockResolvedValue(notebook({ model: { set: false, available: false }, meter: null }));
+  show("c1");
+  await screen.findByRole("complementary", { name: "Sources" });
+  expect(screen.queryByRole("button", { name: /Briefing/ })).not.toBeInTheDocument();
+  expect(screen.queryByText("Make from the sources")).not.toBeInTheDocument();
+});
+
+test("a tile starts making it from the ticked sources", async () => {
+  h.request.mockImplementation(async (path: string) => (path === "/api/projects/p1/notebook/items" ? { item: item("i9", { status: "running" }) } : notebook()));
+  show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Make from the sources" });
+  await userEvent.click(within(pane).getByRole("button", { name: /Study guide/ }));
+  expect(h.request).toHaveBeenCalledWith("/api/projects/p1/notebook/items", { method: "POST", body: { kind: "study_guide" } });
+});
+
+test("sources too long for the model are refused before anything is asked", async () => {
+  h.request.mockResolvedValue(notebook({ meter: { chars: 500000, tokens: 125000, capacity: 100000, percent: 125, fits: false } }));
+  show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Make from the sources" });
+  expect(within(pane).getByRole("button", { name: /Briefing/ })).toBeDisabled();
+  expect(within(pane).getByText(/too long for the Notebook model to read at once: they come to about 125%/)).toBeInTheDocument();
+});
+
+test("a running item is alive, and a ready one opens with its checked citations", async () => {
+  const full = { ...item("i2"), body: "# Briefing i2\n\nFlat past 320 [1].", citations: [{ n: 1, documentId: "serving", name: "serving.pdf", page: 10, section: null, quote: "throughput is flat beyond 320" }] };
+  h.request.mockImplementation(async (path: string) => {
+    if (path === "/api/notebook/items/i2") return { item: full };
+    return notebook({ items: [item("i1", { status: "running", title: "Timeline of 1 source" }), item("i2"), item("i3", { status: "failed", error: "The model wrote nothing" })] });
+  });
+  const { container } = show("c1");
+  const kept = await screen.findByRole("region", { name: "In this notebook" });
+  expect(within(kept).getByRole("status")).toHaveTextContent("Reading 1 source");
+  expect(container.querySelectorAll(".signal-pulse")).toHaveLength(1);
+  expect(within(kept).getByText("The model wrote nothing")).toBeInTheDocument();
+  await userEvent.click(within(kept).getByRole("button", { name: /^Briefing i2/ }));
+  const dialog = await screen.findByRole("dialog");
+  expect(await within(dialog).findByText(/1 quotation checked against the sources/)).toBeInTheDocument();
+  const cite = within(dialog).getByRole("link", { name: "1" });
+  expect(cite).toHaveAttribute("href", "/api/knowledge/documents/serving/file#page=10");
+  fireEvent.click(cite);
+  expect(within(dialog).getByRole("region", { name: "Source 1" })).toHaveTextContent("“throughput is flat beyond 320”");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Save as a note" }));
+  expect(h.store.openDialog).toHaveBeenCalledWith({ kind: "save", item: { kind: "note", title: "Briefing i2", body: "# Briefing i2\n\nFlat past 320 [1].\n\nSources\n[1] serving.pdf, page 10", projectId: "p1" } });
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(within(kept).getByRole("button", { name: "Delete Briefing i3" }));
+  expect(h.request).toHaveBeenCalledWith("/api/notebook/items/i3", { method: "DELETE" });
+  expect(within(kept).queryByRole("button", { name: /^Delete Timeline/ })).not.toBeInTheDocument();
 });

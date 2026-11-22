@@ -31,14 +31,15 @@ export function useProjectFrame() {
   return value;
 }
 
-export type ProjectTab = "overview" | "code" | "research" | "app";
+export type ProjectTab = "overview" | "notebook" | "code" | "research" | "app";
 
-/** Which tabs a project shows: Code with the code feature, Research with workspaces, App for administrators on their own projects. */
+/** Which tabs a project shows: Notebook with knowledge, Code with the code feature, Research with workspaces, App for administrators on their own projects. */
 export function useProjectTabs(detail?: ProjectDetail): Record<ProjectTab, boolean> {
+  const notebook = useFeature("knowledge");
   const code = useFeature("code");
   const research = useFeature("workspaces");
   const { isAdmin } = useSession();
-  return { overview: true, code, research, app: isAdmin && !!detail?.project.mine };
+  return { overview: true, notebook, code, research, app: isAdmin && !!detail?.project.mine };
 }
 
 /** Starts a new chat that goes into the project once it is sent. */
@@ -92,12 +93,14 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   const facts = [p.description, count(p.chats, "chat"), knowledge ? count(p.saved, "saved item") : ""].filter(Boolean).join(" · ");
   const list = [
     { href: base, label: "Overview" },
+    ...(tabs.notebook ? [{ href: `${base}/notebook`, label: "Notebook", prefix: true }] : []),
     // History, Files and Compare live under /code and keep it highlighted.
     ...(tabs.code ? [{ href: `${base}/code`, label: "Code", prefix: true }] : []),
     ...(tabs.research ? [{ href: `${base}/research`, label: "Research" }] : []),
     ...(tabs.app ? [{ href: `${base}/app`, label: "App" }] : []),
   ];
-  const onApp = path.endsWith("/app");
+  // The app and the notebook's three panes take the wider page.
+  const wide = path.endsWith("/app") || path.includes("/notebook");
 
   async function makeApp() {
     setMaking(true);
@@ -115,7 +118,7 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <Page className={onApp ? "max-w-[1600px]" : undefined}>
+    <Page className={wide ? "max-w-[1600px]" : undefined}>
       <PageHeader
         breadcrumb={
           <nav aria-label="Breadcrumb" className="-mb-1 flex items-center gap-1.5 text-sm text-muted-foreground">

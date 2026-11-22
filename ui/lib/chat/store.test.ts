@@ -433,3 +433,9 @@ describe("the content signal", () => {
     expect(content).toHaveBeenCalledTimes(51);
   });
 });
+
+it("a project notebook's chat is the chat on screen; the notebook without one is not", () => {
+  expect(routeOf("/projects/p1/notebook/c%201")).toEqual({ page: "chat", id: "c 1" });
+  expect(routeOf("/projects/p1/notebook")).toEqual({ page: "projects", id: "p1" });
+  expect(routeOf("/projects/p1/code/c1")).toEqual({ page: "projects", id: "p1" });
+});

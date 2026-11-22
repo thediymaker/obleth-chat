@@ -143,7 +143,7 @@ function NowRow({ cards, ctx }: { cards: Card[]; ctx: BoardContext }) {
         <span className="text-sm text-muted-foreground">{cards.length ? `${summary ? `${summary[0]!.toUpperCase()}${summary.slice(1)}.` : "Being worked on."}` : "Nothing is being worked on. Start a card with the assistant, or take one yourself."}</span>
       </div>
       {cards.length > 0 && (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-3">
           {cards.map((card) => (
             <NowCard key={card.id} card={card} ctx={ctx} />
           ))}
@@ -157,8 +157,10 @@ function NowRow({ cards, ctx }: { cards: Card[]; ctx: BoardContext }) {
 function nowStatus(card: Card, me: string) {
   if (alive(card)) return card.chat?.waiting ? "Waiting for a yes or no in its chat" : card.progress || "Working in its chat";
   if (card.progress) return card.progress;
+  if (card.worker === "assistant" && !card.chat) return "Its chat was deleted";
+  // The assistant's chat is between replies: where the steps stand.
+  if (card.worker === "assistant") return stepsLine(card.steps) || "Between replies in its chat";
   const who = workerName(card, me);
-  if (card.worker === "assistant") return "The assistant is on it; its chat is not writing now";
   return who && card.startedAt ? `${who} started this ${ago(card.startedAt)}` : stepsLine(card.steps);
 }
 
@@ -304,18 +306,18 @@ function DoneColumn({ ctx, cards, total }: { ctx: BoardContext; cards: Card[]; t
         <BoardCard key={card.id} card={card} ctx={ctx} onDropBefore={() => drop(ctx, "done", cards)} />
       ))}
       {!all && total > DONE_SHOWN && (
-        <Button variant="ghost" size="sm" className="justify-self-start" onClick={() => setAll(true)}>
+        <Button variant="ghost" size="sm" className="self-start" onClick={() => setAll(true)}>
           {total - DONE_SHOWN} more
         </Button>
       )}
       {all && more.isPending && <Loading compact />}
       {all && more.data?.more && (
-        <Button variant="ghost" size="sm" className="justify-self-start" onClick={() => setLimit((n) => n + 100)}>
+        <Button variant="ghost" size="sm" className="self-start" onClick={() => setLimit((n) => n + 100)}>
           Show more
         </Button>
       )}
       {all && (
-        <Button variant="ghost" size="sm" className="justify-self-start" onClick={() => setAll(false)}>
+        <Button variant="ghost" size="sm" className="self-start" onClick={() => setAll(false)}>
           Show fewer
         </Button>
       )}
@@ -345,7 +347,7 @@ function AddIdea({ projectId }: { projectId: string }) {
         }
       }}
     >
-      <Input aria-label="Add an idea" placeholder="Add an idea…" value={title} maxLength={LIMITS.title} disabled={busy} onChange={(e) => setTitle(e.target.value)} />
+      <Input aria-label="Add an idea" placeholder="Add an idea…" value={title} maxLength={LIMITS.title} readOnly={busy} onChange={(e) => setTitle(e.target.value)} />
     </form>
   );
 }

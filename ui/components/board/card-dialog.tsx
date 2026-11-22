@@ -153,7 +153,7 @@ function OpenCard({ card, history, actions, onDelete, onClose }: { card: Card; h
               </LinkRow>
             )}
             {card.links.map((l, i) => (
-              <LinkRow key={i} label={l.kind}>
+              <LinkRow key={i} label={l.kind ? `${l.kind[0]!.toUpperCase()}${l.kind.slice(1)}` : "Link"}>
                 <span className="font-mono text-sm">{l.label || l.ref}</span>
               </LinkRow>
             ))}
@@ -229,7 +229,7 @@ function OpenCard({ card, history, actions, onDelete, onClose }: { card: Card; h
 function LinkRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex min-w-0 items-baseline gap-3">
-      <span className="w-16 shrink-0 text-xs text-muted-foreground capitalize">{label}</span>
+      <span className="w-16 shrink-0 text-xs text-muted-foreground">{label}</span>
       <span className="min-w-0 break-words">{children}</span>
     </div>
   );

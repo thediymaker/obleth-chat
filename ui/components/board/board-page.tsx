@@ -66,8 +66,10 @@ export function ProjectBoard() {
         />
       )}
       {!empty && <NowRow cards={cols.now} ctx={ctx} />}
-      <div className="-mx-1 overflow-x-auto px-1 pb-2" role="group" aria-label="Board columns">
-        <div className="grid min-w-[920px] grid-cols-4 items-start gap-3">
+      {/* One column under another on a phone, two side by side on a tablet, all four from
+          a laptop up (scrolling sideways when the window is narrower than they need). */}
+      <div className="-mx-1 px-1 pb-2 lg:overflow-x-auto" role="group" aria-label="Board columns">
+        <div className="grid grid-cols-1 items-start gap-x-3 gap-y-6 sm:grid-cols-2 lg:min-w-[920px] lg:grid-cols-4 lg:gap-y-3">
           <Column ctx={ctx} status="idea" name="Ideas" hint="Yours and the assistant’s. Nothing here runs." cards={cols.ideas}>
             <AddIdea projectId={projectId} />
           </Column>

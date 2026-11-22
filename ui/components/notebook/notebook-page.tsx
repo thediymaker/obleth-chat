@@ -202,7 +202,7 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
             </ul>
             {g.total > g.documents.length && (
               <Link href={`/knowledge/${encodeURIComponent(g.id)}`} className="px-1.5 pt-1 pl-8 text-xs text-muted-foreground hover:text-foreground">
-                {count(g.total - g.documents.length, "more")} in the collection
+                {g.total - g.documents.length} more in the collection
               </Link>
             )}
           </section>
@@ -220,8 +220,16 @@ function SourceRow({ d, open, onOpen, onTick, onAsk }: { d: Source; open: boolea
       <div className="flex items-start gap-2.5 rounded-md px-1.5 py-1.5 hover:bg-accent">
         <Checkbox className="mt-0.5" checked={d.ticked} onCheckedChange={(v) => onTick(v === true)} aria-label={`Use ${d.name}`} />
         <button type="button" className="grid min-w-0 flex-1 gap-0.5 text-left" aria-expanded={open} onClick={onOpen}>
-          <span className={cn("truncate text-md leading-snug", d.ticked ? "text-foreground" : "text-text-2")}>{d.name}</span>
-          {ready ? <span className="text-xs text-muted-foreground">{sourceMeta(d)}</span> : <Status d={d} />}
+          <span className={cn("line-clamp-2 text-md leading-snug break-words", d.ticked ? "text-foreground" : "text-text-2")} title={d.name}>
+            {d.name}
+          </span>
+          {ready ? (
+            <span className="text-xs text-muted-foreground">{sourceMeta(d)}</span>
+          ) : (
+            <span className="justify-self-start">
+              <Status d={d} />
+            </span>
+          )}
         </button>
         <ChevronDown className={cn("mt-1 size-3.5 shrink-0 text-faint transition-transform", open && "rotate-180")} aria-hidden="true" />
       </div>
@@ -379,7 +387,7 @@ function AnswersPane({ projectId, chatId, n }: { projectId: string; chatId: stri
         </Button>
       </div>
       <div className="flex flex-1 justify-center px-5 pt-5">
-        <div className="grid w-full max-w-[760px] content-start gap-4">
+        <div className="grid w-full max-w-[760px] grid-cols-[minmax(0,1fr)] content-start gap-4">
           {chips.length > 0 && (
             <section className="grid gap-2.5 rounded-xl border bg-card px-4 py-3.5" aria-label="Suggested questions">
               <Eyebrow>Ask the sources</Eyebrow>

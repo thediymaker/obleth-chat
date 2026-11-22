@@ -81,7 +81,7 @@ function OpenCard({ card, history, actions, onDelete, onClose }: { card: Card; h
   const column = card.status === "suggested" ? "idea" : card.status;
   return (
     <>
-      <DialogHeader className="gap-2 pr-8">
+      <DialogHeader className="gap-2 pr-8 text-left">
         <div className="flex flex-wrap items-center gap-2 text-2xs font-medium tracking-wider text-muted-foreground uppercase">
           {card.kind && <span>{card.kind}</span>}
           {live ? (

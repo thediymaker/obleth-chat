@@ -140,7 +140,7 @@ function ItemRow({ projectId, item, onOpen }: { projectId: string; item: Noteboo
           </span>
         )}
         <span className="grid min-w-0 gap-0.5">
-          <span className="truncate text-md">{item.title}</span>
+          <span className="line-clamp-2 text-md break-words">{item.title}</span>
           <span className={cn("text-xs", item.status === "failed" ? "text-amber" : "text-muted-foreground")} role={alive ? "status" : undefined}>
             {meta}
           </span>

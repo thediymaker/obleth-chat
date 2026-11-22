@@ -96,8 +96,8 @@ test("the newest day shows as a timeline whose references open where each line c
 test("a day being written shows as alive, and writing it again is asked for", async () => {
   serve(day({ state: "writing", headline: "" }));
   renderWithQueries(<ProjectLog projectId="p9" />);
-  expect(await screen.findByRole("heading", { name: "Writing this day…" })).toBeInTheDocument();
-  expect(screen.getByRole("status")).toHaveTextContent("Writing this day…");
+  expect(await screen.findByRole("heading", { name: "Being written" })).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent(/^Writing this day/);
   expect(document.querySelector(".signal-pulse.bg-signal")).not.toBeNull();
   expect(screen.queryByRole("button", { name: /Write this day again/ })).not.toBeInTheDocument();
 });

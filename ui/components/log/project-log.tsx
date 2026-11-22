@@ -104,9 +104,17 @@ export function ProjectLog({ projectId }: { projectId: string }) {
 /** The days, newest first, under their month. */
 function Days({ days, selected, more, onMore, zone }: { days: DaySummary[]; selected: string; more: boolean; onMore: () => void; zone: string }) {
   const path = usePathname();
+  const strip = useRef<HTMLElement>(null);
+  // On a phone the days are one row that scrolls sideways: bring the chosen day into it.
+  useEffect(() => {
+    const nav = strip.current;
+    const on = nav?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!nav || !on || nav.scrollWidth <= nav.clientWidth) return;
+    nav.scrollLeft = on.offsetLeft - (nav.clientWidth - on.offsetWidth) / 2;
+  }, [selected]);
   return (
-    <aside aria-label="Days" className="grid min-w-0 content-start gap-1">
-      <nav aria-label="Days with work" className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1 lg:flex-col lg:overflow-visible">
+    <aside aria-label="Days" className="grid min-w-0 grid-cols-[minmax(0,1fr)] content-start gap-1">
+      <nav ref={strip} aria-label="Days with work" className="relative -mx-1 flex gap-1 overflow-x-auto px-1 pb-1 lg:flex-col lg:overflow-visible">
         {days.map((d, i) => {
           const month = monthOf(d.day);
           const first = i === 0 || monthOf(days[i - 1]!.day) !== month;
@@ -118,6 +126,7 @@ function Days({ days, selected, more, onMore, zone }: { days: DaySummary[]; sele
                 href={`${path}?day=${d.day}`}
                 scroll={false}
                 aria-current={on ? "page" : undefined}
+                title={d.headline || undefined}
                 className={cn(
                   "flex min-h-10 max-w-60 shrink-0 items-center gap-2.5 rounded-md px-2 text-sm lg:max-w-none",
                   on ? "bg-raised text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -192,12 +201,12 @@ function DayEntry({ projectId, day }: { projectId: string; day: string }) {
       {confirm.element}
       <header className="grid gap-1.5">
         <span className="font-mono text-xs text-muted-foreground">{longDay(day)}</span>
-        <h2 className="text-2xl leading-tight font-semibold tracking-[-0.4px] text-pretty">{d.headline || (writing ? "Writing this day…" : "Not written yet")}</h2>
-        <p className="text-sm text-muted-foreground">Written from your chats, runs and commits in this project. Every line links to where it came from, and you can edit any of it.</p>
+        <h2 className="text-2xl leading-tight font-semibold tracking-[-0.4px] text-pretty">{d.headline || (writing ? "Being written" : "Not written yet")}</h2>
+        {d.lines.length > 0 && <p className="text-sm text-muted-foreground">Written from your chats, runs and commits in this project. Every line links to where it came from, and you can edit any of it.</p>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 pt-1">
           {writing ? (
             <span className="flex items-center gap-2 text-sm" role="status">
-              <Alive /> Writing this day…
+              <Alive /> {d.lines.length ? "Writing this day again from your chats, runs and commits…" : "Writing this day from your chats, runs and commits…"}
             </span>
           ) : (
             <Button variant="outline" size="sm" onClick={again} disabled={asking}>

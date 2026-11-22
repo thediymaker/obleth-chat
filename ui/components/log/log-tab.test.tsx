@@ -37,9 +37,10 @@ test("the Log tab shows while the log is on for this server and the person", asy
   );
   const tab = await screen.findByRole("link", { name: "Log" });
   expect(tab).toHaveAttribute("href", "/projects/p9/log");
-  // Right after Overview.
+  // After Board, before Code.
   const names = screen.getAllByRole("link").map((l) => l.textContent);
-  expect(names.indexOf("Log")).toBe(names.indexOf("Overview") + 1);
+  expect(names.indexOf("Log")).toBe(names.indexOf("Board") + 1);
+  expect(names.indexOf("Code")).toBeGreaterThan(names.indexOf("Log"));
 });
 
 test("the Log tab is hidden when the person turned their log off", async () => {

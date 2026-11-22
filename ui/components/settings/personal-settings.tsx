@@ -18,6 +18,7 @@ import { SectionHeading } from "@/components/settings/settings-frame";
 import { SecurityCard, TokensCard, type ApiToken, type DeviceSession } from "@/components/settings/account-cards";
 import { BrowserCard } from "@/components/settings/browser-card";
 import { FilesDialog } from "@/components/settings/files-dialog";
+import { LogSwitchCard } from "@/components/log/log-switch";
 import { GenerationFields, describeGeneration, generationKeys, generationValues, modelOptions, readGeneration, type Generation, type PolicyModel } from "@/components/settings/generation";
 import { UsageCard } from "@/components/settings/usage-card";
 import { api } from "@/lib/api";
@@ -204,6 +205,7 @@ export function PersonalSettings() {
         </div>
         <div className="grid min-w-0 content-start gap-6">
           {browser && <BrowserCard />}
+          <LogSwitchCard />
           <SecurityCard sessions={account.data?.sessions ?? []} loading={account.isFetching && !account.data} error={account.error} onRefresh={refresh} />
           <TokensCard tokens={account.data?.tokens ?? []} onChange={refresh} />
           <AppearanceCard key={`${p.density}-${p.focus}-${p.context}-${p.modelSuggestions}`} values={p} />

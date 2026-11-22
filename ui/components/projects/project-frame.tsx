@@ -6,7 +6,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Box, Code, FlaskConical, LayoutDashboard, NotebookText, Pencil, Plus, ScrollText, SquareKanban } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { appKeys, createApp } from "@/components/apps/api";
@@ -56,7 +56,6 @@ export function useNewChatInProject() {
 export function ProjectFrame({ children }: { children: React.ReactNode }) {
   const { id: raw } = useParams<{ id: string }>();
   const id = decodeURIComponent(raw);
-  const path = usePathname();
   const router = useRouter();
   const client = useQueryClient();
   const { data: d, error, isPending, refetch } = useProjectDetail(id);
@@ -102,8 +101,6 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
     ...(tabs.research ? [{ href: `${base}/research`, label: "Research", icon: FlaskConical }] : []),
     ...(tabs.app ? [{ href: `${base}/app`, label: "App", icon: Box }] : []),
   ];
-  // The app and the notebook's three panes take the wider page.
-  const wide = path.endsWith("/app") || path.includes("/notebook");
 
   async function makeApp() {
     setMaking(true);
@@ -121,7 +118,9 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <Page className={wide ? "max-w-[1600px]" : undefined}>
+    // One width for every tab, the wider one the app and the notebook's three panes
+    // need, so the heading and the tabs stay where they are from tab to tab.
+    <Page className="max-w-[1600px]">
       <PageHeader
         breadcrumb={
           <nav aria-label="Breadcrumb" className="-mb-1 flex items-center gap-1.5 text-sm text-muted-foreground">

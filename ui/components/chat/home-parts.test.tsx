@@ -10,20 +10,27 @@ import { intents } from "@/lib/chat/home";
 import { ChatStore } from "@/lib/chat/store";
 import { jobsText } from "./status-bar";
 import { ChatStoreProvider } from "./chat-provider";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { IntentTabs, RunningNow } from "./home-parts";
 import { renderWithQueries } from "./test-queries";
 
-test("the tabs mark the chosen intent, say what it sets up and report a choice", () => {
+test("the tabs mark the chosen intent, carry what it sets up and report a choice", () => {
   const offered = intents({ workspaces: true, clusters: [{ name: "Sol", confirmActions: true }] });
   const onChange = vi.fn();
-  renderWithQueries(<IntentTabs intents={offered} value="build" onChange={onChange} />);
+  renderWithQueries(
+    <TooltipProvider>
+      <IntentTabs intents={offered} value="build" onChange={onChange} />
+    </TooltipProvider>,
+  );
   expect(screen.getAllByRole("radio").map((r) => [r.textContent, r.getAttribute("aria-checked")])).toEqual([
     ["Ask", "false"],
     ["Build", "true"],
     ["Research", "false"],
     ["Run on a cluster", "false"],
   ]);
-  expect(screen.getByText("A workspace starts with your first message, with a live preview beside the chat.")).toBeTruthy();
+  // What a choice sets up is on the tab itself, shown on hover or focus, not beside the tabs.
+  expect(screen.getByRole("radio", { name: "Build" })).toHaveAttribute("aria-description", "A workspace starts with your first message, with a live preview beside the chat.");
+  expect(screen.queryByText("A workspace starts with your first message, with a live preview beside the chat.")).toBeNull();
   fireEvent.click(screen.getByRole("radio", { name: "Run on a cluster" }));
   expect(onChange).toHaveBeenCalledWith("cluster");
 });

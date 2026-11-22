@@ -178,12 +178,12 @@ export function ChatHome() {
       </div>
       {/* Three across; on a phone, one under the other with the icon beside the text. */}
       <div className="mt-6 grid grid-cols-3 gap-3 max-[760px]:gap-2 max-[560px]:grid-cols-1">
-        {intent.starters.map(([icon, title, copy, prompt]) => (
+        {intent.starters.map(([icon, title, copy, prompt, withWorkspace]) => (
           <button
             key={title}
             type="button"
             data-starter
-            onClick={() => store.starter(prompt, intent.workspace)}
+            onClick={() => store.starter(prompt, withWorkspace ?? intent.workspace)}
             className="flex flex-col items-start rounded-lg border bg-card px-4 py-[18px] text-left transition-colors hover:border-line-strong hover:bg-raised max-[760px]:px-3 max-[760px]:py-3.5 max-[560px]:flex-row max-[560px]:items-center max-[560px]:gap-3 max-[560px]:py-3"
           >
             <span className="mb-3.5 flex size-[30px] shrink-0 items-center justify-center rounded-md border bg-background text-text-2 max-[560px]:mb-0">

@@ -14,11 +14,11 @@ export interface IntentInfo {
   hint: string;
   /** The new chat starts with a workspace. */
   workspace: boolean;
-  /** Icon, title, a line about it and the start of a prompt. */
-  starters: [string, string, string, string][];
+  /** Icon, title, a line about it and the start of a prompt; a fifth, true, starts that one with a workspace. */
+  starters: [string, string, string, string, boolean?][];
 }
 
-/** The intents this installation offers. Build and Research need workspaces; a cluster, one that is connected. */
+/** The intents this installation offers. Build needs workspaces, as does Research's measured starter; a cluster, one that is connected. */
 export function intents({ workspaces, clusters }: { workspaces: boolean; clusters: { name: string; confirmActions?: boolean }[] }): IntentInfo[] {
   const cluster = clusters[0]?.name ?? "";
   const asks = clusters.length > 0 && clusters.every((c) => c.confirmActions);
@@ -47,16 +47,20 @@ export function intents({ workspaces, clusters }: { workspaces: boolean; cluster
         ["file", "Work on a file", "Attach data or a document and make something of it.", "Using the file I attach, "],
       ],
     },
-    workspaces && {
+    {
       id: "research",
       label: "Research",
-      placeholder: "Say what to improve, and the number that shows it got better…",
-      hint: "The model offers to set it up as research: each try on its own branch, measured the same way.",
-      workspace: true,
+      placeholder: "Say what you are looking into…",
+      hint: workspaces
+        ? "Look into a topic, work from your sources, or run measured experiments. The model offers a project to keep it in, with a board, a notebook and a log."
+        : "Look into a topic or work from your sources. The model offers a project to keep it in, with a board, a notebook and a log.",
+      workspace: false,
       starters: [
-        ["bolt", "Make it faster", "Try several ways and keep the quickest.", "Make this as fast as it will go, measuring every try: "],
-        ["grid", "Sweep a setting", "Find the value that does best.", "Find the best value of this setting by trying a range of them: "],
-        ["chart", "Raise a score", "Push accuracy up over many measured tries.", "Improve the accuracy of this as far as it will go: "],
+        ["book", "Look into a topic", "Find out what is known, and keep what you find in one place.", "I am researching this, and want to keep track of what I find: "],
+        ["file", "Work from your sources", "Add papers or notes, then ask across them.", "I have sources on this that I want to read and ask questions about: "],
+        workspaces
+          ? ["chart", "Improve a number", "Try several ways, each measured the same.", "Improve this as far as it will go, measuring every try: ", true]
+          : ["grid", "Plan the work", "Turn a question into steps you can work through.", "Help me plan this research into steps I can work through: "],
       ],
     },
     clusters.length > 0 && {

@@ -7,6 +7,7 @@
 
 import Link from "next/link";
 import { useClusterQueues } from "@/components/clusters/status";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SandboxCard, useSandboxUsage } from "@/components/workspace/sandbox-card";
 import { useWorkspaceList } from "@/components/workspace/workspaces-page";
 import { type Intent, type IntentInfo, runningNow } from "@/lib/chat/home";
@@ -16,28 +17,31 @@ import { cn } from "@/lib/utils";
 export function IntentTabs({ intents, value, onChange }: { intents: IntentInfo[]; value: Intent; onChange: (intent: Intent) => void }) {
   const shown = intents.find((i) => i.id === value) ?? intents[0]!;
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-0.5">
-      <div role="radiogroup" aria-label="What this chat is for" className="flex flex-wrap items-center gap-1">
-        {intents.map((intent) => (
-          <button
-            key={intent.id}
-            type="button"
-            role="radio"
-            aria-checked={intent.id === shown.id}
-            data-intent={intent.id}
-            onClick={() => onChange(intent.id)}
-            className={cn(
-              "h-8 rounded-md border px-3 text-md whitespace-nowrap transition-colors max-[560px]:px-2.5",
-              intent.id === shown.id ? "border-line-strong bg-secondary font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-raised hover:text-foreground",
-            )}
-          >
-            {intent.label}
-          </button>
-        ))}
-      </div>
-      <p className="min-w-0 flex-1 text-sm leading-normal text-muted-foreground max-[760px]:basis-full" data-intent-hint>
-        {shown.hint}
-      </p>
+    <div role="radiogroup" aria-label="What this chat is for" className="flex flex-wrap items-center gap-1 px-0.5">
+      {intents.map((intent) => (
+        // What choosing it sets up shows on hover or focus, and is read out with the name.
+        <Tooltip key={intent.id}>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={intent.id === shown.id}
+              aria-description={intent.hint}
+              data-intent={intent.id}
+              onClick={() => onChange(intent.id)}
+              className={cn(
+                "h-8 rounded-md border px-3 text-md whitespace-nowrap transition-colors max-[560px]:px-2.5",
+                intent.id === shown.id ? "border-line-strong bg-secondary font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-raised hover:text-foreground",
+              )}
+            >
+              {intent.label}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-72">
+            {intent.hint}
+          </TooltipContent>
+        </Tooltip>
+      ))}
     </div>
   );
 }

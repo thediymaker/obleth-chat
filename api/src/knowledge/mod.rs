@@ -1341,6 +1341,16 @@ async fn retry(
 /// (such as text/html) in object storage itself; those are sent from here as
 /// downloads, so their safety never depends on the storage honouring the type a
 /// download link asks for.
+/// Whether Chat sends a stored document itself rather than linking to the bucket. Only
+/// a PDF stored under its own type goes to the bucket, where it opens in place (at a
+/// cited page). Anything else is sent by Chat with a safe type and under its own name:
+/// some S3 services ignore the name and type a link asks for, and the file would then
+/// download under its key, with no extension.
+fn sent_by_chat(name: &str, mime: &str) -> bool {
+    let stored_safely = extract::kind(name, mime).map(extract::mime_for).as_deref() == Some(mime);
+    !stored_safely || !crate::files::served_type(mime).1
+}
+
 async fn file(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1364,9 +1374,8 @@ async fn file(
             })?;
         return crate::attachments::file_response(&name, &mime, files.body(data, key, most).await?);
     };
-    let stored_safely = extract::kind(&name, &mime).map(extract::mime_for) == Some(mime.clone());
-    if !stored_safely {
-        // Served by Chat with a safe type instead of the bucket's; streamed, not held.
+    if sent_by_chat(&name, &mime) {
+        // Streamed, not held.
         return crate::attachments::file_response(
             &name,
             &mime,
@@ -1508,6 +1517,21 @@ pub async fn set_for_conversation(
 mod tests {
     use super::*;
     use crate::test_support::Database;
+
+    #[test]
+    fn only_a_pdf_is_linked_to_the_bucket_and_the_rest_sent_under_its_name() {
+        let text = extract::mime_for(extract::Kind::Markdown);
+        assert!(sent_by_chat("Watershed management - Wikipedia.md", &text));
+        assert!(sent_by_chat("notes.txt", &text));
+        assert!(sent_by_chat("page.html", "text/html; charset=utf-8"));
+        let docx = extract::mime_for(extract::Kind::Docx);
+        assert!(sent_by_chat("report.docx", &docx));
+        assert!(!sent_by_chat("paper.pdf", "application/pdf"));
+        assert!(
+            sent_by_chat("paper.pdf", "text/html"),
+            "a PDF stored under another type"
+        );
+    }
 
     #[test]
     fn a_full_account_is_a_conflict_not_a_bad_request() {

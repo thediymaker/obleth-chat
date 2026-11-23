@@ -18,6 +18,7 @@ Each release's section is also its GitHub Release notes.
 **Fixes**
 
 - **A page read for a notebook is refused when its site's name leads to a private address.** The public-web check looked only at an address's text, so a public-looking name that resolves to a private or in-cluster address passed. Each address a read passes through (the one asked for, each redirect, each page its frames load, and where it ends) is now also resolved and refused when it leads to a private address, and pages are checked before their request is sent. IPv6 addresses that carry an IPv4 one (compatible, NAT64, 6to4) are judged by it, and site-local addresses are private. Other requests a page's scripts make are left to the sandbox namespace's network rules. A page added from the Browser tab is now counted against the day's reads under the same lock as the check, so adds made at once cannot pass the limit together.
+- **A Knowledge document opens or downloads under its own name.** Some S3 services ignore the name and type a download link asks for, so a Word file, a text file or a notebook's web page downloaded under its storage key, with no extension. Chat now sends every document itself under its name; a PDF still opens in place from the bucket.
 - **Write this day again is refused while a person's project log is off.** The tab was hidden, but the request still wrote the day. The days already written stay readable.
 
 **Upgrade notes**

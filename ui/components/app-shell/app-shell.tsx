@@ -11,11 +11,13 @@ import { NEW_CHAT_EVENT, OPEN_SEARCH_EVENT } from "@/components/chat/chat-provid
 import { SearchDialog } from "@/components/chat/search-dialog";
 import { StatusBar } from "@/components/chat/status-bar";
 import { FocusToggle } from "@/components/chat/focus-toggle";
+import { ScratchPad } from "@/components/scratch/scratch-pad";
 import { SiteBanner } from "@/components/site-banner";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { usePreferences } from "@/lib/queries";
+import { OPEN_EVENT as OPEN_SCRATCH_EVENT, isShortcut as isScratchShortcut } from "@/lib/scratch";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 
@@ -32,6 +34,7 @@ function Frame({ children }: { children: React.ReactNode }) {
   const [drawer, setDrawer] = useState(false);
   const [search, setSearch] = useState(false);
   const [feedback, setFeedback] = useState(false);
+  const [scratch, setScratch] = useState(false);
   const router = useRouter();
   const path = usePathname();
   const { title, actions, crumb } = useChrome();
@@ -56,14 +59,20 @@ function Frame({ children }: { children: React.ReactNode }) {
         event.preventDefault();
         window.dispatchEvent(new Event(NEW_CHAT_EVENT));
         router.push("/");
+      } else if (isScratchShortcut(event)) {
+        event.preventDefault();
+        setScratch((open) => !open);
       }
     }
     const openSearch = () => setSearch(true);
+    const openScratch = () => setScratch(true);
     window.addEventListener("keydown", onKey);
     window.addEventListener(OPEN_SEARCH_EVENT, openSearch);
+    window.addEventListener(OPEN_SCRATCH_EVENT, openScratch);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener(OPEN_SEARCH_EVENT, openSearch);
+      window.removeEventListener(OPEN_SCRATCH_EVENT, openScratch);
     };
   }, [router]);
 
@@ -99,6 +108,7 @@ function Frame({ children }: { children: React.ReactNode }) {
             <Button variant="ghost" size="icon-sm" aria-label="Search chats" title="Search chats (⌘K)" onClick={() => setSearch(true)}>
               <Search />
             </Button>
+            <ScratchPad open={scratch} onOpenChange={setScratch} />
             {/* A page's own action (a chat's Details), or Focus mode. */}
             {actions ?? <FocusToggle />}
           </div>

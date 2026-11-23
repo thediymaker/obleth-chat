@@ -107,7 +107,7 @@ describe("when the session ends", () => {
     steerDraft.text = "use the other cluster";
     store.dispose();
     // The next person on this page starts a chat with Auto off and nothing picked.
-    expect(chatDraft.get()).toEqual({ project: null, collections: [], card: null });
+    expect(chatDraft.get()).toEqual({ project: null, collections: [], card: null, intent: null });
     expect(steerDraft.text).toBe("");
     const applied: unknown[] = [];
     const { applyToolsDraft } = await import("./tools-draft");

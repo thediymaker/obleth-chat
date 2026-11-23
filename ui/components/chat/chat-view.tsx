@@ -18,6 +18,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuShortc
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { useBranding } from "@/lib/branding-context";
+import { chatDraft, useChatDraft } from "@/lib/chat/chat-draft";
 import { type Intent, intents, shownIntent } from "@/lib/chat/home";
 import type { Attachment } from "@/lib/chat/types";
 import { useConversations } from "@/lib/queries";
@@ -145,6 +146,14 @@ export function ChatHome() {
     const next = offered.find((i) => i.id === id);
     if (next && next.workspace !== store.workspaceDraft) void store.toggleWorkspace();
   };
+  // A tab chosen before Home showed (the scratch pad's Research this), taken once.
+  const drafted = useChatDraft().intent;
+  useEffect(() => {
+    if (!drafted) return;
+    chatDraft.setIntent(null);
+    if (offered.some((i) => i.id === drafted)) choose(drafted);
+    // Only when a tab is drafted: choose is made again on every render.
+  }, [drafted]);
   return (
     // 820px (900px from 1600px wide), 72px down (110px from 1600px, 56px up to 1200px).
     <div

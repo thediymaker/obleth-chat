@@ -459,9 +459,14 @@ async fn settle(page: &Page) {
 }
 
 async fn wait_loaded(page: &Page) {
+    wait_ready(&page.cdp, &page.session).await
+}
+
+/// Waits for a tab's page to finish loading, then a moment for its scripts.
+pub(super) async fn wait_ready(cdp: &super::cdp::Cdp, session: &str) {
     let began = Instant::now();
     while began.elapsed() < LOAD_WAIT {
-        if let Ok(state) = page.cdp.eval(&page.session, "document.readyState").await {
+        if let Ok(state) = cdp.eval(session, "document.readyState").await {
             if state == "complete" {
                 break;
             }
@@ -585,8 +590,16 @@ fn render(snapshot: &Snapshot, window: usize, note: String) -> (String, usize) {
     } else {
         out.push_str(body);
     }
-    let lower = snapshot.text.to_lowercase();
-    if [
+    if bot_check(&snapshot.text) {
+        out.push_str("\n\nThis looks like a bot check. Call browser_handoff so the person can solve it, or try a different site.");
+    }
+    (out, total)
+}
+
+/// Whether a page's text is little more than a check for automated browsers.
+pub(super) fn bot_check(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
         "captcha",
         "unusual traffic",
         "verify you are human",
@@ -595,11 +608,7 @@ fn render(snapshot: &Snapshot, window: usize, note: String) -> (String, usize) {
     ]
     .iter()
     .any(|sign| lower.contains(sign))
-        && snapshot.text.len() < 4000
-    {
-        out.push_str("\n\nThis looks like a bot check. Call browser_handoff so the person can solve it, or try a different site.");
-    }
-    (out, total)
+        && text.len() < 4000
 }
 
 /// Splits page text into windows at line ends.

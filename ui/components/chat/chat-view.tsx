@@ -18,6 +18,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuShortc
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { useBranding } from "@/lib/branding-context";
+import { chatDraft, useChatDraft } from "@/lib/chat/chat-draft";
 import { type Intent, intents, shownIntent } from "@/lib/chat/home";
 import type { Attachment } from "@/lib/chat/types";
 import { useConversations } from "@/lib/queries";
@@ -145,6 +146,14 @@ export function ChatHome() {
     const next = offered.find((i) => i.id === id);
     if (next && next.workspace !== store.workspaceDraft) void store.toggleWorkspace();
   };
+  // A tab chosen before Home showed (the scratch pad's Research this), taken once.
+  const drafted = useChatDraft().intent;
+  useEffect(() => {
+    if (!drafted) return;
+    chatDraft.setIntent(null);
+    if (offered.some((i) => i.id === drafted)) choose(drafted);
+    // Only when a tab is drafted: choose is made again on every render.
+  }, [drafted]);
   return (
     // 820px (900px from 1600px wide), 72px down (110px from 1600px, 56px up to 1200px).
     <div
@@ -178,12 +187,12 @@ export function ChatHome() {
       </div>
       {/* Three across; on a phone, one under the other with the icon beside the text. */}
       <div className="mt-6 grid grid-cols-3 gap-3 max-[760px]:gap-2 max-[560px]:grid-cols-1">
-        {intent.starters.map(([icon, title, copy, prompt]) => (
+        {intent.starters.map(([icon, title, copy, prompt, withWorkspace]) => (
           <button
             key={title}
             type="button"
             data-starter
-            onClick={() => store.starter(prompt, intent.workspace)}
+            onClick={() => store.starter(prompt, withWorkspace ?? intent.workspace)}
             className="flex flex-col items-start rounded-lg border bg-card px-4 py-[18px] text-left transition-colors hover:border-line-strong hover:bg-raised max-[760px]:px-3 max-[760px]:py-3.5 max-[560px]:flex-row max-[560px]:items-center max-[560px]:gap-3 max-[560px]:py-3"
           >
             <span className="mb-3.5 flex size-[30px] shrink-0 items-center justify-center rounded-md border bg-background text-text-2 max-[560px]:mb-0">

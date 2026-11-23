@@ -1,7 +1,8 @@
 "use client";
 
-// Administration › System: which Chat this is, the banner, data retention, knowledge
-// search's embedding model, decisions, memory, and guides for everything set where Chat runs.
+// Administration › System: which Chat this is, the banner, data retention, memory and
+// the project log on the left; knowledge search's embedding model, the notebook,
+// decisions and guides for everything set where Chat runs on the right.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, BookOpen, Box, ExternalLink, Link2, Lock, Settings, Shield, Terminal } from "lucide-react";
@@ -15,7 +16,9 @@ import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useFeature } from "@/lib/queries";
 import { useSession, type Banner } from "@/lib/session";
+import { LogCard, type LogSettings } from "./log-card";
 import { MemoryCard, type MemorySettings } from "./memory-card";
+import { NotebookCard, type NotebookSettings } from "./notebook-card";
 
 // ---- About ----
 
@@ -573,7 +576,7 @@ export function DecisionsCard({ decisions: d, onSaved }: { decisions: Decisions;
           id="decisions-check-runs"
           label="Check research runs"
           defaultChecked={!!d.checkRuns}
-          description="When a run finishes, ask whether it really tested its idea, and tell the chat when it may not have. The result shows on the project’s Research tab."
+          description="When a run finishes, ask whether it really tested its idea, and tell the chat when it may not have. The result shows on the project’s Experiments tab."
         />
         <CheckField
           id="decisions-check-tree"
@@ -639,7 +642,9 @@ export function SystemTab() {
   const health = useQuery({ queryKey: ["admin", "health"], queryFn: () => api.request<Health>("/api/admin/health").catch(() => null) });
   const decisions = useQuery({ queryKey: ["admin", "decisions"], queryFn: () => orError<Decisions>("/api/admin/decisions") });
   const memory = useQuery({ queryKey: ["admin", "memory"], queryFn: () => orError<MemorySettings>("/api/admin/memory") });
+  const notebook = useQuery({ queryKey: ["admin", "notebook"], queryFn: () => orError<NotebookSettings>("/api/admin/notebook"), enabled: knowledge });
   const banner = useQuery({ queryKey: ["admin", "banner"], queryFn: () => orError<BannerSettings & { error?: string }>("/api/admin/banner") });
+  const log = useQuery({ queryKey: ["admin", "log"], queryFn: () => orError<LogSettings>("/api/admin/log") });
   const set = <T,>(key: string) => (value: T) => queries.setQueryData(["admin", key], value);
   const pages: [typeof Box, string, string, string][] = [
     [Box, "Connect the gateway", "/connect-gateway", "Model access and inference through Obleth"],
@@ -678,25 +683,6 @@ export function SystemTab() {
               />
             ))}
           {retention.data && <RetentionCard key={JSON.stringify(retention.data)} retention={retention.data} onSaved={set<Retention>("retention")} confirm={confirm.ask} />}
-        </div>
-        <div className="grid min-w-0 gap-4">
-          {knowledge &&
-            e &&
-            (e.error ? (
-              <Section title="Knowledge search">
-                <ErrorBox error={e.error} />
-              </Section>
-            ) : (
-              <EmbeddingCard key={JSON.stringify(e.effective)} embedding={e} onSaved={set<Embedding>("embedding")} confirm={confirm.ask} />
-            ))}
-          {d &&
-            (d.error ? (
-              <Section title="Decisions">
-                <ErrorBox error={d.error} />
-              </Section>
-            ) : (
-              <DecisionsCard key={JSON.stringify(d)} decisions={d} onSaved={set<Decisions>("decisions")} />
-            ))}
           {memory.data &&
             (memory.data.error ? (
               <Section title="Memory">
@@ -711,6 +697,49 @@ export function SystemTab() {
                   queries.invalidateQueries({ queryKey: ["capabilities"] });
                 }}
               />
+            ))}
+          {log.data &&
+            (log.data.error ? (
+              <Section title="Project log">
+                <ErrorBox error={log.data.error} />
+              </Section>
+            ) : (
+              <LogCard
+                key={`log-${JSON.stringify(log.data)}`}
+                log={log.data}
+                onSaved={(saved) => {
+                  set<LogSettings>("log")(saved);
+                  queries.invalidateQueries({ queryKey: ["capabilities"] });
+                }}
+              />
+            ))}
+        </div>
+        <div className="grid min-w-0 gap-4">
+          {knowledge &&
+            e &&
+            (e.error ? (
+              <Section title="Knowledge search">
+                <ErrorBox error={e.error} />
+              </Section>
+            ) : (
+              <EmbeddingCard key={JSON.stringify(e.effective)} embedding={e} onSaved={set<Embedding>("embedding")} confirm={confirm.ask} />
+            ))}
+          {knowledge &&
+            notebook.data &&
+            (notebook.data.error ? (
+              <Section title="Notebook">
+                <ErrorBox error={notebook.data.error} />
+              </Section>
+            ) : (
+              <NotebookCard key={JSON.stringify(notebook.data)} notebook={notebook.data} onSaved={set<NotebookSettings>("notebook")} />
+            ))}
+          {d &&
+            (d.error ? (
+              <Section title="Decisions">
+                <ErrorBox error={d.error} />
+              </Section>
+            ) : (
+              <DecisionsCard key={JSON.stringify(d)} decisions={d} onSaved={set<Decisions>("decisions")} />
             ))}
           <Section title="Set where Chat runs" description="The rest is configured with environment variables when Chat is deployed. These guides show how.">
             <div className="grid gap-1">

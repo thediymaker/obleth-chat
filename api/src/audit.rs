@@ -114,6 +114,8 @@ actions! {
     INSIGHTS_UPDATE => "insights.update", Settings;
     INSIGHTS_REPORT => "insights.report", Settings;
     MEMORY_UPDATE => "memory.update", Settings;
+    LOG_UPDATE => "log.update", Settings;
+    NOTEBOOK_UPDATE => "notebook.update", Settings;
     FEEDBACK_BUTTON => "feedback.button", Settings;
     WORKSPACES_STOP => "workspaces.stop", Settings;
     CONNECTION_CREATE => "connection.create", Connections;

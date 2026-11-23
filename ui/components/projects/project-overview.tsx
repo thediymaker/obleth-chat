@@ -26,7 +26,7 @@ import { messageOf, PersonAvatar } from "@/components/manage/kit";
 
 export function Section({ title, aside, children, className }: { title: React.ReactNode; aside?: React.ReactNode; children: React.ReactNode; className?: string }) {
   return (
-    <section className={cn("grid gap-3 rounded-lg border bg-card p-4", className)}>
+    <section className={cn("grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 rounded-lg border bg-card p-4", className)}>
       <div className="flex min-h-6 items-center justify-between gap-2">
         <Eyebrow>{title}</Eyebrow>
         {aside}
@@ -169,14 +169,14 @@ export function ProjectOverview() {
 
   const starts = (
     <Section title="Chats here start with">
-      <div className="grid gap-1">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1">
         {d.collections.map((c) => (
           <div key={c.id} className="flex items-center gap-2 text-md">
             <BookOpen className="size-4 shrink-0 text-muted-foreground" />
-            <Link href={`/knowledge/${encodeURIComponent(c.id)}`} className="grow truncate hover:underline">
+            <Link href={`/knowledge/${encodeURIComponent(c.id)}`} className="grow truncate hover:underline" title={c.name}>
               {c.name}
             </Link>
-            <span className="text-xs text-faint">{count(c.documents, "doc")}</span>
+            <span className="shrink-0 text-xs text-faint">{count(c.documents, "doc")}</span>
             {mine && knowledge && owned.has(c.id) && <AddDocuments collection={c} projectId={p.id} maxFileBytes={maxFileBytes} />}
           </div>
         ))}
@@ -225,11 +225,11 @@ export function ProjectOverview() {
 
   return (
     <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
-      <div className="grid gap-4">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
         {saved}
         {chats}
       </div>
-      <div className="grid gap-4">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
         {instructions}
         {starts}
         {people}

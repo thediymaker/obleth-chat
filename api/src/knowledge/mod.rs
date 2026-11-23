@@ -363,10 +363,16 @@ impl Knowledge {
             };
             job.claimed = renewed;
         }
-        let finished = sqlx::query("UPDATE knowledge_documents SET status='ready', stage='', passages=$2, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$3")
+        // The stored passages' length, overlaps included, which a notebook's meter adds up.
+        let text_chars: i64 = passages
+            .iter()
+            .map(|p| p.text.chars().count().min(7900) as i64)
+            .sum();
+        let finished = sqlx::query("UPDATE knowledge_documents SET status='ready', stage='', passages=$2, text_chars=$4, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$3")
             .bind(job.id)
             .bind(passages.len() as i32)
             .bind(job.claimed)
+            .bind(text_chars)
             .execute(&self.pool)
             .await?;
         if finished.rows_affected() == 0 {
@@ -435,6 +441,20 @@ impl Knowledge {
         query: &str,
         limit: usize,
     ) -> Result<Vec<Hit>, ApiError> {
+        self.search_in(gateway, user, collections, None, query, limit)
+            .await
+    }
+
+    /// `search`, limited to `documents` when given (a notebook's ticked sources).
+    pub async fn search_in(
+        &self,
+        gateway: &Gateway,
+        user: &Identity,
+        collections: &[Uuid],
+        documents: Option<&[Uuid]>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Hit>, ApiError> {
         let query = query.trim();
         if query.is_empty() || collections.is_empty() {
             return Ok(vec![]);
@@ -451,15 +471,17 @@ impl Knowledge {
             .pop()
             .map(vector_literal)
             .ok_or_else(ApiError::internal)?;
-        self.passages(&allowed, &vector, &words(&text), limit).await
+        self.passages(&allowed, documents, &vector, &words(&text), limit)
+            .await
     }
 
-    /// `search` for a turn's question, whose vector memory may already have made.
+    /// `search_in` for a turn's question, whose vector memory may already have made.
     pub async fn search_question(
         &self,
         gateway: &Gateway,
         user: &Identity,
         collections: &[Uuid],
+        documents: Option<&[Uuid]>,
         question: &chat::Question,
         limit: usize,
     ) -> Result<Vec<Hit>, ApiError> {
@@ -473,14 +495,16 @@ impl Knowledge {
         let Some(vector) = question.vector(self, gateway, user).await else {
             return Ok(vec![]);
         };
-        self.passages(&allowed, vector, &words(&question.text), limit)
+        self.passages(&allowed, documents, vector, &words(&question.text), limit)
             .await
     }
 
-    /// Passages in `allowed` collections nearest `vector` and best for `words`.
-    async fn passages(
+    /// Passages in `allowed` collections, and in `documents` when given, nearest
+    /// `vector` and best for `words`.
+    pub(crate) async fn passages(
         &self,
         allowed: &[Uuid],
+        documents: Option<&[Uuid]>,
         vector: &str,
         words: &str,
         limit: usize,
@@ -494,12 +518,12 @@ impl Knowledge {
             "WITH vec AS (
                 SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::halfvec) AS r
                 FROM (SELECT id, embedding FROM knowledge_passages WHERE collection_id = ANY($1)
-                      ORDER BY embedding <=> $2::halfvec LIMIT 40) v
+                      AND ($5::uuid[] IS NULL OR document_id = ANY($5)) ORDER BY embedding <=> $2::halfvec LIMIT 40) v
              ), kw AS (
                 SELECT id, ROW_NUMBER() OVER (ORDER BY rank DESC) AS r FROM (
                     SELECT p.id, ts_rank_cd(p.tsv, q) AS rank
                     FROM knowledge_passages p, to_tsquery('english', $3) q
-                    WHERE $3 <> '' AND p.collection_id = ANY($1) AND p.tsv @@ q
+                    WHERE $3 <> '' AND p.collection_id = ANY($1) AND ($5::uuid[] IS NULL OR p.document_id = ANY($5)) AND p.tsv @@ q
                     ORDER BY rank DESC LIMIT 40) k
              ), fused AS (
                 SELECT id, SUM(1.0 / (60 + r)) AS score, BOOL_OR(src = 'v') AS by_meaning, BOOL_OR(src = 'k') AS by_words
@@ -513,6 +537,7 @@ impl Knowledge {
         .bind(vector)
         .bind(words)
         .bind(limit as i64)
+        .bind(documents)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1075,6 +1100,180 @@ fn room(used: i64, count: i64, size: i64, quota: i64) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// A person's knowledge storage in use: bytes and documents, as `room` counts them.
+async fn used_by<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    owner: Uuid,
+) -> Result<(i64, i64), sqlx::Error> {
+    sqlx::query_as("SELECT COALESCE(SUM(size),0)::bigint, COUNT(*) FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
+        .bind(owner)
+        .fetch_one(db)
+        .await
+}
+
+impl Knowledge {
+    /// Keeps a web page read in its owner's browser as a document in their collection,
+    /// stored and indexed as an upload is, with the address it came from.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn store_page(
+        &self,
+        files: &crate::files::Files,
+        owner: Uuid,
+        collection: Uuid,
+        name: &str,
+        kind: extract::Kind,
+        bytes: Vec<u8>,
+        source_url: &str,
+    ) -> Result<Uuid, ApiError> {
+        let size = bytes.len() as i64;
+        if size == 0 {
+            return Err(ApiError::bad("The page is empty"));
+        }
+        let (used, count) = used_by(&self.pool, owner).await?;
+        room(used, count, size, self.user_bytes)?;
+        let doc = Uuid::new_v4();
+        let mime = extract::mime_for(kind);
+        let placed = files
+            .place(format!("knowledge/{owner}/{doc}"), bytes, &mime)
+            .await?;
+        let recorded = async {
+            let key = placed.key.as_deref().ok_or_else(|| {
+                ApiError::unavailable("Knowledge needs object storage, which is not configured")
+            })?;
+            let mut tx = self.pool.begin().await?;
+            store::lock_owner(&mut tx, owner, Require::Any).await?;
+            let (used, count) = used_by(&mut *tx, owner).await?;
+            room(used, count, size, self.user_bytes)?;
+            let theirs: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_collections WHERE id=$1 AND owner_id=$2 AND attachment_id IS NULL)",
+            )
+            .bind(collection)
+            .bind(owner)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !theirs {
+                return Err(ApiError::not_found());
+            }
+            sqlx::query(
+                "INSERT INTO knowledge_documents (id, collection_id, owner_id, name, mime_type, size, object_key, source_url, read_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())",
+            )
+            .bind(doc)
+            .bind(collection)
+            .bind(owner)
+            .bind(name)
+            .bind(&mime)
+            .bind(size)
+            .bind(key)
+            .bind(source_url)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok::<_, ApiError>(())
+        }
+        .await;
+        match recorded {
+            Ok(()) => {
+                self.queued().await;
+                Ok(doc)
+            }
+            Err(error) => {
+                files.discard(&placed).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Replaces a web page's document with the page as it reads now: the same document,
+    /// so ticks and links to it stay, indexed again and given a new guide.
+    pub(crate) async fn replace_page(
+        &self,
+        files: &crate::files::Files,
+        owner: Uuid,
+        document: Uuid,
+        name: &str,
+        kind: extract::Kind,
+        bytes: Vec<u8>,
+    ) -> Result<(), ApiError> {
+        let size = bytes.len() as i64;
+        if size == 0 {
+            return Err(ApiError::bad("The page is empty"));
+        }
+        let mime = extract::mime_for(kind);
+        let placed = files
+            .place(
+                format!("knowledge/{owner}/{}", Uuid::new_v4()),
+                bytes,
+                &mime,
+            )
+            .await?;
+        let recorded = async {
+            let key = placed.key.as_deref().ok_or_else(|| {
+                ApiError::unavailable("Knowledge needs object storage, which is not configured")
+            })?;
+            let mut tx = self.pool.begin().await?;
+            store::lock_owner(&mut tx, owner, Require::Any).await?;
+            let old: Option<(Option<String>, i64)> = sqlx::query_as(
+                "SELECT object_key, size FROM knowledge_documents WHERE id=$1 AND owner_id=$2 AND source_url IS NOT NULL FOR UPDATE",
+            )
+            .bind(document)
+            .bind(owner)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let (old_key, old_size) = old.ok_or_else(ApiError::not_found)?;
+            let (used, count) = used_by(&mut *tx, owner).await?;
+            let kept = i64::from(old_key.is_some());
+            room(
+                used - old_size * kept,
+                count - kept,
+                size,
+                self.user_bytes,
+            )?;
+            sqlx::query(
+                "UPDATE knowledge_documents SET name=$2, mime_type=$3, size=$4, object_key=$5, status='queued', stage='',
+                     progress_done=0, progress_total=0, pages=NULL, passages=0, text_chars=NULL, error=NULL, attempts=0,
+                     claimed_at=NULL, read_at=NOW(), updated_at=NOW()
+                 WHERE id=$1",
+            )
+            .bind(document)
+            .bind(name)
+            .bind(&mime)
+            .bind(size)
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM knowledge_passages WHERE document_id=$1")
+                .bind(document)
+                .execute(&mut *tx)
+                .await?;
+            // The guide described the page as it was; the next pass writes a new one.
+            sqlx::query("DELETE FROM notebook_guides WHERE document_id=$1")
+                .bind(document)
+                .execute(&mut *tx)
+                .await?;
+            if let Some(old_key) = old_key {
+                sqlx::query("INSERT INTO object_trash (object_key) VALUES ($1) ON CONFLICT (object_key) DO UPDATE SET pending = FALSE")
+                    .bind(old_key)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            Ok::<_, ApiError>(())
+        }
+        .await;
+        match recorded {
+            Ok(()) => {
+                self.queued().await;
+                Ok(())
+            }
+            Err(error) => {
+                files.discard(&placed).await;
+                Err(error)
+            }
+        }
+    }
+}
+
 /// A document the person may see, with its collection and whether they own it.
 async fn visible_document(
     pool: &PgPool,
@@ -1142,6 +1341,16 @@ async fn retry(
 /// (such as text/html) in object storage itself; those are sent from here as
 /// downloads, so their safety never depends on the storage honouring the type a
 /// download link asks for.
+/// Whether Chat sends a stored document itself rather than linking to the bucket. Only
+/// a PDF stored under its own type goes to the bucket, where it opens in place (at a
+/// cited page). Anything else is sent by Chat with a safe type and under its own name:
+/// some S3 services ignore the name and type a link asks for, and the file would then
+/// download under its key, with no extension.
+fn sent_by_chat(name: &str, mime: &str) -> bool {
+    let stored_safely = extract::kind(name, mime).map(extract::mime_for).as_deref() == Some(mime);
+    !stored_safely || !crate::files::served_type(mime).1
+}
+
 async fn file(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1165,9 +1374,8 @@ async fn file(
             })?;
         return crate::attachments::file_response(&name, &mime, files.body(data, key, most).await?);
     };
-    let stored_safely = extract::kind(&name, &mime).map(extract::mime_for) == Some(mime.clone());
-    if !stored_safely {
-        // Served by Chat with a safe type instead of the bucket's; streamed, not held.
+    if sent_by_chat(&name, &mime) {
+        // Streamed, not held.
         return crate::attachments::file_response(
             &name,
             &mime,
@@ -1309,6 +1517,21 @@ pub async fn set_for_conversation(
 mod tests {
     use super::*;
     use crate::test_support::Database;
+
+    #[test]
+    fn only_a_pdf_is_linked_to_the_bucket_and_the_rest_sent_under_its_name() {
+        let text = extract::mime_for(extract::Kind::Markdown);
+        assert!(sent_by_chat("Watershed management - Wikipedia.md", &text));
+        assert!(sent_by_chat("notes.txt", &text));
+        assert!(sent_by_chat("page.html", "text/html; charset=utf-8"));
+        let docx = extract::mime_for(extract::Kind::Docx);
+        assert!(sent_by_chat("report.docx", &docx));
+        assert!(!sent_by_chat("paper.pdf", "application/pdf"));
+        assert!(
+            sent_by_chat("paper.pdf", "text/html"),
+            "a PDF stored under another type"
+        );
+    }
 
     #[test]
     fn a_full_account_is_a_conflict_not_a_bad_request() {

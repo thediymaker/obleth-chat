@@ -15,6 +15,12 @@ pub const RETENTION: Duration = Duration::from_secs(60 * 60);
 pub const MEMORY: Duration = Duration::from_secs(30);
 /// Insights label chats and place workstreams (insights.rs).
 pub const INSIGHTS: Duration = Duration::from_secs(60);
+/// The project log notes days with work and writes the ones that are due
+/// (project_log/write.rs).
+pub const PROJECT_LOG: Duration = Duration::from_secs(60);
+/// Notebook guides are made for new documents in projects, and notebook items a
+/// stopped replica left running are taken up (notebook/).
+pub const NOTEBOOK: Duration = Duration::from_secs(20);
 /// Auto mode's watchdog nudges stopped turns (autopilot.rs).
 pub const AUTO_MODE: Duration = Duration::from_secs(60);
 /// Running research experiments are looked at; each run's own pace is in

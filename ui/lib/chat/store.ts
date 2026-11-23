@@ -35,9 +35,11 @@ export interface Route {
   id: string;
 }
 export const routeOf = (path: string): Route => {
-  const [, first = "", second = ""] = path.split("/");
+  const [, first = "", second = "", third = "", fourth = ""] = path.split("/");
   if (first === "") return { page: "chat", id: "" };
   if (first === "chat") return { page: "chat", id: decodeURIComponent(second) };
+  // A project notebook's chat, /projects/<project>/notebook/<chat>, is the chat on screen.
+  if (first === "projects" && third === "notebook" && fourth) return { page: "chat", id: decodeURIComponent(fourth) };
   return { page: first, id: decodeURIComponent(second) };
 };
 

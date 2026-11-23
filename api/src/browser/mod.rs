@@ -5,6 +5,7 @@
 //! tools refuse to run. The model's tools are in tools.rs, the live view in live.rs.
 pub mod cdp;
 pub mod live;
+pub mod read;
 pub mod tools;
 
 use crate::config::env::{choice, number, text};
@@ -418,29 +419,8 @@ impl Browsers {
     pub async fn open(&self, owner: Uuid, conversation: Uuid) -> Result<Page, String> {
         let (browser, mut tab) = self.tab(owner, conversation).await.map_err(|e| e.1)?;
         let address = self.ensure_running(&browser).await?;
-        let mut connected = None;
-        for attempt in 0..5 {
-            match Cdp::connect(&self.inner.http, &address).await {
-                Ok(cdp) => {
-                    connected = Some(cdp);
-                    break;
-                }
-                Err(error) if attempt == 4 => {
-                    tracing::warn!("could not reach the browser: {error:#}");
-                }
-                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
-            }
-        }
-        let cdp = connected.ok_or("The browser is not answering. Try again in a moment.")?;
+        let cdp = self.connect(&address).await?;
         let fail = |error: anyhow::Error| format!("The browser failed: {error:#}");
-        // Downloads are not kept yet.
-        let _ = cdp
-            .call(
-                "Browser.setDownloadBehavior",
-                json!({"behavior":"deny"}),
-                None,
-            )
-            .await;
         let targets = cdp
             .call("Target.getTargets", json!({}), None)
             .await
@@ -511,6 +491,106 @@ impl Browsers {
             browser,
             tab,
         })
+    }
+
+    /// A DevTools connection to the browser at `address`, which keeps no downloads.
+    async fn connect(&self, address: &str) -> Result<Cdp, String> {
+        let mut connected = None;
+        for attempt in 0..5 {
+            match Cdp::connect(&self.inner.http, address).await {
+                Ok(cdp) => {
+                    connected = Some(cdp);
+                    break;
+                }
+                Err(error) if attempt == 4 => {
+                    tracing::warn!("could not reach the browser: {error:#}");
+                }
+                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+            }
+        }
+        let cdp = connected.ok_or("The browser is not answering. Try again in a moment.")?;
+        // Downloads are not kept yet.
+        let _ = cdp
+            .call(
+                "Browser.setDownloadBehavior",
+                json!({"behavior":"deny"}),
+                None,
+            )
+            .await;
+        Ok(cdp)
+    }
+
+    /// A tab of its own in the person's browser, starting it when needed, for work no
+    /// chat watches. The caller closes it with `close_scratch`.
+    pub(crate) async fn scratch(&self, owner: Uuid) -> Result<(Cdp, String, String), String> {
+        let browser = self.record(owner).await.map_err(|e| e.1)?;
+        let address = self.ensure_running(&browser).await?;
+        let cdp = self.connect(&address).await?;
+        let fail = |error: anyhow::Error| format!("The browser failed: {error:#}");
+        let created = cdp
+            .call("Target.createTarget", json!({"url":"about:blank"}), None)
+            .await
+            .map_err(fail)?;
+        let target = created["targetId"]
+            .as_str()
+            .ok_or("The browser did not open a tab")?
+            .to_owned();
+        let session = match cdp.attach(&target).await {
+            Ok(session) => session,
+            Err(error) => {
+                close_scratch(&cdp, &target).await;
+                return Err(fail(error));
+            }
+        };
+        let _ = cdp
+            .call(
+                "Emulation.setFocusEmulationEnabled",
+                json!({"enabled":true}),
+                Some(&session),
+            )
+            .await;
+        self.touch(browser.id).await;
+        Ok((cdp, session, target))
+    }
+
+    /// Browsers that use the browser at `address` instead of pods, for tests.
+    #[cfg(test)]
+    pub(crate) fn fixed(pool: PgPool, address: String) -> Self {
+        let sandbox = SandboxConfig {
+            namespace: "test".into(),
+            image: "workspace".into(),
+            runtime_class: None,
+            storage_class: None,
+            storage: "1Gi".into(),
+            disk_limit: 1 << 30,
+            cpu_limit: "1".into(),
+            memory_limit: "1Gi".into(),
+            everyone: true,
+            slots: 1,
+            preview_domain: None,
+            preview_suffix: String::new(),
+            preview_scheme: "http".into(),
+            chat_origin: "http://chat.example.org".into(),
+            idle: Duration::from_secs(900),
+            retention: Duration::from_secs(86_400),
+        };
+        let config = BrowserConfig {
+            image: "browser".into(),
+            cpu_limit: "1".into(),
+            memory_limit: "1Gi".into(),
+            storage: "1Gi".into(),
+            idle: Duration::from_secs(900),
+        };
+        Self {
+            inner: Arc::new(Inner {
+                config,
+                kube: Kube::unconfigured(sandbox.namespace.clone()),
+                sandbox,
+                pool,
+                http: reqwest::Client::new(),
+                fixed: Some(address),
+            }),
+        }
     }
 
     /// Stops the person's browser pod; the profile volume stays.
@@ -674,6 +754,13 @@ impl Browsers {
         )
         .await
     }
+}
+
+/// Closes a tab `Browsers::scratch` opened.
+pub(crate) async fn close_scratch(cdp: &Cdp, target: &str) {
+    let _ = cdp
+        .call("Target.closeTarget", json!({"targetId":target}), None)
+        .await;
 }
 
 /// The server is not set up for the browser.

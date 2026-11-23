@@ -1,12 +1,12 @@
 "use client";
 
 // A project's page around its tabs: the heading with its actions, and the tabs
-// (Overview, Code, Research, App) that the server and features allow.
+// (Overview, Code, Experiments, App) that the server and features allow.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Box, Pencil, Plus } from "lucide-react";
+import { ArrowLeft, Box, Code, FlaskConical, LayoutDashboard, NotebookText, Pencil, Plus, ScrollText, SquareKanban } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { appKeys, createApp } from "@/components/apps/api";
@@ -31,14 +31,16 @@ export function useProjectFrame() {
   return value;
 }
 
-export type ProjectTab = "overview" | "code" | "research" | "app";
+export type ProjectTab = "overview" | "notebook" | "log" | "code" | "research" | "app";
 
-/** Which tabs a project shows: Code with the code feature, Research with workspaces, App for administrators on their own projects. */
+/** Which tabs a project shows: Notebook with knowledge, Code with the code feature, Experiments with workspaces, App for administrators on their own projects. */
 export function useProjectTabs(detail?: ProjectDetail): Record<ProjectTab, boolean> {
+  const notebook = useFeature("knowledge");
   const code = useFeature("code");
   const research = useFeature("workspaces");
   const { isAdmin } = useSession();
-  return { overview: true, code, research, app: isAdmin && !!detail?.project.mine };
+  const log = useFeature("myLog");
+  return { overview: true, notebook, log, code, research, app: isAdmin && !!detail?.project.mine };
 }
 
 /** Starts a new chat that goes into the project once it is sent. */
@@ -54,7 +56,6 @@ export function useNewChatInProject() {
 export function ProjectFrame({ children }: { children: React.ReactNode }) {
   const { id: raw } = useParams<{ id: string }>();
   const id = decodeURIComponent(raw);
-  const path = usePathname();
   const router = useRouter();
   const client = useQueryClient();
   const { data: d, error, isPending, refetch } = useProjectDetail(id);
@@ -91,13 +92,15 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   const base = `/projects/${encodeURIComponent(p.id)}`;
   const facts = [p.description, count(p.chats, "chat"), knowledge ? count(p.saved, "saved item") : ""].filter(Boolean).join(" · ");
   const list = [
-    { href: base, label: "Overview" },
+    { href: base, label: "Overview", icon: LayoutDashboard },
+    { href: `${base}/board`, label: "Board", icon: SquareKanban },
+    ...(tabs.notebook ? [{ href: `${base}/notebook`, label: "Notebook", icon: NotebookText, prefix: true }] : []),
+    ...(tabs.log ? [{ href: `${base}/log`, label: "Log", icon: ScrollText }] : []),
     // History, Files and Compare live under /code and keep it highlighted.
-    ...(tabs.code ? [{ href: `${base}/code`, label: "Code", prefix: true }] : []),
-    ...(tabs.research ? [{ href: `${base}/research`, label: "Research" }] : []),
-    ...(tabs.app ? [{ href: `${base}/app`, label: "App" }] : []),
+    ...(tabs.code ? [{ href: `${base}/code`, label: "Code", icon: Code, prefix: true }] : []),
+    ...(tabs.research ? [{ href: `${base}/research`, label: "Experiments", icon: FlaskConical }] : []),
+    ...(tabs.app ? [{ href: `${base}/app`, label: "App", icon: Box }] : []),
   ];
-  const onApp = path.endsWith("/app");
 
   async function makeApp() {
     setMaking(true);
@@ -115,7 +118,9 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <Page className={onApp ? "max-w-[1600px]" : undefined}>
+    // One width for every tab, the wider one the app and the notebook's three panes
+    // need, so the heading and the tabs stay where they are from tab to tab.
+    <Page className="max-w-[1600px]">
       <PageHeader
         breadcrumb={
           <nav aria-label="Breadcrumb" className="-mb-1 flex items-center gap-1.5 text-sm text-muted-foreground">
@@ -147,7 +152,7 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
           </>
         }
       >
-        {list.length > 1 && <SectionTabs label="Project" tabs={list} />}
+        {list.length > 1 && <SectionTabs label="Project" tabs={list} compact />}
       </PageHeader>
       <FrameContext.Provider value={{ detail: d, edit: () => setEditing(true) }}>{children}</FrameContext.Provider>
       {mine && <ProjectDialog open={editing} onOpenChange={setEditing} project={p} />}

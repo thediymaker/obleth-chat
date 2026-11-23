@@ -16,7 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { WorkspaceToggle } from "@/components/workspace/workspace-toggle";
 import { describe } from "@/lib/chat/attachments";
-import { pastesAsFile, PROMPT_LIMIT, promptCount } from "@/lib/chat/composer";
+import { clipboardFiles, pastesAsFile, pastesAsPicture, PROMPT_LIMIT, promptCount } from "@/lib/chat/composer";
 import { matchItems, menuTrigger, replaceTrigger } from "@/lib/chat/composer-menu";
 import { contextUse } from "@/lib/chat/context";
 import { temporaryNoteText } from "@/lib/chat/temporary";
@@ -162,7 +162,9 @@ export function composerHint(store: ReturnType<typeof useChat>) {
 
 const IDLE_PLACEHOLDER = "Ask a question, write some code, follow an idea…";
 
-export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { home?: boolean; placeholder?: string }) {
+/** The message box. `lean` (a project notebook's) keeps to asking: no files, tools,
+ *  collections, actions or mentions, as the notebook's sources decide what it reads. */
+export function Composer({ home = false, lean = false, placeholder = IDLE_PLACEHOLDER }: { home?: boolean; lean?: boolean; placeholder?: string }) {
   const store = useChat();
   const draft = useChatDraft();
   const box = useRef<HTMLTextAreaElement>(null);
@@ -195,6 +197,22 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
   const available = store.available;
+  // A picture or file pasted anywhere on the page, outside a text field, goes to the
+  // message box, so a screenshot can be pasted without clicking into the box first.
+  useEffect(() => {
+    if (lean || !available) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"]')) return;
+      const list = clipboardFiles(e.clipboardData);
+      if (!list.length || (e.clipboardData?.getData("text/plain") && !pastesAsPicture(e.clipboardData))) return;
+      e.preventDefault();
+      store.attachments.add(list);
+      box.current?.focus();
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [lean, available, store]);
   const conversationId = store.route.id || null;
   const knowledgeOn = store.feature("knowledge");
   const submit = () => {
@@ -204,7 +222,7 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
   const temporaryShown = home && !draft.project;
   const attachDisabled = store.streaming || store.attachments.full();
 
-  const trigger = focused && available && closedOn !== text ? menuTrigger(text, caret) : null;
+  const trigger = focused && available && !lean && closedOn !== text ? menuTrigger(text, caret) : null;
   const commands = useCommands({ home, attach: () => files.current?.click(), knowledge: knowledgeOn ? () => setPicker(true) : null });
   const mentions = useMentions(conversationId, trigger?.kind === "mention");
   const entries = trigger ? matchItems(trigger.kind === "command" ? commands : mentions, trigger.query) : [];
@@ -245,7 +263,7 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
           submit();
         }}
         onDragOver={(e) => {
-          if (!e.dataTransfer?.types?.includes("Files")) return;
+          if (lean || !e.dataTransfer?.types?.includes("Files")) return;
           e.preventDefault();
           setDropping(true);
         }}
@@ -321,18 +339,19 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
           }}
           onPaste={(e) => {
             // Text copied from documents can carry a picture of itself; keep it as text.
+            // A copied picture can carry its address as text; that one is the picture.
             const pasted = e.clipboardData?.getData("text/plain") || "";
-            if (pasted) {
+            if (pasted && !pastesAsPicture(e.clipboardData)) {
               // Long text is attached as a file, so the box never cuts it off and the
               // question stays in view.
-              if (pastesAsFile(pasted, e.currentTarget)) {
+              if (!lean && pastesAsFile(pasted, e.currentTarget)) {
                 e.preventDefault();
                 store.attachments.addText(pasted);
               }
               return;
             }
-            const list = composerFiles(e.clipboardData?.files);
-            if (!list.length) return;
+            const list = clipboardFiles(e.clipboardData);
+            if (lean || !list.length) return;
             e.preventDefault();
             store.attachments.add(list);
           }}
@@ -355,7 +374,7 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
               store.attachments.add(list);
             }}
           />
-          {knowledgeOn ? (
+          {lean ? null : knowledgeOn ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button type="button" variant="ghost" size="icon-sm" className="rounded-full" disabled={store.streaming} title="Attach files or add knowledge" aria-label="Attach or add">
@@ -378,7 +397,7 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
               size="icon-sm"
               className="rounded-full"
               disabled={attachDisabled}
-              title="Attach files of any kind (you can also paste or drop them)"
+              title="Attach files of any kind (you can also paste or drop them, pictures included)"
               aria-label="Attach files"
               onClick={() => files.current?.click()}
             >
@@ -386,11 +405,13 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
             </Button>
           )}
           {/* Never wraps: on a phone the model button shrinks instead (model-picker). */}
-          <div className="flex shrink-0 flex-nowrap items-center gap-0.5" role="group" aria-label="What the model can use">
-            <WorkspaceToggle />
-            <BrowserToggle />
-            <ToolsButton chatId={conversationId} disabled={store.streaming} />
-          </div>
+          {!lean && (
+            <div className="flex shrink-0 flex-nowrap items-center gap-0.5" role="group" aria-label="What the model can use">
+              <WorkspaceToggle />
+              <BrowserToggle />
+              <ToolsButton chatId={conversationId} disabled={store.streaming} />
+            </div>
+          )}
           <span className="ml-auto" />
           <span className="text-xs text-muted-foreground" title="Longer text is attached as a file when you paste it">
             {promptCount(text.length)}
@@ -418,14 +439,14 @@ export function Composer({ home = false, placeholder = IDLE_PLACEHOLDER }: { hom
       </form>
       <p className="mt-2 text-center text-xs leading-normal text-faint">
         {composerHint(store)}
-        {available && !store.streaming && !store.switchingVersion && (
+        {available && !lean && !store.streaming && !store.switchingVersion && (
           <span className="max-[760px]:hidden">
             {" "}
             · <kbd className="font-mono">/</kbd> for actions · <kbd className="font-mono">@</kbd> to point at a file, a job or a tool
           </span>
         )}
       </p>
-      {knowledgeOn && <KnowledgePicker open={picker} onOpenChange={setPicker} conversationId={conversationId} />}
+      {knowledgeOn && !lean && <KnowledgePicker open={picker} onOpenChange={setPicker} conversationId={conversationId} />}
     </div>
   );
 }

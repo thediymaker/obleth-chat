@@ -7,7 +7,7 @@ import { ProjectResearch } from "./project-research";
 vi.mock("@/lib/session", () => import("@/components/manage/test-utils"));
 vi.mock("@/components/chat/chat-provider", () => import("@/components/workspace/test-store"));
 const push = vi.fn();
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: vi.fn() }), usePathname: () => "/projects/p1/research" }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: vi.fn() }), usePathname: () => "/projects/p1/research", useSearchParams: () => new URLSearchParams() }));
 vi.mock("sonner", () => ({ toast: vi.fn() }));
 let mine = true;
 vi.mock("@/components/projects/project-frame", () => ({ useProjectFrame: () => ({ detail: { project: { id: "p1", name: "Decode", mine } } }) }));
@@ -30,7 +30,7 @@ beforeEach(() => {
   mine = true;
 });
 
-describe("the Research tab", () => {
+describe("the Experiments tab", () => {
   it("shows the goal, the tree and a node's run, and stops a run", async () => {
     const calls = mockApi((path) => (path.startsWith("/api/research/runs/r2/cancel") ? {} : path.startsWith("/api/research/runs/") ? { run: { log: "step 1\nstep 2", canCancel: true, diff: "@@ -1 +1 @@\n-slow\n+fast" } } : research), { workspaces: true });
     renderPage(<ProjectResearch projectId="p1" />);
@@ -55,7 +55,7 @@ describe("the Research tab", () => {
     const store = fakeStore();
     mockApi(() => ({ research: null }), { workspaces: true });
     renderPage(<ProjectResearch projectId="p1" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Start research in a chat" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Start experiments in a chat" }));
     expect(store.newChat).toHaveBeenCalled();
     expect(store.workspaceDraft).toBe(true);
     expect(store.starter).toHaveBeenCalledWith("Let’s set up research in this project. The goal: ", true);
@@ -66,6 +66,6 @@ describe("the Research tab", () => {
     mine = false;
     mockApi(() => ({ research: null }), { workspaces: true });
     renderPage(<ProjectResearch projectId="p1" />);
-    expect(await screen.findByText("Only the project’s owner can start research in it.")).toBeInTheDocument();
+    expect(await screen.findByText("Only the project’s owner can start experiments in it.")).toBeInTheDocument();
   });
 });

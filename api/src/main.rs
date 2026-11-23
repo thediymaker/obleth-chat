@@ -195,6 +195,16 @@ async fn main() -> Result<()> {
         state.clone(),
         state.shutdown.clone(),
     ));
+    // The project log writes the days whose work went quiet.
+    tokio::spawn(obleth_chat::project_log::write::worker(
+        state.clone(),
+        state.shutdown.clone(),
+    ));
+    // Guides for new documents in projects, while a Notebook model is named.
+    tokio::spawn(obleth_chat::notebook::worker(
+        state.clone(),
+        state.shutdown.clone(),
+    ));
     tokio::spawn(obleth_chat::retention::temporary_worker(
         state.store.clone(),
         state.shutdown.clone(),

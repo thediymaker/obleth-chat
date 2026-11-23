@@ -107,7 +107,7 @@ describe("when the session ends", () => {
     steerDraft.text = "use the other cluster";
     store.dispose();
     // The next person on this page starts a chat with Auto off and nothing picked.
-    expect(chatDraft.get()).toEqual({ project: null, collections: [] });
+    expect(chatDraft.get()).toEqual({ project: null, collections: [], card: null, intent: null });
     expect(steerDraft.text).toBe("");
     const applied: unknown[] = [];
     const { applyToolsDraft } = await import("./tools-draft");
@@ -432,4 +432,10 @@ describe("the content signal", () => {
     expect(plain).toHaveBeenCalledTimes(1);
     expect(content).toHaveBeenCalledTimes(51);
   });
+});
+
+it("a project notebook's chat is the chat on screen; the notebook without one is not", () => {
+  expect(routeOf("/projects/p1/notebook/c%201")).toEqual({ page: "chat", id: "c 1" });
+  expect(routeOf("/projects/p1/notebook")).toEqual({ page: "projects", id: "p1" });
+  expect(routeOf("/projects/p1/code/c1")).toEqual({ page: "projects", id: "p1" });
 });

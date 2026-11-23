@@ -6,9 +6,9 @@
 // that does not exist yet (conversationId null) keeps its picks in chat-draft.ts.
 
 import { useQueryClient, useQuery } from "@tanstack/react-query";
-import { BookOpen, Bookmark, Check, ChevronDown, ExternalLink, Orbit, Plus } from "lucide-react";
+import { BookOpen, Bookmark, Check, ChevronDown, ExternalLink, Orbit, Plus, X } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { createContext, useContext, useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, Eyebrow } from "@/components/app-shell/page";
 import { chatDraft, useChatDraft } from "@/lib/chat/chat-draft";
@@ -255,6 +255,44 @@ export function citeHtml(html: string, m: ReplyLike): string {
     .join("");
 }
 
+/** A citation the person clicked, by its reply and number. */
+export interface CitationFocus {
+  messageId: string;
+  n: number;
+}
+/** Where a page shows clicked citations in place, as a project notebook does: a [n]
+ *  then shows its quoted passage under the reply instead of opening the file. */
+export const CitationContext = createContext<{ focus: CitationFocus | null; clear: () => void } | null>(null);
+
+/** The passage a clicked [n] cites, quoted, with its document and page. */
+export function QuotedPassage({ s, onClose }: { s: SourceItem; onClose?: () => void }) {
+  const external = !s.saved;
+  return (
+    <div className="my-2 grid gap-1.5 rounded-lg border border-line-strong bg-card px-3.5 py-3" data-quoted-passage={s.n} role="region" aria-label={`Source ${s.n}`}>
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+        <span className="rounded border border-foreground px-1.5 font-mono text-2xs text-foreground">{s.n}</span>
+        <span className="min-w-0 font-medium text-foreground">{s.name}</span>
+        {s.page ? <span className="text-faint">p. {s.page}</span> : null}
+        <span className="ml-auto flex items-center gap-1">
+          <Button variant="ghost" size="xs" asChild>
+            <a href={sourceHref(s)} {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>
+              {s.saved ? "Open in Library" : s.page ? "Open at this page" : "Open"}
+              {external && <ExternalLink />}
+            </a>
+          </Button>
+          {onClose && (
+            <Button variant="ghost" size="icon-xs" aria-label="Close the passage" onClick={onClose}>
+              <X />
+            </Button>
+          )}
+        </span>
+      </div>
+      {s.section && <span className="text-xs text-faint">{s.section}</span>}
+      <blockquote className="border-l-2 border-line-strong pl-3 text-sm leading-relaxed text-text-2">“{s.excerpt}”</blockquote>
+    </div>
+  );
+}
+
 const quote = (q: string, max = 80) => `“${q.length > max ? `${q.slice(0, max - 1)}…` : q}”`;
 
 function Passage({ s }: { s: SourceItem & { cited: boolean } }) {
@@ -292,8 +330,11 @@ export function KnowledgeSources({ message }: { message: ReplyLike }) {
   const entry = sourcesOf(message);
   const [open, setOpen] = useState(false);
   const [more, setMore] = useState(false);
+  const citation = useContext(CitationContext);
   if (!entry) return null;
   const items = entry.items || [];
+  const focus = citation?.focus && message.id && citation.focus.messageId === message.id ? items.find((s) => s.n === citation.focus!.n) : undefined;
+  const focused = focus && <QuotedPassage s={focus} onClose={citation?.clear} />;
   const queries = entry.queries || [];
   const where = (entry.collections || []).join(", ");
   const live = searchingNow(message);
@@ -323,7 +364,7 @@ export function KnowledgeSources({ message }: { message: ReplyLike }) {
   const rest = marked.filter((s) => !s.cited);
   const shown = cited.length ? cited : rest.slice(0, 6);
   const hidden = cited.length ? rest : rest.slice(6);
-  return (
+  const card = (
     <div className="my-2 rounded-lg border text-sm" data-sources={message.id || "live"}>
       <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="flex w-full items-center gap-2 px-3 py-2 text-left text-muted-foreground hover:text-foreground">
         {head}
@@ -367,5 +408,13 @@ export function KnowledgeSources({ message }: { message: ReplyLike }) {
         </div>
       )}
     </div>
+  );
+  return focused ? (
+    <>
+      {focused}
+      {card}
+    </>
+  ) : (
+    card
   );
 }

@@ -26,6 +26,7 @@ import { when } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useChat } from "./chat-provider";
 import { NamedIcon } from "./icon";
+import { SHORTCUT as SCRATCH_SHORTCUT } from "@/lib/scratch";
 
 function Locked({ on }: { on: boolean }) {
   return on ? <Pill>Locked</Pill> : null;
@@ -273,6 +274,7 @@ export const SHORTCUTS: [string, string][] = [
   ["Search chats", "⌘ / Ctrl K"],
   ["New chat", "⌘ / Ctrl Shift O"],
   ["Chat details", "⌘ / Ctrl ."],
+  ["Scratch pad", SCRATCH_SHORTCUT.spoken],
   ["Send a message", "Enter"],
   ["New line", "Shift Enter"],
   ["Actions on the chat", "/ in an empty message"],

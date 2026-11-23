@@ -39,6 +39,7 @@ pub mod questions;
 pub mod research;
 pub mod retention;
 pub mod sandbox;
+pub mod scratch;
 pub mod secrets;
 pub mod sent_feedback;
 pub mod shares;
@@ -173,6 +174,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let project_log = project_log::router(state.clone());
     let notebook = notebook::router(state.clone());
     let batches = batches::router(state.clone());
+    let scratch = scratch::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
     let ui_url = state.ui_url.clone();
@@ -241,6 +243,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(project_log)
         .merge(notebook)
         .merge(batches)
+        .merge(scratch)
         .fallback_service(web(branding_dir, ui_url, sandboxes.as_ref()))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn(error::envelope))

@@ -772,7 +772,8 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
     assert!(top["excerpt"].as_str().unwrap().contains("Carnot"));
     assert_eq!(top["matched"], "meaning + words");
 
-    // The original opens through a short-lived signed link.
+    // Chat sends the original itself, under its own name, whatever the S3 service makes
+    // of a link's asked-for name.
     let response = f
         .app
         .clone()
@@ -788,12 +789,14 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = response.headers()["location"].to_str().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(
-        location.starts_with(&format!("{}/bucket/knowledge/", f.store_url))
-            && location.contains("X-Amz-Signature="),
-        "{location}"
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .ends_with("filename*=UTF-8''notes.md"),
+        "{:?}",
+        response.headers()
     );
 
     // Someone else sees nothing of a personal collection.
@@ -985,7 +988,7 @@ async fn uploaded_files_never_open_as_active_content(pool: PgPool) {
     let collection = created["collection"]["id"].as_str().unwrap().to_owned();
     let page = b"<html><body><script>alert(document.domain)</script>Phishing page</body></html>";
     // Whatever type the uploader sends, web pages, text and SVG-typed text are stored
-    // and served as plain-text downloads; only PDFs and images open in place.
+    // and served as plain-text downloads; only PDFs open in place.
     for (name, sent) in [
         ("page.html", "text/html"),
         ("notes.txt", "text/html"),
@@ -1025,20 +1028,72 @@ async fn uploaded_files_never_open_as_active_content(pool: PgPool) {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let location = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
-        let query: HashMap<String, String> = location.query_pairs().into_owned().collect();
+        // Sent by Chat as a plain-text download under its own name, never as the
+        // bucket's object, whose name and type some S3 services will not change.
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let headers = response.headers().clone();
         assert_eq!(
-            query["response-content-type"], "text/plain; charset=utf-8",
+            headers["content-type"], "text/plain; charset=utf-8",
             "{name}"
         );
+        let disposition = headers["content-disposition"].to_str().unwrap();
         assert!(
-            query["response-content-disposition"].starts_with(&format!(
-                "attachment; filename=\"{name}\"; filename*=UTF-8''{name}"
-            )),
-            "{location}"
+            disposition.starts_with("attachment;")
+                && disposition.ends_with(&format!("filename*=UTF-8''{name}")),
+            "{disposition}"
         );
+        assert_eq!(
+            headers["content-security-policy"],
+            "sandbox; default-src 'none'"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], &page[..], "{name}");
     }
+    // A PDF opens in place, through a short-lived signed link to the bucket.
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/knowledge/collections/{collection}/documents?name=paper.pdf"),
+            Body::from(pdf(&["Carnot"])),
+            "application/pdf",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let paper: Value = serde_json::from_slice(&bytes).unwrap();
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!(
+                "/api/knowledge/documents/{}/file",
+                paper["document"]["id"].as_str().unwrap()
+            ),
+            Body::empty(),
+            "application/json",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+    assert!(
+        location
+            .as_str()
+            .starts_with(&format!("{}/bucket/knowledge/", f.store_url)),
+        "{location}"
+    );
+    let query: HashMap<String, String> = location.query_pairs().into_owned().collect();
+    assert_eq!(query["response-content-type"], "application/pdf");
+    assert!(
+        query["response-content-disposition"].starts_with("inline; filename=\"paper.pdf\""),
+        "{location}"
+    );
     // A page an earlier version stored as HTML may carry that type in storage too, so
     // Chat sends it itself, as a plain-text download, instead of linking to storage.
     let legacy: String = sqlx::query_scalar(

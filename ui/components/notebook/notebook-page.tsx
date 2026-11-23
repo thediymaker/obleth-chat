@@ -125,7 +125,7 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
   }
 
   return (
-    <aside aria-label="Sources" className="grid content-start gap-3.5 border-b px-3.5 py-4 lg:border-r lg:border-b-0">
+    <aside aria-label="Sources" className="grid min-w-0 grid-cols-[minmax(0,1fr)] content-start gap-3.5 border-b px-3.5 py-4 lg:border-r lg:border-b-0">
       <div className="flex items-center gap-2 px-1">
         <h2 className="text-base font-semibold">Sources</h2>
         <span className="font-mono text-xs text-muted-foreground">
@@ -173,10 +173,11 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
         <Note className="px-1">{canAdd ? "No sources yet. Add files or paste text, and they are ticked for you." : "This project has no sources yet. Its owner can add them here."}</Note>
       ) : (
         n.collections.map((g) => (
-          <section key={g.id} className="grid gap-px" aria-label={g.name}>
+          <section key={g.id} className="grid grid-cols-[minmax(0,1fr)] gap-px" aria-label={g.name}>
             <div className="flex items-center gap-2 px-1 pb-1">
-              <h3 className="min-w-0 truncate text-2xs font-medium tracking-[.08em] text-muted-foreground uppercase">
-                {g.name} · {g.total}
+              <h3 className="flex min-w-0 items-baseline gap-1 text-2xs font-medium tracking-[.08em] text-muted-foreground uppercase" title={g.name}>
+                <span className="truncate">{g.name}</span>
+                <span className="shrink-0">· {g.total}</span>
               </h3>
               {g.documents.length > 1 && (
                 <button
@@ -195,7 +196,7 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
               )}
             </div>
             {g.documents.length === 0 && <p className="px-1.5 py-1 text-sm text-muted-foreground">No documents yet.</p>}
-            <ul className="grid gap-px">
+            <ul className="grid grid-cols-[minmax(0,1fr)] gap-px">
               {g.documents.map((d) => (
                 <SourceRow key={d.id} d={d} open={openId === d.id} onOpen={() => setOpenId(openId === d.id ? null : d.id)} onTick={(on) => tick([d.id], on)} onAsk={ask} />
               ))}

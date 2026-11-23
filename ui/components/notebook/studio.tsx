@@ -32,7 +32,7 @@ export function StudioPane({ projectId, n }: { projectId: string; n: Notebook })
   const [open, setOpen] = useState<string | null>(null);
   const notes = detail.saved.filter((s) => s.kind === "note" || s.kind === "excerpt").slice(0, 8);
   return (
-    <aside aria-label="Make from the sources" className="grid content-start gap-5 px-4 py-4 lg:border-l">
+    <aside aria-label="Make from the sources" className="grid min-w-0 grid-cols-[minmax(0,1fr)] content-start gap-5 px-4 py-4 lg:border-l">
       <MakeSection projectId={projectId} n={n} isAdmin={isAdmin} />
       {n.items.length > 0 && (
         <section className="grid gap-2" aria-label="In this notebook">

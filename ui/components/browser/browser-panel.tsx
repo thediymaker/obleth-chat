@@ -14,6 +14,7 @@ import { PaneNote } from "@/components/workspace/pane-note";
 import { useBranding } from "@/lib/branding-context";
 import { cn } from "@/lib/utils";
 import { liveUrl } from "@/lib/browser/bridge";
+import { AddToNotebook } from "./add-to-notebook";
 import { buttonOf, keyMessage, modifiers, pagePoint, viewport } from "./input";
 
 type Note = "connecting" | "starting" | "closed" | "status" | null;
@@ -375,7 +376,10 @@ export function BrowserPanel({ conversationId: id }: { conversationId: string })
         />
         {overlay}
       </div>
-      <p className="truncate border-t px-3 py-1.5 text-xs text-faint">Chrome · yours · public internet only{c.title ? ` · ${c.title}` : ""}</p>
+      <div className="flex items-center gap-2 border-t px-3 py-1">
+        <p className="min-w-0 flex-1 truncate py-0.5 text-xs text-faint">Chrome · yours · public internet only{c.title ? ` · ${c.title}` : ""}</p>
+        {c.status === "running" && !kind && <AddToNotebook conversationId={id} url={c.url} />}
+      </div>
     </div>
   );
 }

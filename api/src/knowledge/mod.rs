@@ -1100,6 +1100,180 @@ fn room(used: i64, count: i64, size: i64, quota: i64) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// A person's knowledge storage in use: bytes and documents, as `room` counts them.
+async fn used_by<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    owner: Uuid,
+) -> Result<(i64, i64), sqlx::Error> {
+    sqlx::query_as("SELECT COALESCE(SUM(size),0)::bigint, COUNT(*) FROM knowledge_documents WHERE owner_id=$1 AND object_key IS NOT NULL")
+        .bind(owner)
+        .fetch_one(db)
+        .await
+}
+
+impl Knowledge {
+    /// Keeps a web page read in its owner's browser as a document in their collection,
+    /// stored and indexed as an upload is, with the address it came from.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn store_page(
+        &self,
+        files: &crate::files::Files,
+        owner: Uuid,
+        collection: Uuid,
+        name: &str,
+        kind: extract::Kind,
+        bytes: Vec<u8>,
+        source_url: &str,
+    ) -> Result<Uuid, ApiError> {
+        let size = bytes.len() as i64;
+        if size == 0 {
+            return Err(ApiError::bad("The page is empty"));
+        }
+        let (used, count) = used_by(&self.pool, owner).await?;
+        room(used, count, size, self.user_bytes)?;
+        let doc = Uuid::new_v4();
+        let mime = extract::mime_for(kind);
+        let placed = files
+            .place(format!("knowledge/{owner}/{doc}"), bytes, &mime)
+            .await?;
+        let recorded = async {
+            let key = placed.key.as_deref().ok_or_else(|| {
+                ApiError::unavailable("Knowledge needs object storage, which is not configured")
+            })?;
+            let mut tx = self.pool.begin().await?;
+            store::lock_owner(&mut tx, owner, Require::Any).await?;
+            let (used, count) = used_by(&mut *tx, owner).await?;
+            room(used, count, size, self.user_bytes)?;
+            let theirs: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_collections WHERE id=$1 AND owner_id=$2 AND attachment_id IS NULL)",
+            )
+            .bind(collection)
+            .bind(owner)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !theirs {
+                return Err(ApiError::not_found());
+            }
+            sqlx::query(
+                "INSERT INTO knowledge_documents (id, collection_id, owner_id, name, mime_type, size, object_key, source_url, read_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())",
+            )
+            .bind(doc)
+            .bind(collection)
+            .bind(owner)
+            .bind(name)
+            .bind(&mime)
+            .bind(size)
+            .bind(key)
+            .bind(source_url)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok::<_, ApiError>(())
+        }
+        .await;
+        match recorded {
+            Ok(()) => {
+                self.queued().await;
+                Ok(doc)
+            }
+            Err(error) => {
+                files.discard(&placed).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Replaces a web page's document with the page as it reads now: the same document,
+    /// so ticks and links to it stay, indexed again and given a new guide.
+    pub(crate) async fn replace_page(
+        &self,
+        files: &crate::files::Files,
+        owner: Uuid,
+        document: Uuid,
+        name: &str,
+        kind: extract::Kind,
+        bytes: Vec<u8>,
+    ) -> Result<(), ApiError> {
+        let size = bytes.len() as i64;
+        if size == 0 {
+            return Err(ApiError::bad("The page is empty"));
+        }
+        let mime = extract::mime_for(kind);
+        let placed = files
+            .place(
+                format!("knowledge/{owner}/{}", Uuid::new_v4()),
+                bytes,
+                &mime,
+            )
+            .await?;
+        let recorded = async {
+            let key = placed.key.as_deref().ok_or_else(|| {
+                ApiError::unavailable("Knowledge needs object storage, which is not configured")
+            })?;
+            let mut tx = self.pool.begin().await?;
+            store::lock_owner(&mut tx, owner, Require::Any).await?;
+            let old: Option<(Option<String>, i64)> = sqlx::query_as(
+                "SELECT object_key, size FROM knowledge_documents WHERE id=$1 AND owner_id=$2 AND source_url IS NOT NULL FOR UPDATE",
+            )
+            .bind(document)
+            .bind(owner)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let (old_key, old_size) = old.ok_or_else(ApiError::not_found)?;
+            let (used, count) = used_by(&mut *tx, owner).await?;
+            let kept = i64::from(old_key.is_some());
+            room(
+                used - old_size * kept,
+                count - kept,
+                size,
+                self.user_bytes,
+            )?;
+            sqlx::query(
+                "UPDATE knowledge_documents SET name=$2, mime_type=$3, size=$4, object_key=$5, status='queued', stage='',
+                     progress_done=0, progress_total=0, pages=NULL, passages=0, text_chars=NULL, error=NULL, attempts=0,
+                     claimed_at=NULL, read_at=NOW(), updated_at=NOW()
+                 WHERE id=$1",
+            )
+            .bind(document)
+            .bind(name)
+            .bind(&mime)
+            .bind(size)
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM knowledge_passages WHERE document_id=$1")
+                .bind(document)
+                .execute(&mut *tx)
+                .await?;
+            // The guide described the page as it was; the next pass writes a new one.
+            sqlx::query("DELETE FROM notebook_guides WHERE document_id=$1")
+                .bind(document)
+                .execute(&mut *tx)
+                .await?;
+            if let Some(old_key) = old_key {
+                sqlx::query("INSERT INTO object_trash (object_key) VALUES ($1) ON CONFLICT (object_key) DO UPDATE SET pending = FALSE")
+                    .bind(old_key)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            Ok::<_, ApiError>(())
+        }
+        .await;
+        match recorded {
+            Ok(()) => {
+                self.queued().await;
+                Ok(())
+            }
+            Err(error) => {
+                files.discard(&placed).await;
+                Err(error)
+            }
+        }
+    }
+}
+
 /// A document the person may see, with its collection and whether they own it.
 async fn visible_document(
     pool: &PgPool,

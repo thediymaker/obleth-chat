@@ -10,6 +10,7 @@
 pub mod guides;
 pub mod makes;
 pub mod quotes;
+pub mod web;
 
 use crate::audit::{self, Action, Target};
 use crate::knowledge::VISIBLE as COLLECTION_VISIBLE;
@@ -411,6 +412,20 @@ pub fn router(state: AppState) -> Router {
             "/api/notebook/items/{id}",
             get(read_item).delete(remove_item),
         )
+        .route("/api/projects/{id}/notebook/pages", post(web::add))
+        .route(
+            "/api/projects/{id}/notebook/sources/{document}/read",
+            post(web::again),
+        )
+        .route("/api/notebook/reads/{id}/retry", post(web::try_again))
+        .route(
+            "/api/notebook/reads/{id}",
+            axum::routing::delete(web::forget),
+        )
+        .route(
+            "/api/conversations/{id}/browser/notebook",
+            post(web::from_tab),
+        )
         .route("/api/conversations/{id}/notebook", put(set_chat))
         .route("/api/admin/notebook", get(admin_read).put(admin_save))
         .with_state(state)
@@ -451,12 +466,16 @@ pub async fn view(s: &AppState, user: &Identity, project: Uuid) -> Result<Value,
     let rows = sqlx::query(
         "SELECT * FROM (
             SELECT d.id, d.collection_id, d.name, d.mime_type, d.size, d.status, d.stage, d.progress_done, d.progress_total,
-                   d.pages, d.passages, d.error, d.created_at,
+                   d.pages, d.passages, d.error, d.created_at, d.source_url, d.read_at,
                    s.document_id IS NOT NULL AS ticked, g.status AS guide_status, g.summary, g.questions,
+                   r.id AS read_id, r.status AS read_status, r.error AS read_error,
                    ROW_NUMBER() OVER (PARTITION BY d.collection_id ORDER BY d.created_at DESC, d.id) AS n
             FROM knowledge_documents d
             LEFT JOIN notebook_sources s ON s.document_id = d.id AND s.owner_id = $1 AND s.project_id = $2
             LEFT JOIN notebook_guides g ON g.document_id = d.id
+            LEFT JOIN LATERAL (SELECT r.id, r.status, r.error FROM notebook_page_reads r
+                               WHERE r.document_id = d.id AND r.again AND r.owner_id = $1 AND r.status IN ('reading', 'failed')
+                               ORDER BY r.requested_at DESC LIMIT 1) r ON TRUE
             WHERE d.collection_id = ANY($3)) listed
          WHERE n <= $4 ORDER BY created_at DESC, id",
     )
@@ -481,6 +500,18 @@ pub async fn view(s: &AppState, user: &Identity, project: Uuid) -> Result<Value,
     .bind(&ids)
     .fetch_one(pool)
     .await?;
+    // Pages the person asked for that are not documents yet: being read, or failed.
+    type Pending = (Uuid, Uuid, String, String, Option<String>, DateTime<Utc>);
+    let reading: Vec<Pending> = sqlx::query_as(
+        "SELECT id, collection_id, url, status, error, requested_at FROM notebook_page_reads
+         WHERE owner_id = $1 AND project_id = $2 AND NOT again AND status IN ('reading', 'failed') AND collection_id = ANY($3)
+         ORDER BY requested_at DESC, id",
+    )
+    .bind(user.id)
+    .bind(project)
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
     let groups: Vec<Value> = collections
         .iter()
         .map(|(id, name, own)| {
@@ -489,8 +520,13 @@ pub async fn view(s: &AppState, user: &Identity, project: Uuid) -> Result<Value,
                 .filter(|r| r.get::<Uuid, _>("collection_id") == *id)
                 .map(document_json)
                 .collect();
+            let pages: Vec<Value> = reading
+                .iter()
+                .filter(|r| r.1 == *id)
+                .map(|(read, _, url, status, error, at)| json!({"id":read,"url":url,"status":status,"error":error,"requestedAt":at}))
+                .collect();
             let total = counts.iter().find(|c| c.0 == *id).map_or(0, |c| c.1);
-            json!({"id":id,"name":name,"mine":own,"documents":documents,"total":total})
+            json!({"id":id,"name":name,"mine":own,"documents":documents,"total":total,"reading":pages})
         })
         .collect();
     let total: i64 = counts.iter().map(|c| c.1).sum();
@@ -514,6 +550,7 @@ pub async fn view(s: &AppState, user: &Identity, project: Uuid) -> Result<Value,
         "meter": meter,
         "addTo": add_to,
         "canMakeCollection": mine && add_to.is_empty(),
+        "webPages": web::offered(s, user),
         "items": makes::list(pool, user.id, project).await?,
     }))
 }
@@ -525,10 +562,15 @@ fn document_json(r: &sqlx::postgres::PgRow) -> Value {
             "ready" => json!({"status":status,"summary":r.get::<String,_>("summary"),"questions":r.get::<Vec<String>,_>("questions")}),
             _ => json!({"status":status}),
         });
+    // A web page being read again, or whose last reading failed, for its owner.
+    let reading = r.get::<Option<Uuid>, _>("read_id").map(|id| {
+        json!({"id":id,"status":r.get::<Option<String>,_>("read_status"),"error":r.get::<Option<String>,_>("read_error")})
+    });
     json!({"id":r.get::<Uuid,_>("id"),"name":r.get::<String,_>("name"),"mimeType":r.get::<String,_>("mime_type"),"size":r.get::<i64,_>("size"),
         "status":r.get::<String,_>("status"),"stage":r.get::<String,_>("stage"),"done":r.get::<i32,_>("progress_done"),"total":r.get::<i32,_>("progress_total"),
         "pages":r.get::<Option<i32>,_>("pages"),"passages":r.get::<i32,_>("passages"),"error":r.get::<Option<String>,_>("error"),
-        "createdAt":r.get::<DateTime<Utc>,_>("created_at"),"ticked":r.get::<bool,_>("ticked"),"guide":guide})
+        "createdAt":r.get::<DateTime<Utc>,_>("created_at"),"ticked":r.get::<bool,_>("ticked"),"guide":guide,
+        "sourceUrl":r.get::<Option<String>,_>("source_url"),"readAt":r.get::<Option<DateTime<Utc>>,_>("read_at"),"reading":reading})
 }
 
 async fn read(
@@ -826,6 +868,9 @@ pub async fn worker(s: AppState, shutdown: tokio_util::sync::CancellationToken) 
         }
         if let Err(error) = guides::pass(&s.store.pool, s.gateway.as_ref()).await {
             tracing::warn!("notebook guides: {error}");
+        }
+        if let Err(error) = web::recover(&s).await {
+            tracing::warn!("notebook pages: {error}");
         }
     };
     crate::worker::every(

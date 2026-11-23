@@ -7,7 +7,7 @@
 // /projects/<id>/notebook/<chat>.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { BookOpen, ChevronDown, ExternalLink, FilePlus2, Plus, Upload } from "lucide-react";
+import { BookOpen, ChevronDown, ExternalLink, FilePlus2, Globe, Plus, RotateCw, TriangleAlert, Upload } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useRef, useState } from "react";
@@ -31,7 +31,31 @@ import { count, when } from "@/lib/format";
 import { keys } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { StudioPane } from "./studio";
-import { makeCollection, meterText, type Notebook, noteBody, notebookHref, notebookKey, type Source, setOnlySources, setTicked, sourceMeta, startChat, suggestions, useNotebook } from "./api";
+import {
+  addPages,
+  addressesOf,
+  makeCollection,
+  meterText,
+  type Notebook,
+  noteBody,
+  notebookHref,
+  notebookKey,
+  PAGES_AT_ONCE,
+  type PageRead,
+  readAgain,
+  removeRead,
+  retryRead,
+  type Source,
+  setOnlySources,
+  setTicked,
+  siteOf,
+  sourceMeta,
+  sourceName,
+  startChat,
+  suggestions,
+  useNotebook,
+  webHref,
+} from "./api";
 
 /** The most characters of pasted text, as the server reads a text file. */
 const PASTE_LIMIT = 500_000;
@@ -80,6 +104,7 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
   const client = useQueryClient();
   const [openId, setOpenId] = useState<string | null>(null);
   const [pasting, setPasting] = useState(false);
+  const [linking, setLinking] = useState(false);
   const [adding, setAdding] = useState(false);
   const files = useRef<HTMLInputElement>(null);
   const canAdd = n.addTo.length > 0 || n.canMakeCollection;
@@ -88,6 +113,17 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
   async function tick(ids: string[], ticked: boolean) {
     try {
       await setTicked(client, projectId, ids, ticked);
+    } catch (e) {
+      toast(messageOf(e));
+    }
+  }
+
+  /** Runs a change to the web pages; the answer, when there is one, is the notebook as it now is. */
+  async function pages(change: () => Promise<unknown>) {
+    try {
+      const now = await change();
+      if (now && typeof now === "object" && "collections" in now) client.setQueryData(notebookKey(projectId), now as Notebook);
+      else client.invalidateQueries({ queryKey: notebookKey(projectId) });
     } catch (e) {
       toast(messageOf(e));
     }
@@ -145,6 +181,11 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
               <DropdownMenuItem onSelect={() => setPasting(true)}>
                 <FilePlus2 /> Paste text
               </DropdownMenuItem>
+              {n.webPages && (
+                <DropdownMenuItem onSelect={() => setLinking(true)}>
+                  <Globe /> Web page
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}
@@ -170,7 +211,7 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
         </div>
       )}
       {n.collections.length === 0 ? (
-        <Note className="px-1">{canAdd ? "No sources yet. Add files or paste text, and they are ticked for you." : "This project has no sources yet. Its owner can add them here."}</Note>
+        <Note className="px-1">{canAdd ? (n.webPages ? "No sources yet. Add files, web pages or pasted text, and they are ticked for you." : "No sources yet. Add files or paste text, and they are ticked for you.") : "This project has no sources yet. Its owner can add them here."}</Note>
       ) : (
         n.collections.map((g) => (
           <section key={g.id} className="grid gap-px" aria-label={g.name}>
@@ -194,10 +235,23 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
                 </button>
               )}
             </div>
-            {g.documents.length === 0 && <p className="px-1.5 py-1 text-sm text-muted-foreground">No documents yet.</p>}
+            {g.documents.length === 0 && !g.reading?.length && <p className="px-1.5 py-1 text-sm text-muted-foreground">No documents yet.</p>}
             <ul className="grid gap-px">
+              {g.reading?.map((r) => (
+                <ReadRow key={r.id} r={r} onRetry={() => pages(() => retryRead(r.id))} onRemove={() => pages(() => removeRead(r.id))} />
+              ))}
               {g.documents.map((d) => (
-                <SourceRow key={d.id} d={d} open={openId === d.id} onOpen={() => setOpenId(openId === d.id ? null : d.id)} onTick={(on) => tick([d.id], on)} onAsk={ask} />
+                <SourceRow
+                  key={d.id}
+                  d={d}
+                  open={openId === d.id}
+                  onOpen={() => setOpenId(openId === d.id ? null : d.id)}
+                  onTick={(on) => tick([d.id], on)}
+                  onAsk={ask}
+                  onReadAgain={g.mine && n.webPages ? () => pages(() => readAgain(projectId, d.id)) : undefined}
+                  onDismiss={d.reading ? () => pages(() => removeRead(d.reading!.id)) : undefined}
+                  onRetry={d.reading && n.webPages ? () => pages(() => retryRead(d.reading!.id)) : undefined}
+                />
               ))}
             </ul>
             {g.total > g.documents.length && (
@@ -209,27 +263,115 @@ function SourcesPane({ projectId, n }: { projectId: string; n: Notebook }) {
         ))
       )}
       <PasteDialog open={pasting} onOpenChange={setPasting} onAdd={(file) => add([file])} />
+      <WebPageDialog
+        open={linking}
+        onOpenChange={setLinking}
+        onAdd={async (addresses) => {
+          const now = await addPages(projectId, addresses);
+          client.setQueryData(notebookKey(projectId), now);
+          refreshKnowledge(client);
+          client.invalidateQueries({ queryKey: keys.project(projectId) });
+          toast(addresses.length === 1 ? "Reading the page in your browser. It shows under Sources as it is read." : `Reading ${addresses.length} pages in your browser, one after another.`);
+        }}
+      />
     </aside>
   );
 }
 
-function SourceRow({ d, open, onOpen, onTick, onAsk }: { d: Source; open: boolean; onOpen: () => void; onTick: (on: boolean) => void; onAsk: (q: string) => void }) {
+/** A page that is not a source yet: being read in the person's browser, or why it failed. */
+function ReadRow({ r, onRetry, onRemove }: { r: PageRead; onRetry: () => void; onRemove: () => void }) {
+  const reading = r.status === "reading";
+  let where = r.url;
+  try {
+    const u = new URL(r.url);
+    where = `${siteOf(r.url)}${u.pathname === "/" ? "" : u.pathname}`;
+  } catch {
+    // Shown as given.
+  }
+  return (
+    <li data-read={r.id}>
+      <div className="flex items-start gap-2.5 rounded-md px-1.5 py-1.5">
+        <span className="mt-1 flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
+          {reading ? (
+            <span className="relative size-2">
+              <span className="signal-pulse absolute inset-0 rounded-full bg-signal" />
+              <span className="relative block size-2 rounded-full bg-signal" />
+            </span>
+          ) : (
+            <TriangleAlert className="size-3.5 text-amber" />
+          )}
+        </span>
+        <span className="grid min-w-0 flex-1 gap-0.5">
+          <span className="truncate text-md leading-snug text-text-2" title={r.url}>
+            {where}
+          </span>
+          {reading ? (
+            <span role="status" className="text-xs text-signal">
+              Reading the page…
+            </span>
+          ) : (
+            <>
+              <span className="text-xs text-amber">{r.error || "The page could not be read."}</span>
+              <span className="flex gap-3 text-xs">
+                <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onRetry}>
+                  Try again
+                </button>
+                <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onRemove}>
+                  Remove
+                </button>
+              </span>
+            </>
+          )}
+        </span>
+      </div>
+    </li>
+  );
+}
+
+function SourceRow({
+  d,
+  open,
+  onOpen,
+  onTick,
+  onAsk,
+  onReadAgain,
+  onRetry,
+  onDismiss,
+}: {
+  d: Source;
+  open: boolean;
+  onOpen: () => void;
+  onTick: (on: boolean) => void;
+  onAsk: (q: string) => void;
+  /** Reads a web page again; only for the owner of its collection. */
+  onReadAgain?: () => void;
+  onRetry?: () => void;
+  onDismiss?: () => void;
+}) {
   const ready = d.status === "ready";
+  const name = sourceName(d);
+  const page = webHref(d.sourceUrl);
+  const again = d.reading;
   return (
     <li data-source={d.id}>
       <div className="flex items-start gap-2.5 rounded-md px-1.5 py-1.5 hover:bg-accent">
-        <Checkbox className="mt-0.5" checked={d.ticked} onCheckedChange={(v) => onTick(v === true)} aria-label={`Use ${d.name}`} />
+        <Checkbox className="mt-0.5" checked={d.ticked} onCheckedChange={(v) => onTick(v === true)} aria-label={`Use ${name}`} />
         <button type="button" className="grid min-w-0 flex-1 gap-0.5 text-left" aria-expanded={open} onClick={onOpen}>
           <span className={cn("line-clamp-2 text-md leading-snug break-words", d.ticked ? "text-foreground" : "text-text-2")} title={d.name}>
-            {d.name}
+            {name}
           </span>
-          {ready ? (
+          {again?.status === "reading" ? (
+            <span role="status" className="text-xs text-signal">
+              Reading the page again…
+            </span>
+          ) : ready ? (
             <span className="text-xs text-muted-foreground">{sourceMeta(d)}</span>
           ) : (
             <span className="justify-self-start">
               <Status d={d} />
             </span>
           )}
+          {again?.status === "failed" && <span className="text-xs text-amber">Could not read it again: {again.error || "the page did not load."}</span>}
         </button>
         <ChevronDown className={cn("mt-1 size-3.5 shrink-0 text-faint transition-transform", open && "rotate-180")} aria-hidden="true" />
       </div>
@@ -254,14 +396,94 @@ function SourceRow({ d, open, onOpen, onTick, onAsk }: { d: Source; open: boolea
             <p className="text-muted-foreground">No guide for this source.</p>
           ) : null}
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <span>Added {when(d.createdAt)}</span>
+            <span>{d.sourceUrl && d.readAt ? `Read ${when(d.readAt)}` : `Added ${when(d.createdAt)}`}</span>
+            {page && (
+              <a href={page} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:text-foreground">
+                Open the page <ExternalLink className="size-3" />
+              </a>
+            )}
             <a href={fileUrl(d.id)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:text-foreground">
-              Open the file <ExternalLink className="size-3" />
+              {page ? "Open the copy kept here" : "Open the file"} <ExternalLink className="size-3" />
             </a>
+            {page && onReadAgain && again?.status !== "reading" && (
+              <button type="button" className="inline-flex items-center gap-1 hover:text-foreground" onClick={onReadAgain}>
+                <RotateCw className="size-3" /> Read it again
+              </button>
+            )}
+            {again?.status === "failed" && onRetry && (
+              <button type="button" className="hover:text-foreground" onClick={onRetry}>
+                Try again
+              </button>
+            )}
+            {again?.status === "failed" && onDismiss && (
+              <button type="button" className="hover:text-foreground" onClick={onDismiss}>
+                Dismiss
+              </button>
+            )}
           </span>
         </div>
       )}
     </li>
+  );
+}
+
+/** Add › Web page: addresses, one per line, read in the person's browser. */
+function WebPageDialog({ open, onOpenChange, onAdd }: { open: boolean; onOpenChange: (open: boolean) => void; onAdd: (addresses: string[]) => Promise<void> }) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const addresses = addressesOf(text);
+  const many = addresses.length > PAGES_AT_ONCE;
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) setError("");
+        onOpenChange(next);
+      }}
+    >
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Add web pages as sources</DialogTitle>
+          <DialogDescription>Each page opens in your browser and is read as it shows there, so pages you are signed in to work too. It is kept in the project’s collection, indexed, and ticked for you. A PDF is kept as the file.</DialogDescription>
+        </DialogHeader>
+        <form
+          id="notebook-pages"
+          className="grid gap-2"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!addresses.length || many) return;
+            setBusy(true);
+            setError("");
+            try {
+              await onAdd(addresses);
+              setText("");
+              onOpenChange(false);
+            } catch (err) {
+              setError(messageOf(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <Textarea id="notebook-pages-addresses" aria-label="Addresses" placeholder={"https://example.org/article\nOne address per line"} rows={5} value={text} onChange={(e) => setText(e.target.value)} />
+          <p className={cn("text-xs", many ? "text-amber" : "text-muted-foreground")}>{many ? `Up to ${PAGES_AT_ONCE} pages at a time; this has ${addresses.length}.` : `Up to ${PAGES_AT_ONCE} pages at a time, read one after another.`}</p>
+          {error && (
+            <p role="alert" className="text-sm text-amber">
+              {error}
+            </p>
+          )}
+        </form>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="submit" form="notebook-pages" disabled={busy || !addresses.length || many}>
+            {addresses.length > 1 ? `Add ${addresses.length} pages` : "Add page"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

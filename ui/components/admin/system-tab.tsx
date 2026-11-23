@@ -1,8 +1,8 @@
 "use client";
 
-// Administration › System: which Chat this is, the banner, data retention, knowledge
-// search's embedding model, decisions, memory, the project log, and guides for
-// everything set where Chat runs.
+// Administration › System: which Chat this is, the banner, data retention, memory and
+// the project log on the left; knowledge search's embedding model, the notebook,
+// decisions and guides for everything set where Chat runs on the right.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, BookOpen, Box, ExternalLink, Link2, Lock, Settings, Shield, Terminal } from "lucide-react";
@@ -683,25 +683,6 @@ export function SystemTab() {
               />
             ))}
           {retention.data && <RetentionCard key={JSON.stringify(retention.data)} retention={retention.data} onSaved={set<Retention>("retention")} confirm={confirm.ask} />}
-        </div>
-        <div className="grid min-w-0 gap-4">
-          {knowledge &&
-            e &&
-            (e.error ? (
-              <Section title="Knowledge search">
-                <ErrorBox error={e.error} />
-              </Section>
-            ) : (
-              <EmbeddingCard key={JSON.stringify(e.effective)} embedding={e} onSaved={set<Embedding>("embedding")} confirm={confirm.ask} />
-            ))}
-          {d &&
-            (d.error ? (
-              <Section title="Decisions">
-                <ErrorBox error={d.error} />
-              </Section>
-            ) : (
-              <DecisionsCard key={JSON.stringify(d)} decisions={d} onSaved={set<Decisions>("decisions")} />
-            ))}
           {memory.data &&
             (memory.data.error ? (
               <Section title="Memory">
@@ -732,6 +713,17 @@ export function SystemTab() {
                 }}
               />
             ))}
+        </div>
+        <div className="grid min-w-0 gap-4">
+          {knowledge &&
+            e &&
+            (e.error ? (
+              <Section title="Knowledge search">
+                <ErrorBox error={e.error} />
+              </Section>
+            ) : (
+              <EmbeddingCard key={JSON.stringify(e.effective)} embedding={e} onSaved={set<Embedding>("embedding")} confirm={confirm.ask} />
+            ))}
           {knowledge &&
             notebook.data &&
             (notebook.data.error ? (
@@ -740,6 +732,14 @@ export function SystemTab() {
               </Section>
             ) : (
               <NotebookCard key={JSON.stringify(notebook.data)} notebook={notebook.data} onSaved={set<NotebookSettings>("notebook")} />
+            ))}
+          {d &&
+            (d.error ? (
+              <Section title="Decisions">
+                <ErrorBox error={d.error} />
+              </Section>
+            ) : (
+              <DecisionsCard key={JSON.stringify(d)} decisions={d} onSaved={set<Decisions>("decisions")} />
             ))}
           <Section title="Set where Chat runs" description="The rest is configured with environment variables when Chat is deployed. These guides show how.">
             <div className="grid gap-1">

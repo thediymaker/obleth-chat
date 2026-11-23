@@ -47,7 +47,7 @@ export function LogCard({ log: l, onSaved }: { log: LogSettings; onSaved: (l: Lo
           autoComplete="off"
           placeholder="gemma4-31b-it"
           defaultValue={l.model || ""}
-          help="Writes a day once its work in a project has been quiet for 30 minutes, or when the day ends, and again when more work arrives (at most every 2 hours while the day is under way, and 8 times a day in all): one request to this model each time. It reads up to about 18,000 characters of a day's chats. Each day is charged to its person as Project log in Usage."
+          help="Writes a day once its work in a project has been quiet for 30 minutes, or when the day ends, and again when more work arrives (at most every 2 hours while the day is under way, and at most 8 times a day on its own): one request to this model each time. It reads up to about 18,000 characters of a day's chats. Each day is charged to its person as Project log in Usage."
         />
         <datalist id="log-models">
           {(models.data || [])

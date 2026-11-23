@@ -592,6 +592,13 @@ async fn write_again(
     Path((project, day)): Path<(Uuid, String)>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let user = open(&s, &headers, project, true).await?;
+    // Days already written stay readable after a person turns their log off; none is
+    // written for them.
+    if !on_for(&s, user.id).await {
+        return Err(ApiError::conflict(
+            "Your project log is off. Turn it on in Settings to write a day.",
+        ));
+    }
     let day = parse_day(&day)?;
     let id = day_id(&s.store.pool, project, user.id, day).await?;
     if !write::request(&s, id).await? {

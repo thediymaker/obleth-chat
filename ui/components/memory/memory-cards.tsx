@@ -1,22 +1,32 @@
 "use client";
 
 // Under a reply: the memories it was given ("Remembered 3 things"), and what Chat
-// learned from the exchange, with Undo. The chat page renders <MemoryCards message={m} />.
+// learned from the exchange, with Undo. A memory learned in a chat in a project shows
+// where it went, for this project or everywhere, and changes with one click. The chat
+// page renders <MemoryCards message={m} />.
 
-import { useQueryClient } from "@tanstack/react-query";
-import { Brain, ChevronDown, Sparkles } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Brain, Check, ChevronDown, Globe, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
+import { projectDot } from "@/components/app-shell/sidebar";
+import { api } from "@/lib/api";
+import { useProjects, useSignedIn } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { addMemory, deleteMemory, refreshMemory } from "./api";
+import { addMemory, changeMemory, deleteMemory, MEMORY_KEY, refreshMemory, type MemoryState } from "./api";
 import { messageOf } from "@/components/manage/kit";
+import { scopeMeaning } from "./scope";
 
 interface Item {
   id: string;
   text: string;
   pinned?: boolean;
   change?: "added" | "updated" | "forgot";
+  /** Learned in a chat in a project: where it went (null: everywhere)… */
+  projectId?: string | null;
+  /** …and the chat's project, the other place it can go. */
+  chatProjectId?: string;
 }
 interface Entry {
   kind: "recalled" | "learned";
@@ -37,6 +47,18 @@ const mark = (id: string, state: "deleted" | "restored") => {
   version++;
   listeners.forEach((l) => l());
 };
+// Where memories were moved from a reply in this session, until the Memory list says.
+const moved = new Map<string, string | null>();
+const markMoved = (id: string, projectId: string | null) => {
+  moved.set(id, projectId);
+  version++;
+  listeners.forEach((l) => l());
+};
+const unmarkMoved = (id: string) => {
+  moved.delete(id);
+  version++;
+  listeners.forEach((l) => l());
+};
 
 export const memoryEntries = (m: { activity?: unknown }, kind: Entry["kind"]) =>
   Array.isArray(m.activity) ? (m.activity as Entry[]).filter((e) => e?.kind === kind).flatMap((e) => e.items || []) : [];
@@ -53,7 +75,32 @@ export function MemoryCards({ message }: { message: { activity?: unknown } }) {
   const [open, setOpen] = useState(false);
   const recalled = memoryEntries(message, "recalled");
   const learned = memoryEntries(message, "learned");
+  const scoped = learned.some((i) => i.change === "added" && i.chatProjectId);
+  const signedIn = useSignedIn();
+  // Where each memory is now, so the card is right after a reload or a move elsewhere.
+  const memories = useQuery({ queryKey: MEMORY_KEY, queryFn: () => api.request<MemoryState>("/api/memory"), enabled: signedIn && scoped });
+  const projects = useProjects().data?.projects;
   if (!recalled.length && !learned.length) return null;
+
+  /** The project the memory is in now, or null for everywhere. */
+  function placeOf(item: Item): string | null {
+    if (moved.has(item.id)) return moved.get(item.id) ?? null;
+    const now = memories.data?.memories.find((m) => m.id === item.id);
+    if (now) return now.projectId;
+    return item.projectId ?? null;
+  }
+  async function move(item: Item, projectId: string | null, name: string) {
+    try {
+      await changeMemory(item.id, { projectId });
+      markMoved(item.id, projectId);
+      toast(projectId ? "Kept for this project" : "Moved to everywhere", { description: scopeMeaning(projectId ? name : null) });
+      // Once the list has it, the list is right again, also after a move elsewhere.
+      await refreshMemory(client);
+      if (client.getQueryData<MemoryState>(MEMORY_KEY)?.memories.some((m) => m.id === item.id)) unmarkMoved(item.id);
+    } catch (e) {
+      toast(messageOf(e));
+    }
+  }
 
   async function forget(item: Item) {
     try {
@@ -116,8 +163,9 @@ export function MemoryCards({ message }: { message: { activity?: unknown } }) {
       )}
       {learned.map((item) => {
         const state = done.get(item.id);
-        return (
-          <div key={`${item.change}-${item.id}`} className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm">
+        const project = item.change === "added" && item.chatProjectId ? projects?.find((p) => p.id === item.chatProjectId) : undefined;
+        const row = (
+          <div className="flex min-w-0 items-center gap-2 text-sm">
             <Sparkles className="size-4 shrink-0 text-muted-foreground" />
             {state === "deleted" ? (
               <span className="grow text-muted-foreground">Forgot “{item.text}”</span>
@@ -136,20 +184,66 @@ export function MemoryCards({ message }: { message: { activity?: unknown } }) {
                   )}
                 </span>
                 {item.change === "forgot" ? (
-                  <button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => restore(item)}>
+                  <button type="button" className="shrink-0 text-xs text-muted-foreground hover:text-foreground" onClick={() => restore(item)}>
                     Keep it
                   </button>
                 ) : item.change === "updated" ? (
-                  <Link href={memoryHref(item.id)} className="text-xs text-muted-foreground hover:text-foreground">
+                  <Link href={memoryHref(item.id)} className="shrink-0 text-xs text-muted-foreground hover:text-foreground">
                     Edit
                   </Link>
                 ) : (
-                  <button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => forget(item)}>
+                  <button type="button" className="shrink-0 text-xs text-muted-foreground hover:text-foreground" onClick={() => forget(item)}>
                     Undo
                   </button>
                 )}
               </>
             )}
+          </div>
+        );
+        if (!project || state) return <div key={`${item.change}-${item.id}`} className="rounded-lg border px-3 py-2">{row}</div>;
+        const place = placeOf(item);
+        const here = place === project.id;
+        const choice = (selected: boolean, label: React.ReactNode, title: string, onClick: () => void) => (
+          <button
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            title={title}
+            onClick={selected ? undefined : onClick}
+            className={cn(
+              "inline-flex max-w-full min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5",
+              selected ? "border-foreground/25 bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+            )}
+          >
+            {label}
+          </button>
+        );
+        return (
+          <div key={`${item.change}-${item.id}`} className="grid grid-cols-[minmax(0,1fr)] gap-1.5 rounded-lg border px-3 py-2">
+            {row}
+            <div role="radiogroup" aria-label="Where Chat uses this memory" className="flex min-w-0 flex-wrap items-center gap-1.5 pl-6 text-xs">
+              {choice(
+                here,
+                <>
+                  {here ? <Check className="size-3 shrink-0" aria-hidden="true" /> : <span className={cn("size-2 shrink-0 rounded-full", projectDot(project.color))} aria-hidden="true" />}
+                  <span className="truncate">For this project</span>
+                </>,
+                `${project.name}. ${scopeMeaning(project.name)}`,
+                () => move(item, project.id, project.name),
+              )}
+              {choice(
+                !here,
+                <>
+                  {!here ? <Check className="size-3 shrink-0" aria-hidden="true" /> : <Globe className="size-3 shrink-0" aria-hidden="true" />}
+                  <span className="truncate">Everywhere</span>
+                </>,
+                scopeMeaning(null),
+                () => move(item, null, project.name),
+              )}
+              <span className="min-w-0 basis-full truncate text-muted-foreground sm:flex-1 sm:basis-0" title={scopeMeaning(here ? project.name : null)}>
+                {scopeMeaning(here ? project.name : null)}
+              </span>
+            </div>
           </div>
         );
       })}

@@ -95,17 +95,63 @@ pub fn address(text: &str) -> Result<String, String> {
 fn public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => public_v4(ip),
-        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-            Some(v4) => public_v4(v4),
-            None => {
-                let first = ip.segments()[0];
-                !(ip.is_loopback()
-                    || ip.is_unspecified()
-                    || ip.is_multicast()
-                    || (first & 0xfe00) == 0xfc00
-                    || (first & 0xffc0) == 0xfe80)
+        IpAddr::V6(ip) => {
+            let [first, second, ..] = ip.segments();
+            let octets = ip.octets();
+            // IPv6 forms that carry an IPv4 address are judged by that address:
+            // mapped (::ffff:a.b.c.d), compatible (::a.b.c.d), NAT64 (64:ff9b::/96)
+            // and 6to4 (2002::/16).
+            let compatible =
+                octets[..12].iter().all(|b| *b == 0) && !ip.is_loopback() && !ip.is_unspecified();
+            let nat64 =
+                first == 0x64 && second == 0xff9b && ip.segments()[2..6].iter().all(|s| *s == 0);
+            let carried = if let Some(v4) = ip.to_ipv4_mapped() {
+                Some(v4)
+            } else if compatible || nat64 {
+                Some(Ipv4Addr::new(
+                    octets[12], octets[13], octets[14], octets[15],
+                ))
+            } else if first == 0x2002 {
+                Some(Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]))
+            } else {
+                None
+            };
+            match carried {
+                Some(v4) => public_v4(v4),
+                None => {
+                    !(ip.is_loopback()
+                        || ip.is_unspecified()
+                        || ip.is_multicast()
+                        || (first & 0xfe00) == 0xfc00
+                        || (first & 0xffc0) == 0xfe80
+                        || (first & 0xffc0) == 0xfec0)
+                }
             }
-        },
+        }
+    }
+}
+
+/// How long looking up a page's site may take before it is left to the browser.
+const LOOKUP_TIME: Duration = Duration::from_secs(5);
+
+/// Whether the site of `url`, an address `address` accepted, is public by what its
+/// name resolves to here: a name that leads to a private address, such as a service
+/// inside the cluster or a public name pointed at one, is refused. A name that does
+/// not resolve here is left to the browser. The browser resolves the name again
+/// itself, so this narrows what a read can reach; the sandbox namespace's network
+/// rules are what enforce it.
+pub async fn resolves_public(url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(url::Host::Domain(name)) = url.host() else {
+        return true;
+    };
+    let port = url.port_or_known_default().unwrap_or(443);
+    let found = tokio::time::timeout(LOOKUP_TIME, tokio::net::lookup_host((name, port))).await;
+    match found {
+        Ok(Ok(found)) => found.map(|a| a.ip()).all(public_ip),
+        _ => true,
     }
 }
 
@@ -600,6 +646,28 @@ pub async fn add_from_tab(
         Read::Page { url, .. } | Read::Pdf { url, .. } => url.clone(),
     };
     let url = address(&url).map_err(ApiError::bad)?;
+    if !resolves_public(&url).await {
+        return Err(ApiError::bad(
+            "Only addresses of public web sites can be added",
+        ));
+    }
+    // Counted with the project's reads for the day before it is kept, under the same
+    // lock as the check, so adds made at once cannot pass the day's limit together.
+    let counted = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    room(&mut tx, user.id, project, 1).await?;
+    sqlx::query(
+        "INSERT INTO notebook_page_reads (id, owner_id, project_id, collection_id, url, status, finished_at)
+         VALUES ($1, $2, $3, $4, $5, 'done', NOW())",
+    )
+    .bind(counted)
+    .bind(user.id)
+    .bind(project)
+    .bind(collection)
+    .bind(&url)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     let (name, kind, bytes) = document(read);
     let document = knowledge
         .store_page(
@@ -612,19 +680,11 @@ pub async fn add_from_tab(
             &url,
         )
         .await?;
-    // Counted with the project's reads for the day.
-    sqlx::query(
-        "INSERT INTO notebook_page_reads (id, owner_id, project_id, collection_id, document_id, url, status, finished_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'done', NOW())",
-    )
-    .bind(Uuid::new_v4())
-    .bind(user.id)
-    .bind(project)
-    .bind(collection)
-    .bind(document)
-    .bind(&url)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE notebook_page_reads SET document_id = $2 WHERE id = $1")
+        .bind(counted)
+        .bind(document)
+        .execute(pool)
+        .await?;
     if let Err(error) = tick(pool, user.id, project, &[document], true).await {
         tracing::warn!("could not tick an added page: {}", error.1);
     }

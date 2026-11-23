@@ -47,6 +47,10 @@ fn only_public_http_addresses_are_read() {
         ("http://[::1]/", "public web sites"),
         ("http://[fd00::1]/", "public web sites"),
         ("http://[::ffff:10.0.0.1]/", "public web sites"),
+        ("http://[::127.0.0.1]/", "public web sites"),
+        ("http://[64:ff9b::a00:1]/", "public web sites"),
+        ("http://[2002:a00:1::]/", "public web sites"),
+        ("http://[fec0::1]/", "public web sites"),
         ("http://intranet/", "public web sites"),
         ("http://printer.local/", "public web sites"),
         ("http://svc.cluster.internal/", "public web sites"),
@@ -56,6 +60,17 @@ fn only_public_http_addresses_are_read() {
     }
     let long = format!("https://example.org/{}", "a".repeat(2000));
     assert!(address(&long).unwrap_err().contains("2,000"));
+    // An IPv6 address that carries a public IPv4 one is public.
+    assert!(address("http://[2002:5db8:d822::]/").is_ok());
+}
+
+#[tokio::test]
+async fn a_name_that_resolves_to_a_private_address_is_not_public() {
+    // localhost resolves without a network, to a loopback address.
+    assert!(!resolves_public("http://localhost/").await);
+    assert!(!resolves_public("http://localhost:9223/json").await);
+    // An address given by number is judged by address() alone.
+    assert!(resolves_public("https://93.184.216.34/x").await);
 }
 
 #[test]

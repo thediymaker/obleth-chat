@@ -26,16 +26,20 @@ pub struct Limits {
     pub text_chars: usize,
     /// Bytes of a PDF.
     pub pdf_bytes: usize,
-    /// Whether every address the read passes through must be a public web site's:
-    /// the one asked for, each one a redirect leads to, and the one it ends at.
+    /// Whether every address the read passes through must be a public web site's, by
+    /// its text and by what its name resolves to: the one asked for, each one a
+    /// redirect leads to, each page a frame of it loads before it is asked for, and
+    /// the one it ends at. Its scripts' other requests are left to the sandbox
+    /// namespace's network rules.
     pub public_only: bool,
 }
 
 /// What a read says when it was led somewhere that is not a public web site.
 const NOT_PUBLIC: &str = "The page led to an address that is not a public web site.";
 
-fn allowed(limits: Limits, url: &str) -> bool {
-    !limits.public_only || crate::notebook::web::address(url).is_ok()
+async fn allowed(limits: Limits, url: &str) -> bool {
+    use crate::notebook::web::{address, resolves_public};
+    !limits.public_only || (address(url).is_ok() && resolves_public(url).await)
 }
 
 #[derive(Debug, PartialEq)]
@@ -127,14 +131,17 @@ async fn read_in(
     url: &str,
     limits: Limits,
 ) -> Result<Read, String> {
-    if !allowed(limits, url) {
+    if !allowed(limits, url).await {
         return Err(NOT_PUBLIC.into());
     }
     let failed = |e: anyhow::Error| format!("The browser failed: {e:#}");
     let events = cdp.events();
     cdp.call(
         "Fetch.enable",
-        json!({"patterns":[{"urlPattern":"*","resourceType":"Document","requestStage":"Response"}]}),
+        json!({"patterns":[
+            {"urlPattern":"*","resourceType":"Document","requestStage":"Request"},
+            {"urlPattern":"*","resourceType":"Document","requestStage":"Response"},
+        ]}),
         Some(session),
     )
     .await
@@ -160,7 +167,7 @@ async fn read_in(
         return Err("The browser showed a PDF it would not hand over. Try again.".into());
     }
     // Where the page ended up, after anything its own script did.
-    if !allowed(limits, value["url"].as_str().unwrap_or("")) {
+    if !allowed(limits, value["url"].as_str().unwrap_or("")).await {
         return Err(NOT_PUBLIC.into());
     }
     judge(&value, limits)
@@ -202,6 +209,22 @@ async fn load(
                 }
                 let p = &event["params"];
                 let id = p["requestId"].as_str().unwrap_or("").to_owned();
+                // A page asked for and not yet sent, in any frame and at any point of
+                // the load: one off the public web is never sent.
+                if p.get("responseStatusCode").is_none() && p.get("responseErrorReason").is_none() {
+                    let asked = p.pointer("/request/url").and_then(Value::as_str).unwrap_or("");
+                    if allowed(limits, asked).await {
+                        let _ = cdp
+                            .call("Fetch.continueRequest", json!({"requestId":id}), Some(session))
+                            .await;
+                    } else {
+                        abort(cdp, session, &id).await;
+                        if p["frameId"] == target {
+                            return Err(NOT_PUBLIC.into());
+                        }
+                    }
+                    continue;
+                }
                 let status = p["responseStatusCode"].as_u64().unwrap_or(0);
                 let headers = headers(&p["responseHeaders"]);
                 let main = p["frameId"] == target && !answered;
@@ -214,7 +237,11 @@ async fn load(
                     let next = header("location")
                         .filter(|_| redirect)
                         .and_then(|to| url::Url::parse(at).ok()?.join(to).ok());
-                    if !allowed(limits, at) || next.is_some_and(|to| !allowed(limits, to.as_str())) {
+                    let next_allowed = match &next {
+                        Some(to) => allowed(limits, to.as_str()).await,
+                        None => true,
+                    };
+                    if !allowed(limits, at).await || !next_allowed {
                         abort(cdp, session, &id).await;
                         return Err(NOT_PUBLIC.into());
                     }

@@ -289,7 +289,7 @@ function Panel({ close, escape }: { close: (away?: boolean) => void; escape: Rea
   const disabled = !typed || !!busy;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="grid gap-2 px-4 pt-2 pb-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 px-4 pt-2 pb-3">
         <label htmlFor="scratch-text" className="sr-only">
           Jot something down
         </label>
@@ -309,7 +309,7 @@ function Panel({ close, escape }: { close: (away?: boolean) => void; escape: Rea
             }
           }}
         />
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <ProjectChip
             projects={projects}
             value={project?.id ?? null}
@@ -318,7 +318,7 @@ function Panel({ close, escape }: { close: (away?: boolean) => void; escape: Rea
             onOpenChange={(o) => setChoosing(o ? "any" : "")}
             forCard={choosing === "card"}
           />
-          <Button size="sm" className="ml-auto" disabled={disabled} onClick={() => void save()} title="Save to your scratch pad (⌘↵)">
+          <Button size="sm" className="ml-auto shrink-0" disabled={disabled} onClick={() => void save()} title="Save to your scratch pad (⌘↵)">
             Save <kbd className="font-sans text-xs opacity-70 max-[760px]:hidden">⌘↵</kbd>
           </Button>
         </div>
@@ -355,7 +355,7 @@ function Panel({ close, escape }: { close: (away?: boolean) => void; escape: Rea
           <ul className="divide-y divide-line-soft">
             {jottings.map((j) =>
               editing?.id === j.id ? (
-                <li key={j.id} className="grid gap-2 px-4 py-2.5">
+                <li key={j.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 px-4 py-2.5">
                   <label htmlFor={`scratch-edit-${j.id}`} className="sr-only">
                     Edit the jotting
                   </label>
@@ -373,7 +373,7 @@ function Panel({ close, escape }: { close: (away?: boolean) => void; escape: Rea
                       }
                     }}
                   />
-                  <div className="flex items-center gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
                     <ProjectChip projects={projects} value={editing.projectId} onChange={(id) => setEditing({ ...editing, projectId: id })} />
                     <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setEditing(null)}>
                       Cancel
@@ -450,7 +450,7 @@ function ProjectChip({
   return (
     <DropdownMenu open={open} onOpenChange={onOpenChange} modal={false}>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="xs" className="max-w-[60%] min-w-0 rounded-full px-2.5" aria-label={`${label}, choose a project`} data-project-chip>
+        <Button variant="outline" size="xs" className="max-w-[60%] min-w-0 rounded-full px-2.5" title={label} aria-label={`${label}, choose a project`} data-project-chip>
           {current && <span className={cn("size-2 shrink-0 rounded-full", projectDot(current.color))} aria-hidden="true" />}
           <span className="truncate">{label}</span>
           <ChevronDown className="shrink-0" />

@@ -137,9 +137,9 @@ export function ProjectComposerChip({ onClear }: { onClear?: () => void }) {
   const { card } = useChatDraft();
   if (!p) return null;
   return (
-    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+    <div className="flex max-w-full min-w-0 items-center gap-2 text-sm text-muted-foreground">
       <ProjectDot color={p.color} />
-      <span className="truncate">
+      <span className="min-w-0 truncate" title={card ? `${p.name}: ${card.title}` : p.name}>
         New chat in <strong className="font-medium text-foreground">{p.name}</strong>
         {card && (
           <>
@@ -151,6 +151,7 @@ export function ProjectComposerChip({ onClear }: { onClear?: () => void }) {
       <Button
         variant="ghost"
         size="icon-xs"
+        className="shrink-0"
         aria-label="Start outside the project"
         title="Start outside the project"
         onClick={() => {

@@ -153,6 +153,7 @@ pub(crate) fn limits(s: &AppState) -> Limits {
     Limits {
         text_chars: PAGE_CHARS,
         pdf_bytes: PDF_BYTES.min(s.store.limits.max_file_bytes),
+        public_only: true,
     }
 }
 

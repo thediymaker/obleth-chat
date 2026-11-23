@@ -100,6 +100,8 @@ enum Site {
     /// A page: its status and what the page reads as.
     Page(u64, Value),
     Pdf(Vec<u8>),
+    /// The site answers with a redirect to this address.
+    Redirect(String),
     /// The address does not load at all.
     Unreachable,
 }
@@ -196,6 +198,14 @@ async fn devtools(mut socket: WebSocket, b: Browser) {
                         events.push(held(status, "text/html; charset=utf-8"))
                     }
                     Some(Site::Pdf(_)) => events.push(held(200, "application/pdf")),
+                    Some(Site::Redirect(to)) => {
+                        let mut event = held(302, "text/html");
+                        event["params"]["responseHeaders"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"name":"Location","value":to}));
+                        events.push(event)
+                    }
                     Some(Site::Unreachable) | None => {}
                 }
                 if events.is_empty() {
@@ -403,8 +413,8 @@ async fn added_pages_are_read_in_the_persons_browser_and_kept_as_ticked_sources(
     assert_eq!(listed["webPages"], true);
     let c: Uuid = serde_json::from_value(group["id"].clone()).unwrap();
 
-    // A read of an address on a site that counts its visitors, written as an address
-    // Chat itself could reach: only the browser may load it.
+    // A read of an address on a site that counts its visitors, on this machine, put in
+    // the queue past the check Add makes: nothing loads it, neither Chat nor the browser.
     let counted = format!("{site}/report");
     f.browser.site(
         &counted,
@@ -422,7 +432,7 @@ async fn added_pages_are_read_in_the_persons_browser_and_kept_as_ticked_sources(
 
     drain(f.s.clone(), ana).await;
     let docs = kept(pool, c).await;
-    assert_eq!(docs.len(), 3, "{docs:?}");
+    assert_eq!(docs.len(), 2, "{docs:?}");
     let (page_doc, pdf_doc) = (&docs[0], &docs[1]);
     assert_eq!(
         (
@@ -452,13 +462,22 @@ async fn added_pages_are_read_in_the_persons_browser_and_kept_as_ticked_sources(
         "{stored:?}"
     );
     // Ticked for the person who added them, and the reads are done.
-    let mut want = vec![page_doc.id, pdf_doc.id, docs[2].id];
+    let mut want = vec![page_doc.id, pdf_doc.id];
     want.sort();
     let mut got = ticked(pool, ana, p).await;
     got.sort();
     assert_eq!(got, want);
     let done = reads(pool, ana).await;
-    assert!(done.iter().all(|r| r.1 == "done"), "{done:?}");
+    assert_eq!(done.iter().filter(|r| r.1 == "done").count(), 2, "{done:?}");
+    let refused = done.iter().find(|r| r.1 == "failed").unwrap();
+    assert!(
+        refused
+            .2
+            .as_deref()
+            .unwrap()
+            .contains("not a public web site"),
+        "{refused:?}"
+    );
     // Read in the browser, held at its answer, the PDF taken as a file; never by Chat.
     let calls = f.browser.calls();
     assert!(
@@ -470,7 +489,7 @@ async fn added_pages_are_read_in_the_persons_browser_and_kept_as_ticked_sources(
         "{calls:?}"
     );
     assert!(
-        calls.contains(&format!("Page.navigate {counted}")),
+        !calls.contains(&format!("Page.navigate {counted}")),
         "{calls:?}"
     );
     assert_eq!(
@@ -484,7 +503,7 @@ async fn added_pages_are_read_in_the_persons_browser_and_kept_as_ticked_sources(
         .await
         .unwrap();
     let group = &listed["collections"][0];
-    assert_eq!(group["reading"].as_array().unwrap().len(), 0);
+    assert_eq!(group["reading"].as_array().unwrap().len(), 1);
     let shown = group["documents"]
         .as_array()
         .unwrap()
@@ -494,6 +513,51 @@ async fn added_pages_are_read_in_the_persons_browser_and_kept_as_ticked_sources(
     assert_eq!(shown["sourceUrl"], json!(post));
     assert!(shown["readAt"].is_string());
     f.db.close().await;
+}
+
+#[tokio::test]
+async fn a_read_led_off_the_public_web_is_refused() {
+    let Some(f) = fixture().await else { return };
+    let pool = &f.db.pool;
+    let ana = person(pool, "ana").await;
+    let p = project(pool, ana, None).await;
+    let c = collection(pool, ana, None, Some(p)).await;
+    // One site redirects to the browser's own machine; one's script goes there after loading.
+    let redirects = "https://example.org/moved".to_owned();
+    let scripted = "https://example.org/scripted".to_owned();
+    f.browser.site(
+        &redirects,
+        Site::Redirect("http://127.0.0.1:9222/json/list".into()),
+    );
+    f.browser.site(
+        &scripted,
+        Site::Page(
+            200,
+            page(
+                "http://localhost:9222/json/list",
+                "Tabs",
+                &long_text("Tabs"),
+            ),
+        ),
+    );
+    add_pages(pool, ana, p, &[redirects.clone(), scripted.clone()])
+        .await
+        .unwrap();
+    drain(f.s.clone(), ana).await;
+    let failed = reads(pool, ana).await;
+    assert_eq!(failed.len(), 2);
+    for r in &failed {
+        assert_eq!(r.1, "failed", "{r:?}");
+        assert!(
+            r.2.as_deref().unwrap().contains("not a public web site"),
+            "{r:?}"
+        );
+    }
+    assert!(kept(pool, c).await.is_empty());
+    // The redirect was stopped, not followed.
+    let calls = f.browser.calls();
+    assert!(calls.contains(&"Fetch.failRequest".to_owned()), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("127.0.0.1")), "{calls:?}");
 }
 
 #[tokio::test]

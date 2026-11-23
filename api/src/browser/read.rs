@@ -26,6 +26,16 @@ pub struct Limits {
     pub text_chars: usize,
     /// Bytes of a PDF.
     pub pdf_bytes: usize,
+    /// Whether every address the read passes through must be a public web site's:
+    /// the one asked for, each one a redirect leads to, and the one it ends at.
+    pub public_only: bool,
+}
+
+/// What a read says when it was led somewhere that is not a public web site.
+const NOT_PUBLIC: &str = "The page led to an address that is not a public web site.";
+
+fn allowed(limits: Limits, url: &str) -> bool {
+    !limits.public_only || crate::notebook::web::address(url).is_ok()
 }
 
 #[derive(Debug, PartialEq)]
@@ -117,6 +127,9 @@ async fn read_in(
     url: &str,
     limits: Limits,
 ) -> Result<Read, String> {
+    if !allowed(limits, url) {
+        return Err(NOT_PUBLIC.into());
+    }
     let failed = |e: anyhow::Error| format!("The browser failed: {e:#}");
     let events = cdp.events();
     cdp.call(
@@ -145,6 +158,10 @@ async fn read_in(
     }
     if value["pdf"] == true {
         return Err("The browser showed a PDF it would not hand over. Try again.".into());
+    }
+    // Where the page ended up, after anything its own script did.
+    if !allowed(limits, value["url"].as_str().unwrap_or("")) {
+        return Err(NOT_PUBLIC.into());
     }
     judge(&value, limits)
 }
@@ -188,13 +205,24 @@ async fn load(
                 let status = p["responseStatusCode"].as_u64().unwrap_or(0);
                 let headers = headers(&p["responseHeaders"]);
                 let main = p["frameId"] == target && !answered;
-                let redirect = (300..400).contains(&status) && headers.iter().any(|(k, _)| k == "location");
+                let at = p.pointer("/request/url").and_then(Value::as_str).unwrap_or(url);
+                let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+                let redirect = (300..400).contains(&status) && header("location").is_some();
+                // Neither the page's own address nor one a redirect points at may leave
+                // the public web; a redirect is stopped before the browser follows it.
+                if main {
+                    let next = header("location")
+                        .filter(|_| redirect)
+                        .and_then(|to| url::Url::parse(at).ok()?.join(to).ok());
+                    if !allowed(limits, at) || next.is_some_and(|to| !allowed(limits, to.as_str())) {
+                        abort(cdp, session, &id).await;
+                        return Err(NOT_PUBLIC.into());
+                    }
+                }
                 if !main || redirect || p.get("responseErrorReason").is_some() || status == 0 {
                     resume(cdp, session, &id).await;
                     continue;
                 }
-                let at = p.pointer("/request/url").and_then(Value::as_str).unwrap_or(url);
-                let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
                 if status >= 400 {
                     abort(cdp, session, &id).await;
                     return Err(status_error(status));
@@ -532,6 +560,7 @@ mod tests {
     const LIMITS: Limits = Limits {
         text_chars: 2000,
         pdf_bytes: 1000,
+        public_only: true,
     };
 
     #[test]
@@ -673,6 +702,8 @@ mod live_tests {
         let limits = Limits {
             text_chars: 500_000,
             pdf_bytes: 32 << 20,
+            // The test pages are served from this machine.
+            public_only: false,
         };
         for page in [
             "article.html",

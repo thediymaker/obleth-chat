@@ -70,15 +70,19 @@ function MakeSection({ projectId, n, isAdmin }: { projectId: string; n: Notebook
   const client = useQueryClient();
   const [busy, setBusy] = useState("");
   if (!n.model.set)
-    return isAdmin ? (
-      <Note data-admin-hint>
-        Name a Notebook model in{" "}
-        <Link href="/settings/admin/system" className="underline underline-offset-2">
-          Administration › System
-        </Link>{" "}
-        to make briefings, FAQs, study guides and timelines from the sources, and to give each new source a short guide.
+    return (
+      <Note>
+        Briefings, FAQs, study guides and timelines are not set up on this server.
+        {isAdmin && (
+          <>
+            {" "}
+            <Link href="/settings/admin/system" className="underline underline-offset-2" data-admin-hint>
+              Set it up
+            </Link>
+          </>
+        )}
       </Note>
-    ) : null;
+    );
   if (!n.model.available) return <Note>The Notebook model is not available to your account, so nothing can be made from the sources here.</Note>;
   if (!n.meter) return <Note>The gateway does not say how much the Notebook model can read, so nothing can be made from the sources yet.</Note>;
   const running = n.items.filter((i) => i.status === "running").length;

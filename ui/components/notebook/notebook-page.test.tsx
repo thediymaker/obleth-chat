@@ -203,12 +203,13 @@ test("without a Notebook model there is no meter, and only administrators see wh
   const first = show("c1");
   await screen.findByRole("complementary", { name: "Sources" });
   expect(screen.queryByText(/of what the notebook can read/)).not.toBeInTheDocument();
-  expect(screen.queryByText(/Name a Notebook model/)).not.toBeInTheDocument();
+  expect(await screen.findByText(/are not set up on this server/)).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Set it up" })).not.toBeInTheDocument();
   first.unmount();
   h.admin = true;
   show("c1");
-  expect(await screen.findByText(/Name a Notebook model/)).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Administration › System" })).toHaveAttribute("href", "/settings/admin/system");
+  expect(await screen.findByText(/are not set up on this server/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Set it up" })).toHaveAttribute("href", "/settings/admin/system");
 });
 
 test("suggested questions take turns between sources, and notes list what they cite", () => {

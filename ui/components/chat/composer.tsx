@@ -16,7 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { WorkspaceToggle } from "@/components/workspace/workspace-toggle";
 import { describe } from "@/lib/chat/attachments";
-import { pastesAsFile, PROMPT_LIMIT, promptCount } from "@/lib/chat/composer";
+import { clipboardFiles, pastesAsFile, pastesAsPicture, PROMPT_LIMIT, promptCount } from "@/lib/chat/composer";
 import { matchItems, menuTrigger, replaceTrigger } from "@/lib/chat/composer-menu";
 import { contextUse } from "@/lib/chat/context";
 import { temporaryNoteText } from "@/lib/chat/temporary";
@@ -197,6 +197,22 @@ export function Composer({ home = false, lean = false, placeholder = IDLE_PLACEH
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
   const available = store.available;
+  // A picture or file pasted anywhere on the page, outside a text field, goes to the
+  // message box, so a screenshot can be pasted without clicking into the box first.
+  useEffect(() => {
+    if (lean || !available) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"]')) return;
+      const list = clipboardFiles(e.clipboardData);
+      if (!list.length || (e.clipboardData?.getData("text/plain") && !pastesAsPicture(e.clipboardData))) return;
+      e.preventDefault();
+      store.attachments.add(list);
+      box.current?.focus();
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [lean, available, store]);
   const conversationId = store.route.id || null;
   const knowledgeOn = store.feature("knowledge");
   const submit = () => {
@@ -323,8 +339,9 @@ export function Composer({ home = false, lean = false, placeholder = IDLE_PLACEH
           }}
           onPaste={(e) => {
             // Text copied from documents can carry a picture of itself; keep it as text.
+            // A copied picture can carry its address as text; that one is the picture.
             const pasted = e.clipboardData?.getData("text/plain") || "";
-            if (pasted) {
+            if (pasted && !pastesAsPicture(e.clipboardData)) {
               // Long text is attached as a file, so the box never cuts it off and the
               // question stays in view.
               if (!lean && pastesAsFile(pasted, e.currentTarget)) {
@@ -333,7 +350,7 @@ export function Composer({ home = false, lean = false, placeholder = IDLE_PLACEH
               }
               return;
             }
-            const list = composerFiles(e.clipboardData?.files);
+            const list = clipboardFiles(e.clipboardData);
             if (lean || !list.length) return;
             e.preventDefault();
             store.attachments.add(list);
@@ -380,7 +397,7 @@ export function Composer({ home = false, lean = false, placeholder = IDLE_PLACEH
               size="icon-sm"
               className="rounded-full"
               disabled={attachDisabled}
-              title="Attach files of any kind (you can also paste or drop them)"
+              title="Attach files of any kind (you can also paste or drop them, pictures included)"
               aria-label="Attach files"
               onClick={() => files.current?.click()}
             >

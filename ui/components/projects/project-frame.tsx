@@ -1,7 +1,7 @@
 "use client";
 
 // A project's page around its tabs: the heading with its actions, and the tabs
-// (Overview, Code, Research, App) that the server and features allow.
+// (Overview, Code, Experiments, App) that the server and features allow.
 
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Box, Code, FlaskConical, LayoutDashboard, NotebookText, Pencil, Plus, ScrollText, SquareKanban } from "lucide-react";
@@ -33,7 +33,7 @@ export function useProjectFrame() {
 
 export type ProjectTab = "overview" | "notebook" | "log" | "code" | "research" | "app";
 
-/** Which tabs a project shows: Notebook with knowledge, Code with the code feature, Research with workspaces, App for administrators on their own projects. */
+/** Which tabs a project shows: Notebook with knowledge, Code with the code feature, Experiments with workspaces, App for administrators on their own projects. */
 export function useProjectTabs(detail?: ProjectDetail): Record<ProjectTab, boolean> {
   const notebook = useFeature("knowledge");
   const code = useFeature("code");
@@ -98,7 +98,7 @@ export function ProjectFrame({ children }: { children: React.ReactNode }) {
     ...(tabs.log ? [{ href: `${base}/log`, label: "Log", icon: ScrollText }] : []),
     // History, Files and Compare live under /code and keep it highlighted.
     ...(tabs.code ? [{ href: `${base}/code`, label: "Code", icon: Code, prefix: true }] : []),
-    ...(tabs.research ? [{ href: `${base}/research`, label: "Research", icon: FlaskConical }] : []),
+    ...(tabs.research ? [{ href: `${base}/research`, label: "Experiments", icon: FlaskConical }] : []),
     ...(tabs.app ? [{ href: `${base}/app`, label: "App", icon: Box }] : []),
   ];
 

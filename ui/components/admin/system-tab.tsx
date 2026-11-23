@@ -576,7 +576,7 @@ export function DecisionsCard({ decisions: d, onSaved }: { decisions: Decisions;
           id="decisions-check-runs"
           label="Check research runs"
           defaultChecked={!!d.checkRuns}
-          description="When a run finishes, ask whether it really tested its idea, and tell the chat when it may not have. The result shows on the project’s Research tab."
+          description="When a run finishes, ask whether it really tested its idea, and tell the chat when it may not have. The result shows on the project’s Experiments tab."
         />
         <CheckField
           id="decisions-check-tree"

@@ -285,3 +285,113 @@ test("a running item is alive, and a ready one opens with its checked citations"
   expect(h.request).toHaveBeenCalledWith("/api/notebook/items/i3", { method: "DELETE" });
   expect(within(kept).queryByRole("button", { name: /^Delete Timeline/ })).not.toBeInTheDocument();
 });
+
+// ---- Web pages ----
+
+const webPage = (id: string, more: Partial<Source> = {}): Source =>
+  source(id, { name: `${id} notes.md`, mimeType: "text/plain; charset=utf-8", pages: null, passages: 12, sourceUrl: `https://www.example.org/${id}?ref=feed`, readAt: new Date(Date.now() - 5 * 60_000).toISOString(), ...more });
+
+test("Add offers Web page only when the browser is on, and reads the addresses given", async () => {
+  let current = notebook({ webPages: true });
+  h.request.mockImplementation(async (path: string, init?: { method?: string; body?: { addresses: string[] } }) => {
+    if (path === "/api/projects/p1/notebook/pages" && init?.method === "POST") {
+      current = notebook({ webPages: true, collections: [{ ...current.collections[0]!, reading: init.body!.addresses.map((url, i) => ({ id: `r${i}`, url, status: "reading" as const, error: null, requestedAt: "2026-11-22T10:00:00Z" })) }] });
+      return current;
+    }
+    if (path === "/api/projects/p1/notebook") return current;
+    throw new Error(`unexpected ${path}`);
+  });
+  const { container } = show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Sources" });
+  await userEvent.click(within(pane).getByRole("button", { name: "Add" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Web page" }));
+  const dialog = await screen.findByRole("dialog", { name: "Add web pages as sources" });
+  const box = within(dialog).getByRole("textbox", { name: "Addresses" });
+  fireEvent.change(box, { target: { value: Array.from({ length: 11 }, (_, i) => `example.org/${i}`).join("\n") } });
+  expect(within(dialog).getByText("Up to 10 pages at a time; this has 11.")).toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "Add 11 pages" })).toBeDisabled();
+  fireEvent.change(box, { target: { value: "https://example.org/post\n\nexample.org/paper.pdf" } });
+  await userEvent.click(within(dialog).getByRole("button", { name: "Add 2 pages" }));
+  expect(h.request).toHaveBeenCalledWith("/api/projects/p1/notebook/pages", { method: "POST", body: { addresses: ["https://example.org/post", "example.org/paper.pdf"] } });
+  // Each page shows on its own row while it is read, the only thing in the accent colour.
+  const rows = await within(pane).findAllByRole("status");
+  expect(rows.map((r) => r.textContent)).toEqual(["Reading the page…", "Reading the page…"]);
+  expect(within(pane).getByText("example.org/post")).toBeInTheDocument();
+  expect(container.querySelectorAll("[data-read] .signal-pulse")).toHaveLength(2);
+});
+
+test("without the browser there is no Web page to add", async () => {
+  h.request.mockResolvedValue(notebook({ webPages: false }));
+  show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Sources" });
+  await userEvent.click(within(pane).getByRole("button", { name: "Add" }));
+  expect(await screen.findByRole("menuitem", { name: "Paste text" })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "Web page" })).not.toBeInTheDocument();
+});
+
+test("a page that failed says why, and is tried again or removed", async () => {
+  const failed = { id: "r1", url: "https://example.org/members/report", status: "failed" as const, error: "The page asked for a sign-in. Sign in to the site in the browser beside a chat, then add the page from there.", requestedAt: "2026-11-22T10:00:00Z" };
+  h.request.mockImplementation(async (path: string) => {
+    if (path === "/api/notebook/reads/r1/retry") return notebook({ webPages: true, collections: [{ ...notebook().collections[0]!, reading: [{ ...failed, status: "reading", error: null }] }] });
+    if (path === "/api/notebook/reads/r1") return null;
+    return notebook({ webPages: true, collections: [{ ...notebook().collections[0]!, reading: [failed] }] });
+  });
+  show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Sources" });
+  expect(await within(pane).findByText(/asked for a sign-in/)).toBeInTheDocument();
+  await userEvent.click(within(pane).getByRole("button", { name: "Try again" }));
+  expect(h.request).toHaveBeenCalledWith("/api/notebook/reads/r1/retry", { method: "POST" });
+  expect(await within(pane).findByRole("status")).toHaveTextContent("Reading the page…");
+});
+
+test("a failed page can be removed", async () => {
+  const failed = { id: "r2", url: "https://example.org/gone", status: "failed" as const, error: "The page was not found (HTTP 404).", requestedAt: "2026-11-22T10:00:00Z" };
+  h.request.mockImplementation(async (path: string) => (path === "/api/notebook/reads/r2" ? null : notebook({ webPages: true, collections: [{ ...notebook().collections[0]!, reading: [failed] }] })));
+  show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Sources" });
+  await userEvent.click(await within(pane).findByRole("button", { name: "Remove" }));
+  expect(h.request).toHaveBeenCalledWith("/api/notebook/reads/r2", { method: "DELETE" });
+});
+
+test("a web source shows its site and when it was read, opens its address, and is read again", async () => {
+  let current = notebook({ webPages: true, collections: [{ ...notebook().collections[0]!, documents: [webPage("warmup")] }] });
+  h.request.mockImplementation(async (path: string, init?: { method?: string }) => {
+    if (path === "/api/projects/p1/notebook/sources/warmup/read" && init?.method === "POST") {
+      current = notebook({ webPages: true, collections: [{ ...current.collections[0]!, documents: [webPage("warmup", { reading: { id: "r9", status: "reading", error: null } })] }] });
+      return current;
+    }
+    return current;
+  });
+  show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Sources" });
+  expect(await within(pane).findByText("example.org · Web page · read 5 min ago")).toBeInTheDocument();
+  expect(within(pane).getByRole("checkbox", { name: "Use warmup notes" })).toBeChecked();
+  await userEvent.click(within(pane).getByRole("button", { name: /warmup notes/ }));
+  const open = within(pane).getByRole("link", { name: /Open the page/ });
+  expect(open).toHaveAttribute("href", "https://www.example.org/warmup?ref=feed");
+  expect(open).toHaveAttribute("target", "_blank");
+  expect(open).toHaveAttribute("rel", "noopener noreferrer");
+  await userEvent.click(within(pane).getByRole("button", { name: "Read it again" }));
+  expect(h.request).toHaveBeenCalledWith("/api/projects/p1/notebook/sources/warmup/read", { method: "POST" });
+  expect(await within(pane).findByRole("status")).toHaveTextContent("Reading the page again…");
+  expect(within(pane).queryByRole("button", { name: "Read it again" })).not.toBeInTheDocument();
+});
+
+test("a failed reading again keeps the source and says why", async () => {
+  h.request.mockResolvedValue(notebook({ webPages: true, collections: [{ ...notebook().collections[0]!, documents: [webPage("warmup", { reading: { id: "r3", status: "failed", error: "The site answered with an error (HTTP 503)." } })] }] }));
+  show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Sources" });
+  expect(await within(pane).findByText("Could not read it again: The site answered with an error (HTTP 503).")).toBeInTheDocument();
+  await userEvent.click(within(pane).getByRole("button", { name: /warmup notes/ }));
+  await userEvent.click(within(pane).getByRole("button", { name: "Dismiss" }));
+  expect(h.request).toHaveBeenCalledWith("/api/notebook/reads/r3", { method: "DELETE" });
+});
+
+test("someone else's web source cannot be read again by this person", async () => {
+  h.request.mockResolvedValue(notebook({ webPages: true, collections: [{ ...notebook().collections[0]!, mine: false, documents: [webPage("shared")] }] }));
+  show("c1");
+  const pane = await screen.findByRole("complementary", { name: "Sources" });
+  await userEvent.click(await within(pane).findByRole("button", { name: /shared notes/ }));
+  expect(within(pane).getByRole("link", { name: /Open the page/ })).toBeInTheDocument();
+  expect(within(pane).queryByRole("button", { name: "Read it again" })).not.toBeInTheDocument();
+});

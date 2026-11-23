@@ -1427,6 +1427,12 @@ async fn run_generation(
             tools.push(browser::tools::handoff_definition());
         }
     }
+    // A chat in a project with the browser on can add the page its tab shows to the
+    // project's notebook, when the person asks.
+    let notebook_pages = asks && browsing.is_some() && project.is_some() && s.knowledge.is_some();
+    if notebook_pages {
+        tools.push(notebook::web::definition());
+    }
     // People who may use the browser can be asked to turn it on for this chat.
     let offers_browser = asks && browsing.is_none() && browser_allowed;
     if offers_browser {
@@ -1955,6 +1961,7 @@ async fn run_generation(
                     && c.name != browser::tools::REQUEST
                     && c.name != connections::device::REQUEST
                     && c.name != agents::TOOL
+                    && c.name != notebook::web::TOOL
                     && !board::tools::is_tool(&c.name)
                     && !(browsing.is_some() && browser::tools::is_tool(&c.name))
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
@@ -2294,6 +2301,32 @@ async fn run_generation(
                             output
                         }
                         _ => no_such_tool(&call.name),
+                    };
+                    tool_result(&mut payload, &call.id, output);
+                    continue;
+                }
+                if call.name == notebook::web::TOOL {
+                    // Like save_item, this writes only to the person's own collection
+                    // in the project, from their own browser's tab, so it runs without
+                    // asking.
+                    let output = match project.as_ref().filter(|_| notebook_pages) {
+                        Some(project) => {
+                            let mut entry = json!({"id":call.id,"tool":call.name,"summary":"Adding the page to the notebook","status":"running","startedAt":chrono::Utc::now()});
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry.clone());
+                            let began = Instant::now();
+                            let (ok, summary, output) =
+                                notebook::web::run_tool(&s, &user, id, project.id).await;
+                            entry["status"] = json!(if ok { "completed" } else { "error" });
+                            entry["summary"] = json!(summary);
+                            entry["detail"] = json!(output);
+                            entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                            entry["projectId"] = json!(project.id);
+                            record(&mut activity, &entry, false);
+                            emit(&mut tx, "tool", entry);
+                            output
+                        }
+                        None => no_such_tool(&call.name),
                     };
                     tool_result(&mut payload, &call.id, output);
                     continue;

@@ -15,8 +15,10 @@ export interface SectionTab {
 
 /** Tabs between a section's pages, such as Library's Saved, Collections and Generated. Hidden with one tab.
  *  On a phone the bar scrolls sideways and starts with the active tab in view, so the page never pans.
- *  `current` names the active tab's href when the page decides it (Administration's URL has several shapes). */
-export function SectionTabs({ tabs, label, current }: { tabs: SectionTab[]; label: string; current?: string }) {
+ *  `current` names the active tab's href when the page decides it (Administration's URL has several shapes).
+ *  `compact` is for a bar with many tabs that all have an icon: on a phone each tab but the active one shows
+ *  its icon alone, and the tabs share the width, so the bar fits without scrolling. */
+export function SectionTabs({ tabs, label, current, compact }: { tabs: SectionTab[]; label: string; current?: string; compact?: boolean }) {
   const path = usePathname();
   const nav = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -40,10 +42,13 @@ export function SectionTabs({ tabs, label, current }: { tabs: SectionTab[]; labe
             className={cn(
               "inline-flex shrink-0 items-center gap-1.5 border-b-2 border-transparent px-3 py-2 text-sm whitespace-nowrap text-muted-foreground hover:text-foreground",
               on && "border-foreground text-foreground",
+              compact && Icon && "max-sm:min-h-11 max-sm:min-w-10 max-sm:flex-1 max-sm:shrink max-sm:justify-center max-sm:px-1",
+              compact && Icon && on && "max-sm:flex-none max-sm:px-3",
             )}
+            title={compact && Icon ? name : undefined}
           >
-            {Icon && <Icon className="size-4" />}
-            {name}
+            {Icon && <Icon className="size-4 shrink-0" />}
+            {compact && Icon && !on ? <span className="max-sm:sr-only">{name}</span> : name}
           </Link>
         );
       })}

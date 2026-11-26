@@ -772,7 +772,8 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
     assert!(top["excerpt"].as_str().unwrap().contains("Carnot"));
     assert_eq!(top["matched"], "meaning + words");
 
-    // The original opens through a short-lived signed link.
+    // Chat sends the original itself, under its own name, whatever the S3 service makes
+    // of a link's asked-for name.
     let response = f
         .app
         .clone()
@@ -788,12 +789,14 @@ async fn documents_are_indexed_searched_and_shared_only_as_allowed(pool: PgPool)
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = response.headers()["location"].to_str().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(
-        location.starts_with(&format!("{}/bucket/knowledge/", f.store_url))
-            && location.contains("X-Amz-Signature="),
-        "{location}"
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .ends_with("filename*=UTF-8''notes.md"),
+        "{:?}",
+        response.headers()
     );
 
     // Someone else sees nothing of a personal collection.
@@ -985,7 +988,7 @@ async fn uploaded_files_never_open_as_active_content(pool: PgPool) {
     let collection = created["collection"]["id"].as_str().unwrap().to_owned();
     let page = b"<html><body><script>alert(document.domain)</script>Phishing page</body></html>";
     // Whatever type the uploader sends, web pages, text and SVG-typed text are stored
-    // and served as plain-text downloads; only PDFs and images open in place.
+    // and served as plain-text downloads; only PDFs open in place.
     for (name, sent) in [
         ("page.html", "text/html"),
         ("notes.txt", "text/html"),
@@ -1025,20 +1028,72 @@ async fn uploaded_files_never_open_as_active_content(pool: PgPool) {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let location = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
-        let query: HashMap<String, String> = location.query_pairs().into_owned().collect();
+        // Sent by Chat as a plain-text download under its own name, never as the
+        // bucket's object, whose name and type some S3 services will not change.
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let headers = response.headers().clone();
         assert_eq!(
-            query["response-content-type"], "text/plain; charset=utf-8",
+            headers["content-type"], "text/plain; charset=utf-8",
             "{name}"
         );
+        let disposition = headers["content-disposition"].to_str().unwrap();
         assert!(
-            query["response-content-disposition"].starts_with(&format!(
-                "attachment; filename=\"{name}\"; filename*=UTF-8''{name}"
-            )),
-            "{location}"
+            disposition.starts_with("attachment;")
+                && disposition.ends_with(&format!("filename*=UTF-8''{name}")),
+            "{disposition}"
         );
+        assert_eq!(
+            headers["content-security-policy"],
+            "sandbox; default-src 'none'"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], &page[..], "{name}");
     }
+    // A PDF opens in place, through a short-lived signed link to the bucket.
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/knowledge/collections/{collection}/documents?name=paper.pdf"),
+            Body::from(pdf(&["Carnot"])),
+            "application/pdf",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let paper: Value = serde_json::from_slice(&bytes).unwrap();
+    let response = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!(
+                "/api/knowledge/documents/{}/file",
+                paper["document"]["id"].as_str().unwrap()
+            ),
+            Body::empty(),
+            "application/json",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+    assert!(
+        location
+            .as_str()
+            .starts_with(&format!("{}/bucket/knowledge/", f.store_url)),
+        "{location}"
+    );
+    let query: HashMap<String, String> = location.query_pairs().into_owned().collect();
+    assert_eq!(query["response-content-type"], "application/pdf");
+    assert!(
+        query["response-content-disposition"].starts_with("inline; filename=\"paper.pdf\""),
+        "{location}"
+    );
     // A page an earlier version stored as HTML may carry that type in storage too, so
     // Chat sends it itself, as a plain-text download, instead of linking to storage.
     let legacy: String = sqlx::query_scalar(
@@ -1199,6 +1254,226 @@ async fn a_chat_with_a_collection_cites_its_passages(pool: PgPool) {
     )
     .await;
     assert_eq!(set["collectionIds"], json!([]));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_notebook_chat_answers_only_from_the_ticked_sources(pool: PgPool) {
+    let f = fixture(pool).await;
+    let admin = login(&f.app, "test-admin").await;
+    let (_, project) = call(
+        &f.app,
+        "POST",
+        "/api/projects",
+        json!({"name":"Engines"}),
+        &admin,
+    )
+    .await;
+    let project = project["project"]["id"].as_str().unwrap().to_owned();
+    let notebook = format!("/api/projects/{project}/notebook");
+    // Add makes the project a collection for its sources, once.
+    let (status, made) = call(
+        &f.app,
+        "POST",
+        &format!("{notebook}/collection"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let collection = made["collectionId"].as_str().unwrap().to_owned();
+    let (_, again) = call(
+        &f.app,
+        "POST",
+        &format!("{notebook}/collection"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(again["collectionId"], made["collectionId"]);
+    upload(
+        &f.app,
+        &collection,
+        "engines.md",
+        NOTES.as_bytes().to_vec(),
+        &admin,
+    )
+    .await;
+    // Matches the question too, so only the tick keeps it out.
+    let kitchen = "# Kitchen\n\nThe Carnot engine efficiency limit of a toaster is a kitchen joke about heat and bread.";
+    upload(
+        &f.app,
+        &collection,
+        "kitchen.md",
+        kitchen.as_bytes().to_vec(),
+        &admin,
+    )
+    .await;
+    let documents = settled(&f.app, &collection, &admin).await;
+    let id_of = |name: &str| {
+        documents.iter().find(|d| d["name"] == name).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (engines, toaster) = (id_of("engines.md"), id_of("kitchen.md"));
+
+    // The first visit ticks every source; no Notebook model, so no meter.
+    let (status, n) = call(&f.app, "GET", &notebook, Value::Null, &admin).await;
+    assert_eq!(status, StatusCode::OK, "{n}");
+    assert_eq!(
+        (n["ticked"].as_i64(), n["total"].as_i64()),
+        (Some(2), Some(2))
+    );
+    assert_eq!(n["model"]["set"], false);
+    assert!(n["meter"].is_null());
+    assert!(n["chatId"].is_null());
+    let (_, n) = call(
+        &f.app,
+        "PUT",
+        &format!("{notebook}/sources"),
+        json!({"documentIds":[toaster],"ticked":false}),
+        &admin,
+    )
+    .await;
+    assert_eq!(n["ticked"], 1);
+
+    let (status, chat) = call(
+        &f.app,
+        "POST",
+        &format!("{notebook}/chat"),
+        json!({"model":"fixture-model"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{chat}");
+    let id = chat["chatId"].as_str().unwrap().to_owned();
+    assert_eq!(chat["onlySources"], true);
+    let (_, n) = call(&f.app, "GET", &notebook, Value::Null, &admin).await;
+    assert_eq!(n["chatId"], json!(id));
+    let ask = |content: &'static str| {
+        let (app, admin, id) = (f.app.clone(), admin.clone(), id.clone());
+        async move {
+            let response = app
+                .oneshot(req(
+                    "POST",
+                    &format!("/api/conversations/{id}/messages"),
+                    Body::from(json!({"content":content,"model":"fixture-model"}).to_string()),
+                    "application/json",
+                    &admin,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            response.into_body().collect().await.unwrap();
+        }
+    };
+    ask("What limits the efficiency of a Carnot engine?").await;
+    let requests = f.chats.lock().unwrap().clone();
+    let system = requests[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(system.contains("# The ticked sources"), "{system}");
+    assert!(
+        system.contains("Answer only from these passages"),
+        "{system}"
+    );
+    assert!(system.contains("[1] engines.md"), "{system}");
+    assert!(!system.contains("kitchen"), "{system}");
+    // The model's own search keeps to the ticked source too.
+    let tool = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .unwrap();
+    assert!(
+        !tool["content"].as_str().unwrap().contains("kitchen"),
+        "{tool}"
+    );
+    let (_, detail) = call(
+        &f.app,
+        "GET",
+        &format!("/api/conversations/{id}"),
+        Value::Null,
+        &admin,
+    )
+    .await;
+    let reply = detail["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|m| m["role"] == "assistant")
+        .unwrap()
+        .clone();
+    let sources = reply["activity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "sources")
+        .unwrap()
+        .clone();
+    assert!(sources["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["documentId"] == json!(engines)));
+
+    // Off, the model may answer from general knowledge after saying so.
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/conversations/{id}/notebook"),
+        json!({"onlySources":false}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    ask("And what about entropy in a free expansion?").await;
+    let requests = f.chats.lock().unwrap().clone();
+    let system = requests[2]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("before answering from general knowledge"),
+        "{system}"
+    );
+
+    // Someone outside the project can neither read the notebook nor tick its sources,
+    // nor change the chat.
+    call(
+        &f.app,
+        "POST",
+        "/api/admin/users",
+        json!({"username":"jen","password":PASSWORD,"displayName":"Jen","role":"user"}),
+        &admin,
+    )
+    .await;
+    let jen = login(&f.app, "jen").await;
+    let (status, _) = call(&f.app, "GET", &notebook, Value::Null, &jen).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("{notebook}/sources"),
+        json!({"documentIds":[engines],"ticked":true}),
+        &jen,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/conversations/{id}/notebook"),
+        json!({"onlySources":true}),
+        &jen,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("{notebook}/collection"),
+        Value::Null,
+        &jen,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[sqlx::test(migrations = "./migrations")]

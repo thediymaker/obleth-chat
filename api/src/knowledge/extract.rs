@@ -701,7 +701,7 @@ fn column_index(reference: &str) -> Option<usize> {
 }
 
 /// 100000 as "100,000".
-fn thousands(n: usize) -> String {
+pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let groups: Vec<&str> = digits
         .as_bytes()

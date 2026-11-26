@@ -105,6 +105,25 @@ async fn completions(State(seen): State<Seen>, Json(body): Json<Value>) -> Json<
     let input = body["messages"][1]["content"].as_str().unwrap_or("");
     let content = if system.starts_with("You file a memory") {
         json!({"kind":"work","topics":[{"name":"CHM 501","kind":"course"}]}).to_string()
+    } else if input.contains("evaluation split") {
+        // Two by their kind, two by the scope the model gave.
+        json!({"add":[
+            {"text":"You evaluate on the 2024 held-out split","kind":"work","topics":[]},
+            {"text":"You prefer answers with tables","kind":"preference","topics":[]},
+            {"text":"You write all your code in Python","kind":"work","scope":"everywhere","topics":[]},
+            {"text":"You report results to the funding agency","kind":"about","scope":"project","topics":[]}
+        ],"update":[],"forget":[]})
+        .to_string()
+    } else if input.contains("baseline is gone") {
+        let id = input
+            .lines()
+            .find(|l| l.contains("baseline"))
+            .and_then(|l| l.split(':').next())
+            .unwrap_or("m9")
+            .to_owned();
+        json!({"add":[{"text":"You compare against the new baseline","kind":"work","topics":[]}],
+            "update":[{"id":id.clone(),"text":"You dropped the old baseline"}],"forget":[id]})
+        .to_string()
     } else if input.contains("hydrology") {
         format!(
             "<think>lasting facts</think>{}",
@@ -625,7 +644,17 @@ async fn a_turn_embeds_its_question_once_for_knowledge_and_memory(pool: PgPool) 
     let question = Question::new(&[("user".to_owned(), format!("Which {marker} model?"))]);
     let user = identity(&newcomer);
     let (turn, recalled) = tokio::join!(
-        knowledge.prepare(&gateway, &user, empty, &[], &question, true, false, None),
+        knowledge.prepare(
+            &gateway,
+            &user,
+            empty,
+            &[],
+            &question,
+            true,
+            false,
+            None,
+            None
+        ),
         memory::recall(&state, &gateway, &user, empty, &question)
     );
     assert!(turn.is_none() && !recalled.is_some_and(|r| r.recalled()));
@@ -656,7 +685,7 @@ async fn a_turn_embeds_its_question_once_for_knowledge_and_memory(pool: PgPool) 
     let user = identity(&person);
     let attached = [collection];
     let (turn, recalled) = tokio::join!(
-        knowledge.prepare(&gateway, &user, id, &attached, &question, true, false, None),
+        knowledge.prepare(&gateway, &user, id, &attached, &question, true, false, None, None),
         memory::recall(&state, &gateway, &user, id, &question)
     );
     assert!(turn.is_some());
@@ -889,4 +918,493 @@ async fn people_see_change_and_delete_their_memories(pool: PgPool) {
     let (_, page) = call(&app, &person, "GET", "/api/memory", Value::Null).await;
     assert!(page["memories"].as_array().unwrap().is_empty());
     assert!(page["topics"].as_array().unwrap().is_empty());
+}
+
+/// A project of `owner`'s, shared with a new group that `members` are in when given.
+async fn project(pool: &PgPool, owner: Uuid, name: &str, members: &[Uuid]) -> Uuid {
+    let id = Uuid::new_v4();
+    let group = if members.is_empty() {
+        None
+    } else {
+        let group = Uuid::new_v4();
+        sqlx::query("INSERT INTO user_groups(id,name) VALUES($1,$2)")
+            .bind(group)
+            .bind(format!("Lab {}", group.simple()))
+            .execute(pool)
+            .await
+            .unwrap();
+        for member in members {
+            sqlx::query("INSERT INTO user_group_members(group_id,user_id) VALUES($1,$2)")
+                .bind(group)
+                .bind(member)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        Some(group)
+    };
+    sqlx::query("INSERT INTO projects(id,owner_id,name,color,scope,group_id) VALUES($1,$2,$3,'green',$4,$5)")
+        .bind(id)
+        .bind(owner)
+        .bind(name)
+        .bind(if group.is_some() { "group" } else { "personal" })
+        .bind(group)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+/// A chat of `owner`'s in `project`, with one exchange per message.
+async fn project_chat(
+    pool: &PgPool,
+    owner: Uuid,
+    project: Uuid,
+    messages: &[&str],
+) -> (Uuid, Uuid) {
+    let (id, _) = chat(pool, owner, &[], false).await;
+    sqlx::query("UPDATE conversations SET project_id = $2 WHERE id = $1")
+        .bind(id)
+        .bind(project)
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut reply = Uuid::nil();
+    for text in messages {
+        reply = exchange(pool, id, text).await;
+    }
+    (id, reply)
+}
+
+/// The system prompt and input of each learning pass the model was asked for, in order.
+fn passes(seen: &Seen) -> Vec<(String, String)> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|b| {
+            b["messages"][0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("You keep the memory")
+        })
+        .map(|b| {
+            (
+                b["messages"][0]["content"].as_str().unwrap().to_owned(),
+                b["messages"][1]["content"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Adds a memory by hand; returns its id.
+async fn remember(app: &Router, user: &Session, body: Value) -> String {
+    let (status, added) = call(app, user, "POST", "/api/memory", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{added}");
+    added["memory"]["id"].as_str().unwrap().to_owned()
+}
+
+/// The memory texts a reply in `chat` is given for `text`.
+async fn recalled(state: &AppState, user: &Session, chat: Uuid, text: &str) -> Vec<String> {
+    let gateway = state.gateway.clone().unwrap();
+    let question = Question::new(&[("user".to_owned(), text.to_owned())]);
+    let found = memory::recall(state, &gateway, &identity(user), chat, &question).await;
+    let mut texts: Vec<String> = found
+        .map(|r| {
+            r.entry()["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["text"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    texts.sort();
+    texts
+}
+
+async fn project_of(pool: &PgPool, memory: &str) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT project_id FROM memories WHERE content = $1")
+        .bind(memory)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_chat_in_a_project_gets_general_memories_and_that_projects_only(pool: PgPool) {
+    let (state, app, _) = fixture(&pool).await;
+    enable(&pool).await;
+    let person = session(&pool, "user").await;
+    let rivers = project(&pool, person.id, "Rivers", &[]).await;
+    let glaciers = project(&pool, person.id, "Glaciers", &[]).await;
+    for (text, pinned, project) in [
+        ("You like short answers", true, None),
+        ("You study hydrology at a university", false, None),
+        (
+            "Rivers is pinned: use the gauge dataset",
+            true,
+            Some(rivers),
+        ),
+        (
+            "Rivers hydrology uses the 2024 gauge split",
+            false,
+            Some(rivers),
+        ),
+        (
+            "Glaciers is pinned: use the ice cores",
+            true,
+            Some(glaciers),
+        ),
+        ("Glaciers hydrology uses melt radar", false, Some(glaciers)),
+    ] {
+        remember(
+            &app,
+            &person,
+            json!({"content": text, "kind": "work", "pinned": pinned, "topics": [], "projectId": project}),
+        )
+        .await;
+    }
+    let ask = "Which hydrology dataset should I use?";
+    let (in_rivers, _) = project_chat(&pool, person.id, rivers, &[]).await;
+    assert_eq!(
+        recalled(&state, &person, in_rivers, ask).await,
+        vec![
+            "Rivers hydrology uses the 2024 gauge split",
+            "Rivers is pinned: use the gauge dataset",
+            "You like short answers",
+            "You study hydrology at a university",
+        ]
+    );
+    let (in_glaciers, _) = project_chat(&pool, person.id, glaciers, &[]).await;
+    assert_eq!(
+        recalled(&state, &person, in_glaciers, ask).await,
+        vec![
+            "Glaciers hydrology uses melt radar",
+            "Glaciers is pinned: use the ice cores",
+            "You like short answers",
+            "You study hydrology at a university",
+        ]
+    );
+    let (outside, _) = chat(&pool, person.id, &[], false).await;
+    assert_eq!(
+        recalled(&state, &person, outside, ask).await,
+        vec![
+            "You like short answers",
+            "You study hydrology at a university"
+        ]
+    );
+    // Only general ones besides pinned: no unpinned general memory left still finds
+    // the project's unpinned one in its project.
+    let general: String =
+        sqlx::query_scalar("SELECT id::text FROM memories WHERE content LIKE 'You study%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    call(
+        &app,
+        &person,
+        "DELETE",
+        &format!("/api/memory/{general}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        recalled(&state, &person, outside, ask).await,
+        vec!["You like short answers"]
+    );
+    assert!(recalled(&state, &person, in_rivers, ask)
+        .await
+        .contains(&"Rivers hydrology uses the 2024 gauge split".to_owned()));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn learning_in_a_project_chat_keeps_work_in_the_project_and_the_person_everywhere(
+    pool: PgPool,
+) {
+    let (state, _, seen) = fixture(&pool).await;
+    enable(&pool).await;
+    let person = session(&pool, "user").await;
+    let user = identity(&person);
+    let rivers = project(&pool, person.id, "Rivers", &[]).await;
+    let (id, reply) = project_chat(
+        &pool,
+        person.id,
+        rivers,
+        &["Remember that the evaluation split is the 2024 held-out one"],
+    )
+    .await;
+    assert!(memory::after_reply(&state, &user, id, reply).await);
+    settled(&pool, id).await;
+    // By kind: work stays, a preference goes everywhere; the model's scope wins over kind.
+    assert_eq!(
+        project_of(&pool, "You evaluate on the 2024 held-out split").await,
+        Some(rivers)
+    );
+    assert_eq!(
+        project_of(&pool, "You prefer answers with tables").await,
+        None
+    );
+    assert_eq!(
+        project_of(&pool, "You write all your code in Python").await,
+        None
+    );
+    assert_eq!(
+        project_of(&pool, "You report results to the funding agency").await,
+        Some(rivers)
+    );
+    // The model was told the chat's project and asked for each memory's scope.
+    let system = passes(&seen)[0].0.clone();
+    assert!(system.contains("project \"Rivers\""), "{system}");
+    assert!(system.contains("\"scope\": \"project\""), "{system}");
+    // The reply's card says where each went and which project it may go to.
+    let activity: Value = sqlx::query_scalar("SELECT activity FROM messages WHERE id = $1")
+        .bind(reply)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let items = activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "learned")
+        .unwrap()["items"]
+        .clone();
+    let item = |text: &str| {
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["text"] == text)
+            .unwrap()
+            .clone()
+    };
+    let work = item("You evaluate on the 2024 held-out split");
+    assert_eq!(work["projectId"], json!(rivers));
+    assert_eq!(work["chatProjectId"], json!(rivers));
+    let preference = item("You prefer answers with tables");
+    assert_eq!(preference["projectId"], Value::Null);
+    assert_eq!(preference["chatProjectId"], json!(rivers));
+
+    // Outside a project everything is general, the card offers no choice and the model
+    // is not asked for a scope.
+    let other = session(&pool, "user").await;
+    let (id, reply) = chat(
+        &pool,
+        other.id,
+        &["Remember that the evaluation split is the 2024 one"],
+        false,
+    )
+    .await;
+    assert!(memory::after_reply(&state, &identity(&other), id, reply).await);
+    settled(&pool, id).await;
+    let scoped: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memories WHERE owner_id = $1 AND project_id IS NOT NULL",
+    )
+    .bind(other.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(scoped, 0);
+    assert_eq!(contents(&pool, other.id).await.len(), 4);
+    let system = passes(&seen)[1].0.clone();
+    assert!(!system.contains("scope"), "{system}");
+    let activity: Value = sqlx::query_scalar("SELECT activity FROM messages WHERE id = $1")
+        .bind(reply)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let learned = activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "learned")
+        .unwrap();
+    assert!(learned["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i.get("chatProjectId").is_none()));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_chat_in_one_project_never_updates_or_forgets_another_projects_memory(pool: PgPool) {
+    let (state, app, seen) = fixture(&pool).await;
+    enable(&pool).await;
+    let person = session(&pool, "user").await;
+    let rivers = project(&pool, person.id, "Rivers", &[]).await;
+    let glaciers = project(&pool, person.id, "Glaciers", &[]).await;
+    remember(
+        &app,
+        &person,
+        json!({"content": "You compare against the old baseline", "kind": "work", "topics": [], "projectId": rivers}),
+    )
+    .await;
+    // In Glaciers the Rivers memory is not shown to the model, so it is neither updated
+    // nor forgotten; the new one is not a repeat of it either.
+    let (id, _) = project_chat(&pool, person.id, glaciers, &["The old baseline is gone"]).await;
+    assert_eq!(quiet(&state).await, 1);
+    let shown = passes(&seen)[0].1.clone();
+    assert!(
+        !shown.contains("You compare against the old baseline"),
+        "{shown}"
+    );
+    assert_eq!(
+        project_of(&pool, "You compare against the old baseline").await,
+        Some(rivers)
+    );
+    assert_eq!(
+        project_of(&pool, "You compare against the new baseline").await,
+        Some(glaciers)
+    );
+    settled(&pool, id).await;
+    // In Rivers it is: updated and then forgotten in the same pass, so forgotten.
+    project_chat(&pool, person.id, rivers, &["The old baseline is gone"]).await;
+    assert_eq!(quiet(&state).await, 1);
+    let shown = passes(&seen)[1].1.clone();
+    assert!(
+        shown.contains("You compare against the old baseline"),
+        "{shown}"
+    );
+    assert!(!shown.contains("new baseline"), "{shown}");
+    let left: Vec<String> = contents(&pool, person.id).await;
+    assert!(
+        !left.contains(&"You compare against the old baseline".to_owned()),
+        "{left:?}"
+    );
+    // The Glaciers memory is still there, and Rivers got its own copy.
+    let copies: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memories WHERE content = 'You compare against the new baseline'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(copies, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn memories_are_added_to_and_moved_between_projects_the_person_may_use(pool: PgPool) {
+    let (state, app, _) = fixture(&pool).await;
+    enable(&pool).await;
+    let person = session(&pool, "user").await;
+    let colleague = session(&pool, "user").await;
+    let stranger = session(&pool, "user").await;
+    let mine = project(&pool, person.id, "Rivers", &[]).await;
+    let theirs = project(&pool, stranger.id, "Private work", &[]).await;
+    // The colleague's project, shared with a group the person is in.
+    let shared = project(&pool, colleague.id, "Lab paper", &[person.id]).await;
+    // A project the person may not use is not found.
+    let (status, _) = call(
+        &app,
+        &person,
+        "POST",
+        "/api/memory",
+        json!({"content": "You use radar", "projectId": theirs}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, added) = call(
+        &app,
+        &person,
+        "POST",
+        "/api/memory",
+        json!({"content": "You use radar", "kind": "work", "topics": [], "projectId": mine}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let m = &added["memory"];
+    assert_eq!(
+        (
+            m["projectId"].clone(),
+            m["projectName"].clone(),
+            m["projectColor"].clone()
+        ),
+        (json!(mine), json!("Rivers"), json!("green"))
+    );
+    assert_eq!(m["projectUnavailable"], false);
+    let id = m["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/memory/{id}");
+    // A change without projectId leaves it where it is.
+    let (_, changed) = call(&app, &person, "PATCH", &path, json!({"pinned": true})).await;
+    assert_eq!(changed["memory"]["projectId"], json!(mine));
+    // Moved to a project the person may not use: not found, and nothing changes.
+    let (status, _) = call(&app, &person, "PATCH", &path, json!({"projectId": theirs})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Someone else can't move it.
+    let (status, _) = call(&app, &stranger, "PATCH", &path, json!({"projectId": null})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Everywhere, then into the shared project.
+    let (_, changed) = call(&app, &person, "PATCH", &path, json!({"projectId": null})).await;
+    assert_eq!(changed["memory"]["projectId"], Value::Null);
+    assert_eq!(changed["memory"]["projectUnavailable"], false);
+    let (status, changed) = call(&app, &person, "PATCH", &path, json!({"projectId": shared})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changed["memory"]["projectName"], "Lab paper");
+    // The project's owner sees no memory of the person's, and is never given it.
+    let (_, page) = call(&app, &colleague, "GET", "/api/memory", Value::Null).await;
+    assert!(page["memories"].as_array().unwrap().is_empty());
+    let (theirs_in_shared, _) = project_chat(&pool, colleague.id, shared, &[]).await;
+    assert!(
+        recalled(&state, &colleague, theirs_in_shared, "Do I use radar?")
+            .await
+            .is_empty()
+    );
+    let (mine_in_shared, _) = project_chat(&pool, person.id, shared, &[]).await;
+    assert_eq!(
+        recalled(&state, &person, mine_in_shared, "Do I use radar?").await,
+        vec!["You use radar"]
+    );
+    // After leaving the group the memory is still listed, in no project they can use,
+    // given to no chat, and can be moved out.
+    sqlx::query("DELETE FROM user_group_members WHERE user_id = $1")
+        .bind(person.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = call(&app, &person, "GET", "/api/memory", Value::Null).await;
+    let listed = &page["memories"][0];
+    assert_eq!(listed["projectId"], Value::Null);
+    assert_eq!(listed["projectName"], Value::Null);
+    assert_eq!(listed["projectUnavailable"], true);
+    assert!(recalled(&state, &person, mine_in_shared, "Do I use radar?")
+        .await
+        .is_empty());
+    let (outside, _) = chat(&pool, person.id, &[], false).await;
+    assert!(recalled(&state, &person, outside, "Do I use radar?")
+        .await
+        .is_empty());
+    let (status, _) = call(&app, &person, "PATCH", &path, json!({"projectId": shared})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, changed) = call(&app, &person, "PATCH", &path, json!({"projectId": mine})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changed["memory"]["projectUnavailable"], false);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn deleting_a_project_makes_its_memories_general(pool: PgPool) {
+    let (state, app, _) = fixture(&pool).await;
+    enable(&pool).await;
+    let person = session(&pool, "user").await;
+    let rivers = project(&pool, person.id, "Rivers", &[]).await;
+    remember(
+        &app,
+        &person,
+        json!({"content": "You use radar", "kind": "work", "topics": [], "projectId": rivers}),
+    )
+    .await;
+    let (outside, _) = chat(&pool, person.id, &[], false).await;
+    assert!(recalled(&state, &person, outside, "Do I use radar?")
+        .await
+        .is_empty());
+    sqlx::query("DELETE FROM projects WHERE id = $1")
+        .bind(rivers)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = call(&app, &person, "GET", "/api/memory", Value::Null).await;
+    assert_eq!(page["memories"][0]["projectId"], Value::Null);
+    assert_eq!(page["memories"][0]["projectUnavailable"], false);
+    assert_eq!(
+        recalled(&state, &person, outside, "Do I use radar?").await,
+        vec!["You use radar"]
+    );
 }

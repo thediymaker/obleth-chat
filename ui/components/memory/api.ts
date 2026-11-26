@@ -22,6 +22,13 @@ export interface Memory {
   updatedAt: string;
   source: { conversationId: string; title: string | null } | null;
   topics: string[];
+  /** The project whose chats alone get it, while the person may use it; null with
+   *  projectUnavailable false: general, every chat gets it. */
+  projectId: string | null;
+  projectName: string | null;
+  projectColor: string | null;
+  /** In a project the person can no longer use: no chat gets it until it is moved. */
+  projectUnavailable: boolean;
 }
 export interface Topic {
   id: string;
@@ -69,6 +76,8 @@ export interface MemoryInput {
   kind?: MemoryKind;
   pinned?: boolean;
   topics?: string[];
+  /** A project the person may use, or null for every chat; absent leaves it where it is. */
+  projectId?: string | null;
 }
 export const addMemory = (body: MemoryInput) => api.request<{ memory: Memory }>("/api/memory", { method: "POST", body });
 export const changeMemory = (id: string, body: MemoryInput) => api.request<{ memory: Memory }>(memoryPath(id), { method: "PATCH", body });

@@ -3,7 +3,7 @@ import { intents, runningNow, shownIntent } from "./home";
 
 describe("intents", () => {
   it("offers only what the installation can do", () => {
-    expect(intents({ workspaces: false, clusters: [] }).map((i) => i.id)).toEqual(["ask"]);
+    expect(intents({ workspaces: false, clusters: [] }).map((i) => i.id)).toEqual(["ask", "research"]);
     expect(intents({ workspaces: true, clusters: [] }).map((i) => i.id)).toEqual(["ask", "build", "research"]);
     expect(intents({ workspaces: true, clusters: [{ name: "Sol" }] }).map((i) => i.id)).toEqual(["ask", "build", "research", "cluster"]);
   });
@@ -21,7 +21,9 @@ describe("shownIntent", () => {
   it("follows the workspace switch in the box", () => {
     expect(shownIntent("build", true, all)).toBe("build");
     expect(shownIntent("build", false, all)).toBe("ask");
-    expect(shownIntent("research", false, all)).toBe("ask");
+    // Research is any research: it needs no workspace, and keeps one that is on.
+    expect(shownIntent("research", false, all)).toBe("research");
+    expect(shownIntent("research", true, all)).toBe("research");
     expect(shownIntent("ask", true, all)).toBe("build");
     expect(shownIntent("cluster", true, all)).toBe("cluster");
   });

@@ -1,10 +1,12 @@
 "use client";
 
 // Memory: what Chat has learned about you, as a graph of topics and memories, with
-// a panel to read, change, pin and delete each one. Endpoints in api/src/memory.rs.
+// a panel to read, change, pin, move and delete each one. Each memory is used
+// everywhere or in one project; the page can show one project's. Endpoints in
+// api/src/memory.rs.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Brain, List, MoreHorizontal, Network, Pin, PinOff, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { Brain, ChevronDown, FolderInput, Globe, List, ListFilter, MoreHorizontal, Network, Pin, PinOff, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -13,19 +15,29 @@ import { usePageChrome } from "@/components/app-shell/chrome";
 import { EmptyState, ErrorBox, FeatureOff, Loading, Page, PageHeader } from "@/components/app-shell/page";
 import { CheckField, FormActions, FormDialog, FormError, Note, Pill, Section, SelectField, TextAreaField, TextField, SwitchField, useConfirm, useSubmit, messageOf } from "@/components/manage/kit";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { projectDot } from "@/components/app-shell/sidebar";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { initials, ago } from "@/lib/format";
+import { useProjects } from "@/lib/queries";
 import { useUser } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { addMemory, changeMemory, deleteMemory, MEMORY_KEY, MEMORY_KINDS, refreshMemory, saveChoices, topicColor, topicNames, topicPath, TOPIC_KINDS, useMemory, type Memory, type MemoryKind, type MemoryState, type Topic, type TopicKind } from "./api";
 import { MemoryGraph, type Selection } from "./memory-graph";
+import { EVERYWHERE, ScopeLabel, ScopeMenu, scopeMeaning, UNAVAILABLE } from "./scope";
 
 const KIND_OPTIONS = Object.entries(MEMORY_KINDS).map(([k, [label]]) => [k, label] as const);
 const TOPIC_OPTIONS = Object.entries(TOPIC_KINDS).map(([k, [label]]) => [k, label] as const);
 const chatHref = (id: string) => `/chat/${encodeURIComponent(id)}`;
+
+/** Which memories the page shows: all, the general ones, one project's, or those in a
+ *  project the person can no longer use. */
+type Filter = "all" | "everywhere" | "unavailable" | { project: string };
+const keep = (filter: Filter) => (m: Memory) =>
+  filter === "all" ||
+  (filter === "everywhere" ? !m.projectId && !m.projectUnavailable : filter === "unavailable" ? m.projectUnavailable : m.projectId === filter.project);
 
 export function MemoryPage() {
   usePageChrome("Memory");
@@ -38,10 +50,18 @@ export function MemoryPage() {
   const [view, setView] = useState<"graph" | "list">("graph");
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
+  const [filter, setFilter] = useState<Filter>("all");
   const linked = params.get("m");
   const [selected, setSelected] = useState<Selection>(linked ? { type: "memory", id: linked } : null);
   const data = memory.data;
   const name = user.display_name || user.username;
+  // What the filter shows, and its topics: those a shown memory is about.
+  const shown = useMemo(() => {
+    if (!data || filter === "all") return data;
+    const memories = data.memories.filter(keep(filter));
+    const used = new Set(memories.flatMap((m) => m.topics));
+    return { ...data, memories, topics: data.topics.filter((t) => used.has(t.id)) };
+  }, [data, filter]);
 
   const select = (s: Selection) => {
     setSelected(s);
@@ -72,7 +92,7 @@ export function MemoryPage() {
   }
 
   if (memory.isPending) return <Page><Loading label="Loading memory…" /></Page>;
-  if (memory.error || !data)
+  if (memory.error || !data || !shown)
     return (
       <Page>
         <ErrorBox error={memory.error} onRetry={() => memory.refetch()} />
@@ -139,6 +159,7 @@ export function MemoryPage() {
               <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find a memory or topic" aria-label="Find a memory or topic" className="pl-8" />
             </div>
+            <ScopeFilter data={data} value={filter} onChange={setFilter} />
             <div role="group" aria-label="View" className="flex rounded-md border p-0.5">
               {(
                 [
@@ -158,11 +179,12 @@ export function MemoryPage() {
               ))}
             </div>
             <span className="ml-auto text-sm text-muted-foreground">
-              {data.memories.length} {data.memories.length === 1 ? "memory" : "memories"} · {data.topics.length} {data.topics.length === 1 ? "topic" : "topics"}
+              {filter !== "all" && `${shown.memories.length} of `}
+              {data.memories.length} {data.memories.length === 1 ? "memory" : "memories"} · {shown.topics.length} {shown.topics.length === 1 ? "topic" : "topics"}
               {data.memories.length >= data.max && <span className="text-amber"> · full</span>}
             </span>
           </div>
-          <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
             <div className="min-w-0">
               {!data.memories.length ? (
                 <EmptyState
@@ -175,10 +197,20 @@ export function MemoryPage() {
                     </Button>
                   }
                 />
+              ) : !shown.memories.length ? (
+                <EmptyState
+                  title="No memories here"
+                  text="None of your memories is used here yet."
+                  action={
+                    <Button variant="outline" onClick={() => setFilter("all")}>
+                      Show all memories
+                    </Button>
+                  }
+                />
               ) : view === "graph" ? (
-                <MemoryGraph className="h-[min(640px,70vh)]" memories={data.memories} topics={data.topics} selected={selected} onSelect={select} query={query} initials={initials(name) || "You"} />
+                <MemoryGraph className="h-[min(640px,70vh)]" memories={shown.memories} topics={shown.topics} selected={selected} onSelect={select} query={query} initials={initials(name) || "You"} />
               ) : (
-                <MemoryList data={data} query={query} selected={selected} onSelect={select} />
+                <MemoryList data={shown} query={query} selected={selected} onSelect={select} />
               )}
             </div>
             <aside className="grid min-w-0 gap-4 lg:sticky lg:top-4">
@@ -187,14 +219,75 @@ export function MemoryPage() {
               ) : selected?.type === "topic" && data.topics.some((t) => t.id === selected.id) ? (
                 <TopicDetail key={selected.id} topic={data.topics.find((t) => t.id === selected.id)!} data={data} onClose={() => select(null)} onSelect={select} confirm={confirm.ask} />
               ) : (
-                <Recent data={data} onSelect={select} />
+                <Recent data={shown} onSelect={select} />
               )}
             </aside>
           </div>
         </>
       )}
-      {adding && <AddMemory data={data} onClose={() => setAdding(false)} onAdded={(id) => select({ type: "memory", id })} />}
+      {adding && <AddMemory data={data} project={typeof filter === "object" ? filter.project : null} onClose={() => setAdding(false)} onAdded={(id) => select({ type: "memory", id })} />}
     </Page>
+  );
+}
+
+/** Which memories the page shows: all, everywhere, or each project that has some. */
+function ScopeFilter({ data, value, onChange }: { data: MemoryState; value: Filter; onChange: (f: Filter) => void }) {
+  const projects = useMemo(() => {
+    const seen = new Map<string, { id: string; name: string; color: string; count: number }>();
+    for (const m of data.memories) {
+      if (!m.projectId) continue;
+      const p = seen.get(m.projectId) ?? { id: m.projectId, name: m.projectName || "Project", color: m.projectColor || "gray", count: 0 };
+      p.count++;
+      seen.set(m.projectId, p);
+    }
+    return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [data.memories]);
+  const general = data.memories.filter(keep("everywhere")).length;
+  const unavailable = data.memories.filter(keep("unavailable")).length;
+  const current = typeof value === "object" ? projects.find((p) => p.id === value.project) : undefined;
+  const label = value === "all" ? "All memories" : value === "everywhere" ? EVERYWHERE : value === "unavailable" ? UNAVAILABLE : (current?.name ?? "Project");
+  const key = typeof value === "object" ? value.project : value;
+  const count = (n: number) => <span className="ml-auto shrink-0 pl-2 text-xs text-muted-foreground tabular-nums">{n}</span>;
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" className="max-w-full min-w-0 sm:max-w-72" title={`Showing: ${label}`} aria-label={`Show memories used in: ${label}`}>
+          {current ? <span className={cn("size-2 shrink-0 rounded-full", projectDot(current.color))} aria-hidden="true" /> : <ListFilter className="shrink-0" />}
+          <span className="truncate">{label}</span>
+          <ChevronDown className="shrink-0" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="max-h-80 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto">
+        <DropdownMenuRadioGroup value={key} onValueChange={(v) => onChange(v === "all" || v === "everywhere" || v === "unavailable" ? v : { project: v })}>
+          <DropdownMenuRadioItem value="all">
+            <span className="truncate">All memories</span>
+            {count(data.memories.length)}
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="everywhere">
+            <Globe aria-hidden="true" />
+            <span className="truncate">{EVERYWHERE}</span>
+            {count(general)}
+          </DropdownMenuRadioItem>
+          {!!projects.length && <DropdownMenuSeparator />}
+          {projects.map((p) => (
+            <DropdownMenuRadioItem key={p.id} value={p.id} title={p.name} className="min-w-0">
+              <span className={cn("size-2 shrink-0 rounded-full", projectDot(p.color))} aria-hidden="true" />
+              <span className="truncate">{p.name}</span>
+              {count(p.count)}
+            </DropdownMenuRadioItem>
+          ))}
+          {!!unavailable && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuRadioItem value="unavailable" className="min-w-0">
+                <span className="truncate">{UNAVAILABLE}</span>
+                {count(unavailable)}
+              </DropdownMenuRadioItem>
+            </>
+          )}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -247,10 +340,13 @@ function Recent({ data, onSelect }: { data: MemoryState; onSelect: (s: Selection
         <ul className="grid gap-1">
           {recent.map((m) => (
             <li key={m.id}>
-              <button type="button" onClick={() => onSelect({ type: "memory", id: m.id })} className="grid w-full gap-0.5 rounded-md px-2 py-1.5 text-left hover:bg-accent">
+              <button type="button" onClick={() => onSelect({ type: "memory", id: m.id })} className="grid w-full grid-cols-[minmax(0,1fr)] gap-0.5 rounded-md px-2 py-1.5 text-left hover:bg-accent">
                 <span className="text-md">{m.content}</span>
-                <span className="text-xs text-muted-foreground">
-                  {m.origin === "added" ? "Added" : "Learned"} {ago(m.createdAt)}
+                <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className="shrink-0">
+                    {m.origin === "added" ? "Added" : "Learned"} {ago(m.createdAt)} ·
+                  </span>
+                  <ScopeLabel memory={m} />
                 </span>
               </button>
             </li>
@@ -277,6 +373,7 @@ function Recent({ data, onSelect }: { data: MemoryState; onSelect: (s: Selection
 
 function MemoryDetail({ memory, data, onClose, onSelect }: { memory: Memory; data: MemoryState; onClose: () => void; onSelect: (s: Selection) => void }) {
   const client = useQueryClient();
+  const projects = useProjects().data?.projects ?? [];
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(memory.content);
   const [topicsText, setTopicsText] = useState("");
@@ -306,7 +403,7 @@ function MemoryDetail({ memory, data, onClose, onSelect }: { memory: Memory; dat
         action: {
           label: "Undo",
           onClick: async () => {
-            const { memory: back } = await addMemory({ content: memory.content, kind: memory.kind, pinned: memory.pinned, topics: topics.map((t) => t.name) });
+            const { memory: back } = await addMemory({ content: memory.content, kind: memory.kind, pinned: memory.pinned, topics: topics.map((t) => t.name), projectId: memory.projectId });
             await refreshMemory(client);
             onSelect({ type: "memory", id: back.id });
           },
@@ -396,6 +493,28 @@ function MemoryDetail({ memory, data, onClose, onSelect }: { memory: Memory; dat
           </DropdownMenu>
         )}
       </form>
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
+        <span className="text-sm font-medium">Used in</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <ScopeLabel memory={memory} className="grow text-sm" />
+          <ScopeMenu
+            projects={projects}
+            value={memory.projectUnavailable ? "unavailable" : memory.projectId}
+            label="Move to"
+            trigger={
+              <>
+                <FolderInput /> Move
+              </>
+            }
+            disabled={busy}
+            onChange={(projectId) => {
+              const to = projects.find((p) => p.id === projectId);
+              if (projectId !== memory.projectId || memory.projectUnavailable) void save({ projectId }, to ? `Moved to ${to.name}` : "Moved to everywhere");
+            }}
+          />
+        </div>
+        <span className="text-xs text-muted-foreground">{memory.projectUnavailable ? "No chat gets it until you move it." : scopeMeaning(memory.projectId ? memory.projectName : null)}</span>
+      </div>
       <SelectField id="memory-kind" label="Kind" value={memory.kind} onChange={(e) => save({ kind: e.target.value as MemoryKind })} options={KIND_OPTIONS} help={MEMORY_KINDS[memory.kind]?.[1]} />
       <div className="grid gap-1 text-sm text-muted-foreground">
         <span>
@@ -412,7 +531,7 @@ function MemoryDetail({ memory, data, onClose, onSelect }: { memory: Memory; dat
           <Trash2 /> Delete
         </Button>
       </div>
-      {memory.pinned && <Note>Pinned: every chat gets this memory, and Chat never changes it on its own.</Note>}
+      {memory.pinned && <Note>{memory.projectId ? `Pinned: every chat of yours in ${memory.projectName} gets this memory, and Chat never changes it on its own.` : "Pinned: every chat gets this memory, and Chat never changes it on its own."}</Note>}
     </Section>
   );
 }
@@ -524,7 +643,7 @@ function MemoryList({ data, query, selected, onSelect }: { data: MemoryState; qu
   }, [data, q]);
   if (!groups.length) return <EmptyState title="No memory matches" text="Try other words." />;
   return (
-    <div className="grid gap-3" aria-label="Memories by topic" role="region">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-3" aria-label="Memories by topic" role="region">
       {groups.map(({ topic, memories }) => (
         <section key={topic?.id ?? "none"} className="rounded-lg border bg-card p-3">
           <h2 className="mb-1.5 flex items-center gap-2 px-1 text-sm font-semibold">
@@ -538,7 +657,7 @@ function MemoryList({ data, query, selected, onSelect }: { data: MemoryState; qu
               "No topic"
             )}
           </h2>
-          <ul className="grid gap-0.5">
+          <ul className="grid grid-cols-[minmax(0,1fr)] gap-0.5">
             {memories.map((m) => (
               <li key={m.id}>
                 <button
@@ -548,7 +667,11 @@ function MemoryList({ data, query, selected, onSelect }: { data: MemoryState; qu
                   className={cn("flex w-full items-baseline gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent", selected?.type === "memory" && selected.id === m.id && "bg-accent")}
                 >
                   {m.pinned && <Pin className="size-3 shrink-0 self-center text-muted-foreground" />}
-                  <span className="grow text-md">{m.content}</span>
+                  <span className="grid min-w-0 grow gap-0.5">
+                    <span className="text-md">{m.content}</span>
+                    <ScopeLabel memory={m} className="text-xs text-muted-foreground sm:hidden" />
+                  </span>
+                  <ScopeLabel memory={m} className="hidden max-w-[35%] shrink-0 self-center text-xs text-muted-foreground sm:inline-flex" />
                   <Pill className="shrink-0">{MEMORY_KINDS[m.kind]?.[0]}</Pill>
                 </button>
               </li>
@@ -560,8 +683,11 @@ function MemoryList({ data, query, selected, onSelect }: { data: MemoryState; qu
   );
 }
 
-function AddMemory({ data, onClose, onAdded }: { data: MemoryState; onClose: () => void; onAdded: (id: string) => void }) {
+function AddMemory({ data, project, onClose, onAdded }: { data: MemoryState; project: string | null; onClose: () => void; onAdded: (id: string) => void }) {
   const client = useQueryClient();
+  const projects = useProjects().data?.projects ?? [];
+  const [projectId, setProjectId] = useState<string | null>(project);
+  const chosen = projects.find((p) => p.id === projectId) ?? null;
   const { busy, error, onSubmit } = useSubmit(async (form) => {
     const kind = String(form.get("memory-new-kind") || "");
     const topics = topicNames(String(form.get("memory-new-topics") || ""));
@@ -570,6 +696,7 @@ function AddMemory({ data, onClose, onAdded }: { data: MemoryState; onClose: () 
       kind: kind ? (kind as MemoryKind) : undefined,
       pinned: form.get("memory-new-pin") === "on",
       topics: topics.length ? topics : undefined,
+      projectId: chosen?.id ?? null,
     });
     await refreshMemory(client);
     // The model files a memory added without a kind or topics; look again shortly.
@@ -579,8 +706,8 @@ function AddMemory({ data, onClose, onAdded }: { data: MemoryState; onClose: () 
     toast("Memory added");
   });
   return (
-    <FormDialog open onOpenChange={(o) => !o && onClose()} title="Add a memory" description="Something Chat should know about you in every chat where it fits.">
-      <form onSubmit={onSubmit} className="grid gap-4">
+    <FormDialog open onOpenChange={(o) => !o && onClose()} title="Add a memory" description="Something Chat should know about you or your work, in the chats where it fits.">
+      <form onSubmit={onSubmit} className="grid grid-cols-[minmax(0,1fr)] gap-4">
         <TextAreaField id="memory-new-content" label="Memory" required maxLength={500} rows={3} placeholder="You teach CHM 501 and prefer worked examples." help="Write it to you, in one sentence." autoFocus />
         <TextField id="memory-new-topics" label="Topics" list="memory-new-topic-names" placeholder="CHM 501, Teaching" help="Up to three, separated by commas. Leave blank and Chat chooses." autoComplete="off" />
         <datalist id="memory-new-topic-names">
@@ -588,8 +715,15 @@ function AddMemory({ data, onClose, onAdded }: { data: MemoryState; onClose: () 
             <option key={t.id} value={t.name} />
           ))}
         </datalist>
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
+          <span className="text-sm font-medium">Used in</span>
+          <div className="flex min-w-0">
+            <ScopeMenu projects={projects} value={chosen?.id ?? null} onChange={setProjectId} label="Used in" />
+          </div>
+          <span className="text-xs text-muted-foreground">{scopeMeaning(chosen?.name ?? null)}</span>
+        </div>
         <SelectField id="memory-new-kind" label="Kind" defaultValue="" options={[["", "Let Chat choose"], ...KIND_OPTIONS]} />
-        <CheckField id="memory-new-pin" label="Pin it, so every chat gets it" />
+        <CheckField id="memory-new-pin" label={chosen ? "Pin it, so every chat in the project gets it" : "Pin it, so every chat gets it"} />
         <FormError message={error} />
         <FormActions>
           <Button type="submit" disabled={busy}>

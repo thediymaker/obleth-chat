@@ -24,7 +24,8 @@ import { cn } from "@/lib/utils";
 import { ACCEPT, collectionPath, DEFAULT_MAX_FILE, DOCUMENTS_PAGE, fileUrl, knowledgeKeys, refreshKnowledge, scopeLabel, type CollectionDetail, type KnowledgeDocument, type Scope, type SearchResult, uploadDocument, useCollection, useCollections } from "./api";
 import { CollectionDialog } from "./collection-dialog";
 
-function Status({ d }: { d: KnowledgeDocument }) {
+/** A document's indexing state, as its collection lists it. */
+export function Status({ d }: { d: KnowledgeDocument }) {
   if (d.status === "queued") return <Pill>Waiting</Pill>;
   if (d.status === "processing")
     return (

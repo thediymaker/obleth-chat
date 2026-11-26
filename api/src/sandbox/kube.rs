@@ -92,6 +92,27 @@ impl Kube {
         })
     }
 
+    /// A client for no cluster, whose every call fails, for tests that never reach one.
+    #[cfg(test)]
+    pub fn unconfigured(namespace: String) -> Self {
+        let tls = Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+        );
+        Self {
+            http: reqwest::Client::new(),
+            tls,
+            base: Url::parse("https://kubernetes.invalid").unwrap(),
+            token_file: PathBuf::from("/nonexistent"),
+            namespace,
+        }
+    }
+
     async fn token(&self) -> Result<String> {
         Ok(tokio::fs::read_to_string(&self.token_file)
             .await

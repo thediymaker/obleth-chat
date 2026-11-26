@@ -8,6 +8,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, FlaskConical, Square, Terminal } from "lucide-react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { EmptyState, ErrorBox, Eyebrow, Loading } from "@/components/app-shell/page";
@@ -40,12 +41,12 @@ function Start({ projectId, mine }: { projectId: string; mine: boolean }) {
     <EmptyState
       variant="card"
       icon={FlaskConical}
-      title="No research yet"
-      text="Research measures ideas against each other: every experiment is a branch of your code, run with the same command, and the best result carries into the next round."
+      title="No experiments yet"
+      text="Experiments measure ideas against each other: each one is a branch of your code, run with the same command, and the best result carries into the next round."
       action={
         can && (
           <Button onClick={() => startIn(projectId, { auto: true, prompt: "Let’s set up research in this project. The goal: " })}>
-            <FlaskConical /> Start research in a chat
+            <FlaskConical /> Start experiments in a chat
           </Button>
         )
       }
@@ -54,8 +55,8 @@ function Start({ projectId, mine }: { projectId: string; mine: boolean }) {
         {can
           ? "Already started one? It shows here once the chat has agreed the metric and run command with you and set up the baseline. Until then, follow it in the chat."
           : mine
-            ? "Research runs in a workspace, and workspaces are not enabled for your account."
-            : "Only the project’s owner can start research in it."}
+            ? "Experiments run in a workspace, and workspaces are not enabled for your account."
+            : "Only the project’s owner can start experiments in it."}
       </p>
       <ol className="mt-3 grid w-full gap-3 text-left sm:grid-cols-2 lg:grid-cols-4">
         {STEPS.map(([title, text], i) => (
@@ -361,14 +362,16 @@ export function ProjectResearch({ projectId }: { projectId: string }) {
     },
     refetchInterval: (query) => (query.state.data?.runs.some((r) => r.status === "running") ? 5000 : false),
   });
+  // A link to one run (?run=, from the project's log) opens it on its node.
+  const linked = useSearchParams().get("run");
   const [selected, setSelected] = useState<string | null>(null);
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(linked);
   if (q.isPending) return <Loading label="Loading research…" />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const data = q.data;
   if (!data) return <Start projectId={projectId} mine={!!detail.project.mine} />;
   const f = facts(data);
-  const node = data.experiments.some((e) => e.id === selected) ? selected : f.defaultNode();
+  const node = data.experiments.some((e) => e.id === selected) ? selected : (data.runs.find((r) => r.id === picked)?.experimentId ?? f.defaultNode());
   const e = data.experiments.find((x) => x.id === node);
   return (
     <div>

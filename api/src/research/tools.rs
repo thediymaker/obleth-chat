@@ -143,7 +143,7 @@ pub async fn standing(
             };
             Some(Standing::Elsewhere(match title {
                 Some(t) if r.owner_id == user => format!("This project's research runs in your chat “{t}”; continue it there."),
-                _ => "This project's research is run by someone else; it is shown on the project's Research tab.".into(),
+                _ => "This project's research is run by someone else; it is shown on the project's Experiments tab.".into(),
             }))
         }
     }
@@ -1215,7 +1215,7 @@ async fn wait(ctx: &Ctx<'_>, research: &Research, args: &Value) -> Outcome {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            return outcome(true, "Still running", format!("Nothing finished in {seconds} s. Still running: {list}. Call experiment_wait again, read progress with run_log, or end your reply and tell the person the runs are going; their results appear on the project's Research tab."));
+            return outcome(true, "Still running", format!("Nothing finished in {seconds} s. Still running: {list}. Call experiment_wait again, read progress with run_log, or end your reply and tell the person the runs are going; their results appear on the project's Experiments tab."));
         }
         for run in &running {
             check(ctx.pool, ctx.sb, *run).await;

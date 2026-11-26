@@ -16,8 +16,5 @@ CREATE TABLE compare_settings (
 INSERT INTO compare_settings (id) VALUES (TRUE);
 
 -- Those answers are requests of their own in the usage ledger, each inside a lease
--- like a follow-up's.
-ALTER TABLE generation_usage DROP CONSTRAINT generation_usage_purpose_check;
-ALTER TABLE generation_usage ADD CONSTRAINT generation_usage_purpose_check
-    CHECK (purpose IN ('chat','follow_up','agent','compare')) NOT VALID;
-ALTER TABLE generation_usage VALIDATE CONSTRAINT generation_usage_purpose_check;
+-- like a follow-up's: purpose 'compare', which generation_usage has allowed since
+-- migration 093.

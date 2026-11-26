@@ -26,6 +26,8 @@ test("each event reads as one sentence, with names in bold", () => {
   expect(sentenceText(auditSentence(e("model.certify", { targetName: "glm", metadata: { score: 91 } })))).toBe("Ana recorded a certification for the model glm");
   expect(sentenceText(auditSentence(e("model.certify", { targetName: "glm", metadata: { cleared: true } })))).toBe("Ana cleared the certification of the model glm");
   expect(sentenceText(auditSentence(e("memory.update", { metadata: { enabled: false } })))).toBe("Ana turned memory off");
+  expect(sentenceText(auditSentence(e("notebook.update", { metadata: { model: "long-window" } })))).toBe("Ana named the Notebook model long-window");
+  expect(sentenceText(auditSentence(e("notebook.update", { metadata: { model: null } })))).toBe("Ana turned the Notebook model off");
   expect(sentenceText(auditSentence(e("feedback.button", { metadata: { mode: "sidebar" } })))).toBe("Ana put the Feedback button in the sidebar");
   expect(sentenceText(auditSentence(e("something_new")))).toBe("Ana · Something New");
 });

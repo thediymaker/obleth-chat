@@ -26,3 +26,16 @@ test("the page may name the active tab itself", () => {
   expect(screen.getByRole("link", { name: "People" })).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("link", { name: "Groups" })).not.toHaveAttribute("aria-current");
 });
+
+test("a compact bar keeps every tab's name for a screen reader and shows only the active one's on a phone", () => {
+  path = "/projects/x/code";
+  const Icon = () => <svg aria-hidden="true" />;
+  render(<SectionTabs label="Project" compact tabs={tabs.map((t) => ({ ...t, icon: Icon }))} />);
+  const overview = screen.getByRole("link", { name: "Overview" });
+  expect(overview).toHaveAttribute("title", "Overview");
+  expect(overview.className).toContain("max-sm:flex-1");
+  expect(overview.querySelector("span")?.className).toContain("max-sm:sr-only");
+  const code = screen.getByRole("link", { name: "Code" });
+  expect(code).toHaveAttribute("aria-current", "page");
+  expect(code.querySelector("span")).toBeNull();
+});

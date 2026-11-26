@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { choose, mockApi, renderPage } from "@/components/manage/test-utils";
@@ -31,6 +31,8 @@ function tab() {
   renderPage(<SystemTab />);
   return calls;
 }
+/** The Save button on the Knowledge search card. */
+const saveSearch = () => within(screen.getByLabelText("Embedding model").closest("section")!).getByRole("button", { name: "Save" });
 const patch = (calls: { path: string; method: string }[]) => calls.filter((c) => c.method === "PATCH" && c.path.includes("embedding"));
 
 test("changing the embedding model fills in its prefixes and re-indexes only after confirmation", async () => {
@@ -38,7 +40,7 @@ test("changing the embedding model fills in its prefixes and re-indexes only aft
   await choose(await screen.findByLabelText("Embedding model"), /^embeddinggemma-2/);
   expect(screen.getByLabelText("Search prefix")).toHaveValue("task: search result | query: ");
   expect(screen.getByLabelText("Passage prefix")).toHaveValue("title: none | text: ");
-  await userEvent.click(screen.getAllByRole("button", { name: "Save" })[0]!);
+  await userEvent.click(saveSearch());
   expect(await screen.findByText(/index all 12 documents and 3 saved items again with embeddinggemma-2/)).toBeInTheDocument();
   expect(patch(calls)).toHaveLength(0);
   await userEvent.click(screen.getByRole("button", { name: "Change and re-index" }));
@@ -65,7 +67,7 @@ test("values equal to the defaults follow the defaults without a re-index warnin
   expect(embeddingBody(settings, { model: "qwen3-embedding-8b", queryPrefix: "Instruct: find\r\nQuery: ", documentPrefix: "" })).toEqual({ model: null, queryPrefix: null, documentPrefix: null });
   const calls = tab();
   await screen.findByLabelText("Embedding model");
-  await userEvent.click(screen.getAllByRole("button", { name: "Save" })[0]!);
+  await userEvent.click(saveSearch());
   await waitFor(() => expect(patch(calls)).toHaveLength(1));
   expect(screen.queryByText(/Index everything again/)).toBeNull();
 });

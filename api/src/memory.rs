@@ -7,6 +7,11 @@
 //! go into the system prompt, and the reply records which ones it was given. People
 //! can see, change, pin and delete every memory, add their own, and turn memory off.
 //! Temporary chats are never read and never given memories.
+//!
+//! A memory is general, given to every chat of its owner's, or kept for one project,
+//! given only to their chats in that project. A memory is always its owner's alone,
+//! even in a project shared with a group. A chat sees, and the pass reading it changes,
+//! only the general memories and its own project's.
 use crate::audit::{self, Action, Target};
 use crate::worker::Start;
 use crate::{
@@ -77,6 +82,9 @@ Each memory is about one to three topics: short names (one to four words) of a p
 Reply with JSON only:
 {"add": [{"text": "...", "kind": "about|work|preference|goal", "topics": [{"name": "...", "kind": "project|tool|field|course|topic"}]}], "update": [{"id": "m1", "text": "..."}], "forget": ["m2"]}
 kind: about = who they are; work = what they work on; preference = how they like answers; goal = what they want to achieve. Use empty lists when nothing changes; most messages change nothing."#;
+
+/// Added to LEARN_PROMPT for a chat in a project, so each new memory says where it goes.
+const SCOPE_NOTE: &str = r#"This chat is in the person's project "{project}". Their memories are either general, given to all their chats, or kept for one project, given only to their chats in it; the known memories are their general ones and this project's. For each memory you add, also give "scope": "project" when it is about the work in this project (its data, methods, results, decisions, deadlines, the tools used only for it), or "everywhere" when it is about the person in any chat (who they are, how they like answers, tools they use generally, goals beyond this project). Example: {"text": "...", "kind": "work", "scope": "project", "topics": [...]}"#;
 
 /// The decision each new or changed memory must pass: whether it is a lasting fact about
 /// the person or only a detail of the task at hand.
@@ -231,16 +239,14 @@ async fn find(
     if !chosen.use_memory && !learns {
         return Ok(None);
     }
-    let temporary: bool =
-        sqlx::query_scalar("SELECT temporary FROM conversations WHERE id = $1 AND owner_id = $2")
-            .bind(conversation)
-            .bind(user.id)
-            .fetch_optional(pool)
-            .await?
-            .unwrap_or(true);
-    if temporary {
+    let Some(Chat {
+        temporary: false,
+        project,
+        ..
+    }) = chat_of(pool, user.id, conversation).await?
+    else {
         return Ok(None);
-    }
+    };
     if !chosen.use_memory {
         return Ok(Some(Recall {
             items: Vec::new(),
@@ -248,18 +254,23 @@ async fn find(
         }));
     }
     let pinned: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, content FROM memories WHERE owner_id = $1 AND pinned ORDER BY updated_at DESC LIMIT $2",
+        "SELECT id, content FROM memories WHERE owner_id = $1 AND pinned
+           AND (project_id IS NULL OR project_id = $3)
+         ORDER BY updated_at DESC LIMIT $2",
     )
     .bind(user.id)
     .bind(PINNED)
+    .bind(project)
     .fetch_all(pool)
     .await?;
     let mut items: Vec<(Uuid, String, bool)> =
         pinned.into_iter().map(|(id, c)| (id, c, true)).collect();
     let unpinned: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM memories WHERE owner_id = $1 AND NOT pinned)",
+        "SELECT EXISTS(SELECT 1 FROM memories WHERE owner_id = $1 AND NOT pinned
+           AND (project_id IS NULL OR project_id = $2))",
     )
     .bind(user.id)
+    .bind(project)
     .fetch_one(pool)
     .await?;
     if unpinned && !question.text.is_empty() {
@@ -270,6 +281,7 @@ async fn find(
         let ranked = rank(
             pool,
             user.id,
+            project,
             vector,
             &question.text,
             RELEVANT,
@@ -306,18 +318,53 @@ async fn find(
     Ok(Some(Recall { items, learns }))
 }
 
+/// A chat of the person's: whether it is temporary, and the project it is in while they
+/// may still use it.
+struct Chat {
+    temporary: bool,
+    project: Option<Uuid>,
+    project_name: Option<String>,
+}
+
+/// Person `owner`'s chat; None when it is not theirs. A chat in a project they can no
+/// longer use is in no project, so it gets only their general memories.
+async fn chat_of(
+    pool: &PgPool,
+    owner: Uuid,
+    conversation: Uuid,
+) -> Result<Option<Chat>, sqlx::Error> {
+    let row: Option<(bool, Option<Uuid>, Option<String>)> = sqlx::query_as(&format!(
+        "SELECT v.temporary, p.id, p.name FROM conversations v
+         LEFT JOIN projects p ON p.id = v.project_id AND {}
+         WHERE v.id = $2 AND v.owner_id = $1",
+        crate::projects::VISIBLE
+    ))
+    .bind(owner)
+    .bind(conversation)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(temporary, project, project_name)| Chat {
+        temporary,
+        project,
+        project_name,
+    }))
+}
+
 /// The person's unpinned memories that best match `query`, by meaning (`vector`, the
-/// query embedded) and by words, best first. `fit` drops matches by meaning that are further away than it.
+/// query embedded) and by words, best first: their general ones and those of `project`,
+/// never another project's. `fit` drops matches by meaning that are further away than it.
 async fn rank(
     pool: &PgPool,
     owner: Uuid,
+    project: Option<Uuid>,
     vector: Option<&str>,
     query: &str,
     limit: i64,
     fit: Option<f64>,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(
-        "WITH mine AS (SELECT id, embedding, tsv FROM memories WHERE owner_id = $1 AND NOT pinned),
+        "WITH mine AS (SELECT id, embedding, tsv FROM memories WHERE owner_id = $1 AND NOT pinned
+                        AND (project_id IS NULL OR project_id = $6)),
          vec AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY d) AS r FROM (
                 SELECT id, embedding <=> $2::halfvec AS d FROM mine
@@ -336,6 +383,7 @@ async fn rank(
     .bind(crate::knowledge::words(query))
     .bind(limit)
     .bind(fit.unwrap_or(2.0))
+    .bind(project)
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
@@ -494,16 +542,14 @@ async fn claim(
     if !choices(pool, user.id, settings.default_on).await?.learn {
         return Ok(None);
     }
-    let temporary: bool =
-        sqlx::query_scalar("SELECT temporary FROM conversations WHERE id = $1 AND owner_id = $2")
-            .bind(conversation)
-            .bind(user.id)
-            .fetch_optional(pool)
-            .await?
-            .unwrap_or(true);
-    if temporary {
+    let Some(Chat {
+        temporary: false,
+        project,
+        project_name,
+    }) = chat_of(pool, user.id, conversation).await?
+    else {
         return Ok(None);
-    }
+    };
     // The claim, unless another pass holds it or the last one failed moments ago.
     let read_through: Option<i32> = sqlx::query_scalar(
         "INSERT INTO memory_reads (conversation_id, owner_id, claimed_until)
@@ -543,6 +589,7 @@ async fn claim(
         gateway,
         model,
         user: user.clone(),
+        project: project.zip(project_name),
         read_through,
     }))
 }
@@ -555,6 +602,7 @@ struct Claimed {
     gateway: Gateway,
     model: String,
     user: Identity,
+    project: Option<(Uuid, String)>,
     read_through: i32,
 }
 
@@ -568,6 +616,7 @@ impl Claimed {
             gateway: &self.gateway,
             model: &self.model,
             user: &self.user,
+            project: self.project.as_ref().map(|(id, name)| (*id, name.as_str())),
         };
         let done = pass.learn(conversation, reply, self.read_through).await;
         if let Err(error) = settle(&self.pool, &READS, conversation, done).await {
@@ -584,7 +633,8 @@ const READS: Claims = Claims {
     failed: "memory could not read a chat",
 };
 
-/// One pass over a chat, as its owner.
+/// One pass over a chat, as its owner. It sees, changes and adds to only what the chat
+/// may be given: the person's general memories and those of the chat's project.
 struct Pass<'a> {
     pool: &'a PgPool,
     knowledge: Option<&'a Knowledge>,
@@ -592,6 +642,8 @@ struct Pass<'a> {
     gateway: &'a Gateway,
     model: &'a str,
     user: &'a Identity,
+    /// The chat's project, when it is in one the person may use.
+    project: Option<(Uuid, &'a str)>,
 }
 
 /// A memory the model may change, under the short id it saw.
@@ -615,6 +667,20 @@ pub struct NewMemory {
     pub text: String,
     pub kind: String,
     pub topics: Vec<(String, String)>,
+    /// "project" or "everywhere", as the model said for a chat in a project.
+    pub scope: Option<String>,
+}
+
+/// Whether a memory learned in a chat in a project stays in the project. The model says
+/// so for each memory (`scope`); when it does not, the memory's kind decides: what the
+/// person works on and wants to achieve stays in the project, who they are and how they
+/// like answers goes everywhere.
+fn stays_in_project(scope: Option<&str>, kind: &str) -> bool {
+    match scope.map(str::trim) {
+        Some(s) if s.eq_ignore_ascii_case("project") => true,
+        Some(s) if s.eq_ignore_ascii_case("everywhere") => false,
+        _ => matches!(kind, "work" | "goal"),
+    }
 }
 
 impl Pass<'_> {
@@ -686,13 +752,20 @@ impl Pass<'_> {
                 "\n\nThe assistant's latest reply, for context only (never remember what it says):\n{answer}"
             ));
         }
+        let system = match self.project {
+            Some((_, name)) => format!(
+                "{LEARN_PROMPT}\n\n{}",
+                SCOPE_NOTE.replace("{project}", name)
+            ),
+            None => LEARN_PROMPT.to_owned(),
+        };
         let body = json!({
             "model": self.model,
             "temperature": 0,
             "max_tokens": 1200,
             "stream": false,
             "messages": [
-                {"role": "system", "content": LEARN_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": input},
             ],
         });
@@ -792,18 +865,29 @@ impl Pass<'_> {
         .map(|_| ())
     }
 
-    /// The memories the model sees: all of them for a person with few, otherwise the
-    /// pinned ones and the best matches for the new messages, under short ids.
+    /// The chat's project, when it is in one.
+    fn project_id(&self) -> Option<Uuid> {
+        self.project.map(|(id, _)| id)
+    }
+
+    /// The memories the model sees, of those the chat may be given: all of them for a
+    /// person with few, otherwise the pinned ones and the best matches for the new
+    /// messages, under short ids.
     async fn known(&self, text: &str) -> Result<Vec<Known>, sqlx::Error> {
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE owner_id = $1")
-            .bind(self.user.id)
-            .fetch_one(self.pool)
-            .await?;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memories WHERE owner_id = $1 AND (project_id IS NULL OR project_id = $2)",
+        )
+        .bind(self.user.id)
+        .bind(self.project_id())
+        .fetch_one(self.pool)
+        .await?;
         let rows: Vec<(Uuid, String, bool)> = if total <= KNOWN {
             sqlx::query_as(
-                "SELECT id, content, pinned FROM memories WHERE owner_id = $1 ORDER BY created_at",
+                "SELECT id, content, pinned FROM memories WHERE owner_id = $1
+                   AND (project_id IS NULL OR project_id = $2) ORDER BY created_at",
             )
             .bind(self.user.id)
+            .bind(self.project_id())
             .fetch_all(self.pool)
             .await?
         } else {
@@ -816,6 +900,7 @@ impl Pass<'_> {
             let mut ids = rank(
                 self.pool,
                 self.user.id,
+                self.project_id(),
                 vector.as_deref(),
                 text,
                 KNOWN,
@@ -823,21 +908,26 @@ impl Pass<'_> {
             )
             .await?;
             let pinned: Vec<Uuid> = sqlx::query_scalar(
-                "SELECT id FROM memories WHERE owner_id = $1 AND pinned ORDER BY updated_at DESC LIMIT $2",
+                "SELECT id FROM memories WHERE owner_id = $1 AND pinned
+                   AND (project_id IS NULL OR project_id = $3)
+                 ORDER BY updated_at DESC LIMIT $2",
             )
             .bind(self.user.id)
             .bind(PINNED)
+            .bind(self.project_id())
             .fetch_all(self.pool)
             .await?;
             ids.extend(pinned);
             if ids.len() < KNOWN as usize {
                 let recent: Vec<Uuid> = sqlx::query_scalar(
                     "SELECT id FROM memories WHERE owner_id = $1 AND NOT (id = ANY($2))
+                       AND (project_id IS NULL OR project_id = $4)
                      ORDER BY COALESCE(used_at, created_at) DESC LIMIT $3",
                 )
                 .bind(self.user.id)
                 .bind(&ids)
                 .bind(KNOWN - ids.len() as i64)
+                .bind(self.project_id())
                 .fetch_all(self.pool)
                 .await?;
                 ids.extend(recent);
@@ -874,10 +964,12 @@ impl Pass<'_> {
         for short in changes.forget.iter().take(MAX_CHANGES) {
             if let Some(k) = find(short) {
                 let gone = sqlx::query(
-                    "DELETE FROM memories WHERE id = $1 AND owner_id = $2 AND NOT pinned",
+                    "DELETE FROM memories WHERE id = $1 AND owner_id = $2 AND NOT pinned
+                       AND (project_id IS NULL OR project_id = $3)",
                 )
                 .bind(k.id)
                 .bind(self.user.id)
+                .bind(self.project_id())
                 .execute(self.pool)
                 .await?;
                 if gone.rows_affected() > 0 {
@@ -911,12 +1003,13 @@ impl Pass<'_> {
             let vector = vectors.as_ref().and_then(|v| v.get(i).cloned());
             let done = sqlx::query(
                 "UPDATE memories SET content = $3, embedding = $4::halfvec, embedding_attempts = 0, updated_at = NOW()
-                 WHERE id = $1 AND owner_id = $2 AND NOT pinned",
+                 WHERE id = $1 AND owner_id = $2 AND NOT pinned AND (project_id IS NULL OR project_id = $5)",
             )
             .bind(id)
             .bind(self.user.id)
             .bind(text)
             .bind(vector)
+            .bind(self.project_id())
             .execute(self.pool)
             .await?;
             if done.rows_affected() > 0 {
@@ -961,15 +1054,17 @@ impl Pass<'_> {
         .await?;
         for (i, add) in adds.iter().enumerate() {
             let vector = vectors.as_ref().and_then(|v| v.get(i).cloned());
-            // A memory that says the same as one kept already, by meaning.
+            // A memory that says the same as one the chat may be given, by meaning.
             if let Some(vector) = &vector {
                 let repeat: Option<Uuid> = sqlx::query_scalar(
                     "SELECT id FROM memories WHERE owner_id = $1 AND embedding IS NOT NULL
+                     AND (project_id IS NULL OR project_id = $4)
                      AND embedding <=> $2::halfvec < $3 LIMIT 1",
                 )
                 .bind(self.user.id)
                 .bind(vector)
                 .bind(SAME_DISTANCE)
+                .bind(self.project_id())
                 .fetch_optional(self.pool)
                 .await?;
                 if repeat.is_some() {
@@ -982,9 +1077,14 @@ impl Pass<'_> {
             } else {
                 "about"
             };
+            // In a chat in a project, the memory stays in it or goes everywhere; the
+            // reply's card shows which, and lets the person change it.
+            let scope = self
+                .project_id()
+                .filter(|_| stays_in_project(add.scope.as_deref(), kind));
             sqlx::query(
-                "INSERT INTO memories (id, owner_id, kind, content, origin, source_conversation_id, source_message_id, embedding)
-                 VALUES ($1, $2, $3, $4, 'learned', $5, $6, $7::halfvec)",
+                "INSERT INTO memories (id, owner_id, kind, content, origin, source_conversation_id, source_message_id, embedding, project_id)
+                 VALUES ($1, $2, $3, $4, 'learned', $5, $6, $7::halfvec, $8)",
             )
             .bind(id)
             .bind(self.user.id)
@@ -993,10 +1093,15 @@ impl Pass<'_> {
             .bind(conversation)
             .bind(source_message)
             .bind(vector)
+            .bind(scope)
             .execute(self.pool)
             .await?;
             link(self.pool, self.user.id, id, &add.topics).await?;
-            items.push(json!({"id":id,"text":add.text,"change":"added"}));
+            items.push(match self.project_id() {
+                Some(chat_project) => json!({"id":id,"text":add.text,"change":"added",
+                    "projectId":scope,"chatProjectId":chat_project}),
+                None => json!({"id":id,"text":add.text,"change":"added"}),
+            });
         }
         self.prune_topics().await?;
         Ok(items)
@@ -1128,6 +1233,7 @@ pub fn changes(response: &Value) -> Option<Changes> {
                     text: a["text"].as_str()?.to_owned(),
                     kind: a["kind"].as_str().unwrap_or("about").to_owned(),
                     topics: topics_of(&a["topics"]),
+                    scope: a["scope"].as_str().map(str::to_owned),
                 })
             })
             .collect(),
@@ -1295,16 +1401,10 @@ async fn read(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     let settings = settings(pool).await?;
     let available = settings.enabled && settings.model.is_some() && s.gateway.is_some();
     let chosen = choices(pool, user.id, settings.default_on).await?;
-    let memories = sqlx::query(
-        "SELECT m.id, m.kind, m.content, m.origin, m.pinned, m.uses, m.used_at, m.created_at, m.updated_at,
-           m.source_conversation_id, c.title AS source_title,
-           COALESCE((SELECT array_agg(l.topic_id) FROM memory_links l WHERE l.memory_id = m.id), '{}') AS topics
-         FROM memories m LEFT JOIN conversations c ON c.id = m.source_conversation_id AND c.owner_id = m.owner_id
-         WHERE m.owner_id = $1 ORDER BY m.created_at DESC",
-    )
-    .bind(user.id)
-    .fetch_all(pool)
-    .await?;
+    let memories = sqlx::query(&format!("{} ORDER BY m.created_at DESC", select()))
+        .bind(user.id)
+        .fetch_all(pool)
+        .await?;
     let topics = sqlx::query(
         "SELECT t.id, t.name, t.kind, COUNT(l.memory_id) AS count FROM memory_topics t
          LEFT JOIN memory_links l ON l.topic_id = t.id WHERE t.owner_id = $1
@@ -1328,6 +1428,21 @@ async fn read(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Valu
     })))
 }
 
+/// Person $1's memories, each with the project it is in while they may use it.
+fn select() -> String {
+    format!(
+        "SELECT m.id, m.kind, m.content, m.origin, m.pinned, m.uses, m.used_at, m.created_at, m.updated_at,
+           m.source_conversation_id, c.title AS source_title,
+           COALESCE((SELECT array_agg(l.topic_id) FROM memory_links l WHERE l.memory_id = m.id), '{{}}') AS topics,
+           p.id AS project_id, p.name AS project_name, p.color AS project_color,
+           m.project_id IS NOT NULL AND p.id IS NULL AS project_unavailable
+         FROM memories m LEFT JOIN conversations c ON c.id = m.source_conversation_id AND c.owner_id = m.owner_id
+         LEFT JOIN projects p ON p.id = m.project_id AND {}
+         WHERE m.owner_id = $1",
+        crate::projects::VISIBLE
+    )
+}
+
 fn memory_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
         "id": r.get::<Uuid, _>("id"),
@@ -1344,22 +1459,22 @@ fn memory_json(r: &sqlx::postgres::PgRow) -> Value {
             "title": r.get::<Option<String>, _>("source_title"),
         })),
         "topics": r.get::<Vec<Uuid>, _>("topics"),
+        // Null with projectUnavailable false: general, given to every chat.
+        "projectId": r.get::<Option<Uuid>, _>("project_id"),
+        "projectName": r.get::<Option<String>, _>("project_name"),
+        "projectColor": r.get::<Option<String>, _>("project_color"),
+        // In a project the person can no longer use: given to no chat until moved.
+        "projectUnavailable": r.get::<bool, _>("project_unavailable"),
     })
 }
 
 async fn one(pool: &PgPool, owner: Uuid, id: Uuid) -> Result<Value, ApiError> {
-    let row = sqlx::query(
-        "SELECT m.id, m.kind, m.content, m.origin, m.pinned, m.uses, m.used_at, m.created_at, m.updated_at,
-           m.source_conversation_id, c.title AS source_title,
-           COALESCE((SELECT array_agg(l.topic_id) FROM memory_links l WHERE l.memory_id = m.id), '{}') AS topics
-         FROM memories m LEFT JOIN conversations c ON c.id = m.source_conversation_id AND c.owner_id = m.owner_id
-         WHERE m.id = $1 AND m.owner_id = $2",
-    )
-    .bind(id)
-    .bind(owner)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(ApiError::not_found)?;
+    let row = sqlx::query(&format!("{} AND m.id = $2", select()))
+        .bind(owner)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     Ok(memory_json(&row))
 }
 
@@ -1400,6 +1515,15 @@ struct Input {
     pinned: Option<bool>,
     /// Topic names; absent keeps the topics, and on a new memory lets the model choose.
     topics: Option<Vec<String>>,
+    /// The project whose chats alone get the memory, one the person may use; null makes
+    /// it general. Absent keeps it where it is, and makes a new memory general.
+    #[serde(default, deserialize_with = "some")]
+    project_id: Option<Option<Uuid>>,
+}
+
+/// Keeps "absent" (None) apart from "null" (Some(None)).
+fn some<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<Uuid>>, D::Error> {
+    Option::<Uuid>::deserialize(d).map(Some)
 }
 
 fn kind_of(kind: Option<&str>) -> Result<Option<String>, ApiError> {
@@ -1455,6 +1579,10 @@ async fn create(
         .and_then(clean)
         .ok_or_else(|| ApiError::bad("Write what Chat should remember"))?;
     let kind = kind_of(body.kind.as_deref())?;
+    let project = body.project_id.flatten();
+    if let Some(project) = project {
+        crate::board::visible(pool, user.id, project).await?;
+    }
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE owner_id = $1")
         .bind(user.id)
         .fetch_one(pool)
@@ -1476,8 +1604,8 @@ async fn create(
     };
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO memories (id, owner_id, kind, content, origin, pinned, embedding)
-         VALUES ($1, $2, $3, $4, 'added', $5, $6::halfvec)",
+        "INSERT INTO memories (id, owner_id, kind, content, origin, pinned, embedding, project_id)
+         VALUES ($1, $2, $3, $4, 'added', $5, $6::halfvec, $7)",
     )
     .bind(id)
     .bind(user.id)
@@ -1485,6 +1613,7 @@ async fn create(
     .bind(&content)
     .bind(body.pinned.unwrap_or(false))
     .bind(vector)
+    .bind(project)
     .execute(pool)
     .await?;
     if let Some(topics) = &topics {
@@ -1533,6 +1662,9 @@ async fn update(
             .fetch_optional(pool)
             .await?;
     let current = current.ok_or_else(ApiError::not_found)?;
+    if let Some(Some(project)) = body.project_id {
+        crate::board::visible(pool, user.id, project).await?;
+    }
     let changed = content.filter(|c| *c != current);
     let vector = match (&changed, &s.knowledge, &s.gateway) {
         (Some(text), Some(k), Some(g)) => embed(k, g, &user, std::slice::from_ref(text), false)
@@ -1547,6 +1679,7 @@ async fn update(
            pinned = COALESCE($5, pinned),
            embedding = CASE WHEN $3 IS NULL THEN embedding ELSE $6::halfvec END,
            embedding_attempts = CASE WHEN $3 IS NULL THEN embedding_attempts ELSE 0 END,
+           project_id = CASE WHEN $7 THEN $8 ELSE project_id END,
            updated_at = NOW()
          WHERE id = $1 AND owner_id = $2",
     )
@@ -1556,6 +1689,8 @@ async fn update(
     .bind(kind)
     .bind(body.pinned)
     .bind(vector)
+    .bind(body.project_id.is_some())
+    .bind(body.project_id.flatten())
     .execute(pool)
     .await?;
     if let Some(names) = &body.topics {
@@ -1926,6 +2061,24 @@ mod tests {
         assert_eq!(got.forget, vec!["m3".to_owned(), "m4".to_owned()]);
         assert!(changes(&answer("Nothing to remember.")).is_none());
         assert_eq!(changes(&answer("{}")).unwrap(), Changes::default());
+    }
+
+    #[test]
+    fn in_a_project_the_models_scope_decides_and_otherwise_the_kind() {
+        assert!(stays_in_project(None, "work"));
+        assert!(stays_in_project(None, "goal"));
+        assert!(!stays_in_project(None, "about"));
+        assert!(!stays_in_project(None, "preference"));
+        assert!(!stays_in_project(Some(" Everywhere "), "work"));
+        assert!(stays_in_project(Some("project"), "preference"));
+        assert!(stays_in_project(Some("this project"), "work"));
+        assert!(!stays_in_project(Some("this project"), "about"));
+        let got = changes(&answer(
+            r#"{"add":[{"text":"You use the 2024 split","kind":"work","scope":"everywhere"},{"text":"You like tables","kind":"preference"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(got.add[0].scope.as_deref(), Some("everywhere"));
+        assert_eq!(got.add[1].scope, None);
     }
 
     #[test]

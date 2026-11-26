@@ -1,5 +1,6 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { polyfillLayout, renderWithQueries } from "@/components/chat/test-queries";
 
@@ -49,5 +50,24 @@ describe("Search chats", () => {
     await userEvent.type(screen.getByPlaceholderText("Search titles and messages…"), "gpu");
     await userEvent.click(await screen.findByText(/See all results/));
     await waitFor(() => expect(push).toHaveBeenCalledWith("/history?query=gpu&archived=all"));
+  });
+
+  it("offers the scratch pad, which opens once the dialog has closed", async () => {
+    const opened = vi.fn();
+    window.addEventListener("obleth:scratch", opened);
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return <SearchDialog open={open} onOpenChange={setOpen} />;
+    }
+    renderWithQueries(<Harness />);
+    expect(await screen.findByRole("option", { name: /Open the scratch pad/ })).toBeInTheDocument();
+    await userEvent.type(screen.getByPlaceholderText("Search titles and messages…"), "gpu");
+    expect(screen.queryByRole("option", { name: /Open the scratch pad/ })).not.toBeInTheDocument();
+    await userEvent.clear(screen.getByPlaceholderText("Search titles and messages…"));
+    await userEvent.type(screen.getByPlaceholderText("Search titles and messages…"), "scr");
+    await userEvent.click(await screen.findByRole("option", { name: /Open the scratch pad/ }));
+    await waitFor(() => expect(opened).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    window.removeEventListener("obleth:scratch", opened);
   });
 });

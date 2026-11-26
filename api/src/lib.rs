@@ -8,6 +8,7 @@ pub mod autopilot;
 pub mod background;
 pub mod banner;
 pub mod batches;
+pub mod board;
 pub mod browser;
 pub mod code;
 pub mod compare;
@@ -29,14 +30,17 @@ pub mod mcp;
 pub mod memory;
 pub mod metrics;
 pub mod models;
+pub mod notebook;
 pub mod operations;
 pub mod paging;
 pub mod pause;
+pub mod project_log;
 pub mod projects;
 pub mod questions;
 pub mod research;
 pub mod retention;
 pub mod sandbox;
+pub mod scratch;
 pub mod secrets;
 pub mod sent_feedback;
 pub mod shares;
@@ -150,6 +154,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let attachments = attachments::router(state.clone());
     let images = images::router(state.clone());
     let projects = projects::router(state.clone());
+    let board = board::router(state.clone());
     let groups = groups::router(state.clone());
     let shares = shares::router(state.clone());
     let code = code::router(state.clone());
@@ -168,7 +173,10 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let apps = apps::router(state.clone());
     let mcp = mcp::router(state.clone());
     let memory = memory::router(state.clone());
+    let project_log = project_log::router(state.clone());
+    let notebook = notebook::router(state.clone());
     let batches = batches::router(state.clone());
+    let scratch = scratch::router(state.clone());
     let metrics = state.metrics.clone();
     let sandboxes = state.sandboxes.clone();
     let ui_url = state.ui_url.clone();
@@ -216,6 +224,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(attachments)
         .merge(images)
         .merge(projects)
+        .merge(board)
         .merge(groups)
         .merge(shares)
         .merge(code)
@@ -234,7 +243,10 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(apps)
         .merge(mcp)
         .merge(memory)
+        .merge(project_log)
+        .merge(notebook)
         .merge(batches)
+        .merge(scratch)
         .fallback_service(web(branding_dir, ui_url, sandboxes.as_ref()))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .layer(middleware::from_fn(error::envelope))
@@ -365,6 +377,15 @@ async fn capabilities(State(s): State<AppState>, headers: HeaderMap) -> Json<Val
     value["features"]["memory"] = json!(memory::available(&s).await);
     value["features"]["batches"] = json!(s.gateway.is_some());
     let user = s.auth.require(&headers, false).await.ok();
+    // The project log: on this server, and on for this person.
+    let log = project_log::available(&s).await;
+    value["features"]["log"] = json!(log);
+    value["features"]["myLog"] = json!(match &user {
+        Some(user) if log => project_log::choice(&s.store.pool, user.id)
+            .await
+            .is_ok_and(|c| c.enabled),
+        _ => false,
+    });
     if user.as_ref().is_some_and(|u| u.is_admin()) {
         value["adminGatewayUrl"] = json!(s.admin_gateway_url);
     }
@@ -1049,7 +1070,17 @@ async fn run_generation(
     );
     let knowledge_search = async {
         let k = s.knowledge.as_ref()?;
-        let attached = attached_documents(&s, k, &user, id, &turn).await;
+        // A notebook chat searches only the documents its owner ticked.
+        let notebook = notebook::restriction(&s.store.pool, user.id, id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("could not read a notebook chat's sources: {error}");
+                None
+            });
+        let attached = match notebook {
+            Some(_) => vec![],
+            None => attached_documents(&s, k, &user, id, &turn).await,
+        };
         let tools = resolved.capabilities.supports_function_calling != Some(false);
         let library = resolved.capabilities.supports_function_calling == Some(true);
         k.prepare(
@@ -1061,6 +1092,7 @@ async fn run_generation(
             tools,
             library,
             project.as_ref(),
+            notebook,
         )
         .await
     };
@@ -1070,6 +1102,8 @@ async fn run_generation(
     );
     // Models with tools may ask the person to choose before going on.
     let asks = resolved.capabilities.supports_function_calling == Some(true);
+    // A chat in a project can read the person's log of their work there.
+    let log_tool = asks && project.is_some() && project_log::on_for(&s, user.id).await;
     // A chat with the browser on gets the browser tools and its owner's search engine.
     let browser_allowed = s.browsers.as_ref().is_some_and(|b| b.allowed(&user));
     let browsing = match &s.browsers {
@@ -1192,6 +1226,19 @@ async fn run_generation(
     }
     if let Some(project) = &project {
         preamble.push(project.prompt());
+    }
+    // A chat in a project works its board: models that call tools change it, and
+    // every model sees it, with the card this chat works in full.
+    let board_tools = asks && project.is_some();
+    if let Some(project) = &project {
+        if let Some(view) =
+            board::tools::prompt(&s.store.pool, user.id, project.id, id, board_tools).await
+        {
+            preamble.push(view);
+        }
+    }
+    if log_tool {
+        preamble.push(project_log::PROMPT.into());
     }
     if let Some((sandbox, sandboxes)) = &workspace {
         let instructions = models::agent_instructions(&s.store.pool, user.id).await;
@@ -1345,6 +1392,12 @@ async fn run_generation(
     if knowledge_turn.as_ref().is_some_and(|t| t.library) {
         tools.push(knowledge::chat::save_definition(memory_learns));
     }
+    if board_tools {
+        tools.extend(board::tools::definitions());
+    }
+    if log_tool {
+        tools.push(project_log::definition());
+    }
     if asks {
         tools.push(questions::definition());
     }
@@ -1376,6 +1429,12 @@ async fn run_generation(
         if asks {
             tools.push(browser::tools::handoff_definition());
         }
+    }
+    // A chat in a project with the browser on can add the page its tab shows to the
+    // project's notebook, when the person asks.
+    let notebook_pages = asks && browsing.is_some() && project.is_some() && s.knowledge.is_some();
+    if notebook_pages {
+        tools.push(notebook::web::definition());
     }
     // People who may use the browser can be asked to turn it on for this chat.
     let offers_browser = asks && browsing.is_none() && browser_allowed;
@@ -1437,6 +1496,7 @@ async fn run_generation(
         let mut cuts = 0;
         let mut drops = 0;
         let mut overthinks = 0;
+        let mut log_reads = 0;
         // Files changed since the model last ran something, and whether Chat has
         // already asked it to check its work this turn.
         let mut unchecked = false;
@@ -1904,6 +1964,7 @@ async fn run_generation(
             let workspace_call = calls.iter().any(|c| {
                 c.name != knowledge::chat::TOOL
                     && c.name != knowledge::chat::SAVE_TOOL
+                    && c.name != project_log::TOOL
                     && c.name != questions::TOOL
                     && c.name != questions::WORKSPACE_TOOL
                     && c.name != questions::RESEARCH_TOOL
@@ -1913,6 +1974,8 @@ async fn run_generation(
                     && c.name != browser::tools::REQUEST
                     && c.name != connections::device::REQUEST
                     && c.name != agents::TOOL
+                    && c.name != notebook::web::TOOL
+                    && !board::tools::is_tool(&c.name)
                     && !(browsing.is_some() && browser::tools::is_tool(&c.name))
                     && toolset.as_ref().and_then(|t| t.find(&c.name)).is_none()
             });
@@ -2173,6 +2236,37 @@ async fn run_generation(
                     tool_result(&mut payload, &call.id, output);
                     continue;
                 }
+                if call.name == project_log::TOOL {
+                    let Some(project) = project.as_ref().filter(|_| log_tool) else {
+                        tool_result(&mut payload, &call.id, no_such_tool(&call.name));
+                        continue;
+                    };
+                    if log_reads >= project_log::MAX_TOOL_READS {
+                        tool_result(&mut payload, &call.id, format!("That is {} reads of the log, the most for one answer. Answer from what you have read.", project_log::MAX_TOOL_READS));
+                        continue;
+                    }
+                    log_reads += 1;
+                    let mut entry = json!({"id":call.id,"tool":call.name,"summary":"Reading the project log","status":"running","startedAt":chrono::Utc::now()});
+                    record(&mut activity, &entry, true);
+                    emit(&mut tx, "tool", entry.clone());
+                    let began = Instant::now();
+                    let read = project_log::read_for_tool(
+                        &s.store.pool,
+                        user.id,
+                        project.id,
+                        &project.name,
+                        &call.arguments,
+                    )
+                    .await;
+                    entry["status"] = json!(if read.ok { "completed" } else { "error" });
+                    entry["summary"] = json!(read.summary);
+                    entry["detail"] = json!(read.detail);
+                    entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                    record(&mut activity, &entry, false);
+                    emit(&mut tx, "tool", entry);
+                    tool_result(&mut payload, &call.id, read.output);
+                    continue;
+                }
                 if call.name == knowledge::chat::TOOL {
                     let (Some(k), Some(found)) = (&s.knowledge, knowledge_turn.as_mut()) else {
                         tool_result(&mut payload, &call.id, no_such_tool(&call.name));
@@ -2220,6 +2314,67 @@ async fn run_generation(
                             output
                         }
                         _ => no_such_tool(&call.name),
+                    };
+                    tool_result(&mut payload, &call.id, output);
+                    continue;
+                }
+                if call.name == notebook::web::TOOL {
+                    // Like save_item, this writes only to the person's own collection
+                    // in the project, from their own browser's tab, so it runs without
+                    // asking.
+                    let output = match project.as_ref().filter(|_| notebook_pages) {
+                        Some(project) => {
+                            let mut entry = json!({"id":call.id,"tool":call.name,"summary":"Adding the page to the notebook","status":"running","startedAt":chrono::Utc::now()});
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry.clone());
+                            let began = Instant::now();
+                            let (ok, summary, output) =
+                                notebook::web::run_tool(&s, &user, id, project.id).await;
+                            entry["status"] = json!(if ok { "completed" } else { "error" });
+                            entry["summary"] = json!(summary);
+                            entry["detail"] = json!(output);
+                            entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                            entry["projectId"] = json!(project.id);
+                            record(&mut activity, &entry, false);
+                            emit(&mut tx, "tool", entry);
+                            output
+                        }
+                        None => no_such_tool(&call.name),
+                    };
+                    tool_result(&mut payload, &call.id, output);
+                    continue;
+                }
+                if board::tools::is_tool(&call.name) {
+                    // Like save_item, these change only the project's own board, so
+                    // they run without asking.
+                    let output = match project.as_ref().filter(|_| board_tools) {
+                        Some(project) => {
+                            let args: Value =
+                                serde_json::from_str(&call.arguments).unwrap_or(json!({}));
+                            let mut entry = json!({"id":call.id,"tool":call.name,"summary":board::tools::summary(&call.name, &args),"status":"running","startedAt":chrono::Utc::now()});
+                            record(&mut activity, &entry, true);
+                            emit(&mut tx, "tool", entry.clone());
+                            let began = Instant::now();
+                            let ctx = board::tools::Ctx {
+                                pool: &s.store.pool,
+                                user: user.id,
+                                conversation: id,
+                                project: project.id,
+                            };
+                            let ran = board::tools::run(&ctx, &call.name, &call.arguments).await;
+                            entry["status"] = json!(if ran.ok { "completed" } else { "error" });
+                            entry["summary"] = json!(ran.summary);
+                            entry["detail"] = json!(ran.output);
+                            entry["durationMs"] = json!(began.elapsed().as_millis() as u64);
+                            entry["projectId"] = json!(project.id);
+                            if let Some(card) = ran.card {
+                                entry["cardId"] = json!(card);
+                            }
+                            record(&mut activity, &entry, false);
+                            emit(&mut tx, "tool", entry);
+                            ran.output
+                        }
+                        None => no_such_tool(&call.name),
                     };
                     tool_result(&mut payload, &call.id, output);
                     continue;

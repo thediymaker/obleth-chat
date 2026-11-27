@@ -2,6 +2,84 @@
 
 Each release's section is also its GitHub Release notes.
 
+## Unreleased
+
+**Changes**
+
+- **On Kubernetes, workspaces run in a namespace of their own.** A new install puts workspace and browser pods in `obleth-sandboxes` (`<namespace>-sandboxes` with `--namespace`), under its own quota and default-deny network policies, and Chat's service account has permissions only there. Before, Chat's Role to create pods and exec into them was in its own namespace, where the database and the Secrets are, so those permissions also reached the PostgreSQL pod and any Secret a new pod could mount. `deploy/k8s.yaml` no longer holds the Role, RoleBinding and workspace NetworkPolicies and sets `OBLETH_CHAT_SANDBOX_NAMESPACE`; `deploy/k8s-workspaces.yaml` holds them and `./setup.sh kubernetes` applies both. Installs that already run are left as they are: see the upgrade notes.
+- **A device's console sign-in always uses the secret saved for that device.** The `login` tool no longer takes a `secret` argument, and Chat no longer tells the model the names of a person's other secrets. Before, a call could name any saved secret to be typed into the console, without asking. The user name can still be given.
+
+**Fixes**
+
+- **A decision reads the whole action, or the person is asked.** With Decisions checking actions, the judge was shown the first 400 characters of each argument, so it answered for a job script or a file it had read only the top of. It now reads every argument in full; an action longer than 32,000 characters is not put to it, and the approval card shows with that as the reason.
+- **A yes/no argument of Chat's own tools is true or false.** `"overwrite": 1` or `"eraseAll": "false"` read as no to the approval card and the gate and as yes to the cluster or the browser, so a file write could replace a file without the card saying so or being asked for, and a flash could erase the chip first. Such a call is now refused as written, and the cluster agent and the browser take only `true`.
+- **A workbook that repeats a long string no longer exhausts memory.** A small `.xlsx` whose cells all name one very long shared string, or one cell reference given again and again, could make Chat build gigabytes of text and be stopped by the kernel. A cell is read up to 32,767 characters, a workbook up to 16 MB of text, and a cell placed before one already read in its row is skipped; the text says where it stopped.
+- **A batch's prompt is not built past its limit.** A template naming one long cell thousands of times was rendered whole, several gigabytes, before its length was checked. Rendering stops at the limit.
+- **A batch runs only on a model the person may use.** `POST /api/batches` checked the model's name but not whether an administrator had turned it off, left it unpublished or kept it for other groups.
+- **A reply of nested brackets cannot stop the server.** Reading a tool call written as text followed lists and dicts to any depth, and deep enough nesting ran the stack out, which ends the whole process. Values nest 64 deep at most.
+- **An Open WebUI export with deeply nested `<details>` imports in one pass.** A crafted reply took time with the square of its length while holding the one import that runs at a time.
+- **Knowledge indexing writes only under its own claim.** A run whose claim another worker had taken over could still delete that worker's passages, or mark the document failed or in need of OCR.
+- **A device's sign-in gives back none of the password.** A console that echoes what it is sent put the password in the result the model reads; only its first copy was removed from the detail the page shows. Every copy is now removed from both, and an empty secret is not sent.
+- **The browser does not open its own machine.** `browser_open` and the address bar of the live view took `127.0.0.1` and `localhost`, where the browser's DevTools port lists the tabs of all of the person's chats.
+- **A broken preview's error page is read up to 256 KB.** The compile check read the whole body the workspace's dev server sent, of any size, into Chat's memory.
+- **Allow and Decline keep their card when the answer does not arrive.** A failed request showed its error and then marked the step as running or declined anyway, while the server still waited.
+- **Signing out closes the serial ports of attached devices**, so the next sign-in on the page, or another tab, can open them.
+- **Identify chip asks the bootloader one thing at a time.** Four commands were sent at once over the one serial line.
+- **A branding image of up to 512 KB uploads.** The route took the 128 KB limit of the API's JSON bodies, so larger images its own limit allows were refused.
+- **`scripts/load-test.mjs` runs again.** It imported a stream reader from a directory that no longer exists; it now carries its own. Its usage check allows for the requests Chat makes itself after each reply.
+- **Forking a shared chat counts its files against the person's storage.** The copies of its attachments and generated images were made without looking at the file count or the storage limits, so forking could go past them, and without object storage fill the database. A fork that does not fit is refused with what to do.
+- **Starting a project from a repository stops at a size limit.** The fetch could bring in a repository of any size, into the server's temporary folder and then its memory. A fetch stops at 192 MB and is tried again for the latest version alone; a history over 64 MB is no longer packaged or read to find that out; two fetches run at a time.
+- **A PDF's bookmarks cannot hold up indexing.** Thousands of bookmarks whose titles almost match their page were compared against it for tens of minutes, on the one indexing worker. Placing a file's bookmarks now has a budget; past it, the rest start at the top of their page. Text with no spaces in it, such as encoded data, is cut into passages like any other.
+- **A terminal or live browser view closes when its sign-in ends.** Both stayed open for hours after the person signed out, was signed out by an administrator, or had the account disabled. They now check once a minute, as the preview does.
+- **An upload sent a few bytes at a time is ended.** Such a body stayed under the thirty-second quiet limit while holding its place among uploads (the memory reserved for it, or one of two spreadsheet slots) for fifteen minutes. After its first minute an upload has to arrive at half the pace that would finish it in time. Someone with no room left is told before the file is read.
+- **A batch download nobody takes gives up its turn.** A browser that stopped reading a results spreadsheet kept one of the two download turns and the batch's answers in memory. The download ends, as cut off, after a minute without progress or fifteen in all.
+- **Wakes and cluster snapshots no longer pile up.** Each replica kept an entry for every wake sent to another replica, and a snapshot for every cluster address ever looked at.
+- **Deleting a chat no longer reads six tables from end to end.** Approvals, device calls, notes to a working reply, research, saved items and memories refer to a chat and had no index for it (migration 100).
+- **`/metrics` without a token is not served through a proxy.** With no `OBLETH_CHAT_METRICS_TOKEN`, an ingress that forwards every path published the metrics. They now answer only a request that reaches Chat directly; see the upgrade notes.
+- **A reply Auto wrote can be retried and edited, and its chat exported and imported.** Retrying or editing such a reply failed, because the new chat was given the reply's whole record as its settings. A chat that had switched to such a reply's version under 1.9 could not be exported or continued over MCP; migration 101 puts its settings right. Importing one of Chat's own exports was refused for what Chat itself records on a reply (that Auto chose it, a comparison, timings beside the token counts); those are now left out or kept as fits.
+- **Saved secrets move to the secret key with the tokens.** The pass that re-encrypts connection tokens when `OBLETH_CHAT_SECRET_KEY_FILE` is added left saved secrets under the gateway signing key, so they could not be read once that key was removed as the README says.
+- **Worker agents run when an account allows one response at a time.** An agent's request was counted as a second response beside the turn that started it, and refused.
+- **A link with `#toString` in it no longer blanks the page**, nor does one with a stray `%`. A page that fails to draw now shows a message with Try again in place of an empty screen.
+- **`scripts/check-backup.py` passes on installs with object storage**, whose file rows hold no bytes. It also reads the dump a piece at a time, does not require a signing key the backup does not list, and names a file the backup lists but lacks.
+- **A slow start no longer loses a reply its lease.** Copying files into a workspace or a slow search before the first request to the model could take longer than the lease, which only began to be renewed after them.
+- **The project log does not write a day twice.** Days were claimed all at once and written three at a time, so the last claims ran out while they waited and another replica wrote those days too.
+- **A research run whose output has a NUL byte ends.** Its result could not be saved, so it stayed running and kept its workspace awake until cancelled.
+- **Sync catches a file still holding both versions whatever its name.** A conflicted file with a space or a letter outside ASCII in its name skipped the check, and both versions were committed into the project.
+- **Signing out is not followed by "Your session has expired".** A refresh queued before the sign-out arrived after it.
+- **Math, code colours and diagrams load again after a failed fetch.** A library whose file failed to load once stayed unavailable until the page was reloaded.
+- **The chat page no longer redraws with every word of a reply.** Only the transcript does, as intended; following the end of the reply had tied the whole page to it.
+- **A Decisions key is not sent to a changed address.** Saving or checking a different URL without a new key kept the key saved for the old one and sent it there.
+- **More IPv6 forms count as private** for connection and repository addresses: IPv4-compatible, local-use NAT64, Teredo, 6to4 and site-local.
+- **A non-text byte in `X-Forwarded-For` no longer hides the client's address.** The whole header was dropped, so sign-in attempts were counted against the proxy.
+- **A shared chat's page is `private` to caches.**
+- **An app's run keeps its place and its record when the caller hangs up.** A call that was abandoned gave its place among the sixteen runs back at once while its steps ran on for up to five minutes, so abandoned calls could run without limit, and each was left in the run list as still running.
+- **An app's run stops at 20,000 steps, and its record keeps the first thousand.** For each inside For each multiplies; such a run kept every pass in memory and in its record. A For each now also stops at its first item that fails, instead of running the rest before reporting it, and code steps run eight at a time across all runs.
+- **A workspace command that writes before it has read its input no longer stalls.** Chat sent all of a command's input before reading any of its output, so each side could end up waiting for the other until the command's time ran out. Keeping only the end of a very long output no longer moves the kept part for every piece that arrives, and opening a session in a workspace is given twenty seconds.
+- **A person's browser closes Chromium before its pod stops.** The pod was ended without Chromium being asked to close, so cookies and sign-ins from its last moments could be missing from the profile next time. The pod now waits up to fifteen seconds for it, runs with a read-only root filesystem, and its readiness check goes through the port Chat connects to.
+- **A token is not made in a session that has just been signed out.** Signing a session out from another device revokes the tokens made in it; one being made at that moment could slip past and outlive the session.
+- **A reply at the size limit is still saved when Chat adds a note to it.** The pause note or the gap between steps could take a reply already at 1 MiB over the limit, and the whole reply was refused when it was saved. It is cut to fit.
+- **Forks of shared chats with files run two at a time, within the memory uploads share.** Each fork copies its files inside one transaction; many at once could take every database connection for a few seconds, or hold many large files in memory.
+- **A research run checked in the instant it starts is not reported lost.** Its process id file existed for a moment before it held the id.
+- **Previews reach a workspace on an IPv6-only cluster**, and a preview's WebSocket that the workspace never answers is given up after ten seconds.
+- **`./setup.sh kubernetes` hands passwords to `kubectl` on its input**, not on a command line other users of the machine can list.
+- **A chat that cannot reach the server asks again less often.** A reply being followed was asked for every three seconds for as long as the connection was down; the wait now doubles up to half a minute.
+- **Two writes to a device at once both arrive.** Typing in the device's terminal while a tool sent to it made the second write fail, since a serial port gives out one writer at a time. Writes take turns, closing a port that has stopped answering no longer waits on it for good, and half a character left from the last time the port was open no longer shows in the next.
+- **The live browser view does not go back a frame.** Frames are decoded off the main thread, and one that finished late was drawn over a newer one.
+- **A citation number inside a link or beside math is left alone.** `[1]` in the text of a link became a link inside a link, and one in the TeX kept with rendered math was rewritten there.
+- **Dragging the side pane cannot leave the page's text unselectable**, and a tab chosen from the scratch pad waits for Home's tabs to load instead of being dropped.
+
+**Upgrade notes**
+
+- Kubernetes installs made with 1.9 or earlier keep workspaces, and their volumes, in Chat's namespace. `./setup.sh kubernetes` reads the running ConfigMap and leaves `OBLETH_CHAT_SANDBOX_NAMESPACE` as it finds it. If you apply `deploy/k8s.yaml` yourself, remove the `OBLETH_CHAT_SANDBOX_NAMESPACE` line first, or workspaces start in `obleth-sandboxes` without the volumes they had; the Role, RoleBinding and the `workspaces-ingress` and `workspaces-egress` policies already in your namespace stay and keep working. Volumes do not move between namespaces.
+- With Decisions checking actions, job scripts and files longer than 32,000 characters now always show the approval card.
+- Without `OBLETH_CHAT_METRICS_TOKEN`, `/metrics` answers 401 to a request carrying `X-Forwarded-For`, `Forwarded`, `X-Forwarded-Host` or `X-Real-IP`. A scraper that reaches the pod or Service directly is unaffected; one that goes through a proxy needs the token.
+- After changing the Decisions URL, enter its key again.
+- Migrations 100 and 101 run at startup: six indexes, and one pass over chats' settings.
+- The device `login` tool's `secret` argument is gone; a model that passes it gets an error.
+- An app's For each stops at the first item that fails; before, the remaining items still ran (and made their requests) before the run failed. A run of more than 20,000 steps fails.
+- The browser's clean stop needs this release's browser image; a pod of the older image stops as before. `OBLETH_CHAT_BROWSER_IMAGE` set to an image of your own: it must run with a read-only root filesystem, writing only under `/profile` and `/tmp`.
+- A model that passes `1` or `"true"` for a yes/no argument of a cluster, Kubernetes or device tool that changes something gets an error saying so, and calls again.
+
 ## v1.9.0
 
 **Changes**

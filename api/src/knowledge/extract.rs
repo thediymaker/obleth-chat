@@ -34,6 +34,12 @@ pub const MAX_PASSAGES: usize = 6000;
 pub const MAX_CELLS: usize = 100_000;
 /// Columns read from one row, so a stray cell far to the right can't pad every row.
 const MAX_COLUMNS: usize = 256;
+/// Characters kept of one cell: what a spreadsheet's own cell holds. A shared string
+/// is kept once at this length however many cells name it.
+const MAX_CELL_CHARS: usize = 32_767;
+/// Bytes of text read from one workbook's cells, more than is ever indexed, so cells
+/// that each repeat a long string can't add up without end.
+const MAX_SHEET_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SLIDES: usize = 1000;
 const MAX_SHEETS: usize = 100;
 /// Shared strings read from a workbook; cells that name a later one read as empty.
@@ -48,6 +54,9 @@ const MAX_BOOKMARK_DEPTH: usize = 8;
 const MAX_HEADING: usize = 300;
 /// How far into a page a bookmark's title is looked for: more than a page of text holds.
 const TITLE_WINDOW: usize = 256 * 1024;
+/// How many bytes of text may be compared in all while placing one file's bookmarks.
+/// Far more than a real document takes; past it the rest start at the top of their page.
+const TITLE_WORK: usize = 256 * 1024 * 1024;
 /// Address space a tool may take, in KiB, well under what a server is given, so a file
 /// that makes a tool allocate without end stops the tool and not Chat.
 const TOOL_MEMORY_KIB: usize = 1024 * 1024;
@@ -559,8 +568,44 @@ fn drawing_text(xml: &str) -> String {
         .join("\n")
 }
 
+/// How much more of a workbook is read: cells, and bytes of their text.
+#[derive(Clone, Copy)]
+struct Room {
+    cells: usize,
+    bytes: usize,
+}
+
+impl Room {
+    fn new() -> Self {
+        Self {
+            cells: MAX_CELLS,
+            bytes: MAX_SHEET_BYTES,
+        }
+    }
+    fn full(&self) -> bool {
+        self.cells == 0 || self.bytes == 0
+    }
+    /// What the text says where it stopped.
+    fn limit(&self) -> String {
+        if self.cells == 0 {
+            format!("{} cells", thousands(MAX_CELLS))
+        } else {
+            format!("{} MB of text", MAX_SHEET_BYTES / (1024 * 1024))
+        }
+    }
+}
+
+/// `text` up to its first `chars` characters.
+fn first_chars(text: &str, chars: usize) -> &str {
+    match text.char_indices().nth(chars) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
+}
+
 /// A workbook's sheets in order, one page each under "Sheet: name", as comma-separated
-/// rows. At most MAX_CELLS cells are read in all; a sheet cut short says so.
+/// rows. At most MAX_CELLS cells and MAX_SHEET_BYTES of their text are read in all; a
+/// sheet cut short says so.
 async fn xlsx_pages(zip: &mut Zip<'_>) -> Result<Vec<Page>> {
     let workbook = zip.read("xl/workbook.xml").await?;
     let rels = relationships(
@@ -581,10 +626,10 @@ async fn xlsx_pages(zip: &mut Zip<'_>) -> Result<Vec<Page>> {
             .collect()
     })
     .await?;
-    let mut left = MAX_CELLS;
+    let mut left = Room::new();
     let mut pages: Vec<Page> = Vec::new();
     for (k, (name, part)) in sheets.iter().take(MAX_SHEETS).enumerate() {
-        if left == 0 {
+        if left.full() {
             let names: Vec<&str> = sheets[k..].iter().map(|(n, _)| n.as_str()).collect();
             if let Some(last) = pages.last_mut() {
                 last.text.push_str(&format!(
@@ -616,46 +661,69 @@ fn shared_strings(xml: &str) -> Vec<String> {
     elements(xml, "si")
         .take(MAX_SHARED_STRINGS)
         // Phonetic guides (rPh) repeat the text in another script.
-        .map(|e| decode(&strip_tags(&remove_blocks(e.body, "rph"))))
+        .map(|e| {
+            let text = decode(&strip_tags(&remove_blocks(e.body, "rph")));
+            first_chars(&text, MAX_CELL_CHARS).to_owned()
+        })
         .collect()
 }
 
 /// A sheet's rows as comma-separated values, quoted where needed. Empty rows are left
-/// out. Counts the cells read against `left` and says where it stopped.
-fn sheet_text(xml: &str, strings: &[String], left: &mut usize) -> String {
+/// out. Counts the cells read and their text against `left` and says where it stopped.
+fn sheet_text(xml: &str, strings: &[String], left: &mut Room) -> String {
     let mut rows = elements(xml, "row");
     let mut lines = Vec::new();
+    // A row the text budget ended part-way through.
+    let mut short = false;
     while let Some(row) = rows.next() {
-        if *left == 0 {
+        if left.full() {
             let more = match 1 + rows.by_ref().count() {
                 1 => "1 more row is".to_owned(),
                 n => format!("{n} more rows are"),
             };
             lines.push(format!(
-                "[Cut here: {more} not included. Chat reads up to {} cells of a workbook.]",
-                thousands(MAX_CELLS)
+                "[Cut here: {more} not included. Chat reads up to {} of a workbook.]",
+                left.limit()
             ));
+            short = false;
             break;
         }
         let mut cells: Vec<String> = Vec::new();
         for cell in elements(row.body, "c") {
+            if left.bytes == 0 {
+                short = true;
+                break;
+            }
             let column = attribute(cell.head, "r")
                 .and_then(column_index)
                 .unwrap_or(cells.len());
             if column >= MAX_COLUMNS {
                 break;
             }
+            // Cells come left to right. One placed at or before a cell already read,
+            // such as the same reference given again, has no column left to go to.
+            if column < cells.len() {
+                continue;
+            }
             let value = cell_value(cell.head, cell.body, strings);
             if value.is_empty() {
                 continue;
             }
-            cells.resize(column.max(cells.len()), String::new());
-            cells.push(csv_field(&value));
-            *left = left.saturating_sub(1);
+            let field = csv_field(first_chars(&value, MAX_CELL_CHARS));
+            left.cells = left.cells.saturating_sub(1);
+            left.bytes = left.bytes.saturating_sub(field.len() + 1);
+            cells.resize(column, String::new());
+            cells.push(field);
         }
         if !cells.is_empty() {
             lines.push(cells.join(","));
         }
+    }
+    if short {
+        lines.push(format!(
+            "[Cut here: the rest of this row is not included. Chat reads up to {} of a workbook.]",
+            left.limit()
+        ));
     }
     lines.join("\n")
 }
@@ -1202,6 +1270,7 @@ fn pdf_pages(pages: &[&str], outline: &[(usize, String, i32)]) -> Vec<Page> {
     }
     let mut current: Option<String> = None;
     let mut out = Vec::new();
+    let mut work = TITLE_WORK;
     for (i, text) in pages.iter().enumerate() {
         let number = i as i32 + 1;
         let mut cut = 0;
@@ -1212,7 +1281,7 @@ fn pdf_pages(pages: &[&str], outline: &[(usize, String, i32)]) -> Vec<Page> {
             false => text.to_ascii_lowercase(),
         };
         for (title, path) in here {
-            let at = find_loose(&lower[cut..], title).map_or(cut, |at| cut + at);
+            let at = find_loose(&lower[cut..], title, &mut work).map_or(cut, |at| cut + at);
             if at > cut || (at == 0 && cut == 0) {
                 out.push(Page {
                     number: Some(number),
@@ -1234,8 +1303,9 @@ fn pdf_pages(pages: &[&str], outline: &[(usize, String, i32)]) -> Vec<Page> {
 }
 
 /// Where `title`'s words appear in `lower`, text already in lower case, in order and
-/// with any spacing between them. Only the first TITLE_WINDOW bytes are searched.
-fn find_loose(lower: &str, title: &str) -> Option<usize> {
+/// with any spacing between them. Only the first TITLE_WINDOW bytes are searched, and
+/// nothing once `work`, the bytes left to compare, has run out.
+fn find_loose(lower: &str, title: &str, work: &mut usize) -> Option<usize> {
     let words: Vec<String> = title
         .split_whitespace()
         .map(str::to_ascii_lowercase)
@@ -1246,19 +1316,33 @@ fn find_loose(lower: &str, title: &str) -> Option<usize> {
         window -= 1;
     }
     let lower = &lower[..window];
-    lower
-        .match_indices(first.as_str())
-        .map(|(i, _)| i)
-        .find(|&i| {
-            let mut at = i + first.len();
-            words[1..].iter().all(|word| {
-                let rest = &lower[at..];
-                let skipped = rest.len() - rest.trim_start().len();
-                let found = rest[skipped..].starts_with(word.as_str());
-                at += skipped + word.len();
-                found && skipped > 0
-            })
-        })
+    // Finding the first word reads the window once; each place it appears costs the
+    // words compared there.
+    if *work < window {
+        *work = 0;
+        return None;
+    }
+    *work -= window;
+    for (i, _) in lower.match_indices(first.as_str()) {
+        let mut at = i + first.len();
+        let whole = words[1..].iter().all(|word| {
+            let rest = &lower[at..];
+            let skipped = rest.len() - rest.trim_start().len();
+            let found = rest[skipped..].starts_with(word.as_str());
+            at += skipped + word.len();
+            found && skipped > 0
+        });
+        if whole {
+            return Some(i);
+        }
+        let compared = at - i;
+        if *work < compared {
+            *work = 0;
+            return None;
+        }
+        *work -= compared;
+    }
+    None
 }
 
 fn section_text(html: &str) -> String {
@@ -1487,6 +1571,16 @@ fn pieces(paragraph: &str, size: usize) -> Vec<String> {
             if current.len() + word.len() > size && !current.is_empty() {
                 out.push(current.trim().to_owned());
                 current.clear();
+            }
+            // Text with no spaces, such as encoded data, is cut wherever the size falls.
+            let mut word = word;
+            while word.len() > size {
+                let mut cut = size;
+                while !word.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                out.push(word[..cut].to_owned());
+                word = &word[cut..];
             }
             current.push_str(word);
         }
@@ -2170,14 +2264,17 @@ mod tests {
             format!(r#"<row r="{n}"><c r="A{n}"><v>{n}</v></c><c r="B{n}"><v>x</v></c></row>"#)
         };
         let sheet: String = (1..=4).map(row).collect();
-        let mut left = 3;
+        let mut left = Room {
+            cells: 3,
+            ..Room::new()
+        };
         let text = sheet_text(&sheet, &[], &mut left);
         assert_eq!(
             text,
             "1,x\n2,x\n[Cut here: 2 more rows are not included. Chat reads up to 100,000 cells of a workbook.]"
         );
         // A stray cell far to the right doesn't pad the row out to it.
-        let mut left = 10;
+        let mut left = Room::new();
         assert_eq!(
             sheet_text(
                 r#"<row><c r="A1"><v>a</v></c><c r="ZZ1"><v>far</v></c></row>"#,
@@ -2301,10 +2398,10 @@ mod tests {
         }
         // Workbook and slide parts: millions of empty elements, read without a list of them.
         let started = Instant::now();
-        let mut left = MAX_CELLS;
+        let mut left = Room::new();
         let rows = "<row><c/><c t=\"s\"><v>0</v></c></row>".repeat(300_000);
         let sheet = sheet_text(&rows, &["a".into()], &mut left);
-        assert_eq!(left, 0);
+        assert_eq!(left.cells, 0);
         assert!(
             sheet.contains("more rows are not included"),
             "{}",
@@ -2312,6 +2409,55 @@ mod tests {
         );
         assert_eq!(shared_strings(&filled("<si/>")).len(), mib / 5);
         assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_workbook_that_repeats_a_long_string_stays_in_bounds() {
+        // A shared string is kept at a cell's length, however long the file made it.
+        let long = format!("<si><t>{}</t></si>", "x".repeat(MAX_CELL_CHARS * 3));
+        let strings = shared_strings(&long);
+        assert_eq!(strings[0].len(), MAX_CELL_CHARS);
+        // Every cell of a full-width sheet names it: the text read stops at its budget,
+        // not at cells times the string.
+        let row: String = (0..MAX_COLUMNS)
+            .map(|_| "<c t=\"s\"><v>0</v></c>")
+            .collect();
+        let sheet = format!("<row>{row}</row>").repeat(400);
+        let mut left = Room::new();
+        let text = sheet_text(&sheet, &strings, &mut left);
+        assert_eq!(left.bytes, 0);
+        assert!(left.cells > 0);
+        assert!(
+            text.len() <= MAX_SHEET_BYTES + MAX_CELL_CHARS + 200,
+            "{}",
+            text.len()
+        );
+        assert!(
+            text.ends_with("not included. Chat reads up to 16 MB of text of a workbook.]"),
+            "{}",
+            &text[text.len() - 120..]
+        );
+        // The same reference given again and again is one cell, not a row without end.
+        let again = "<c r=\"A1\" t=\"s\"><v>0</v></c>".repeat(100_000);
+        let mut left = Room::new();
+        let text = sheet_text(&format!("<row>{again}</row>"), &strings, &mut left);
+        assert_eq!(text.len(), MAX_CELL_CHARS);
+        assert_eq!(left.cells, MAX_CELLS - 1);
+        // A row the budget ends in says so when no row follows it.
+        let mut left = Room {
+            bytes: 3,
+            ..Room::new()
+        };
+        let text = sheet_text(
+            "<row><c><v>abcd</v></c><c><v>e</v></c></row>",
+            &[],
+            &mut left,
+        );
+        assert_eq!(
+            text,
+            "abcd\n[Cut here: the rest of this row is not included. Chat reads up to 16 MB of text of a workbook.]"
+        );
+        assert_eq!(first_chars("añb", 2), "añ");
     }
 
     #[test]
@@ -2354,6 +2500,45 @@ mod tests {
             path[0].len()
         );
         assert_eq!(path[1], "Detail");
+    }
+
+    #[test]
+    fn placing_bookmarks_has_a_budget() {
+        // Every bookmark's first word is everywhere on the page and the rest of the
+        // title nearly matches each time, which without a budget takes hours.
+        let title = format!("a {}b", "a ".repeat(140));
+        let outline: Vec<(usize, String, i32)> =
+            (0..MAX_BOOKMARKS).map(|_| (1, title.clone(), 1)).collect();
+        let page = "a ".repeat(TITLE_WINDOW / 2);
+        let started = Instant::now();
+        let read = pdf_pages(&[page.as_str()], &outline);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(read.len(), 1);
+        // A title that is there is still found.
+        let mut work = TITLE_WORK;
+        assert_eq!(
+            find_loose("intro\n\nthe  results follow", "The Results", &mut work),
+            Some(7)
+        );
+        assert_eq!(find_loose("the results", "The Results", &mut 0), None);
+    }
+
+    #[test]
+    fn text_without_spaces_is_still_cut_into_passages() {
+        let pages = [Page {
+            number: Some(1),
+            section: None,
+            text: "é".repeat(PASSAGE * 4),
+        }];
+        let passages = split(&pages);
+        assert!(passages.len() >= 8, "{}", passages.len());
+        assert!(passages
+            .iter()
+            .all(|p| p.text.len() <= PASSAGE + OVERLAP + 2));
     }
 
     #[test]

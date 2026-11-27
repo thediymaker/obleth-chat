@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::Notify;
+use tokio::{sync::Notify, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 /// The notification channel every replica listens on; the payload is the key.
@@ -18,13 +18,34 @@ pub const CHANNEL: &str = "obleth_chat_wakeups";
 
 #[derive(Clone, Default)]
 pub struct Wakeups {
-    waiters: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    waiters: Arc<Mutex<Waiters>>,
 }
+
+#[derive(Default)]
+struct Waiters {
+    /// Each key's wake, with when the key was first seen here.
+    keys: HashMap<String, (Arc<Notify>, Option<Instant>)>,
+    swept: Option<Instant>,
+}
+
+/// A wake nobody waits for is kept this long. Every replica hears every wake, and
+/// most are for a wait on another replica, so they would otherwise stay for good.
+const KEPT: Duration = Duration::from_secs(600);
 
 impl Wakeups {
     fn entry(&self, key: &str) -> Arc<Notify> {
         let mut waiters = self.waiters.lock().unwrap_or_else(|e| e.into_inner());
-        waiters.entry(key.to_owned()).or_default().clone()
+        let now = Instant::now();
+        if waiters.swept.is_none_or(|at| now.duration_since(at) > KEPT) {
+            waiters.swept = Some(now);
+            // The map's is the only holder of a wake no one is waiting on.
+            waiters.keys.retain(|_, (wake, seen)| {
+                Arc::strong_count(wake) > 1 || seen.is_none_or(|at| now.duration_since(at) < KEPT)
+            });
+        }
+        let (wake, seen) = waiters.keys.entry(key.to_owned()).or_default();
+        seen.get_or_insert(now);
+        wake.clone()
     }
 
     /// Wakes the wait on this key here. With no one waiting yet, the wake is kept
@@ -41,10 +62,11 @@ impl Wakeups {
         let mut waiters = self.waiters.lock().unwrap_or_else(|e| e.into_inner());
         // Ours and the map's are the only holders: nothing else waits on it.
         if waiters
+            .keys
             .get(key)
-            .is_some_and(|held| Arc::strong_count(held) <= 2)
+            .is_some_and(|(held, _)| Arc::strong_count(held) <= 2)
         {
-            waiters.remove(key);
+            waiters.keys.remove(key);
         }
         woken
     }
@@ -92,7 +114,7 @@ impl Wakeups {
 
     #[cfg(test)]
     fn waiting(&self) -> usize {
-        self.waiters.lock().unwrap().len()
+        self.waiters.lock().unwrap().keys.len()
     }
 }
 
@@ -118,5 +140,22 @@ mod tests {
         // Another key's wake is not this one's.
         wakeups.wake("call:4");
         assert!(!wakeups.wait("call:5", Duration::from_millis(10)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wakes_for_waits_on_other_replicas_do_not_pile_up() {
+        let wakeups = Wakeups::default();
+        for call in 0..1000 {
+            wakeups.wake(&format!("call:{call}"));
+        }
+        assert_eq!(wakeups.waiting(), 1000);
+        // Someone waiting through the sweep keeps their place.
+        let waiting = wakeups.clone();
+        let task = tokio::spawn(async move { waiting.wait("held", KEPT * 3).await });
+        tokio::time::sleep(KEPT + Duration::from_secs(1)).await;
+        wakeups.wake("late");
+        assert_eq!(wakeups.waiting(), 2);
+        wakeups.wake("held");
+        assert!(task.await.unwrap());
     }
 }

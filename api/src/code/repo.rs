@@ -7,6 +7,7 @@ use super::workspace::Author;
 use crate::error::ApiError;
 use axum::http::StatusCode;
 use sqlx::{PgConnection, Row};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
@@ -18,6 +19,8 @@ pub const MAX_PROJECT_BYTES: i64 = 256 * 1024 * 1024;
 /// After this many bundles the chain is folded into one.
 const COMPACT_AFTER: i64 = 30;
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The signal a process gets for writing a file past its size limit.
+const SIGXFSZ: i32 = 25;
 
 fn failed(what: &str, detail: &str) -> ApiError {
     tracing::warn!(what, detail, "git failed");
@@ -31,6 +34,8 @@ pub struct Output {
     pub ok: bool,
     pub stdout: Vec<u8>,
     pub stderr: String,
+    /// It stopped because a file it was writing passed the limit it ran under.
+    pub too_big: bool,
 }
 
 impl Output {
@@ -82,7 +87,30 @@ impl Repo {
     }
 
     pub async fn git_env(&self, args: &[&str], env: &[(&str, &str)]) -> Result<Output, ApiError> {
-        let mut command = Command::new("git");
+        self.git_within(args, env, None).await
+    }
+
+    /// As `git_env`. With `file_bytes`, git and what it starts are stopped when a file
+    /// they write grows past it, which is what bounds a fetch from somewhere else.
+    pub async fn git_within(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        file_bytes: Option<usize>,
+    ) -> Result<Output, ApiError> {
+        let mut command = match file_bytes {
+            None => Command::new("git"),
+            Some(bytes) => {
+                // The shell counts in 512-byte blocks.
+                let mut shell = Command::new("sh");
+                shell.args([
+                    "-c",
+                    "ulimit -f \"$0\" && exec git \"$@\"",
+                    &(bytes.div_ceil(512) + 1).to_string(),
+                ]);
+                shell
+            }
+        };
         command
             .current_dir(&self.dir)
             .env_clear()
@@ -120,10 +148,17 @@ impl Repo {
                     format!("Could not run git: {e}")
                 })
             })?;
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         Ok(Output {
             ok: output.status.success(),
+            too_big: file_bytes.is_some()
+                && !output.status.success()
+                && (output.status.signal() == Some(SIGXFSZ)
+                    || stderr.contains(&format!("died of signal {SIGXFSZ}"))
+                    || stderr.contains("File too large")
+                    || stderr.contains("File size limit exceeded")),
             stdout: output.stdout,
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stderr,
         })
     }
 
@@ -165,6 +200,63 @@ impl Repo {
         };
         let _ = tokio::fs::remove_file(&file).await;
         data
+    }
+
+    /// As `bundle`, or None when the bundle would be over `limit` bytes. One that big
+    /// is never finished on disk or read into memory.
+    pub async fn bundle_within(
+        &self,
+        revs: &[&str],
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let file = self.dir.join(format!("out-{}.bundle", Uuid::new_v4()));
+        let path = file.to_string_lossy().into_owned();
+        let mut args = vec!["bundle", "create", "-q", path.as_str()];
+        args.extend_from_slice(revs);
+        let result = self.git_within(&args, &[], Some(limit)).await;
+        let size = tokio::fs::metadata(&file).await.map(|m| m.len()).ok();
+        let data = match result {
+            Err(error) => Err(error),
+            Ok(result) if result.too_big => Ok(None),
+            Ok(result) if !result.ok => Err(failed("package", &result.stderr)),
+            Ok(_) if size.is_none_or(|size| size > limit as u64) => Ok(None),
+            Ok(_) => tokio::fs::read(&file)
+                .await
+                .map(Some)
+                .map_err(|e| failed("package", &e.to_string())),
+        };
+        let _ = tokio::fs::remove_file(&file).await;
+        data
+    }
+
+    /// The files a stopped fetch left half written.
+    async fn partial(&self) -> Vec<(PathBuf, u64)> {
+        let mut found = Vec::new();
+        let packs = self.dir.join("objects").join("pack");
+        let Ok(mut entries) = tokio::fs::read_dir(&packs).await else {
+            return found;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_name().to_string_lossy().starts_with("tmp_") {
+                let size = entry.metadata().await.map_or(0, |m| m.len());
+                found.push((entry.path(), size));
+            }
+        }
+        found
+    }
+
+    /// The size of the largest file a stopped fetch left half written. Git does not
+    /// always say that a pack it was receiving hit the size limit; the pack does.
+    pub(crate) async fn partial_bytes(&self) -> u64 {
+        let partial = self.partial().await;
+        partial.iter().map(|(_, size)| *size).max().unwrap_or(0)
+    }
+
+    /// Removes what a stopped fetch left half written.
+    pub(crate) async fn clear_partial(&self) {
+        for (path, _) in self.partial().await {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 
     /// The project's code as it is now, or an empty repository before the first sync.

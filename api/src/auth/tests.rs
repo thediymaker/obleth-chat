@@ -175,6 +175,128 @@ async fn roles_round_trip_text_and_unknown_values_fail_decoding() {
 }
 
 #[tokio::test]
+async fn an_open_connection_learns_that_its_sign_in_ended() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let auth = Auth::new(db.pool.clone(), config()).await.unwrap();
+    let app = auth.router();
+    let every = Duration::from_millis(40);
+    let patient = Duration::from_millis(400);
+    let watch = |cookie: &str, admins_only: bool| {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        let auth = auth.clone();
+        tokio::spawn(async move {
+            auth.signed_out_within(&headers, |user| !admins_only || user.is_admin(), every)
+                .await
+        })
+    };
+
+    // While the sign-in stands, the watch keeps waiting through its checks.
+    let (cookie, _, user) = sign_in(&app, "admin", PASSWORD).await;
+    let id = Uuid::parse_str(user["id"].as_str().unwrap()).unwrap();
+    let mut open = watch(&cookie, true);
+    assert!(tokio::time::timeout(patient, &mut open).await.is_err());
+
+    // No longer allowed what the connection needs: it ends.
+    sqlx::query("UPDATE users SET role = 'user' WHERE id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), open)
+        .await
+        .expect("the watch ends when the person may no longer use the connection")
+        .unwrap();
+
+    // Signed out: it ends.
+    let mut open = watch(&cookie, false);
+    assert!(tokio::time::timeout(patient, &mut open).await.is_err());
+    sqlx::query("DELETE FROM auth_sessions WHERE user_id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), open)
+        .await
+        .expect("the watch ends when the session does")
+        .unwrap();
+
+    // A disabled account: it ends.
+    sqlx::query("UPDATE users SET role = 'admin' WHERE id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (cookie, _, _) = sign_in(&app, "admin", PASSWORD).await;
+    let mut open = watch(&cookie, true);
+    assert!(tokio::time::timeout(patient, &mut open).await.is_err());
+    sqlx::query("UPDATE users SET enabled = FALSE WHERE id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), open)
+        .await
+        .expect("the watch ends when the account is disabled")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_token_is_made_only_in_a_session_that_still_stands() {
+    let Some(db) = Database::new().await else {
+        return;
+    };
+    let auth = Auth::new(db.pool.clone(), config()).await.unwrap();
+    let app = auth.router();
+    let (_, _, user) = sign_in(&app, "admin", PASSWORD).await;
+    let id = Uuid::parse_str(user["id"].as_str().unwrap()).unwrap();
+    let session: Uuid = sqlx::query_scalar("SELECT id FROM auth_sessions WHERE user_id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let make = |user: Uuid, session: Uuid| {
+        let pool = db.pool.clone();
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            let made = tokens::insert(&mut tx, user, session, "ci", &[tokens::READ], 1).await;
+            tx.commit().await.unwrap();
+            made.map(|(token, _)| token)
+        }
+    };
+    let tokens_made = || {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM api_tokens")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(make(id, session).await.is_ok());
+    // Someone else's session is not theirs to make a token in.
+    assert!(make(Uuid::new_v4(), session).await.is_err());
+    // The session ran out, or was signed out from another device after the request
+    // was let in: no token is made to outlive it.
+    sqlx::query("UPDATE auth_sessions SET expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1")
+        .bind(session)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(make(id, session).await.is_err());
+    sqlx::query("DELETE FROM auth_sessions WHERE id = $1")
+        .bind(session)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let refused = make(id, session).await.unwrap_err();
+    assert_eq!(refused.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(tokens_made().await, 1);
+}
+
+#[tokio::test]
 async fn local_auth_origin_csrf_and_account_isolation() {
     let Some(db) = Database::new().await else {
         return;
@@ -2410,6 +2532,16 @@ fn loopback_preset_and_client_report_explain_the_chain() {
             &loopback,
             Some(ip("::ffff:127.0.0.1")),
             &forwarded(b"198.51.100.7")
+        ),
+        client_key(&[], Some(ip("198.51.100.7")), &HeaderMap::new())
+    );
+    // A byte that is not text in what the client sent does not hide the hop the proxy
+    // added after it.
+    assert_eq!(
+        client_key(
+            &loopback,
+            Some(ip("127.0.0.1")),
+            &forwarded(b"\x80, 198.51.100.7")
         ),
         client_key(&[], Some(ip("198.51.100.7")), &HeaderMap::new())
     );

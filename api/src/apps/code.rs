@@ -16,17 +16,31 @@ const OUTPUT_BYTES: usize = 1024 * 1024;
 /// Runs `code` as the body of a function that sees `inputs`, `steps`, `item` and
 /// `index`, and returns what it returns.
 pub async fn run(code: String, view: Value) -> Result<Value, String> {
-    tokio::task::spawn_blocking(move || evaluate(&format!("(function () {{\n{code}\n}})()"), &view))
+    evaluated(format!("(function () {{\n{code}\n}})()"), view)
         .await
         .map_err(|_| "The code stopped unexpectedly".to_string())?
 }
 
+/// Evaluates on a thread of its own, a few at a time across every run: each holds a
+/// thread and up to MEMORY until it ends, whether or not its run still waits for it.
+async fn evaluated(
+    source: String,
+    view: Value,
+) -> Result<Result<Value, String>, tokio::task::JoinError> {
+    static RUNNING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+    let turn = RUNNING.acquire().await;
+    tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        evaluate(&source, &view)
+    })
+    .await
+}
+
 /// Whether a JavaScript expression holds, for an If rule written as code.
 pub async fn holds(expression: String, view: Value) -> Result<bool, String> {
-    let value =
-        tokio::task::spawn_blocking(move || evaluate(&format!("Boolean(\n{expression}\n)"), &view))
-            .await
-            .map_err(|_| "The rule stopped unexpectedly".to_string())??;
+    let value = evaluated(format!("Boolean(\n{expression}\n)"), view)
+        .await
+        .map_err(|_| "The rule stopped unexpectedly".to_string())??;
     Ok(value == Value::Bool(true))
 }
 

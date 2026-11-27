@@ -317,6 +317,39 @@ async fn two_people_sync_one_project(pool: PgPool) {
         "ignored files stay"
     );
 
+    // A file still holding both versions is caught whatever its name: here one with
+    // a space and an accent in it.
+    let named = "my données.txt";
+    a.write(named, "one\n");
+    code::sync_chat(&pool, &a, &jen, p, jen_chat, None)
+        .await
+        .unwrap();
+    code::sync_chat(&pool, &b, &kim, p, kim_chat, None)
+        .await
+        .unwrap();
+    a.write(named, "jen\n");
+    code::sync_chat(&pool, &a, &jen, p, jen_chat, None)
+        .await
+        .unwrap();
+    b.write(named, "kim\n");
+    let out = code::sync_chat(&pool, &b, &kim, p, kim_chat, None)
+        .await
+        .unwrap();
+    assert_eq!(state(&out), "conflict");
+    let err = code::finish_chat(&pool, &b, &kim, p, kim_chat)
+        .await
+        .unwrap_err();
+    assert!(err.1.ends_with(": my données.txt"), "{}", err.1);
+    b.write(named, "both\n");
+    let out = code::finish_chat(&pool, &b, &kim, p, kim_chat)
+        .await
+        .unwrap();
+    assert_eq!(state(&out), "synced");
+    code::sync_chat(&pool, &a, &jen, p, jen_chat, None)
+        .await
+        .unwrap();
+    assert_eq!(a.read(named).as_deref(), Some("both\n"));
+
     // Who is working on it, and how far behind.
     let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
         "SELECT conversation_id, synced FROM conversation_code WHERE project_id = $1",
@@ -1281,9 +1314,10 @@ async fn a_repository_too_big_to_keep_comes_in_as_its_latest_version(pool: PgPoo
         config: vec![],
         secret: None,
     };
-    let done = code::import::start_within(&pool, p, jen.id, &code::author(&jen), &source, 1)
-        .await
-        .unwrap();
+    let done =
+        code::import::start_within(&pool, p, jen.id, &code::author(&jen), &source, 1, 64 << 20)
+            .await
+            .unwrap();
     assert!(!done.history);
     assert_eq!(done.commits, 1);
     assert_eq!(
@@ -1292,4 +1326,94 @@ async fn a_repository_too_big_to_keep_comes_in_as_its_latest_version(pool: PgPoo
     );
     let log = server_git(&pool, p, &["log", "--format=%an|%s", "main"]).await;
     assert_eq!(log, "Jen|Start from https://example.org/ada/big\n");
+}
+
+/// Bytes that do not compress, so a file of them is as big in a pack as on disk.
+fn noise(len: usize, mut seed: u64) -> Vec<u8> {
+    (0..len)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        })
+        .collect()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_fetch_is_stopped_at_its_limit(pool: PgPool) {
+    let jen = person(&pool, "Jen").await;
+    let dirs = root();
+    let origin = dirs.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git_in(&origin, &["init", "-q"]);
+    let commit = |message: &str| {
+        git_in(&origin, &["add", "-A"]);
+        git_in(
+            &origin,
+            &[
+                "-c",
+                "user.name=Ada",
+                "-c",
+                "user.email=a@e",
+                "commit",
+                "-qm",
+                message,
+            ],
+        );
+    };
+    // Three megabytes of history that the latest version no longer has.
+    for n in 1..=3 {
+        std::fs::write(origin.join("old.bin"), noise(1 << 20, n)).unwrap();
+        commit(&format!("v{n}"));
+    }
+    std::fs::remove_file(origin.join("old.bin")).unwrap();
+    std::fs::write(origin.join("notes.txt"), "kept\n").unwrap();
+    commit("tip");
+    let source = code::import::Source {
+        url: "https://example.org/ada/heavy".into(),
+        fetch: format!("file://{}", origin.display()),
+        config: vec![],
+        secret: None,
+    };
+    // The whole history is over the fetch limit, so only the latest version comes.
+    let p = project(&pool, &jen, None).await;
+    let done = code::import::start_within(
+        &pool,
+        p,
+        jen.id,
+        &code::author(&jen),
+        &source,
+        64 << 20,
+        1 << 20,
+    )
+    .await
+    .unwrap();
+    assert!(!done.history);
+    assert_eq!(done.commits, 1);
+    assert_eq!(
+        server_git(&pool, p, &["show", "main:notes.txt"]).await,
+        "kept\n"
+    );
+
+    // A latest version over the limit is refused, not fetched to the end.
+    std::fs::write(origin.join("now.bin"), noise(2 << 20, 9)).unwrap();
+    commit("heavy tip");
+    let p = project(&pool, &jen, None).await;
+    let refused = code::import::start_within(
+        &pool,
+        p,
+        jen.id,
+        &code::author(&jen),
+        &source,
+        64 << 20,
+        1 << 20,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.1.contains("even without its history"),
+        "{}",
+        refused.1
+    );
 }

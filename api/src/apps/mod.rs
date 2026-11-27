@@ -374,8 +374,8 @@ impl Outcome {
     }
 }
 
-/// Runs a version of the app and records it. The run carries on to the end even if
-/// the caller goes away.
+/// Runs a version of the app and records it. The run holds one of the replica's
+/// places and carries on to the end, record included, even if the caller goes away.
 async fn execute(
     state: &AppState,
     app: &App,
@@ -387,76 +387,90 @@ async fn execute(
 ) -> Result<Outcome, ApiError> {
     let inputs = engine::inputs(&definition, given)
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    let pool = &state.store.pool;
+    let slot = CALLS
+        .try_acquire()
+        .map_err(|_| ApiError::too_many("Too many runs at once; try again shortly"))?;
     let version = if trigger == "test" { 0 } else { app.version };
-    let run: Uuid = sqlx::query_scalar(
-        "INSERT INTO app_runs (id, app_id, version, trigger, actor_id, key_id, inputs) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
-    )
-    .bind(Uuid::new_v4())
-    .bind(&app.id)
-    .bind(version)
-    .bind(trigger)
-    .bind(user.id)
-    .bind(key)
-    .bind(&inputs)
-    .fetch_one(pool)
-    .await?;
-    let collections: Vec<Uuid> =
-        sqlx::query_scalar("SELECT collection_id FROM project_collections WHERE project_id = $1")
-            .bind(app.project_id)
-            .fetch_all(pool)
-            .await?;
     let task_state = state.clone();
-    let started = Instant::now();
-    let handle = tokio::spawn(async move {
-        let run = engine::Run {
-            state: &task_state,
-            user,
-            collections,
-            trace: Mutex::new(vec![]),
+    let (app_id, project) = (app.id.clone(), app.project_id);
+    // A task of its own from here on, so a caller that hangs up neither frees the
+    // place while the steps still run nor leaves the run without its result.
+    let whole = tokio::spawn(async move {
+        let _slot = slot;
+        let pool = &task_state.store.pool;
+        let run: Uuid = sqlx::query_scalar(
+            "INSERT INTO app_runs (id, app_id, version, trigger, actor_id, key_id, inputs) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&app_id)
+        .bind(version)
+        .bind(trigger)
+        .bind(user.id)
+        .bind(key)
+        .bind(&inputs)
+        .fetch_one(pool)
+        .await?;
+        let collections: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT collection_id FROM project_collections WHERE project_id = $1",
+        )
+        .bind(project)
+        .fetch_all(pool)
+        .await?;
+        let started = Instant::now();
+        let steps_state = task_state.clone();
+        let handle = tokio::spawn(async move {
+            let run = engine::Run {
+                state: &steps_state,
+                user,
+                collections,
+                trace: Mutex::new(vec![]),
+                taken: Default::default(),
+            };
+            let result = match tokio::time::timeout(RUN_TIMEOUT, run.go(&definition, inputs)).await
+            {
+                Ok(result) => result,
+                Err(_) => Err(format!(
+                    "The run took longer than {} minutes",
+                    RUN_TIMEOUT.as_secs() / 60
+                )),
+            };
+            let trace = run.trace.into_inner().unwrap_or_default();
+            (result, trace)
+        });
+        let (result, trace) = handle
+            .await
+            .unwrap_or_else(|_| (Err("The run stopped unexpectedly".into()), vec![]));
+        let ms = started.elapsed().as_millis() as u64;
+        let (status, output, error) = match result {
+            Ok(v) => ("completed", v, None),
+            Err(e) => ("failed", Value::Null, Some(e)),
         };
-        let result = match tokio::time::timeout(RUN_TIMEOUT, run.go(&definition, inputs)).await {
-            Ok(result) => result,
-            Err(_) => Err(format!(
-                "The run took longer than {} minutes",
-                RUN_TIMEOUT.as_secs() / 60
-            )),
-        };
-        let trace = run.trace.into_inner().unwrap_or_default();
-        (result, trace)
-    });
-    let (result, trace) = handle
-        .await
-        .unwrap_or_else(|_| (Err("The run stopped unexpectedly".into()), vec![]));
-    let ms = started.elapsed().as_millis() as u64;
-    let (status, output, error) = match result {
-        Ok(v) => ("completed", v, None),
-        Err(e) => ("failed", Value::Null, Some(e)),
-    };
-    let trace = Value::Array(trace);
-    sqlx::query("UPDATE app_runs SET status = $2, output = $3, error = $4, trace = $5, finished_at = NOW() WHERE id = $1")
-        .bind(run)
-        .bind(status)
-        .bind(&output)
-        .bind(&error)
-        .bind(&trace)
+        let trace = Value::Array(trace);
+        sqlx::query("UPDATE app_runs SET status = $2, output = $3, error = $4, trace = $5, finished_at = NOW() WHERE id = $1")
+            .bind(run)
+            .bind(status)
+            .bind(&output)
+            .bind(&error)
+            .bind(&trace)
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "DELETE FROM app_runs WHERE app_id = $1 AND started_at < NOW() - make_interval(days => $2)",
+        )
+        .bind(&app_id)
+        .bind(KEEP_RUN_DAYS)
         .execute(pool)
         .await?;
-    sqlx::query(
-        "DELETE FROM app_runs WHERE app_id = $1 AND started_at < NOW() - make_interval(days => $2)",
-    )
-    .bind(&app.id)
-    .bind(KEEP_RUN_DAYS)
-    .execute(pool)
-    .await?;
-    Ok(Outcome {
-        id: run,
-        status,
-        output,
-        error,
-        trace,
-        ms,
-    })
+        Ok::<_, ApiError>(Outcome {
+            id: run,
+            status,
+            output,
+            error,
+            trace,
+            ms,
+        })
+    });
+    whole.await.map_err(|_| ApiError::internal())?
 }
 
 #[derive(Deserialize)]
@@ -474,9 +488,6 @@ async fn test(
     let (user, app) = editable(&state, &headers, &id, true).await?;
     let definition: Definition = serde_json::from_value(app.draft.clone())
         .map_err(|_| ApiError::bad("Save the steps again"))?;
-    let _slot = CALLS
-        .try_acquire()
-        .map_err(|_| ApiError::too_many("Too many runs at once; try again shortly"))?;
     let outcome = execute(&state, &app, definition, &body.inputs, user, "test", None).await?;
     Ok(Json(outcome.view()))
 }
@@ -520,9 +531,6 @@ async fn call(
         .clone()
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "This app isn't published"))?;
     let definition: Definition = serde_json::from_value(live).map_err(|_| ApiError::internal())?;
-    let _slot = CALLS
-        .try_acquire()
-        .map_err(|_| ApiError::too_many("Too many runs at once; try again shortly"))?;
     let given = body.map(|Json(v)| v).unwrap_or(Value::Null);
     let outcome = execute(&state, &app, definition, &given, user, "api", Some(key)).await?;
     let body = json!({"runId": outcome.id, "status": outcome.status, "output": outcome.output, "error": outcome.error});
@@ -710,9 +718,6 @@ async fn chat(
         turns.reverse();
         given["history"] = serde_json::to_value(turns).map_err(|_| ApiError::internal())?;
     }
-    let _slot = CALLS
-        .try_acquire()
-        .map_err(|_| ApiError::too_many("Too many runs at once; try again shortly"))?;
     let outcome = execute(&state, &app, definition, &given, user, "chat", None).await?;
     Ok(Json(
         json!({"runId": outcome.id, "status": outcome.status, "output": outcome.output, "error": outcome.error}),

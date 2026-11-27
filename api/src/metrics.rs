@@ -124,12 +124,21 @@ impl Metrics {
     pub fn require_token(&mut self, token: &str) {
         self.token = Some(Sha256::digest(token.as_bytes()).to_vec().into());
     }
-    /// Whether a request may read `/metrics`: always without a token set, otherwise
-    /// only with that token as its one bearer credential. The comparison takes the
-    /// same time whatever the token sent.
+    /// Whether a request may read `/metrics`. With a token set, only with that token
+    /// as its one bearer credential; the comparison takes the same time whatever the
+    /// token sent. Without one, only a request that came straight to Chat, as a
+    /// scraper beside it does: one a proxy passed on is refused, so an ingress that
+    /// forwards every path does not publish the metrics.
     pub fn allows(&self, headers: &HeaderMap) -> bool {
         let Some(expected) = &self.token else {
-            return true;
+            return ![
+                "forwarded",
+                "x-forwarded-for",
+                "x-forwarded-host",
+                "x-real-ip",
+            ]
+            .iter()
+            .any(|name| headers.contains_key(*name));
         };
         let mut values = headers.get_all(header::AUTHORIZATION).iter();
         let (Some(value), None) = (values.next(), values.next()) else {

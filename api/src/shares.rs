@@ -160,10 +160,12 @@ async fn read(
         Json(shared(&s, &user, owner, id).await?).into_response()
     };
     let mut response = tagged(response, &tag)?;
-    // Revalidated on every read; never served from a cache unasked.
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    // Revalidated on every read; never served from a cache unasked, and kept only by
+    // the reader's own browser: who may read it depends on their sign-in.
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache"),
+    );
     Ok(response)
 }
 
@@ -240,6 +242,23 @@ async fn fork(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let user = s.auth.require(&headers, true).await?;
     let owner = readable(&s.store.pool, user.id, id).await?;
+    // A fork copies the chat's files inside its transaction, each one whole in
+    // memory and, with object storage, over a second database connection. A few at
+    // a time keeps a burst of forks from taking every connection or the memory.
+    static FORKING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let _turn = FORKING.acquire().await.map_err(|_| ApiError::internal())?;
+    // Room for its largest file in the memory uploads share, taken before the
+    // transaction as an upload takes it: one file is in memory at a time.
+    let largest: i64 = sqlx::query_scalar(
+        "SELECT GREATEST( \
+           (SELECT COALESCE(MAX(a.size), 0) FROM attachments a JOIN message_attachments ma ON ma.attachment_id = a.id \
+            JOIN messages m ON m.id = ma.message_id WHERE m.conversation_id = $1), \
+           (SELECT COALESCE(MAX(size), 0) FROM generated_images WHERE conversation_id = $1))::BIGINT",
+    )
+    .bind(id)
+    .fetch_one(&s.store.pool)
+    .await?;
+    let _memory = crate::attachments::hold(largest.max(0) as usize).await?;
     let conversation = s.store.fork_shared(user.id, owner, id).await?;
     Ok((
         StatusCode::CREATED,

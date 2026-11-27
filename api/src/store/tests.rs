@@ -225,3 +225,25 @@ async fn text_length_checks_keep_what_the_code_writes() {
     }
     db.close().await;
 }
+
+#[test]
+fn a_reply_over_the_limit_is_cut_at_the_end_of_a_character() {
+    use super::{fit_response, MAX_RESPONSE_BYTES};
+    // Within the limit: untouched.
+    let mut short = "kept as it is".to_owned();
+    fit_response(&mut short, 100);
+    assert_eq!(short, "kept as it is");
+    // A full reply with a note added, whose cut would fall inside a character.
+    let mut full = "é".repeat(MAX_RESPONSE_BYTES / 2);
+    full.push_str("\n\n_Paused._");
+    fit_response(&mut full, 0);
+    assert_eq!(full.len(), MAX_RESPONSE_BYTES);
+    let mut beside_thinking = "é".repeat(MAX_RESPONSE_BYTES / 2);
+    fit_response(&mut beside_thinking, 1001);
+    assert_eq!(beside_thinking.len(), MAX_RESPONSE_BYTES - 1002);
+    assert!(beside_thinking.chars().all(|c| c == 'é'));
+    // Thinking alone at the limit leaves no room.
+    let mut none = "text".to_owned();
+    fit_response(&mut none, MAX_RESPONSE_BYTES + 5);
+    assert_eq!(none, "");
+}

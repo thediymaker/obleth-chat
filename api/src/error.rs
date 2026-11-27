@@ -119,7 +119,9 @@ pub async fn admitted<T>(
 
 /// Reads an upload of at most `most` bytes that keeps arriving. Thirty seconds
 /// without a byte, or fifteen minutes in all, ends it, so a stalled upload does not
-/// hold a turn or its memory for as long as its sender likes.
+/// hold a turn or its memory for as long as its sender likes. Neither does one sent
+/// a few bytes at a time: after its first minute it has to be arriving at half the
+/// pace that would finish it in time.
 pub async fn upload(
     body: axum::body::Body,
     most: usize,
@@ -130,6 +132,11 @@ pub async fn upload(
     const WHOLE: Duration = Duration::from_secs(15 * 60);
     read_within(body, most, too_large.into(), QUIET, WHOLE).await
 }
+
+/// How long an upload has before its pace is looked at, and the fewest bytes a
+/// second one of unstated size may arrive at after that.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
+const SLOWEST: f64 = 16.0 * 1024.0;
 
 async fn read_within(
     body: axum::body::Body,
@@ -145,6 +152,17 @@ async fn read_within(
             "The upload stopped arriving. Try again.",
         )
     };
+    // What the body says it holds, or for one that does not say, a slow steady line.
+    let size = axum::body::HttpBody::size_hint(&body).exact();
+    let behind = move |have: usize, elapsed: std::time::Duration| {
+        let late = elapsed.saturating_sub(SETTLE).as_secs_f64();
+        let due = match size {
+            Some(size) => size as f64 * late / (2.0 * whole.as_secs_f64()),
+            None => SLOWEST * late,
+        };
+        (have as f64) < due
+    };
+    let started = tokio::time::Instant::now();
     let mut stream = body.into_data_stream();
     let read = async {
         let mut bytes = Vec::new();
@@ -160,6 +178,9 @@ async fn read_within(
                         return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, too_large));
                     }
                     bytes.extend_from_slice(&chunk);
+                    if behind(bytes.len(), started.elapsed()) {
+                        return Err(stalled());
+                    }
                 }
             }
         }
@@ -316,6 +337,35 @@ mod upload_tests {
         assert_eq!(
             (err.0, err.1.as_str()),
             (StatusCode::PAYLOAD_TOO_LARGE, "Choose a smaller file")
+        );
+    }
+
+    /// A body of unstated size: `chunk` bytes every `every`, `times` over.
+    fn drip(chunk: usize, every: Duration, times: usize) -> Body {
+        Body::from_stream(stream::iter(0..times).then(move |_| async move {
+            tokio::time::sleep(every).await;
+            Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; chunk]))
+        }))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_sent_a_few_bytes_at_a_time_ends_early() {
+        // Never quiet for thirty seconds, and never going to finish.
+        let started = tokio::time::Instant::now();
+        let err = upload(drip(1, Duration::from_secs(20), 10_000), 1 << 20, "big")
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::REQUEST_TIMEOUT);
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "{:?}",
+            started.elapsed()
+        );
+        // A slow line that keeps a steady pace is read to the end.
+        let slow = drip(20 * 1024, Duration::from_secs(1), 300);
+        assert_eq!(
+            upload(slow, 8 << 20, "big").await.unwrap().len(),
+            300 * 20 * 1024
         );
     }
 

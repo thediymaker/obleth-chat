@@ -111,26 +111,27 @@ pub async fn tick(s: &AppState) -> Result<usize, sqlx::Error> {
         gateway,
         model,
     };
-    let mut claimed = Vec::new();
-    for id in due(pool).await? {
-        if let Some(day) = claim(pool, id).await? {
-            claimed.push(day);
-        }
-    }
-    let count = claimed.len();
-    let done: Vec<Result<(), sqlx::Error>> = futures_util::stream::iter(claimed)
-        .map(|day| {
+    // Each day is claimed as its turn comes, so its claim covers its own writing and
+    // not the wait behind the days before it. Claimed all at once, the last ones'
+    // claims ran out while they waited and another replica wrote them too.
+    let done: Vec<Result<bool, sqlx::Error>> = futures_util::stream::iter(due(pool).await?)
+        .map(|id| {
             let writer = &writer;
             async move {
+                let Some(day) = claim(&writer.pool, id).await? else {
+                    return Ok(false);
+                };
                 let result = writer.write(&day, true).await;
-                settle(&writer.pool, day.id, result).await
+                settle(&writer.pool, day.id, result).await?;
+                Ok(true)
             }
         })
         .buffer_unordered(AT_ONCE)
         .collect()
         .await;
-    for result in done {
-        result?;
+    let mut count = 0;
+    for written in done {
+        count += usize::from(written?);
     }
     Ok(count)
 }

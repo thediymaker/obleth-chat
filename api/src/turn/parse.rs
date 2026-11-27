@@ -358,9 +358,13 @@ type NamedCall = (String, Value);
 /// offered tools, with its byte range. Values are Python literals: strings
 /// (triple-quoted too), numbers, True, False, None, lists and dicts.
 fn pythonic_calls(text: &str, offered: &[String]) -> Option<(usize, usize, Vec<NamedCall>)> {
+    /// How deep lists and dicts may nest. Each level is a call on the stack, and a
+    /// reply of nothing but opening brackets would otherwise run it out.
+    const NESTING: usize = 64;
     struct P<'a> {
         s: &'a str,
         i: usize,
+        depth: usize,
     }
     impl P<'_> {
         fn rest(&self) -> &str {
@@ -419,6 +423,15 @@ fn pythonic_calls(text: &str, offered: &[String]) -> Option<(usize, usize, Vec<N
             None
         }
         fn value(&mut self) -> Option<Value> {
+            if self.depth == NESTING {
+                return None;
+            }
+            self.depth += 1;
+            let value = self.nested();
+            self.depth -= 1;
+            value
+        }
+        fn nested(&mut self) -> Option<Value> {
             self.space();
             if self.rest().starts_with(['"', '\'']) {
                 return self.string().map(Value::String);
@@ -494,6 +507,7 @@ fn pythonic_calls(text: &str, offered: &[String]) -> Option<(usize, usize, Vec<N
         let mut p = P {
             s: text,
             i: start + 1,
+            depth: 0,
         };
         let mut calls = vec![];
         let parsed = loop {
@@ -627,6 +641,26 @@ mod tests {
         );
         assert!(text_tool_calls("Use [write_file(path=x)] carefully", &offered).is_none());
         assert!(text_tool_calls("See [rm(path=\"/\")]", &offered).is_none());
+    }
+
+    /// A reply of opening brackets is not a call, and reading it must not run the
+    /// stack out: that would end the whole server, not one reply.
+    #[test]
+    fn pythonic_values_nest_only_so_deep() {
+        let offered = vec!["delegate".to_string()];
+        let nested = |depth: usize| {
+            format!(
+                "[delegate(tasks={}1{})]",
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        let (_, _, calls) = pythonic_calls(&nested(40), &offered).unwrap();
+        assert_eq!(calls[0].0, "delegate");
+        assert!(pythonic_calls(&nested(65), &offered).is_none());
+        assert!(pythonic_calls(&nested(500_000), &offered).is_none());
+        let open = format!("[delegate(tasks={}", "[{\"a\":".repeat(300_000));
+        assert!(pythonic_calls(&open, &offered).is_none());
     }
 
     #[test]

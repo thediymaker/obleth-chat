@@ -158,6 +158,68 @@ async fn search_pages_pins_archive_and_isolation(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn the_settings_migration_leaves_a_chat_its_parameters_only(pool: PgPool) {
+    let alice = user(&pool).await;
+    let s = Store::new(pool.clone());
+    let set = |id: Uuid, settings: serde_json::Value| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE conversations SET settings = $2 WHERE id = $1")
+                .bind(id)
+                .bind(settings)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let read = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT settings FROM conversations WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // As 1.9 left a chat after a switch to a version Auto had written.
+    let polluted = s.create(alice, "Polluted", "fixture").await.unwrap();
+    set(
+        polluted.id,
+        json!({"temperature": 0.2, "systemPrompt": "Be brief", "auto": true, "autoWhy": "a short question", "compare": ["a", "b"]}),
+    )
+    .await;
+    // Only what does not belong: nothing is left.
+    let only = s.create(alice, "Only extras", "fixture").await.unwrap();
+    set(only.id, json!({"auto": true, "autoWhy": "x"})).await;
+    let clean = s.create(alice, "Clean", "fixture").await.unwrap();
+    let parameters = json!({"systemPrompt": "Be brief", "temperature": 0.2, "topP": 0.9, "maxTokens": 512, "reasoningEffort": "high"});
+    set(clean.id, parameters.clone()).await;
+    let untouched = s.create(alice, "As made", "fixture").await.unwrap();
+    let as_made = read(untouched.id).await;
+    // The export of such a chat failed before the migration.
+    assert!(s.export(alice, &[polluted.id]).await.is_err());
+
+    let migration = include_str!("../migrations/101_chat_settings_only.sql");
+    let changed = sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    assert_eq!(changed.rows_affected(), 2);
+    assert_eq!(
+        read(polluted.id).await,
+        json!({"temperature": 0.2, "systemPrompt": "Be brief"})
+    );
+    assert_eq!(read(only.id).await, json!({}));
+    assert_eq!(read(clean.id).await, parameters);
+    assert_eq!(read(untouched.id).await, as_made);
+    s.export(alice, &[polluted.id]).await.unwrap();
+    s.get(alice, only.id).await.unwrap();
+    // A second run finds nothing to do.
+    let again = sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    assert_eq!(again.rows_affected(), 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn the_path_migration_links_chats_left_unlinked(pool: PgPool) {
     let alice = user(&pool).await;
     let s = Store::new(pool.clone());
@@ -334,6 +396,51 @@ async fn import_enforces_prompt_length_and_snapshot_settings(pool: PgPool) {
             StatusCode::BAD_REQUEST
         );
     }
+    // What Chat itself writes on a reply comes back in: that Auto chose it, a
+    // comparison, and the timings beside the token counts. Only the model and the
+    // parameters are kept as its settings.
+    let mut archive = s.export(alice, &[c.id]).await.unwrap();
+    archive.conversations[0].messages[1].settings = Some(json!({
+        "model": "served-model", "temperature": 0.5, "auto": true,
+        "autoWhy": {"reason": "close", "next": [{"model": "other"}]}, "compare": {"with": []},
+    }));
+    archive.conversations[0].messages[1].usage = Some(json!({
+        "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "steps": 2,
+        "generation_ms": 900, "first_token_ms": 120, "last_prompt_tokens": 10,
+        "last_completion_tokens": 5, "energy_wh": 0.25, "co2_g": 0.1, "later": "x",
+    }));
+    let copy = s.import(alice, archive).await.unwrap();
+    let kept = s.get(alice, copy[0].id).await.unwrap().messages[1].clone();
+    assert_eq!(
+        kept.settings,
+        Some(json!({"model": "served-model", "temperature": 0.5}))
+    );
+    let usage = kept.usage.unwrap();
+    assert_eq!(
+        (&usage["steps"], &usage["energy_wh"]),
+        (&json!(2), &json!(0.25))
+    );
+    assert!(usage.get("later").is_none());
+    for usage in [json!([]), json!({"steps": "2"}), json!({"energy_wh": -1})] {
+        let mut archive = s.export(alice, &[c.id]).await.unwrap();
+        archive.conversations[0].messages[1].usage = Some(usage);
+        assert_eq!(
+            s.import(alice, archive).await.unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // A reply Auto wrote can be retried: the new chat takes its parameters only.
+    sqlx::query("UPDATE messages SET settings=$2 WHERE id=$1")
+        .bind(answer)
+        .bind(json!({"model": "fixture", "temperature": 0.7, "auto": true, "autoWhy": {"reason": "close"}}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fork = s
+        .fork_turn(alice, c.id, answer, "regenerate", None)
+        .await
+        .unwrap();
+    assert_eq!(fork.settings, json!({"temperature": 0.7}));
     let mut archive = s.export(alice, &[c.id]).await.unwrap();
     archive.conversations[0].messages[1].settings =
         Some(json!({"model": "imported-model", "temperature": 0.5}));

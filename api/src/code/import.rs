@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::net::IpAddr;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -136,6 +137,46 @@ async fn checked(raw: &str, token: Option<&str>) -> Result<Source, ApiError> {
     })
 }
 
+/// How many fetches run at once on this server, and the most one may bring in before
+/// it is stopped and only the latest version is fetched.
+static RUNNING: Semaphore = Semaphore::const_new(2);
+const MAX_FETCH: usize = 3 * MAX_TRANSFER;
+
+fn too_large() -> ApiError {
+    ApiError::bad(
+        "That repository is over 64 MB even without its history, more than a project keeps",
+    )
+}
+
+async fn fetch(
+    repo: &Repo,
+    address: &str,
+    env: &[(&str, &str)],
+    limit: usize,
+    latest_only: bool,
+) -> Result<repo::Output, ApiError> {
+    // Everything arrives as one pack file, which is what the limit measures.
+    let mut args = vec![
+        "-c",
+        "protocol.https.allow=always",
+        "-c",
+        "fetch.unpackLimit=1",
+        "fetch",
+        "-q",
+        "--no-tags",
+        "--no-write-fetch-head",
+    ];
+    if latest_only {
+        args.push("--depth=1");
+    }
+    args.extend([address, "+HEAD:refs/heads/main"]);
+    let mut out = repo.git_within(&args, env, Some(limit)).await?;
+    if !out.ok && repo.partial_bytes().await >= limit as u64 {
+        out.too_big = true;
+    }
+    Ok(out)
+}
+
 /// Fills an empty project's code from `source`. Its history comes along when it
 /// fits; otherwise its latest version becomes one commit by `who`.
 pub async fn start(
@@ -145,10 +186,11 @@ pub async fn start(
     who: &Author,
     source: &Source,
 ) -> Result<Imported, ApiError> {
-    start_within(pool, project, user, who, source, MAX_TRANSFER).await
+    start_within(pool, project, user, who, source, MAX_TRANSFER, MAX_FETCH).await
 }
 
-/// As `start`, keeping the history only while its bundle is under `history_bytes`.
+/// As `start`, keeping the history only while its bundle is under `history_bytes`
+/// and the fetch brings in under `fetch_bytes`.
 pub async fn start_within(
     pool: &PgPool,
     project: Uuid,
@@ -156,6 +198,7 @@ pub async fn start_within(
     who: &Author,
     source: &Source,
     history_bytes: usize,
+    fetch_bytes: usize,
 ) -> Result<Imported, ApiError> {
     if repo::head(&mut *pool.acquire().await?, project)
         .await?
@@ -170,8 +213,11 @@ pub async fn start_within(
         env.push((format!("GIT_CONFIG_VALUE_{i}"), value.clone()));
     }
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    // A fetch fills this server's temporary folder, so only a few run at once.
+    let _turn = RUNNING.acquire().await.map_err(|_| ApiError::internal())?;
     let repo = Repo::empty().await?;
     let mut fetched = None;
+    let mut shallow = false;
     // Some hosts serve a repository only at its .git address, and redirects are off.
     let mut tries = vec![source.fetch.clone()];
     if source.fetch.starts_with("https://") && !source.fetch.ends_with(".git") {
@@ -179,21 +225,16 @@ pub async fn start_within(
     }
     let mut said = String::new();
     for address in &tries {
-        let out = repo
-            .git_env(
-                &[
-                    "-c",
-                    "protocol.https.allow=always",
-                    "fetch",
-                    "-q",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    address,
-                    "+HEAD:refs/heads/main",
-                ],
-                &env,
-            )
-            .await?;
+        let mut out = fetch(&repo, address, &env, fetch_bytes, false).await?;
+        if out.too_big {
+            // More history than a project could keep anyway: only the latest version.
+            repo.clear_partial().await;
+            shallow = true;
+            out = fetch(&repo, address, &env, fetch_bytes, true).await?;
+            if out.too_big {
+                return Err(too_large());
+            }
+        }
         if out.ok {
             fetched = Some(());
             break;
@@ -232,11 +273,15 @@ pub async fn start_within(
         .await?
         .ok_or_else(|| ApiError::bad("That repository has no commits yet"))?;
     repo.main = Some(tip.clone());
-    let mut history = true;
-    let mut bundle = repo.bundle(&["HEAD"]).await?;
-    if bundle.len() > history_bytes {
+    let whole = match shallow {
+        true => None,
+        false => repo.bundle_within(&["HEAD"], history_bytes).await?,
+    };
+    let history = whole.is_some();
+    let bundle = if let Some(whole) = whole {
+        whole
+    } else {
         // Too much history to keep: the latest version, as the project's first commit.
-        history = false;
         let message = format!(
             "Start from {}\n\nThe latest version of {} at {}, without its history.",
             source.url,
@@ -258,13 +303,10 @@ pub async fn start_within(
         }
         let one = one.text().trim().to_owned();
         repo.git(&["update-ref", "refs/heads/main", &one]).await?;
-        bundle = repo.bundle(&["HEAD"]).await?;
-        if bundle.len() > MAX_TRANSFER {
-            return Err(ApiError::bad(
-                "That repository is over 64 MB even without its history, more than a project keeps",
-            ));
-        }
-    }
+        repo.bundle_within(&["HEAD"], MAX_TRANSFER)
+            .await?
+            .ok_or_else(too_large)?
+    };
     let (main, commits) = match repo::advance(pool, project, user, None, &bundle).await? {
         repo::Advance::Moved { main, commits } => (main, commits),
         repo::Advance::Stale { .. } => {

@@ -81,13 +81,15 @@ pub(crate) fn launch_script() -> String {
          git worktree prune 2>/dev/null\n\
          git worktree add -q --detach -f \"$R/src\" \"$2\" > \"$R/log\" 2>&1 || {{ cat \"$R/log\"; exit 3; }}\n\
          for d in .venv node_modules; do [ -d \"$d\" ] && [ ! -e \"$R/src/$d\" ] && ln -s \"$PWD/$d\" \"$R/src/$d\"; done\n\
-         nohup setsid sh -c 'echo $$ > \"$1/pid\"; cd \"$1/src\" && sh \"$1/cmd\" > \"$1/log\" 2>&1 < /dev/null; echo $? > \"$1/exit.tmp\" && mv \"$1/exit.tmp\" \"$1/exit\"' sh \"$R\" > /dev/null 2>&1 < /dev/null &\n\
+         nohup setsid sh -c 'echo $$ > \"$1/pid.tmp\" && mv \"$1/pid.tmp\" \"$1/pid\"; cd \"$1/src\" && sh \"$1/cmd\" > \"$1/log\" 2>&1 < /dev/null; echo $? > \"$1/exit.tmp\" && mv \"$1/exit.tmp\" \"$1/exit\"' sh \"$R\" > /dev/null 2>&1 < /dev/null &\n\
          echo started"
     )
 }
 /// A run writes its exit file before its process ends, so once the process is gone
 /// the exit file is read again: a run that ended between the two checks finished,
-/// and only one with no exit file at all is lost.
+/// and only one with no exit file at all is lost. The pid file is moved into place
+/// whole, as the exit file is: one seen while still empty would read as a process
+/// that is gone, and a run just started would be called lost.
 pub(crate) fn poll_script() -> String {
     format!(
         "{RUN_DIR}\n[ -d \"$R\" ] || {{ echo lost; exit 0; }}\n\
@@ -256,7 +258,7 @@ pub async fn launch(
                 Ok((stdout, stderr, _)) => format!("{stdout}{stderr}"),
                 Err(e) => e,
             };
-            let why: String = why.trim().chars().take(1000).collect();
+            let why: String = why.trim().replace('\0', "").chars().take(1000).collect();
             let _ = sqlx::query("UPDATE research_runs SET status='failed',finished_at=NOW(),log_tail=$2,reported=TRUE WHERE id=$1")
                 .bind(id)
                 .bind(format!("The run could not start: {why}"))
@@ -373,7 +375,8 @@ pub async fn check(pool: &PgPool, sb: &Sandboxes, run: Uuid) -> bool {
     // A running experiment keeps its workspace awake.
     sb.touch(&sandbox).await;
     let (state, log) = out.split_once('\n').unwrap_or((out.as_str(), ""));
-    let log = tail(log, LOG_TAIL);
+    // A program may print a NUL byte, which Postgres does not store in text.
+    let log = tail(log, LOG_TAIL).replace('\0', "");
     match state.trim() {
         "running" => {
             // Written only when the log moved on, so a quiet run costs no write.
@@ -422,17 +425,33 @@ async fn finish(
     log: &str,
     metric: &str,
 ) {
-    let metrics = parse_metrics(log);
+    let log = log.replace('\0', "");
+    let metrics = parse_metrics(&log);
     let value = metrics.get(metric).copied();
-    let _ = sqlx::query("UPDATE research_runs SET status=CASE WHEN status='cancelled' THEN status ELSE $2 END, exit_code=$3, log_tail=$4, metrics=$5, metric=$6, finished_at=NOW() WHERE id=$1")
+    let saved = sqlx::query("UPDATE research_runs SET status=CASE WHEN status='cancelled' THEN status ELSE $2 END, exit_code=$3, log_tail=$4, metrics=$5, metric=$6, finished_at=NOW() WHERE id=$1")
         .bind(run)
         .bind(status)
         .bind(code)
-        .bind(log)
+        .bind(&log)
         .bind(json!(metrics))
         .bind(value)
         .execute(pool)
         .await;
+    if let Err(error) = saved {
+        // Whatever about its output could not be stored, the run is over: left as
+        // running it would be asked about, and keep its workspace awake, for good.
+        tracing::warn!(%run, "could not record a research run's result: {error}");
+        let ended = sqlx::query("UPDATE research_runs SET status=CASE WHEN status='cancelled' THEN status ELSE $2 END, exit_code=$3, log_tail='[The output of this run could not be saved.]', finished_at=NOW() WHERE id=$1 AND status='running'")
+            .bind(run)
+            .bind(if status == "completed" { "failed" } else { status })
+            .bind(code)
+            .execute(pool)
+            .await;
+        if let Err(error) = ended {
+            tracing::warn!(%run, "could not end a research run: {error}");
+        }
+        return;
+    }
     // A run that measured the node's metric answered it; a crash leaves it open to repair.
     if status == "completed" && value.is_some() {
         let _ = sqlx::query("UPDATE experiments SET frozen=TRUE WHERE id=$1")

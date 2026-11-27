@@ -99,9 +99,8 @@ pub fn tools() -> Vec<Tool> {
             "dtr":{"type":"boolean"},
             "rts":{"type":"boolean"}
         }), &[]),
-        tool("login", "Sign in at the console", "Signs in at the device's console: wakes it, answers the login prompt with the user name and the password prompt with a saved secret's value, which you never see, and reads the prompt that follows. Call it before running commands on a board that runs Linux. The device's saved user name and secret are used unless you name others. Opens the port at 115200 if it is closed.", true, json!({
-            "user":{"type":"string","description":"The user name, if not the one saved for the device"},
-            "secret":{"type":"string","description":"The name of the person's secret holding the password, if not the one saved for the device"}
+        tool("login", "Sign in at the console", "Signs in at the device's console: wakes it, answers the login prompt with the user name and the password prompt with a saved secret's value, which you never see, and reads the prompt that follows. Call it before running commands on a board that runs Linux. The password is always the secret the person saved for this device; the saved user name is used unless you name another. Opens the port at 115200 if it is closed.", true, json!({
+            "user":{"type":"string","description":"The user name, if not the one saved for the device"}
         }), &[]),
         tool("identify", "Identify chip", "Asks the chip's ROM bootloader what it is: chip family and revision, MAC address, flash size and features. Supported today: Espressif ESP32 chips. Pauses the monitor and restarts the board afterwards.", true, json!({}), &[]),
         tool("flash", "Write firmware", "Writes firmware images from the chat's workspace to the chip's flash at the given offsets, then restarts the board. ESP-IDF builds list the offsets in build/flasher_args.json; Arduino and PlatformIO builds put the bootloader at 0x0 (ESP32-S3, C3) or 0x1000 (ESP32), the partition table at 0x8000, boot_app0 at 0xe000 and the app at 0x10000. Supported today: Espressif chips. The workspace must be running.", false, json!({

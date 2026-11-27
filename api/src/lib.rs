@@ -361,7 +361,7 @@ async fn metrics_endpoint(
     if !s.metrics.allows(&headers) {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
-            "Metrics need the configured bearer token",
+            "Metrics need the configured bearer token. Without one they are served only to requests that reach Chat directly, not through a proxy",
         ));
     }
     Ok((
@@ -1056,6 +1056,16 @@ async fn run_generation(
     unready: Option<String>,
 ) {
     let workspace_turn = workspace.is_some();
+    // Getting ready below searches, reads the workspace and copies files into it before
+    // the turn's own heartbeat (`control`) begins. The lease is kept meanwhile, so a
+    // slow start does not let it run out under the reply.
+    let preparing = lifecycle::keep_lease(
+        s.store.pool.clone(),
+        user.id,
+        id,
+        turn.generation_id,
+        lifecycle::LEASE_RENEW_INTERVAL,
+    );
     // The chat's project: instructions, and collections and saved items it also searches.
     let project = projects::for_conversation(&s.store.pool, user.id, id).await;
     // Passages from the chat's knowledge collections, and what Chat remembers about the
@@ -2888,6 +2898,7 @@ async fn run_generation(
             None => work.await,
         }
     };
+    drop(preparing);
     let mut result = tokio::select! {end=control=>Err(end),result=bounded=>result,_=s.shutdown.cancelled()=>Err(TurnEnd::ShuttingDown)};
     // Steps that never finished are shown as stopped, while the lease still allows writes.
     if !activity.is_empty() {
@@ -2932,7 +2943,10 @@ async fn run_generation(
     };
     let error = result.as_ref().err().map(TurnEnd::message);
     // Drop any replay note the model copied into its own reply.
-    let cleaned = store::strip_records(&content);
+    let mut cleaned = store::strip_records(&content);
+    // What Chat adds itself (a pause note, the gap between steps) is not counted as
+    // it goes in, so a reply already at the limit is cut to what can be saved.
+    store::fit_response(&mut cleaned, reasoning_content.len());
     let rewritten = (cleaned != content).then(|| cleaned.clone());
     content = cleaned;
     let mut persisted = Err(ApiError::internal());

@@ -190,6 +190,8 @@ const SHARED_FOR: Duration = Duration::from_secs(30);
 type Look = Arc<tokio::sync::Mutex<Option<Arc<Snapshot>>>>;
 /// Each cluster's latest look, by the cluster's address.
 static SNAPSHOTS: Mutex<BTreeMap<String, Look>> = Mutex::new(BTreeMap::new());
+/// How many clusters' looks are kept before the stale ones are dropped.
+const SNAPSHOTS_KEPT: usize = 64;
 
 /// How long an account's recently ended jobs serve the Clusters page. Listing them is a
 /// slow accounting query over a week, and the page asks for status every 30 s.
@@ -623,12 +625,20 @@ impl Client {
     /// The cluster's nodes and the queue's size, asked with this person's token at
     /// most once every SHARED_FOR for everyone who looks at the cluster.
     async fn snapshot(&mut self) -> Result<Arc<Snapshot>, String> {
-        let slot = SNAPSHOTS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(self.base.to_string())
-            .or_default()
-            .clone();
+        let slot = {
+            let mut looks = SNAPSHOTS.lock().unwrap_or_else(PoisonError::into_inner);
+            let base = self.base.to_string();
+            if looks.len() >= SNAPSHOTS_KEPT && !looks.contains_key(&base) {
+                // Room for this one: looks nobody is taking that have gone stale.
+                looks.retain(|_, look| {
+                    Arc::strong_count(look) > 1
+                        || look.try_lock().is_ok_and(|taken| {
+                            taken.as_ref().is_some_and(|s| s.at.elapsed() < SHARED_FOR)
+                        })
+                });
+            }
+            looks.entry(base).or_default().clone()
+        };
         // One look at a time per cluster: whoever waits gets the look just taken.
         let mut slot = slot.lock().await;
         if let Some(snapshot) = slot.as_ref().filter(|s| s.at.elapsed() < SHARED_FOR) {

@@ -129,7 +129,7 @@ impl YesNo {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 struct Row {
     endpoint: String,
     url: Option<String>,
@@ -525,7 +525,14 @@ impl Patch {
             row.endpoint = endpoint.into();
         }
         if let Some(url) = &self.url {
-            row.url = Some(url.to_string());
+            let url = url.to_string();
+            // A saved key was given for the address it was saved with. It does not
+            // follow the endpoint to another address: that one needs its own key.
+            let moved = row.url.as_deref().is_some_and(|saved| saved != url);
+            if moved && self.key.is_none() {
+                row.api_key = None;
+            }
+            row.url = Some(url);
         }
         if let Some(None) = self.key {
             row.api_key = None;
@@ -847,6 +854,12 @@ mod tests {
             .unwrap();
         assert_eq!(off.endpoint, "off");
         assert!(off.url.is_some() && off.api_key.is_some());
+        // The key stays with its address: saving the same address keeps it, another
+        // address drops it unless that one's key comes with it.
+        let change = |body: Value| patch(&body).unwrap().apply(off.clone()).unwrap().api_key;
+        assert!(change(json!({"url": "https://d.example.com"})).is_some());
+        assert!(change(json!({"url": "https://elsewhere.example.net"})).is_none());
+        assert!(change(json!({"url": "https://elsewhere.example.net", "key": "sk-new"})).is_some());
         assert!(patch(&json!({"key": null}))
             .unwrap()
             .apply(off)

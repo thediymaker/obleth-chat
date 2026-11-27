@@ -503,7 +503,12 @@ async fn serve(sb: &Sandboxes, slug: &str, request: Request) -> Result<Response,
         ));
     }
     sb.touch(&sandbox).await;
-    let target = format!("{ip}:{port}");
+    // An IPv6 address goes in brackets, as an address with a port needs.
+    let target = if ip.contains(':') {
+        format!("[{ip}]:{port}")
+    } else {
+        format!("{ip}:{port}")
+    };
     let is_upgrade = request
         .headers()
         .get(header::UPGRADE)
@@ -659,9 +664,13 @@ async fn websocket(
             headers.insert(header::COOKIE, cookies);
         }
     }
-    let (server, handshake) = tokio_tungstenite::connect_async(upstream)
-        .await
-        .map_err(|_| ApiError::upstream("The preview server refused the WebSocket"))?;
+    let (server, handshake) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(upstream),
+    )
+    .await
+    .map_err(|_| ApiError::upstream("The preview server did not answer the WebSocket"))?
+    .map_err(|_| ApiError::upstream("The preview server refused the WebSocket"))?;
     let chosen = handshake
         .headers()
         .get(header::SEC_WEBSOCKET_PROTOCOL)

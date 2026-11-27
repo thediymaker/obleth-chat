@@ -412,3 +412,71 @@ fn checkpoint_writes_stay_linear_in_the_reply_size() {
         assert!(written <= 40 * total, "{total}: {written}");
     }
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_turn_getting_ready_keeps_its_lease_until_it_is_let_go(pool: PgPool) {
+    let owner = owner(&pool).await;
+    let store = Store::new(pool.clone());
+    let chat = store.create(owner, "Slow start", "fixture").await.unwrap();
+    let turn = store
+        .start_turn(owner, chat.id, "Question", "fixture", "", 0.7, 128)
+        .await
+        .unwrap();
+    let left = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT EXTRACT(EPOCH FROM generation_expires - clock_timestamp())::float8 FROM conversations WHERE id=$1",
+            )
+            .bind(chat.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let nearly_out = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE conversations SET generation_expires=clock_timestamp()+INTERVAL '3 seconds' WHERE id=$1")
+                .bind(chat.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    // A long search or a copy into the workspace has used most of the lease.
+    nearly_out().await;
+    let keeper = lifecycle::keep_lease(
+        pool.clone(),
+        owner,
+        chat.id,
+        turn.generation_id,
+        Duration::from_millis(100),
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        left().await > 30.0,
+        "the lease is renewed while getting ready"
+    );
+    // Let go, as when the turn's own heartbeat takes over: nothing more is renewed.
+    drop(keeper);
+    nearly_out().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(left().await < 3.0);
+    // A stopped turn is not kept alive, and the keeper ends by itself.
+    let keeper = lifecycle::keep_lease(
+        pool.clone(),
+        owner,
+        chat.id,
+        turn.generation_id,
+        Duration::from_millis(100),
+    );
+    sqlx::query("UPDATE conversations SET generation_cancel_requested=TRUE WHERE id=$1")
+        .bind(chat.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(left().await < 3.0);
+    assert!(keeper.is_finished());
+}

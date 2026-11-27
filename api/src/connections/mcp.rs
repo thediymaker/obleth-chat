@@ -107,7 +107,17 @@ pub fn is_public(ip: IpAddr) -> bool {
                     s[7] as u8,
                 ));
             }
-            !(v6.is_loopback()
+            // Ranges that carry an IPv4 address inside them, or reach a network's own
+            // hosts, by ways no public service is served on: IPv4-compatible (::a.b.c.d),
+            // local-use NAT64 (64:ff9b:1::/48), Teredo (2001::/32), 6to4 (2002::/16)
+            // and site-local (fec0::/10).
+            let tunnelled = s[..6] == [0, 0, 0, 0, 0, 0]
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
+                || (s[0] == 0x2001 && s[1] == 0)
+                || s[0] == 0x2002
+                || (s[0] & 0xffc0) == 0xfec0;
+            !(tunnelled
+                || v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || (s[0] & 0xfe00) == 0xfc00
@@ -612,6 +622,12 @@ mod tests {
             "::ffff:10.0.0.1",
             "64:ff9b::a00:1",
             "2001:db8::1",
+            "::10.0.0.1",
+            "::8.8.8.8",
+            "64:ff9b:1::a00:1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2002:a00:1::1",
+            "fec0::1",
         ] {
             assert!(!is_public(ip.parse().unwrap()), "{ip} should be private");
         }

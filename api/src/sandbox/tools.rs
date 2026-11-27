@@ -1309,7 +1309,12 @@ async fn compile_check(
         Ok(response) if response.status().is_server_error() => {
             let status = response.status().as_u16();
             let output = if fresh.is_empty() {
-                strip_ansi(&response.text().await.unwrap_or_default())
+                // The dev server is the workspace's own program: an error page of any
+                // size is its to send, and only its start is shown.
+                let body = crate::http::read_capped(response, 256 * 1024)
+                    .await
+                    .unwrap_or_default();
+                strip_ansi(&String::from_utf8_lossy(&body))
             } else {
                 fresh.to_owned()
             };

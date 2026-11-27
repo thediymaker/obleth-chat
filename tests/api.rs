@@ -1323,8 +1323,13 @@ async fn background_completion_and_same_chat_regeneration_restore_selected_conte
 #[sqlx::test(migrations = "./migrations")]
 async fn metrics_need_the_configured_token(pool: PgPool) {
     let (app, mut state, _, task) = fixture(pool).await;
-    // Without a token, metrics are open as before.
+    // Without a token, metrics are open to a scraper that reaches Chat directly, and
+    // not to a request a proxy passed on.
     assert_eq!(fetch(&app, "/metrics", &[]).await.status(), StatusCode::OK);
+    for through in ["x-forwarded-for", "forwarded", "x-real-ip"] {
+        let response = fetch(&app, "/metrics", &[(through, "203.0.113.9")]).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{through}");
+    }
     state.metrics.require_token("scrape-fixture-token");
     let app = router(state, "branding".into());
     for headers in [
@@ -1336,10 +1341,14 @@ async fn metrics_need_the_configured_token(pool: PgPool) {
         let response = fetch(&app, "/metrics", &headers).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{headers:?}");
     }
+    // With the token, through a proxy too.
     let response = fetch(
         &app,
         "/metrics",
-        &[("authorization", "Bearer scrape-fixture-token")],
+        &[
+            ("authorization", "Bearer scrape-fixture-token"),
+            ("x-forwarded-for", "203.0.113.9"),
+        ],
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1394,6 +1403,24 @@ async fn uploads_are_not_read_before_sign_in(pool: PgPool) {
     assert_eq!(
         value(response).await["error"]["message"],
         "The batch could not be read"
+    );
+    // A batch runs only on a model the person may use, as a message does.
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/batches",
+            json!({"name": "n", "model": "not-in-the-catalog", "template": "Tag {t}",
+                "columns": ["t"], "rows": [["a"]]}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        value(response).await["error"]["message"],
+        "This model is not available to your account"
     );
     task.abort();
 }
@@ -1467,7 +1494,7 @@ async fn a_shared_chat_answers_not_modified_until_it_changes(pool: PgPool) {
     let path = format!("/api/shared/{id}");
     let first = fetch(&app, &path, &[("cookie", &cookie)]).await;
     assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(first.headers()["cache-control"], "no-cache");
+    assert_eq!(first.headers()["cache-control"], "private, no-cache");
     let tag = first.headers()["etag"].to_str().unwrap().to_owned();
     let again = fetch(&app, &path, &[("cookie", &cookie), ("if-none-match", &tag)]).await;
     assert_eq!(again.status(), StatusCode::NOT_MODIFIED);

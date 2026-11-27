@@ -2465,19 +2465,29 @@ async fn a_secret_key_takes_over_tokens_sealed_with_the_signing_key(pool: PgPool
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    // A saved secret is sealed with the same key.
+    let (status, _) = call(
+        &f.app,
+        "PUT",
+        "/api/secrets/WIFI_PSK",
+        json!({"value":"bb-pass"}),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     let admin_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username='test-admin'")
         .fetch_one(&pool)
         .await
         .unwrap();
     let formats = || async {
         sqlx::query_scalar::<_, i32>(
-            "SELECT get_byte(token, 0) FROM connections UNION ALL SELECT get_byte(token, 0) FROM connection_credentials",
+            "SELECT get_byte(token, 0) FROM connections UNION ALL SELECT get_byte(token, 0) FROM connection_credentials UNION ALL SELECT get_byte(value, 0) FROM secrets",
         )
         .fetch_all(&pool)
         .await
         .unwrap()
     };
-    assert_eq!(formats().await, [1, 1, 1]);
+    assert_eq!(formats().await, [1, 1, 1, 1]);
 
     let key = SecretKey::from_bytes([5u8; 32]);
     let secret_only = Connections::with_keys(pool.clone(), None, Some(key.clone()), true).unwrap();
@@ -2493,8 +2503,8 @@ async fn a_secret_key_takes_over_tokens_sealed_with_the_signing_key(pool: PgPool
         Connections::with_keys(pool.clone(), Some(f.pem.as_bytes()), Some(key), true).unwrap();
     let replica = both.clone();
     let (first, second) = tokio::join!(both.reseal(), replica.reseal());
-    assert_eq!(first.unwrap() + second.unwrap(), 3);
-    assert_eq!(formats().await, [2, 2, 2]);
+    assert_eq!(first.unwrap() + second.unwrap(), 4);
+    assert_eq!(formats().await, [2, 2, 2, 2]);
     assert_eq!(
         both.reseal().await.unwrap(),
         0,
@@ -2518,6 +2528,18 @@ async fn a_secret_key_takes_over_tokens_sealed_with_the_signing_key(pool: PgPool
     let mut state = f.state.clone();
     state.connections = Some(secret_only);
     let app = router(state, "branding".into());
+    let (status, secret) = call(
+        &app,
+        "GET",
+        "/api/secrets/WIFI_PSK/value",
+        Value::Null,
+        &admin,
+    )
+    .await;
+    assert_eq!(
+        (status, &secret["value"]),
+        (StatusCode::OK, &json!("bb-pass"))
+    );
     let (_, listed) = call(&app, "GET", "/api/connections", Value::Null, &admin).await;
     let own = listed["connections"]
         .as_array()
@@ -2985,7 +3007,9 @@ async fn secrets_are_named_to_the_model_and_opened_only_by_the_owners_browser(po
         prompt.contains("user debian, password in the secret bb-pass"),
         "{prompt}"
     );
-    assert!(prompt.contains("saved secrets named bb-pass"), "{prompt}");
+    // The model is told the device's own secret and no list of the others: a login
+    // cannot name one.
+    assert!(!prompt.contains("saved secrets named"), "{prompt}");
     assert!(!seen.iter().any(|r| r.to_string().contains("temppwd")));
     let (status, _) = call(
         &f.app,

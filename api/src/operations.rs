@@ -276,7 +276,11 @@ async fn reserve_kind_in(
         i64::try_from(context_bytes).map_err(|_| ApiError::bad("Context size is too large"))?;
     let limits = limits_in(tx, owner).await?;
     let active:i64=sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM conversations WHERE owner_id=$1 AND active_generation IS NOT NULL AND generation_expires>NOW()) + (SELECT COUNT(*) FROM generation_usage WHERE user_id=$1 AND status='reserved' AND purpose='follow_up' AND reservation_expires>NOW())").bind(owner).fetch_one(&mut **tx).await?;
-    if active >= limits.concurrent_requests {
+    // A reply and its suggestions are the responses the limit counts. A turn's worker
+    // agents and background work (a comparison, the project log, a notebook) run
+    // inside or beside one, and would otherwise be refused while their own turn is open.
+    let counted = leased.is_none_or(|(purpose, _)| purpose == "follow_up");
+    if counted && active >= limits.concurrent_requests {
         return Err(ApiError::too_many(format!("Your account allows {} responses at once. Stop or wait for a response before starting another.",limits.concurrent_requests)));
     }
     let (requests,tokens,reserved):(i64,i64,i64)=sqlx::query_as(&format!("SELECT COUNT(*),COALESCE(SUM(COALESCE(total_tokens,charged_tokens)),0)::bigint,COALESCE(SUM(CASE WHEN status='reserved' AND {LIVE} THEN reserved_output_tokens ELSE 0 END),0)::bigint FROM generation_usage g WHERE user_id=$1 AND created_at >= (date_trunc('day',NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')")).bind(owner).fetch_one(&mut **tx).await?;

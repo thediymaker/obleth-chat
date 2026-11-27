@@ -52,7 +52,15 @@ pub async fn open(
             tracing::warn!("could not open a workspace terminal: {error:#}");
             ApiError::upstream("The terminal could not start")
         })?;
-    Ok(upgrade.on_upgrade(move |client| bridge(client, shell, sandboxes, sandbox)))
+    let auth = s.auth.clone();
+    Ok(upgrade.on_upgrade(move |client| async move {
+        let allowed = sandboxes.clone();
+        tokio::select! {
+            _ = bridge(client, shell, sandboxes, sandbox) => {}
+            // Signing out, or losing the account or workspaces, closes the terminal.
+            _ = auth.until_signed_out(&headers, |user| allowed.allowed(user)) => {}
+        }
+    }))
 }
 
 async fn bridge(

@@ -366,7 +366,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/appearance", get(read).patch(save))
         .route(
             "/api/admin/branding/images/{slot}",
-            axum::routing::put(upload).delete(remove),
+            // An image may be larger than the JSON bodies the rest of the API takes.
+            axum::routing::put(upload)
+                .layer(axum::extract::DefaultBodyLimit::max(IMAGE_BYTES))
+                .delete(remove),
         )
         .route("/api/branding/images/{slot}", get(image))
         .with_state(state)

@@ -7,12 +7,15 @@
 //! QuickJS (code.rs).
 use super::code;
 use crate::{auth::Identity, AppState};
-use futures_util::{future::BoxFuture, stream, StreamExt};
+use futures_util::{future::BoxFuture, stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
     collections::{BTreeMap, HashSet},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -27,6 +30,11 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_BYTES: usize = 1024 * 1024;
 /// How much of each step's output the trace keeps.
 const PREVIEW_BYTES: usize = 2000;
+/// The most steps one run takes, each pass of a For each counted: loops inside loops
+/// multiply, and a run that long is a mistake in its steps.
+const MAX_RUN_STEPS: usize = 20_000;
+/// How many steps the trace keeps: the first ones, and a failure after them.
+const MAX_TRACE: usize = 1000;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -582,6 +590,8 @@ pub struct Run<'a> {
     /// The collections a Search step with none of its own searches.
     pub collections: Vec<Uuid>,
     pub trace: Mutex<Vec<Value>>,
+    /// Steps taken so far.
+    pub taken: AtomicUsize,
 }
 
 impl Run<'_> {
@@ -608,6 +618,9 @@ impl Run<'_> {
         Box::pin(async move {
             let mut last = Value::Null;
             for step in list {
+                if self.taken.fetch_add(1, Ordering::Relaxed) >= MAX_RUN_STEPS {
+                    return Err(format!("The run took more than {MAX_RUN_STEPS} steps"));
+                }
                 let started = Instant::now();
                 let outcome = self.step(step, scope, in_item).await;
                 let ms = started.elapsed().as_millis() as u64;
@@ -664,7 +677,10 @@ impl Run<'_> {
             entry["path"] = json!(path);
         }
         if let Ok(mut trace) = self.trace.lock() {
-            trace.push(entry);
+            // A long run keeps its first steps, and the few that failed after them.
+            if trace.len() < MAX_TRACE || (result.is_err() && trace.len() < MAX_TRACE + 20) {
+                trace.push(entry);
+            }
         }
     }
 
@@ -819,22 +835,22 @@ impl Run<'_> {
                     ));
                 }
                 let base = scope.clone();
-                let results: Vec<Result<Value, String>> =
-                    stream::iter(list.into_iter().enumerate())
-                        .map(|(i, item)| {
-                            let mut each = base.clone();
-                            each.item = item;
-                            each.index = json!(i);
-                            async move {
-                                match self.steps(steps, &mut each, true).await? {
-                                    Flow::Next(v) | Flow::Respond(v) => Ok(v),
-                                }
+                // The first item to fail ends the loop; the items after it are not run.
+                let results: Vec<Value> = stream::iter(list.into_iter().enumerate())
+                    .map(|(i, item)| {
+                        let mut each = base.clone();
+                        each.item = item;
+                        each.index = json!(i);
+                        async move {
+                            match self.steps(steps, &mut each, true).await? {
+                                Flow::Next(v) | Flow::Respond(v) => Ok::<_, String>(v),
                             }
-                        })
-                        .buffered(concurrency.unwrap_or(4) as usize)
-                        .collect()
-                        .await;
-                next(Value::Array(results.into_iter().collect::<Result<_, _>>()?))
+                        }
+                    })
+                    .buffered(concurrency.unwrap_or(4) as usize)
+                    .try_collect()
+                    .await?;
+                next(Value::Array(results))
             }
             Step::Search {
                 collections,

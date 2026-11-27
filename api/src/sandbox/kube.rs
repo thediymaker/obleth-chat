@@ -18,6 +18,8 @@ use url::Url;
 const SERVICE_ACCOUNT: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 /// Bytes kept per output stream; the newest bytes win.
 pub const OUTPUT_LIMIT: usize = 256 * 1024;
+/// How long opening an exec session may take.
+const EXEC_CONNECT: Duration = Duration::from_secs(20);
 
 pub type ExecSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -264,33 +266,51 @@ impl Kube {
         stdin: Option<&[u8]>,
         limit: usize,
     ) -> Result<ExecOutput> {
-        let mut socket = self.exec_socket(pod, argv, stdin.is_some(), false).await?;
-        if let Some(data) = stdin {
+        let socket = self.exec_socket(pod, argv, stdin.is_some(), false).await?;
+        let (mut sink, mut stream) = socket.split();
+        // Input goes in while output is read: a command that writes before it has
+        // read all of its input would otherwise wait on Chat, and Chat on it.
+        let send = async {
+            let Some(data) = stdin else {
+                return Ok(());
+            };
             for chunk in data.chunks(64 * 1024) {
                 let mut frame = Vec::with_capacity(chunk.len() + 1);
                 frame.push(0);
                 frame.extend_from_slice(chunk);
-                socket.send(Message::Binary(frame.into())).await?;
+                sink.send(Message::Binary(frame.into())).await?;
             }
             // v5: close stdin so `cat > file` sees end of input.
-            socket.send(Message::Binary(vec![255, 0].into())).await?;
-        }
-        let mut output = ExecOutput::default();
-        while let Some(message) = socket.next().await {
-            let data = match message? {
-                Message::Binary(data) => data,
-                Message::Close(_) => break,
-                _ => continue,
-            };
-            let Some((&channel, payload)) = data.split_first() else {
-                continue;
-            };
-            match channel {
-                1 => append(&mut output.stdout, payload, &mut output.truncated, limit),
-                2 => append(&mut output.stderr, payload, &mut output.truncated, limit),
-                3 => output.exit_code = Some(exit_code(payload)),
-                _ => {}
+            sink.send(Message::Binary(vec![255, 0].into())).await?;
+            anyhow::Ok(())
+        };
+        let receive = async {
+            let mut output = ExecOutput::default();
+            while let Some(message) = stream.next().await {
+                let data = match message? {
+                    Message::Binary(data) => data,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let Some((&channel, payload)) = data.split_first() else {
+                    continue;
+                };
+                match channel {
+                    1 => append(&mut output.stdout, payload, &mut output.truncated, limit),
+                    2 => append(&mut output.stderr, payload, &mut output.truncated, limit),
+                    3 => output.exit_code = Some(exit_code(payload)),
+                    _ => {}
+                }
             }
+            keep_end(&mut output.stdout, limit);
+            keep_end(&mut output.stderr, limit);
+            anyhow::Ok(output)
+        };
+        let (sent, output) = tokio::join!(send, receive);
+        let output = output?;
+        // A command that ended without taking all of its input still has its result.
+        if output.exit_code.is_none() {
+            sent?;
         }
         Ok(output)
     }
@@ -336,23 +356,38 @@ impl Kube {
             "sec-websocket-protocol",
             HeaderValue::from_static("v5.channel.k8s.io"),
         );
-        let (socket, _) = connect_async_tls_with_config(
-            request,
-            None,
-            false,
-            Some(Connector::Rustls(self.tls.clone())),
+        let (socket, _) = tokio::time::timeout(
+            EXEC_CONNECT,
+            connect_async_tls_with_config(
+                request,
+                None,
+                false,
+                Some(Connector::Rustls(self.tls.clone())),
+            ),
         )
         .await
+        .map_err(|_| anyhow::anyhow!("Kubernetes did not open an exec session in time"))?
         .context("Could not open a Kubernetes exec session")?;
         Ok(socket)
     }
 }
 
+/// Adds output, keeping its end. The start is dropped only once the buffer is a
+/// quarter over the limit, so a long output is moved a few times over instead of
+/// once per piece; `keep_end` trims what is left when the output ends.
 fn append(buffer: &mut Vec<u8>, data: &[u8], truncated: &mut bool, limit: usize) {
     buffer.extend_from_slice(data);
     if buffer.len() > limit {
-        buffer.drain(..buffer.len() - limit);
         *truncated = true;
+    }
+    if buffer.len() > limit.saturating_add((limit / 4).max(64 * 1024)) {
+        keep_end(buffer, limit);
+    }
+}
+
+fn keep_end(buffer: &mut Vec<u8>, limit: usize) {
+    if buffer.len() > limit {
+        buffer.drain(..buffer.len() - limit);
     }
 }
 
@@ -436,8 +471,89 @@ mod tests {
             OUTPUT_LIMIT,
         );
         append(&mut buffer, b"end", &mut truncated, OUTPUT_LIMIT);
+        keep_end(&mut buffer, OUTPUT_LIMIT);
         assert!(truncated);
         assert_eq!(buffer.len(), OUTPUT_LIMIT);
+        assert!(buffer.ends_with(b"end"));
+    }
+
+    /// Against a real cluster, in a pod whose `sandbox` container has sh, cat and
+    /// head. With OBLETH_CHAT_KUBE_API, OBLETH_CHAT_KUBE_TOKEN_FILE and
+    /// OBLETH_CHAT_KUBE_CA_FILE set as for local development:
+    /// OBLETH_TEST_KUBE_POD=namespace/pod cargo test --lib -- --ignored live_exec
+    #[tokio::test]
+    #[ignore]
+    async fn live_exec_carries_input_and_output_together() {
+        let target = std::env::var("OBLETH_TEST_KUBE_POD").unwrap();
+        let (namespace, pod) = target.split_once('/').unwrap();
+        let kube = Kube::from_env(namespace.to_owned()).unwrap();
+        let input: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let run = |argv: &'static [&'static str], stdin: Option<&'static [u8]>, limit: usize| {
+            let kube = kube.clone();
+            async move {
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    kube.exec_limited(pod, argv, stdin, limit),
+                )
+                .await
+                .expect("the command neither finished nor failed")
+                .unwrap()
+            }
+        };
+        let input: &'static [u8] = input.leak();
+
+        // Input comes back whole.
+        let out = run(&["cat"], Some(input), input.len()).await;
+        assert_eq!(out.exit_code, Some(0));
+        assert!(out.stdout == input && !out.truncated);
+
+        // A command that writes a great deal before it reads any of its input: each
+        // side would wait for the other if the input were sent first.
+        let out = run(
+            &[
+                "sh",
+                "-c",
+                "head -c 8388608 /dev/zero; cat > /dev/null; echo read",
+            ],
+            Some(input),
+            1024,
+        )
+        .await;
+        assert_eq!(out.exit_code, Some(0));
+        assert!(out.truncated && out.stdout.len() == 1024 && out.stdout.ends_with(b"read\n"));
+
+        // One that ends without taking its input still has its result.
+        let out = run(&["sh", "-c", "echo early; exit 3"], Some(input), 1024).await;
+        assert_eq!(
+            (out.exit_code, out.stdout.as_slice()),
+            (Some(3), &b"early\n"[..])
+        );
+
+        // No input at all, and the two outputs apart.
+        let out = run(&["sh", "-c", "echo out; echo err >&2"], None, 1024).await;
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(
+            (out.stdout.as_slice(), out.stderr.as_slice()),
+            (&b"out\n"[..], &b"err\n"[..])
+        );
+    }
+
+    #[test]
+    fn a_long_output_is_not_moved_for_every_piece() {
+        // 64 MiB in small pieces against a 1 MiB limit: moving the kept megabyte for
+        // each piece would copy 64 GiB.
+        let (limit, piece) = (1024 * 1024, vec![b'x'; 1024]);
+        let mut buffer = Vec::new();
+        let mut truncated = false;
+        let mut most = 0;
+        for _ in 0..64 * 1024 {
+            append(&mut buffer, &piece, &mut truncated, limit);
+            most = most.max(buffer.len());
+        }
+        append(&mut buffer, b"end", &mut truncated, limit);
+        keep_end(&mut buffer, limit);
+        assert!(truncated && most <= limit + limit / 4 + piece.len());
+        assert_eq!(buffer.len(), limit);
         assert!(buffer.ends_with(b"end"));
     }
 }

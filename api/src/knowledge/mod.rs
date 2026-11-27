@@ -160,26 +160,38 @@ impl Knowledge {
             let worked = embedded
                 || match self.claim().await {
                     Ok(Some(job)) => {
-                        let id = job.id;
+                        let (id, first_claim) = (job.id, job.claimed);
                         // Each file is read in its own task, so one that makes Chat panic
                         // fails on its own instead of stopping indexing for everyone.
                         let (knowledge, gateway) = (self.clone(), gateway.clone());
-                        let result =
-                            tokio::spawn(async move { knowledge.process(&gateway, job).await })
-                                .await
-                                .unwrap_or_else(|_| {
-                                    Err(anyhow::anyhow!("Chat failed while reading this file"))
-                                });
+                        // The run renews its claim as it goes, and hands back the one
+                        // it ended with.
+                        let (result, claimed) = tokio::spawn(async move {
+                            let mut job = job;
+                            let result = knowledge.process(&gateway, &mut job).await;
+                            (result, job.claimed)
+                        })
+                        .await
+                        .unwrap_or_else(|_| {
+                            (
+                                Err(anyhow::anyhow!("Chat failed while reading this file")),
+                                first_claim,
+                            )
+                        });
                         if let Err(error) = result {
                             tracing::warn!(document=%id, "could not index a document: {error:#}");
                             let message = format!("{error:#}");
+                            // Only this claim's failure: a document another worker has
+                            // taken over since, or one queued again, is not this run's
+                            // to fail.
                             let _ = sqlx::query(
-                            "UPDATE knowledge_documents SET status='failed', stage='', error=$2, updated_at=NOW() WHERE id=$1",
-                        )
-                        .bind(id)
-                        .bind(message.chars().take(900).collect::<String>())
-                        .execute(&self.pool)
-                        .await;
+                                "UPDATE knowledge_documents SET status='failed', stage='', error=$2, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$3",
+                            )
+                            .bind(id)
+                            .bind(message.chars().take(900).collect::<String>())
+                            .bind(claimed)
+                            .execute(&self.pool)
+                            .await;
                         }
                         true
                     }
@@ -225,7 +237,7 @@ impl Knowledge {
         }))
     }
 
-    async fn process(&self, gateway: &Gateway, mut job: Job) -> anyhow::Result<()> {
+    async fn process(&self, gateway: &Gateway, job: &mut Job) -> anyhow::Result<()> {
         if job.attempts > 3 {
             anyhow::bail!("Processing stopped three times; delete the file and upload it again");
         }
@@ -241,9 +253,10 @@ impl Knowledge {
         };
         let pages = match extract::extract(&self.tools, kind, &bytes).await? {
             extract::Extracted::NeedsOcr { pages } => {
-                sqlx::query("UPDATE knowledge_documents SET status='needs_ocr', stage='', pages=$2, updated_at=NOW() WHERE id=$1")
+                sqlx::query("UPDATE knowledge_documents SET status='needs_ocr', stage='', pages=$2, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$3")
                     .bind(job.id)
                     .bind(pages)
+                    .bind(job.claimed)
                     .execute(&self.pool)
                     .await?;
                 return Ok(());
@@ -269,11 +282,17 @@ impl Knowledge {
         } else {
             0
         };
-        sqlx::query("DELETE FROM knowledge_passages WHERE document_id=$1 AND ordinal >= $2")
-            .bind(job.id)
-            .bind(from as i32)
-            .execute(&self.pool)
-            .await?;
+        // While this claim still holds: a run whose claim another worker took over
+        // while it read the file must not clear what that worker has stored since.
+        sqlx::query(
+            "DELETE FROM knowledge_passages WHERE document_id=$1 AND ordinal >= $2
+               AND EXISTS (SELECT 1 FROM knowledge_documents WHERE id=$1 AND status='processing' AND claimed_at=$3)",
+        )
+        .bind(job.id)
+        .bind(from as i32)
+        .bind(job.claimed)
+        .execute(&self.pool)
+        .await?;
         let started = sqlx::query("UPDATE knowledge_documents SET stage='embedding', progress_done=$5, progress_total=$2, pages=$3, updated_at=NOW() WHERE id=$1 AND status='processing' AND claimed_at=$4")
             .bind(job.id)
             .bind(passages.len() as i32)

@@ -11,6 +11,7 @@ pub mod batches;
 pub mod board;
 pub mod browser;
 pub mod code;
+pub mod compare;
 pub mod config;
 pub mod connections;
 pub mod decisions;
@@ -148,6 +149,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
     let operations = operations::router(state.clone());
     let retention = retention::router(state.clone());
     let banner = banner::router(state.clone());
+    let compare = compare::router(state.clone());
     let appearance = appearance::router(state.clone());
     let attachments = attachments::router(state.clone());
     let images = images::router(state.clone());
@@ -217,6 +219,7 @@ pub fn router(state: AppState, branding_dir: PathBuf) -> Router {
         .merge(operations)
         .merge(retention)
         .merge(banner)
+        .merge(compare)
         .merge(appearance)
         .merge(attachments)
         .merge(images)
@@ -358,7 +361,7 @@ async fn metrics_endpoint(
     if !s.metrics.allows(&headers) {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
-            "Metrics need the configured bearer token",
+            "Metrics need the configured bearer token. Without one they are served only to requests that reach Chat directly, not through a proxy",
         ));
     }
     Ok((
@@ -1053,6 +1056,16 @@ async fn run_generation(
     unready: Option<String>,
 ) {
     let workspace_turn = workspace.is_some();
+    // Getting ready below searches, reads the workspace and copies files into it before
+    // the turn's own heartbeat (`control`) begins. The lease is kept meanwhile, so a
+    // slow start does not let it run out under the reply.
+    let preparing = lifecycle::keep_lease(
+        s.store.pool.clone(),
+        user.id,
+        id,
+        turn.generation_id,
+        lifecycle::LEASE_RENEW_INTERVAL,
+    );
     // The chat's project: instructions, and collections and saved items it also searches.
     let project = projects::for_conversation(&s.store.pool, user.id, id).await;
     // Passages from the chat's knowledge collections, and what Chat remembers about the
@@ -1457,6 +1470,12 @@ async fn run_generation(
         payload["tools"] = Value::Array(tools);
     }
     let mut activity: Vec<Value> = vec![];
+    // A reply Auto chooses may also be put to the models Auto ranked next (see
+    // `compare`). Its first request is kept for that while an administrator has
+    // comparing on, with how many requests the reply took: only one is compared.
+    let comparable = payload["model"] == "auto" && compare::watching(&s.store.pool).await;
+    let mut first_request: Option<Value> = None;
+    let mut requests = 0u32;
     let user_message_id = turn.messages.last().map(|m| m.id);
     emit(
         &mut tx,
@@ -1520,6 +1539,10 @@ async fn run_generation(
                     record(&mut activity, &entry, true);
                     emit(&mut tx, "tool", entry);
                 }
+            }
+            requests += 1;
+            if comparable && requests == 1 {
+                first_request = Some(payload.clone());
             }
             let mut calls: Vec<ToolCall> = vec![];
             let mut stalls = 0;
@@ -2875,6 +2898,7 @@ async fn run_generation(
             None => work.await,
         }
     };
+    drop(preparing);
     let mut result = tokio::select! {end=control=>Err(end),result=bounded=>result,_=s.shutdown.cancelled()=>Err(TurnEnd::ShuttingDown)};
     // Steps that never finished are shown as stopped, while the lease still allows writes.
     if !activity.is_empty() {
@@ -2919,7 +2943,10 @@ async fn run_generation(
     };
     let error = result.as_ref().err().map(TurnEnd::message);
     // Drop any replay note the model copied into its own reply.
-    let cleaned = store::strip_records(&content);
+    let mut cleaned = store::strip_records(&content);
+    // What Chat adds itself (a pause note, the gap between steps) is not counted as
+    // it goes in, so a reply already at the limit is cut to what can be saved.
+    store::fit_response(&mut cleaned, reasoning_content.len());
     let rewritten = (cleaned != content).then(|| cleaned.clone());
     content = cleaned;
     let mut persisted = Err(ApiError::internal());
@@ -3013,7 +3040,27 @@ async fn run_generation(
     };
     let title = async { replied && insights::after_reply(&s, &user, id).await };
     let memory = async { replied && memory::after_reply(&s, &user, id, turn.assistant_id).await };
-    let (followups, title_pending, memory_pending) = tokio::join!(followups, title, memory);
+    // Second opinions, for a plain answer Auto chose: one request, no tools run.
+    let comparing = async {
+        match (first_request.take(), &served) {
+            (Some(request), Some(model)) if replied && persisted.is_ok() && requests == 1 => {
+                compare::after_reply(
+                    &s,
+                    &gateway,
+                    &user,
+                    id,
+                    turn.assistant_id,
+                    model,
+                    auto_why.as_ref(),
+                    request,
+                )
+                .await
+            }
+            _ => false,
+        }
+    };
+    let (followups, title_pending, memory_pending, compare_pending) =
+        tokio::join!(followups, title, memory, comparing);
     if persisted.is_err() {
         emit(
             &mut tx,
@@ -3039,6 +3086,9 @@ async fn run_generation(
         }
         if memory_pending {
             done["memoryPending"] = json!(true);
+        }
+        if compare_pending {
+            done["comparePending"] = json!(true);
         }
         done
     });

@@ -11,7 +11,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Most secrets one person keeps.
@@ -23,15 +22,6 @@ pub fn valid_name(name: &str) -> bool {
     matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
         && name.len() <= 40
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-}
-
-/// The names of a person's secrets, for the model.
-pub async fn names(pool: &PgPool, owner: Uuid) -> Vec<String> {
-    sqlx::query_scalar("SELECT name FROM secrets WHERE owner_id=$1 ORDER BY LOWER(name)")
-        .bind(owner)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
 }
 
 /// Opens one of the person's secrets by name.

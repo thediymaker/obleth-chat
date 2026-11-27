@@ -60,7 +60,13 @@ pub async fn open(
         .open(user.id, id)
         .await
         .map_err(ApiError::upstream)?;
-    Ok(upgrade.on_upgrade(move |client| bridge(client, page, browsers, user.id, id)))
+    let auth = s.auth.clone();
+    Ok(upgrade.on_upgrade(move |client| async move {
+        // Signing out, or losing the account or the browser, closes the view.
+        let allowed = browsers.clone();
+        let gone = auth.until_signed_out(&headers, |user| allowed.allowed(user));
+        bridge(client, page, browsers, user.id, id, gone).await
+    }))
 }
 
 async fn bridge(
@@ -69,7 +75,9 @@ async fn bridge(
     browsers: Browsers,
     owner: Uuid,
     conversation: Uuid,
+    gone: impl std::future::Future<Output = ()>,
 ) {
+    tokio::pin!(gone);
     let (mut client_tx, mut client_rx) = client.split();
     let mut events = page.cdp.events();
     let session = page.session.clone();
@@ -168,6 +176,7 @@ async fn bridge(
                 }
             }
             _ = &mut deadline => break,
+            _ = &mut gone => break,
         }
     }
     let _ = page
@@ -274,7 +283,7 @@ async fn forward(page: &Page, input: &Value) -> anyhow::Result<()> {
                 format!("https://{raw}")
             };
             if let Ok(url) = url::Url::parse(&address) {
-                if matches!(url.scheme(), "http" | "https") {
+                if matches!(url.scheme(), "http" | "https") && !super::tools::own_machine(&url) {
                     page.cdp
                         .call("Page.navigate", json!({"url":url.as_str()}), session)
                         .await?;

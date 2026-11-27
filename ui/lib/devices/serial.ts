@@ -28,6 +28,8 @@ const KEEP = 256 * 1024;
 const MONITOR_KEEP = 64 * 1024;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** How long closing waits for each step of letting go of the port. */
+const CLOSE_WAIT_MS = 3000;
 
 /** The id reported for a port, from the USB ids the browser knows. */
 export function portInfo(port: SerialPort): { vendorId?: number; productId?: number } {
@@ -48,6 +50,8 @@ export class SerialDevice {
   private baud: number | null = null;
   private options: OpenOptions = {};
   private waiters = new Set<() => void>();
+  /** The write under way, so the next one waits its turn for the port's one writer. */
+  private writing: Promise<void> = Promise.resolve();
   private listeners = new Set<() => void>();
   private outputs = new Set<(text: string) => void>();
   /** Set while a flasher owns the port. */
@@ -96,6 +100,8 @@ export class SerialDevice {
     await this.port.open({ baudRate, dataBits: options.dataBits, stopBits: options.stopBits, parity: options.parity, flowControl: options.flowControl });
     this.baud = baudRate;
     this.options = { ...options, baudRate };
+    // Half a character left from the last time the port was open is not this one's.
+    this.decoder = new TextDecoder();
     this.unread = "";
     this.total = 0;
     this.lastError = "";
@@ -137,12 +143,15 @@ export class SerialDevice {
   }
 
   async close() {
+    // A device that stopped answering can leave any of these waiting for good.
+    const within = (step: Promise<unknown> | null | undefined) => Promise.race([Promise.resolve(step).catch(() => {}), sleep(CLOSE_WAIT_MS)]);
     const reader = this.reader;
     if (reader) {
-      await reader.cancel().catch(() => {});
-      await this.readLoop?.catch(() => {});
+      await within(reader.cancel());
+      await within(this.readLoop);
     }
-    if (this.port.readable || this.port.writable) await this.port.close().catch(() => {});
+    await within(this.writing);
+    if (this.port.readable || this.port.writable) await within(this.port.close());
     this.changed();
   }
 
@@ -178,14 +187,20 @@ export class SerialDevice {
     return { text, dropped, matched };
   }
 
+  /** Writes after any write already under way: a port has one writer at a time, and
+   * a second asked for meanwhile (the terminal typing while a tool sends) would throw. */
   async write(bytes: Uint8Array) {
-    if (!this.isOpen || !this.port.writable) throw new Error("The port is not open. Open it first.");
-    const writer = this.port.writable.getWriter();
-    try {
-      await writer.write(bytes);
-    } finally {
-      writer.releaseLock();
-    }
+    const mine = this.writing.then(async () => {
+      if (!this.isOpen || !this.port.writable) throw new Error("The port is not open. Open it first.");
+      const writer = this.port.writable.getWriter();
+      try {
+        await writer.write(bytes);
+      } finally {
+        writer.releaseLock();
+      }
+    });
+    this.writing = mine.catch(() => {});
+    await mine;
     this.changed();
   }
 

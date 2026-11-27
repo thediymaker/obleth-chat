@@ -440,6 +440,22 @@ async fn upload(
                 too_large.clone(),
             ));
         }
+        // Someone with no room left is told before the file is read and stored. The
+        // insert decides for certain, under the owner's lock.
+        let (count, bytes): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*),COALESCE(SUM(size),0)::BIGINT FROM attachments WHERE owner_id=$1",
+        )
+        .bind(user.id)
+        .fetch_one(&s.store.pool)
+        .await?;
+        // The least the file can be: the body itself, or what its base64 decodes to.
+        let least = match raw {
+            true => declared,
+            false => declared.saturating_sub(MIB as u64) / 4 * 3,
+        };
+        if count >= limits.max_files || bytes.saturating_add(least as i64) > limits.quota_bytes {
+            return Err(storage_full(&limits));
+        }
         Ok::<_, ApiError>((user, declared as usize))
     };
     let ((user, length), body) = crate::error::admitted(body, checks.await).await?;
@@ -553,6 +569,14 @@ async fn place(
         .await
 }
 
+fn storage_full(limits: &Limits) -> ApiError {
+    ApiError::conflict(format!(
+        "Your file storage is full: you can keep {} files and {} in all. Delete files you no longer need before uploading more.",
+        limits.max_files,
+        size_label(limits.quota_bytes as usize)
+    ))
+}
+
 async fn insert_in(
     tx: &mut Transaction<'_, Postgres>,
     limits: &Limits,
@@ -567,12 +591,8 @@ async fn insert_in(
     .bind(owner)
     .fetch_one(&mut **tx)
     .await?;
-    let (max_files, quota) = (limits.max_files, limits.quota_bytes);
-    if count >= max_files || bytes + i64::from(file.meta.size) > quota {
-        return Err(ApiError::conflict(format!(
-                "Your file storage is full: you can keep {max_files} files and {} in all. Delete files you no longer need before uploading more.",
-                size_label(quota as usize)
-            )));
+    if count >= limits.max_files || bytes + i64::from(file.meta.size) > limits.quota_bytes {
+        return Err(storage_full(limits));
     }
     sqlx::query("INSERT INTO attachments(id,owner_id,name,mime_type,kind,size,data,object_key,sha256,extracted_text,parts,searched)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
         .bind(file.meta.id).bind(owner).bind(&file.meta.name).bind(&file.meta.mime_type)

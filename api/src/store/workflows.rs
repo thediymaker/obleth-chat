@@ -75,6 +75,19 @@ pub struct ArchivedMessage {
     pub error_message: Option<String>,
 }
 pub const ARCHIVE_BYTES: usize = 10 * 1024 * 1024;
+/// What a reply's usage holds: whole-number counts and timings, and measured amounts.
+/// An import keeps these and leaves out anything else.
+const USAGE_COUNTS: [&str; 8] = [
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "last_prompt_tokens",
+    "last_completion_tokens",
+    "generation_ms",
+    "first_token_ms",
+    "steps",
+];
+const USAGE_MEASURES: [&str; 2] = ["energy_wh", "co2_g"];
 /// Conversations per export, import, or bulk history action.
 pub const MAX_ARCHIVE_CONVERSATIONS: usize = 50;
 
@@ -288,8 +301,10 @@ impl Store {
         let mut settings = snapshot
             .cloned()
             .unwrap_or_else(|| original.settings.clone());
+        // A reply's record also says which model wrote it, that Auto chose it and why,
+        // and whether it was compared. The new chat takes its parameters only.
         if let Some(map) = settings.as_object_mut() {
-            map.remove("model");
+            map.retain(|key, _| crate::models::PARAMETER_KEYS.contains(&key.as_str()));
         }
         let parameters: ParameterOverrides =
             serde_json::from_value(settings.clone()).map_err(|_| ApiError::internal())?;
@@ -458,7 +473,7 @@ impl Store {
     pub async fn import(
         &self,
         owner: Uuid,
-        archive: ChatArchive,
+        mut archive: ChatArchive,
     ) -> Result<Vec<ConversationSummary>, ApiError> {
         if archive.format != "obleth-chat"
             || archive.version != 1
@@ -476,7 +491,7 @@ impl Store {
         {
             return Err(ApiError::bad("Import exceeds 10 MiB"));
         }
-        for chat in &archive.conversations {
+        for chat in &mut archive.conversations {
             validate_title(&chat.title)?;
             validate_model(&chat.model)?;
             chat.settings.validate()?;
@@ -486,7 +501,7 @@ impl Store {
                 ));
             }
             let mut bytes = 0;
-            for m in &chat.messages {
+            for m in &mut chat.messages {
                 if !matches!(m.role.as_str(), "user" | "assistant")
                     || !matches!(m.status.as_str(), "completed" | "error" | "interrupted")
                     || (m.role == "user"
@@ -521,31 +536,44 @@ impl Store {
                 {
                     return Err(ApiError::bad("Invalid imported message result"));
                 }
-                if let Some(v) = &m.settings {
+                if let Some(v) = &mut m.settings {
+                    // A reply's record is its model and parameters, which are checked.
+                    // An export also carries what Chat noted about the reply (that Auto
+                    // chose it, a comparison): that stays behind, as would anything a
+                    // later version adds.
+                    let bad = || ApiError::bad("Invalid imported generation settings");
+                    let map = v.as_object_mut().ok_or_else(bad)?;
+                    map.retain(|key, _| {
+                        key == "model" || crate::models::PARAMETER_KEYS.contains(&key.as_str())
+                    });
                     // Version selection copies a snapshot model into the conversation.
-                    let mut map = v
-                        .as_object()
-                        .cloned()
-                        .ok_or_else(|| ApiError::bad("Invalid imported generation settings"))?;
-                    if let Some(model) = map.remove("model") {
-                        validate_model(model.as_str().ok_or_else(|| {
-                            ApiError::bad("Invalid imported generation settings")
-                        })?)?;
+                    if let Some(model) = map.get("model") {
+                        validate_model(model.as_str().ok_or_else(bad)?)?;
                     }
-                    let p: ParameterOverrides = serde_json::from_value(Value::Object(map))
-                        .map_err(|_| ApiError::bad("Invalid imported generation settings"))?;
+                    let mut parameters = map.clone();
+                    parameters.remove("model");
+                    let p: ParameterOverrides =
+                        serde_json::from_value(Value::Object(parameters)).map_err(|_| bad())?;
                     p.validate()?;
                 }
-                if let Some(v) = &m.usage {
-                    if !v.as_object().is_some_and(|m| {
-                        m.len() <= 3
-                            && m.iter().all(|(k, v)| {
-                                matches!(
-                                    k.as_str(),
-                                    "prompt_tokens" | "completion_tokens" | "total_tokens"
-                                ) && v.as_u64().is_some()
-                            })
-                    }) {
+                if let Some(v) = &mut m.usage {
+                    // The counts and timings Chat records, each a whole number.
+                    let map = v
+                        .as_object_mut()
+                        .ok_or_else(|| ApiError::bad("Invalid imported token usage"))?;
+                    map.retain(|key, _| {
+                        USAGE_COUNTS.contains(&key.as_str())
+                            || USAGE_MEASURES.contains(&key.as_str())
+                    });
+                    let fits = map.iter().all(|(key, n)| {
+                        if USAGE_COUNTS.contains(&key.as_str()) {
+                            n.as_u64().is_some()
+                        } else {
+                            n.as_f64()
+                                .is_some_and(|n| n.is_finite() && (0.0..1e9).contains(&n))
+                        }
+                    });
+                    if !fits {
                         return Err(ApiError::bad("Invalid imported token usage"));
                     }
                 }

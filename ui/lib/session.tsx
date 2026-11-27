@@ -90,7 +90,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       epoch.current++;
       api.clearSession();
       queries.clear();
-      setState((s) => ({ ...s, phase: "login", user: null, error: "", notice }));
+      // A request left over from a session that has already ended says nothing new:
+      // someone who signed out is not then told their session expired.
+      setState((s) => (s.phase === "login" ? s : { ...s, phase: "login", user: null, error: "", notice }));
     },
     [queries],
   );

@@ -196,6 +196,8 @@ export class ChatStore {
   readonly operations = new Map<string, Operation>();
   private revisions = new Map<string, number>();
   private watches = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Checks of a chat that failed in a row, so a connection that stays down is asked less often. */
+  private watchFailures = new Map<string, number>();
   /** The last saved copy of each watched chat and its ETag, so a watch can ask only for a newer one. */
   private watched = new Map<string, { tag: string; saved: Conversation }>();
   private versionSelections = new Map<string, number>();
@@ -308,7 +310,9 @@ export class ChatStore {
     for (const timer of this.watches.values()) clearTimeout(timer);
     this.watches.clear();
     this.watched.clear();
+    this.watchFailures.clear();
     this.timers.forEach(clearInterval);
+    this.timers = [];
     this.follow?.stop();
     this.attachments.clear();
     this.workspace.reset();
@@ -875,6 +879,8 @@ export class ChatStore {
     }
   }
   async reconcileConversation(id: string) {
+    // A check queued before the person signed out asks nothing of the next session.
+    if (this.disposed) return;
     if (this.versionSelections.has(id)) {
       this.scheduleWatch(id);
       return;
@@ -886,6 +892,7 @@ export class ChatStore {
       validator = { tag: kept?.tag ?? "" };
     try {
       const answer = await this.options.api.request(chatPath(id), { validator });
+      this.watchFailures.delete(id);
       if (epoch !== this.epoch || this.disposed) return;
       const unchanged = answer === NOT_MODIFIED && !!kept;
       const saved = unchanged ? structuredClone(kept.saved) : unwrap(answer);
@@ -969,7 +976,10 @@ export class ChatStore {
           this.error = "Connection interrupted. Reconnecting to the saved response…";
           this.emit();
         }
-        this.scheduleWatch(id, 3000);
+        // Three seconds at first, then twice as long each time, up to half a minute.
+        const failed = (this.watchFailures.get(id) || 0) + 1;
+        this.watchFailures.set(id, failed);
+        this.scheduleWatch(id, Math.min(30_000, 3000 * 2 ** Math.min(failed - 1, 4)));
       }
     } finally {
       if (!this.watches.has(id)) this.watched.delete(id);
@@ -1308,6 +1318,8 @@ export class ChatStore {
         if (data.titlePending) for (const wait of [3000, 9000]) setTimeout(() => this.reconcileConversation(c.id), wait);
         // Memory reads the exchange in the background; its card joins the reply when done.
         if (data.memoryPending) for (const wait of [5000, 12000, 25000]) setTimeout(() => this.reconcileConversation(c.id), wait);
+        // Chat is also asking other models: the reply says so from its next read, and its card waits for them.
+        if (data.comparePending) setTimeout(() => this.reconcileConversation(c.id), 1200);
         break;
       case "error":
         assistant.status = "error";
@@ -1352,7 +1364,9 @@ export class ChatStore {
     try {
       await this.options.api.request(`${chatPath(id)}/approvals`, { method: "POST", body: { callId, decision, remember } });
     } catch (e) {
+      // The answer never arrived, so the step still waits for one: the card stays.
       this.toast((e as Error).message);
+      return;
     }
     const waiting = (this.active?.messages || []).flatMap((m) => m.activity || []).find((s) => s.id === callId && s.status === "awaiting");
     if (waiting) waiting.status = decision === "allow" ? "running" : "declined";

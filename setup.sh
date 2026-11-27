@@ -3,7 +3,7 @@
 # pulling a new release; it keeps the passwords and keys it made.
 #
 #   ./setup.sh docker      Chat and PostgreSQL with Docker or Podman Compose
-#   ./setup.sh kubernetes  Chat with workspaces in one namespace
+#   ./setup.sh kubernetes  Chat in one namespace, its workspaces in another
 #
 # It asks for anything missing; pass it instead with:
 #   --url URL         the address people open Chat at
@@ -202,15 +202,30 @@ setup_kubernetes() {
   fi
 
   local ns=(-n "$namespace")
+  # Workspaces get a namespace of their own, away from the database and the Secrets.
+  # An install that already runs keeps them, and their volumes, where its settings
+  # put them: in Chat's own namespace when they name none, as in 1.9 and earlier.
+  local sandboxes=obleth-sandboxes
+  [ "$namespace" = obleth-chat ] || sandboxes=$namespace-sandboxes
+  if kubectl "${ns[@]}" get configmap obleth-chat-config >/dev/null 2>&1; then
+    sandboxes=$(kubectl "${ns[@]}" get configmap obleth-chat-config -o 'jsonpath={.data.OBLETH_CHAT_SANDBOX_NAMESPACE}')
+  fi
   has_secret() { kubectl "${ns[@]}" get secret "$1" >/dev/null 2>&1; }
   secret_value() { kubectl "${ns[@]}" get secret "$1" -o "go-template={{index .data \"$2\"}}" | base64 -d; }
   # deploy/*.yaml for this namespace and these URLs.
   render() {
-    awk -v ns="$namespace" -v origin="$url" -v gateway="$gateway" -v storage="$storage_class" '
+    awk -v ns="$namespace" -v sandboxes="$sandboxes" -v origin="$url" -v gateway="$gateway" -v storage="$storage_class" '
       /^---$/ { kind = "" }
       /^kind: / { kind = $2 }
       kind == "Namespace" && $0 == "  name: obleth-chat" { print "  name: " ns; next }
+      kind == "Namespace" && $0 == "  name: obleth-sandboxes" { print "  name: " sandboxes; next }
       /^ *namespace: obleth-chat$/ { sub(/obleth-chat$/, ns); print; next }
+      /^ *namespace: obleth-sandboxes$/ { sub(/obleth-sandboxes$/, sandboxes); print; next }
+      /kubernetes\.io\/metadata\.name: obleth-chat}$/ { sub(/obleth-chat}$/, ns "}"); print; next }
+      /^  OBLETH_CHAT_SANDBOX_NAMESPACE: / {
+        if (sandboxes != "") print "  OBLETH_CHAT_SANDBOX_NAMESPACE: " sandboxes
+        next
+      }
       /^  OBLETH_CHAT_ORIGIN: / { print "  OBLETH_CHAT_ORIGIN: " origin; next }
       /^  OBLETH_CHAT_GATEWAY_URL: / {
         print "  OBLETH_CHAT_GATEWAY_URL: " gateway
@@ -238,8 +253,9 @@ setup_kubernetes() {
 
   # PostgreSQL in the namespace, unless Chat already has a database or was given one.
   if has_secret obleth-chat-postgres || { ! has_secret obleth-chat-env && [ -z "$database" ]; }; then
-    has_secret obleth-chat-postgres || kubectl "${ns[@]}" create secret generic obleth-chat-postgres \
-      --from-literal=admin-password="$(hex)" --from-literal=chat-password="$(hex)" >/dev/null
+    # Secrets go to kubectl on its input: a command line shows in this host's process list.
+    has_secret obleth-chat-postgres || printf 'admin-password=%s\nchat-password=%s\n' "$(hex)" "$(hex)" |
+      kubectl "${ns[@]}" create secret generic obleth-chat-postgres --from-env-file=/dev/stdin >/dev/null
     kubectl "${ns[@]}" create configmap obleth-chat-postgres-init \
       --from-file=10-obleth-chat.sh=deploy/postgres-init.sh --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     render deploy/k8s-postgres.yaml | kubectl apply -f -
@@ -256,19 +272,26 @@ setup_kubernetes() {
       postgres://?* | postgresql://?*) ;;
       *) die "--database must be a postgresql:// URL" ;;
     esac
+    case $database in *$'\n'*) die "--database must be one line" ;; esac
     admin_password=$(password)
-    kubectl "${ns[@]}" create secret generic obleth-chat-env \
-      --from-literal=OBLETH_CHAT_DATABASE_URL="$database" \
-      --from-literal=OBLETH_CHAT_BOOTSTRAP_PASSWORD="$admin_password" >/dev/null
+    printf 'OBLETH_CHAT_DATABASE_URL=%s\nOBLETH_CHAT_BOOTSTRAP_PASSWORD=%s\n' "$database" "$admin_password" |
+      kubectl "${ns[@]}" create secret generic obleth-chat-env --from-env-file=/dev/stdin >/dev/null
   fi
 
+  # The workspace namespace first, so Chat finds its permissions there when it starts.
+  if [ -n "$sandboxes" ] && [ "$sandboxes" != "$namespace" ]; then
+    render deploy/k8s-workspaces.yaml | kubectl apply -f -
+  fi
   render deploy/k8s.yaml | kubectl apply -f -
   kubectl "${ns[@]}" rollout status deployment/obleth-chat-ui --timeout=300s
   kubectl "${ns[@]}" rollout status deployment/obleth-chat --timeout=300s
 
   cat <<EOF
 
-Chat is running in namespace $namespace, with workspaces for administrators.
+Chat is running in namespace $namespace, with workspaces for administrators$(
+  if [ -n "$sandboxes" ] && [ "$sandboxes" != "$namespace" ]; then printf ' in namespace %s.' "$sandboxes"
+  else printf '.\n  Workspaces stay in namespace %s, where this install already had them.' "$namespace"
+  fi)
   Sign in at $url as admin$([ -n "$admin_password" ] && printf ' with %s' "$admin_password" || printf ', with the initial password in Secret obleth-chat-env (OBLETH_CHAT_BOOTSTRAP_PASSWORD)')
 
 Next:

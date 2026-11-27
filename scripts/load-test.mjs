@@ -6,7 +6,43 @@ import { readFile, writeFile, stat, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { readEvents } from '../web/client.js';
+
+// A reply's stream as its events, read by lines so an event split across chunks,
+// in the middle of a character or of a CRLF, comes out whole. As ui/lib/api.ts reads it.
+async function* readEvents(body) {
+  assert(body, 'The service returned an empty response stream.');
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '', event = 'message', data = [];
+  const parse = () => {
+    if (!data.length) { event = 'message'; return null; }
+    const result = { event, data: JSON.parse(data.join('\n')) };
+    event = 'message'; data = [];
+    return result;
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      let index;
+      while ((index = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, index).replace(/\r$/, '');
+        buffer = buffer.slice(index + 1);
+        if (!line) { const item = parse(); if (item) yield item; }
+        else if (line.startsWith('event:')) event = line.slice(6).trimStart();
+        else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+      }
+      if (done) break;
+    }
+    if (buffer.startsWith('data:')) data.push(buffer.slice(5).replace(/^ /, ''));
+    const item = parse();
+    if (item) yield item;
+  } finally {
+    // Stops the reply upstream when the reader leaves after its last event.
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
 
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], process.argv[i + 1]);
@@ -144,8 +180,16 @@ try {
       assert(answer.content.includes('## A saved response') && answer.reasoningContent.length > 0);
       assert.equal(answer.usage?.total_tokens, 83);
     }
-    const usage = requireStatus(await request(account.session, 'GET', '/api/usage'), 200, 'Read private usage');
-    assert.equal(usage.today.requests, rounds); assert.equal(usage.today.totalTokens, rounds * 83);
+    // Besides the reply, a turn makes Chat's own requests for it (a title, what to
+    // ask next), counted the same way and still running for a moment after the reply.
+    let usage;
+    for (let tries = 0; tries < 100; tries++) {
+      usage = requireStatus(await request(account.session, 'GET', '/api/usage'), 200, 'Read private usage');
+      if (usage.today.activeGenerations === 0) break;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    assert(usage.today.requests >= rounds, 'Usage must count every generation.');
+    assert(usage.today.totalTokens >= rounds * 83, 'Usage must count every generation\'s tokens.');
     assert.equal(usage.today.activeGenerations, 0); assert.equal(usage.today.reservedTokens, 0);
     const list = requireStatus(await request(account.session, 'GET', '/api/conversations'), 200, 'Read private history');
     assert.equal(list.total, 1); assert.equal(list.conversations[0].id, account.chat);

@@ -16,6 +16,7 @@ import { api } from "@/lib/api";
 import { when } from "@/lib/format";
 import { useFeature } from "@/lib/queries";
 import { useSession, type Banner } from "@/lib/session";
+import { CompareCard, type CompareSettings } from "./compare-card";
 import { LogCard, type LogSettings } from "./log-card";
 import { MemoryCard, type MemorySettings } from "./memory-card";
 import { NotebookCard, type NotebookSettings } from "./notebook-card";
@@ -642,6 +643,7 @@ export function SystemTab() {
   const health = useQuery({ queryKey: ["admin", "health"], queryFn: () => api.request<Health>("/api/admin/health").catch(() => null) });
   const decisions = useQuery({ queryKey: ["admin", "decisions"], queryFn: () => orError<Decisions>("/api/admin/decisions") });
   const memory = useQuery({ queryKey: ["admin", "memory"], queryFn: () => orError<MemorySettings>("/api/admin/memory") });
+  const compare = useQuery({ queryKey: ["admin", "compare"], queryFn: () => orError<CompareSettings>("/api/admin/compare") });
   const notebook = useQuery({ queryKey: ["admin", "notebook"], queryFn: () => orError<NotebookSettings>("/api/admin/notebook"), enabled: knowledge });
   const banner = useQuery({ queryKey: ["admin", "banner"], queryFn: () => orError<BannerSettings & { error?: string }>("/api/admin/banner") });
   const log = useQuery({ queryKey: ["admin", "log"], queryFn: () => orError<LogSettings>("/api/admin/log") });
@@ -740,6 +742,14 @@ export function SystemTab() {
               </Section>
             ) : (
               <DecisionsCard key={JSON.stringify(d)} decisions={d} onSaved={set<Decisions>("decisions")} />
+            ))}
+          {compare.data &&
+            (compare.data.error ? (
+              <Section title="Comparing answers">
+                <ErrorBox error={compare.data.error} />
+              </Section>
+            ) : (
+              <CompareCard key={`compare ${JSON.stringify(compare.data)}`} compare={compare.data} onSaved={set<CompareSettings>("compare")} />
             ))}
           <Section title="Set where Chat runs" description="The rest is configured with environment variables when Chat is deployed. These guides show how.">
             <div className="grid gap-1">

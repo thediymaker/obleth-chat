@@ -145,6 +145,15 @@ async fn fake_chat(
                 if served.is_some() { "fresh" } else { "" },
             ),
             ("x-obleth-auto-why", why),
+            // The models it ranked next: one in the catalog, one nobody may use.
+            (
+                "x-obleth-auto-next",
+                if served.is_some() {
+                    "fixture-model;gap=0.010, unlisted-model;gap=0.200"
+                } else {
+                    ""
+                },
+            ),
         ],
         Sse::new(stream),
     )
@@ -725,8 +734,236 @@ async fn auto_goes_to_the_gateway_router_and_records_the_model_it_chose(pool: Pg
     // Why it chose that model is kept with the reply, as the gateway said it.
     assert_eq!(
         settings["autoWhy"],
-        json!({"reason":"fresh","topics":["coding"],"difficulty":2,"from":"heuristic","needs":["tools"],"candidates":3})
+        json!({"reason":"fresh","topics":["coding"],"difficulty":2,"from":"heuristic","needs":["tools"],"candidates":3,
+            "next":[{"model":"fixture-model","gap":0.01},{"model":"unlisted-model","gap":0.2}]})
     );
+    // Nobody turned comparing on: the reply stands alone.
+    assert!(settings.get("compare").is_none());
+    assert_eq!(fake.seen.lock().unwrap().len(), 2);
+    task.abort();
+}
+
+/// The body of a reply's stream, read to its end.
+async fn stream_text(response: axum::response::Response) -> String {
+    assert_eq!(response.status(), StatusCode::OK);
+    String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_reply_auto_chose_is_also_put_to_the_models_it_ranked_next(pool: PgPool) {
+    let (app, state, fake, task) = fixture(pool.clone()).await;
+    let (cookie, csrf, session) = login(&app, "test-admin").await;
+    let owner = Uuid::parse_str(session["user"]["id"].as_str().unwrap()).unwrap();
+    // As installed nothing is compared; an administrator says when.
+    let read = fetch(&app, "/api/admin/compare", &[("cookie", &cookie)]).await;
+    assert_eq!(read.status(), StatusCode::OK);
+    let installed = value(read).await;
+    assert_eq!(installed["closeCall"], false);
+    assert_eq!(installed["hard"], false);
+    assert_eq!(installed["sampleEvery"], 0);
+    let refused = app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/api/admin/compare",
+            json!({"closeCall":true,"closeGap":2,"hard":false,"sampleEvery":0,"dailyLimit":1}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let saved = app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/api/admin/compare",
+            json!({"closeCall":true,"closeGap":0.05,"hard":false,"sampleEvery":0,"dailyLimit":1}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(value(saved).await["closeCall"], true);
+    let logged: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE action = 'compare.update'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(logged, 1);
+
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/conversations",
+            json!({"title":"Routed", "model":"auto"}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    let id = value(response).await["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let chat_id = Uuid::parse_str(&id).unwrap();
+    let ask = |content: &'static str, model: &'static str| {
+        app.clone().oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages"),
+            json!({"content":content, "model":model}),
+            &cookie,
+            &csrf,
+        ))
+    };
+    // The versions of the chat's last reply, once `count` of them are there.
+    let versions = |count: usize| {
+        let (app, state, cookie, id) = (app.clone(), state.clone(), cookie.clone(), id.clone());
+        async move {
+            for _ in 0..100 {
+                let chat = state.store.get(owner, chat_id).await.unwrap();
+                let reply = chat.messages.last().unwrap().id;
+                let listed = value(
+                    fetch(
+                        &app,
+                        &format!("/api/conversations/{id}/messages/{reply}/versions"),
+                        &[("cookie", &cookie)],
+                    )
+                    .await,
+                )
+                .await["versions"]
+                    .as_array()
+                    .unwrap()
+                    .clone();
+                if listed.len() >= count {
+                    return listed;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("the second opinion never arrived");
+        }
+    };
+
+    // Auto's pick was close: the runner-up answers too, in the background.
+    let body = stream_text(ask("Question", "auto").await.unwrap()).await;
+    assert!(body.contains(r#""comparePending":true"#), "{body}");
+    let listed = versions(2).await;
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0]["model"], "routed-model");
+    assert_eq!(listed[0]["auto"], true);
+    assert_eq!(listed[0]["second"], false);
+    assert_eq!(listed[0]["selected"], true);
+    assert_eq!(listed[1]["model"], "fixture-model");
+    assert_eq!(listed[1]["auto"], false);
+    assert_eq!(listed[1]["second"], true);
+    assert_eq!(listed[1]["selected"], false);
+    assert_eq!(listed[1]["status"], "completed");
+    assert_eq!(listed[1]["content"], "Hello α");
+    assert_eq!(listed[1]["usage"]["total_tokens"], 15);
+    assert!(listed[1]["usage"]["first_token_ms"].is_u64());
+    // It was asked the same thing, by name. The model nobody may use was not asked.
+    {
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["body"]["model"], "auto");
+        assert_eq!(seen[1]["body"]["model"], "fixture-model");
+        assert_eq!(seen[1]["body"]["messages"], seen[0]["body"]["messages"]);
+        assert!(seen[1]["body"].get("tools").is_none());
+    }
+    // The chat still shows Auto's reply, which says who else answered and why.
+    let chat = state.store.get(owner, chat_id).await.unwrap();
+    assert_eq!(chat.messages.len(), 2);
+    let reply = chat.messages.last().unwrap();
+    assert_eq!(reply.id.to_string(), listed[0]["id"].as_str().unwrap());
+    assert_eq!(reply.versions.len(), 2);
+    let note = &reply.settings.as_ref().unwrap()["compare"];
+    assert_eq!(note["models"], json!(["fixture-model", "unlisted-model"]));
+    assert_eq!(note["why"], "close");
+    // It is a request of its own in the usage ledger.
+    let ledger: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT model, status, total_tokens FROM generation_usage WHERE user_id = $1 AND purpose = 'compare'",
+    )
+    .bind(owner)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        ledger,
+        [("fixture-model".into(), "completed".into(), Some(15))]
+    );
+
+    // Keeping the other answer: the chat goes on from it, with its model, and the
+    // next message is taken as any other.
+    let second = listed[1]["id"].as_str().unwrap();
+    let kept = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages/{second}/select"),
+            json!({}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(kept.status(), StatusCode::OK);
+    let kept = value(kept).await["conversation"].clone();
+    assert_eq!(kept["model"], "fixture-model");
+    assert_eq!(kept["messages"][1]["id"], second);
+    assert!(kept["settings"].get("compareOf").is_none(), "{kept}");
+    // Back to Auto's own reply, whose settings also say what Auto chose and why.
+    let auto_reply = listed[0]["id"].as_str().unwrap();
+    let back = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/conversations/{id}/messages/{auto_reply}/select"),
+            json!({}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(back.status(), StatusCode::OK);
+    let back = value(back).await["conversation"].clone();
+    assert!(back["settings"].get("autoWhy").is_none(), "{back}");
+    assert!(back["settings"].get("auto").is_none(), "{back}");
+
+    // A second reply is compared too; then the day's number is used up.
+    let body = stream_text(ask("Another", "auto").await.unwrap()).await;
+    assert!(body.contains(r#""comparePending":true"#), "{body}");
+    assert_eq!(versions(2).await.len(), 2);
+    let body = stream_text(ask("A third", "auto").await.unwrap()).await;
+    assert!(!body.contains("comparePending"), "{body}");
+    let chat = state.store.get(owner, chat_id).await.unwrap();
+    assert!(chat
+        .messages
+        .last()
+        .unwrap()
+        .settings
+        .as_ref()
+        .unwrap()
+        .get("compare")
+        .is_none());
+
+    // A reply to a model the person named is never compared.
+    sqlx::query("UPDATE compare_settings SET sample_every = 1, daily_limit = 100")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let body = stream_text(ask("Named", "fixture-model").await.unwrap()).await;
+    assert!(!body.contains("comparePending"), "{body}");
     task.abort();
 }
 
@@ -1086,8 +1323,13 @@ async fn background_completion_and_same_chat_regeneration_restore_selected_conte
 #[sqlx::test(migrations = "./migrations")]
 async fn metrics_need_the_configured_token(pool: PgPool) {
     let (app, mut state, _, task) = fixture(pool).await;
-    // Without a token, metrics are open as before.
+    // Without a token, metrics are open to a scraper that reaches Chat directly, and
+    // not to a request a proxy passed on.
     assert_eq!(fetch(&app, "/metrics", &[]).await.status(), StatusCode::OK);
+    for through in ["x-forwarded-for", "forwarded", "x-real-ip"] {
+        let response = fetch(&app, "/metrics", &[(through, "203.0.113.9")]).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{through}");
+    }
     state.metrics.require_token("scrape-fixture-token");
     let app = router(state, "branding".into());
     for headers in [
@@ -1099,10 +1341,14 @@ async fn metrics_need_the_configured_token(pool: PgPool) {
         let response = fetch(&app, "/metrics", &headers).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{headers:?}");
     }
+    // With the token, through a proxy too.
     let response = fetch(
         &app,
         "/metrics",
-        &[("authorization", "Bearer scrape-fixture-token")],
+        &[
+            ("authorization", "Bearer scrape-fixture-token"),
+            ("x-forwarded-for", "203.0.113.9"),
+        ],
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1157,6 +1403,24 @@ async fn uploads_are_not_read_before_sign_in(pool: PgPool) {
     assert_eq!(
         value(response).await["error"]["message"],
         "The batch could not be read"
+    );
+    // A batch runs only on a model the person may use, as a message does.
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/batches",
+            json!({"name": "n", "model": "not-in-the-catalog", "template": "Tag {t}",
+                "columns": ["t"], "rows": [["a"]]}),
+            &cookie,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        value(response).await["error"]["message"],
+        "This model is not available to your account"
     );
     task.abort();
 }
@@ -1230,7 +1494,7 @@ async fn a_shared_chat_answers_not_modified_until_it_changes(pool: PgPool) {
     let path = format!("/api/shared/{id}");
     let first = fetch(&app, &path, &[("cookie", &cookie)]).await;
     assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(first.headers()["cache-control"], "no-cache");
+    assert_eq!(first.headers()["cache-control"], "private, no-cache");
     let tag = first.headers()["etag"].to_str().unwrap().to_owned();
     let again = fetch(&app, &path, &[("cookie", &cookie), ("if-none-match", &tag)]).await;
     assert_eq!(again.status(), StatusCode::NOT_MODIFIED);

@@ -88,6 +88,10 @@ impl Ui {
             headers.remove(name);
         }
         headers.remove(PREVIEW_HEADER);
+        // The interface server's own marker for requests it makes to itself; from a
+        // browser it would only ask the server to skip the step that sets the
+        // page's content policy.
+        headers.remove("x-middleware-subrequest");
         if let Some(previews) = &self.previews {
             headers.insert(PREVIEW_HEADER, previews.clone());
         }

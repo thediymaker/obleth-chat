@@ -511,17 +511,25 @@ pub(super) fn details(content: &str) -> (String, String) {
         let mut depth = 1;
         let mut at = open_end;
         let mut close = None;
+        // The next close is looked for once and kept until the reading passes it, and
+        // an open is looked for only before it: thousands of blocks opened inside one
+        // another are read once through, not once per block.
+        let mut ahead: Option<usize> = None;
         while depth > 0 {
-            let next_open = rest[at..].find("<details").map(|i| at + i);
-            let Some(next_close) = rest[at..].find("</details>").map(|i| at + i) else {
-                break;
+            let next_close = match ahead.filter(|c| *c >= at) {
+                Some(found) => found,
+                None => match rest[at..].find("</details>") {
+                    Some(i) => at + i,
+                    None => break,
+                },
             };
-            match next_open {
-                Some(o) if o < next_close => {
+            ahead = Some(next_close);
+            match rest[at..next_close].find("<details") {
+                Some(i) => {
                     depth += 1;
-                    at = o + 8;
+                    at = at + i + 8;
                 }
-                _ => {
+                None => {
                     depth -= 1;
                     at = next_close + 10;
                     if depth == 0 {
@@ -803,4 +811,54 @@ fn epoch(value: f64) -> Option<DateTime<Utc>> {
         v => v,
     };
     Utc.timestamp_millis_opt((seconds * 1000.0) as i64).single()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::details;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn details_blocks_leave_the_text_and_give_up_their_reasoning() {
+        let (text, reasoning) = details(
+            "Before\n<details type=\"reasoning\" done=\"true\">\n<summary>Thought</summary>\n> one\n> two\n</details>\nAfter",
+        );
+        assert_eq!(text, "Before\n\nAfter");
+        assert_eq!(reasoning, "one\ntwo");
+        // A block inside another closes with it; a tool's step is dropped.
+        let (text, reasoning) = details(
+            "<details type=\"tool_calls\"><details type=\"reasoning\">inner</details>tail</details>Answer <details>plain</details>",
+        );
+        assert_eq!(text, "Answer <details>plain</details>");
+        assert_eq!(reasoning, "");
+        // One never closed stays in the text as it was.
+        let open = "Text <details type=\"reasoning\">never closed";
+        assert_eq!(details(open).0, open);
+    }
+
+    /// Blocks opened inside one another by the hundred thousand are read once
+    /// through. Read once per block, this reply would hold the one import running
+    /// at a time for hours.
+    #[test]
+    fn deeply_nested_details_are_read_in_one_pass() {
+        let opens = "<details type=\"x\">".repeat(400_000);
+        for reply in [
+            format!("{opens}</details>"),
+            format!("{opens}{}", "</details>".repeat(399_999)),
+            format!("{opens}{}after", "</details>".repeat(400_000)),
+        ] {
+            let started = Instant::now();
+            let (text, _) = details(&reply);
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(
+                text == "after" || text.len() == reply.len(),
+                "{}",
+                text.len()
+            );
+        }
+    }
 }

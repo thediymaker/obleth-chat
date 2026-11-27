@@ -224,7 +224,9 @@ export const sourceHref = (s: SourceItem) => (s.saved ? `/library/${encodeURICom
 const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 const CITE = /\[(\d{1,2}(?:\s*,\s*\d{1,2})*)\]/g;
 
-/** Links each [n] in a reply's rendered HTML to its source. Leaves code alone. */
+/** Links each [n] in a reply's rendered HTML to its source. Leaves alone code,
+ * drawings, text that is already a link (a link inside a link is not HTML) and the
+ * TeX kept beside rendered math. */
 export function citeHtml(html: string, m: ReplyLike): string {
   const entry = sourcesOf(m);
   if (!entry?.items?.length) return html;
@@ -234,8 +236,8 @@ export function citeHtml(html: string, m: ReplyLike): string {
     .split(/(<[^>]+>)/)
     .map((part) => {
       if (part.startsWith("<")) {
-        if (/^<(pre|code|svg)\b/i.test(part)) code++;
-        else if (/^<\/(pre|code|svg)>/i.test(part)) code = Math.max(0, code - 1);
+        if (/^<(pre|code|svg|a|math)\b/i.test(part)) code++;
+        else if (/^<\/(pre|code|svg|a|math)>/i.test(part)) code = Math.max(0, code - 1);
         return part;
       }
       if (code) return part;

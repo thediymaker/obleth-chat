@@ -156,6 +156,15 @@ function ResizeHandle({ pane, width, setWidth }: { pane: React.RefObject<HTMLEle
   const [dragging, setDragging] = useState(false);
   const latest = useRef(width);
   latest.current = width;
+  // The page's text is unselectable only while dragging, even if the pane goes away
+  // mid-drag and the pointer's release never reaches this handle.
+  useEffect(() => {
+    if (!dragging) return;
+    document.body.style.userSelect = "none";
+    return () => {
+      document.body.style.userSelect = "";
+    };
+  }, [dragging]);
   return (
     <div
       role="separator"
@@ -173,7 +182,6 @@ function ResizeHandle({ pane, width, setWidth }: { pane: React.RefObject<HTMLEle
         e.preventDefault();
         e.currentTarget.setPointerCapture(e.pointerId);
         setDragging(true);
-        document.body.style.userSelect = "none";
       }}
       onPointerMove={(e) => {
         if (e.currentTarget.hasPointerCapture(e.pointerId)) setWidth(window.innerWidth - e.clientX);
@@ -181,14 +189,10 @@ function ResizeHandle({ pane, width, setWidth }: { pane: React.RefObject<HTMLEle
       onPointerUp={(e) => {
         if (!dragging) return;
         setDragging(false);
-        document.body.style.userSelect = "";
         if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
         setWidth(latest.current, true);
       }}
-      onPointerCancel={() => {
-        setDragging(false);
-        document.body.style.userSelect = "";
-      }}
+      onPointerCancel={() => setDragging(false)}
       onDoubleClick={() => setWidth(null, true)}
       onKeyDown={(e) => {
         const step = e.shiftKey ? 96 : 32,

@@ -319,6 +319,20 @@ async fn admission_is_atomic_across_concurrent_store_requests(pool: PgPool) {
             .0,
         StatusCode::TOO_MANY_REQUESTS
     );
+    // The open turn's own worker agents are not a second response.
+    let mut tx = pool.begin().await.unwrap();
+    obleth_chat::operations::reserve_agent_in(
+        &mut tx,
+        owner,
+        Uuid::new_v4(),
+        "test-model",
+        100,
+        10,
+        60,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
 }
 
 #[sqlx::test(migrations = "./migrations")]

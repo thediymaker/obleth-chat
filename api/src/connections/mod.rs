@@ -303,8 +303,8 @@ impl Connections {
         self
     }
 
-    /// Re-encrypts tokens still sealed with the key derived from the gateway signing
-    /// key under the secret key, so the signing key can be removed. Each row changes
+    /// Re-encrypts tokens and saved secrets still sealed with the key derived from the
+    /// gateway signing key under the secret key, so the signing key can be removed. Each row changes
     /// only if it still holds what was read, so replicas starting together, or a
     /// second run, change nothing twice. Returns how many tokens moved.
     pub async fn reseal(&self) -> anyhow::Result<u64> {
@@ -322,13 +322,17 @@ impl Connections {
         )
         .fetch_all(&self.pool)
         .await?;
-        if rows.is_empty() && credentials.is_empty() {
+        let secrets: Vec<(Uuid, Vec<u8>)> =
+            sqlx::query_as("SELECT id, value FROM secrets WHERE get_byte(value, 0) = 1")
+                .fetch_all(&self.pool)
+                .await?;
+        if rows.is_empty() && credentials.is_empty() && secrets.is_empty() {
             return Ok(0);
         }
         if self.legacy.is_none() {
             tracing::warn!(
-                count = rows.len() + credentials.len(),
-                "saved connection tokens were sealed with the gateway signing key, which is not configured; people need to enter them again"
+                count = rows.len() + credentials.len() + secrets.len(),
+                "saved connection tokens and secrets were sealed with the gateway signing key, which is not configured; people need to enter them again"
             );
             return Ok(0);
         }
@@ -353,6 +357,18 @@ impl Connections {
                 .bind(connection)
                 .bind(user)
                 .bind(self.seal(&aad, &token))
+                .bind(&sealed)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        }
+        for (id, sealed) in secrets {
+            let Some(value) = self.unseal(id.as_bytes(), &sealed) else {
+                continue;
+            };
+            moved += sqlx::query("UPDATE secrets SET value=$2 WHERE id=$1 AND value=$3")
+                .bind(id)
+                .bind(self.seal(id.as_bytes(), &value))
                 .bind(&sealed)
                 .execute(&self.pool)
                 .await?
@@ -626,7 +642,6 @@ impl Connections {
             } else {
                 "the person adds a service under Settings › MCP servers"
             },
-            secrets: vault::names(&self.pool, user).await,
             outputs: self.objects.clone().map(|store| output::Outputs {
                 pool: self.pool.clone(),
                 store,
@@ -815,8 +830,6 @@ pub struct Toolset {
     unready: Vec<String>,
     /// Where the person adds a cluster or a service, for the model to point to.
     adds: &'static str,
-    /// The names of the person's secrets, which a device's login may name.
-    secrets: Vec<String>,
     /// Where job output from Slurm clusters comes back, when there is object storage.
     outputs: Option<output::Outputs>,
     /// Where file sessions on Slurm clusters are started and their calls filed, when
@@ -910,17 +923,6 @@ impl Toolset {
         if self.actions == crate::models::Actions::Blocked {
             prompt.push_str(" You may only read through these services; a change there needs a model certified for changes, which the person can switch to.");
         }
-        if !self.secrets.is_empty()
-            && self
-                .servers
-                .iter()
-                .any(|s| matches!(s.backend, Backend::Device))
-        {
-            prompt.push_str(&format!(
-                " The person has saved secrets named {}: a tool that takes a secret name uses the value, which you never see or ask for.",
-                self.secrets.join(", ")
-            ));
-        }
         prompt.push(' ');
         prompt.push_str(&self.reach());
         prompt
@@ -1012,7 +1014,10 @@ impl Toolset {
 
     /// The call's arguments as the tool will get them. A tool of Chat's own that
     /// changes something takes only the arguments it names: one it would ignore has
-    /// no place in a call a person is asked to read and allow.
+    /// no place in a call a person is asked to read and allow. Its yes/no arguments
+    /// are true or false and nothing else: the card, the gate and the code that
+    /// carries the call out, on a cluster or in the browser, would each read 1 or
+    /// "false" their own way.
     fn arguments(&self, index: usize, arguments: &str) -> Result<Value, String> {
         let arguments: Value = match arguments.trim() {
             "" => json!({}),
@@ -1022,8 +1027,13 @@ impl Toolset {
             },
         };
         let offered = &self.tools[index];
-        let own = !matches!(self.servers[offered.server].backend, Backend::Mcp { .. });
-        if own && !offered.tool.read_only {
+        let backend = &self.servers[offered.server].backend;
+        let own = !matches!(backend, Backend::Mcp { .. });
+        // A device's login runs unasked and sends a saved password, so it too takes
+        // only what it names: the password is the device's own secret, never one the
+        // call picks.
+        let login = matches!(backend, Backend::Device) && offered.tool.name == "login";
+        if own && (!offered.tool.read_only || login) {
             let known = offered.tool.input_schema["properties"].as_object();
             let unknown = arguments
                 .as_object()
@@ -1039,6 +1049,19 @@ impl Toolset {
                     "This tool has no argument named {:?}. It takes: {}.",
                     output::head(key, 100),
                     takes.join(", ")
+                ));
+            }
+            let loose = arguments
+                .as_object()
+                .into_iter()
+                .flatten()
+                .find(|(key, value)| {
+                    known.is_some_and(|known| known[*key]["type"] == "boolean")
+                        && !matches!(value, Value::Bool(_) | Value::Null)
+                });
+            if let Some((key, _)) = loose {
+                return Err(format!(
+                    "The argument {key:?} must be true or false, without quotes."
                 ));
             }
         }
@@ -2345,7 +2368,6 @@ mod tests {
             tools,
             unready: vec![],
             adds: "the person adds a cluster under Compute › Clusters",
-            secrets: vec![],
             outputs: None,
             files: None,
             actions: crate::models::Actions::Certified,
@@ -2419,6 +2441,26 @@ mod tests {
         assert_eq!(review["items"][0]["what"], "job 42");
         assert!(reviewed(&set, "sol__submit", json!({"script":"x","nmae":"y"})).is_err());
 
+        // A yes/no argument is true or false. Anything else would be no to the card
+        // and the gate and yes to the cluster, so the call is refused as written.
+        let write = set.find("sol__files_write").unwrap();
+        for loose in [json!(1), json!("true"), json!("false"), json!([true])] {
+            let call = json!({"path":"~/.bashrc","content":"x","overwrite":loose});
+            let refused = reviewed(&set, "sol__files_write", call.clone()).unwrap_err();
+            assert!(
+                refused.contains("\"overwrite\" must be true or false"),
+                "{refused}"
+            );
+            assert!(set.arguments(write, &call.to_string()).is_err());
+        }
+        let replace = json!({"path":"a","content":"x","overwrite":true});
+        assert_eq!(set.gate(write, &replace.to_string()), gate::Gate::Ask);
+        let review = reviewed(&set, "sol__files_write", replace).unwrap();
+        assert_eq!(review["items"][0]["facts"][1][0], "Replaces the file");
+        let new = json!({"path":"a","content":"x","overwrite":null});
+        assert_eq!(set.gate(write, &new.to_string()), gate::Gate::Judge);
+        assert!(reviewed(&set, "sol__files_write", new).is_ok());
+
         // Another service's tool has no summary, and all of its arguments.
         let long = "line\n".repeat(2_000);
         let review = reviewed(
@@ -2437,6 +2479,39 @@ mod tests {
         let refused = reviewed(&set, "docs__send", json!({"body":huge})).unwrap_err();
         assert!(refused.contains("at most 384 KB"), "{refused}");
         assert!(reviewed(&set, "docs__send", json!([1])).is_err());
+    }
+
+    /// A device's login runs unasked and types a saved password into the console. The
+    /// password is the device's own secret: the call cannot name another one.
+    #[test]
+    fn a_device_login_cannot_pick_the_secret() {
+        let mut set = clusters();
+        let mut board = set.servers.pop().unwrap();
+        board.name = "Board".into();
+        board.backend = Backend::Device;
+        set.servers.push(board);
+        let login = device::tools()
+            .into_iter()
+            .find(|tool| tool.name == "login")
+            .unwrap();
+        assert!(login.read_only);
+        assert!(login.input_schema["properties"]["secret"].is_null());
+        set.tools.push(Offered {
+            exposed: "board__login".into(),
+            server: set.servers.len() - 1,
+            tool: login,
+        });
+        let index = set.find("board__login").unwrap();
+        let refused = set
+            .arguments(index, r#"{"secret":"WIFI_PSK"}"#)
+            .unwrap_err();
+        assert!(
+            refused.contains("no argument named \"secret\""),
+            "{refused}"
+        );
+        assert!(set.arguments(index, r#"{"user":"root"}"#).is_ok());
+        assert!(set.arguments(index, "").is_ok());
+        assert!(!set.prompt().contains("secrets named"));
     }
 
     /// The same refusal holds when nobody is asked: in Auto, or with a standing grant.

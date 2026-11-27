@@ -37,6 +37,19 @@ pub const MAX_SYSTEM_PROMPT_BYTES: usize = 8 * 1024;
 pub const MAX_STORED_MESSAGES: usize = 1000;
 pub const MAX_CONTEXT_BYTES: usize = 100 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Cuts a reply's text, at the end of a character, to what can be saved beside
+/// `reasoning` bytes of thinking.
+pub fn fit_response(content: &mut String, reasoning: usize) {
+    let room = MAX_RESPONSE_BYTES.saturating_sub(reasoning);
+    if content.len() > room {
+        let cut = (0..=room)
+            .rev()
+            .find(|at| content.is_char_boundary(*at))
+            .unwrap_or(0);
+        content.truncate(cut);
+    }
+}
 /// Sum of UTF-8 answer and reasoning bytes, including every terminal status.
 /// Before a turn starts, its user message and MAX_RESPONSE_BYTES must fit here.
 pub const MAX_CONVERSATION_BYTES: usize = 4 * 1024 * 1024;
@@ -457,6 +470,21 @@ impl Store {
         .bind(fork)
         .fetch_all(&mut *tx)
         .await?;
+        // The copies count against the viewer's storage like files they uploaded. The
+        // owner lock this transaction holds keeps the sums still.
+        let (count, bytes): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM attachments WHERE owner_id = $1) + CARDINALITY($2::uuid[]), ((SELECT COALESCE(SUM(size), 0) FROM attachments WHERE owner_id = $1) + (SELECT COALESCE(SUM(size), 0) FROM attachments WHERE id = ANY($2)))::BIGINT",
+        )
+        .bind(viewer)
+        .bind(&linked)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !linked.is_empty() && (count > self.limits.max_files || bytes > self.limits.quota_bytes)
+        {
+            return Err(ApiError::conflict(
+                "This chat's files do not fit in your file storage. Delete files you no longer need, then fork it again.",
+            ));
+        }
         for old in linked {
             let new = Uuid::new_v4();
             let (mime, data, key): (String, Option<Vec<u8>>, Option<String>) =
@@ -499,6 +527,18 @@ impl Store {
         .bind(fork)
         .fetch_all(&mut *tx)
         .await?;
+        let pictures: i64 = sqlx::query_scalar(
+            "SELECT ((SELECT COALESCE(SUM(size), 0) FROM generated_images WHERE owner_id = $1) + (SELECT COALESCE(SUM(size), 0) FROM generated_images WHERE id = ANY($2)))::BIGINT",
+        )
+        .bind(viewer)
+        .bind(&images)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !images.is_empty() && pictures > crate::images::MAX_USER_BYTES {
+            return Err(ApiError::conflict(
+                "This chat's generated images do not fit in your image storage. Delete images you no longer need, then fork it again.",
+            ));
+        }
         for old in images {
             let new = Uuid::new_v4();
             let (mime, data, key): (String, Option<Vec<u8>>, Option<String>) = sqlx::query_as(

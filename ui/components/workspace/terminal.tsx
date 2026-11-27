@@ -135,7 +135,7 @@ export function WorkspaceTerminal({ bridge, conversationId, session }: { bridge:
       });
       cleanups.push(bridge.onCommand(conversationId, () => void typeCommand(bridge, conversationId, s, true)));
       connect(s);
-      requestAnimationFrame(() => {
+      const frame = requestAnimationFrame(() => {
         try {
           fit.fit();
         } catch {
@@ -143,6 +143,7 @@ export function WorkspaceTerminal({ bridge, conversationId, session }: { bridge:
         }
         term.focus();
       });
+      cleanups.push(() => cancelAnimationFrame(frame));
     })();
 
     return () => {

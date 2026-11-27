@@ -143,6 +143,26 @@ pub async fn heartbeat(
     ended(pool, owner, id, generation).await.map(Some)
 }
 
+/// Renews a turn's lease every `every` until the handle is dropped, for the time
+/// before the turn's own heartbeat begins. It ends by itself once the turn is
+/// stopped or taken over, which that heartbeat then finds.
+pub fn keep_lease(
+    pool: PgPool,
+    owner: Uuid,
+    id: Uuid,
+    generation: Uuid,
+    every: Duration,
+) -> tokio_util::task::AbortOnDropHandle<()> {
+    tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(every).await;
+            if let Ok(Some(_)) = heartbeat(&pool, owner, id, generation).await {
+                break;
+            }
+        }
+    }))
+}
+
 /// Apply the heartbeat conditions without renewing the lease.
 pub async fn check(
     pool: &PgPool,

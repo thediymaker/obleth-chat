@@ -105,6 +105,7 @@ export function auditSentence(e: AuditEvent): Part[] {
       const image = m.image === "favicon" ? "the tab icon" : m.image === "logo-dark" ? "the dark theme's logo" : m.image === "logo-light" ? "the light theme's logo" : "";
       return [actor, image ? (m.removed ? ` removed ${image}` : ` set ${image}`) : " changed the branding"];
     },
+    "compare.update": () => [actor, m.closeCall || m.hard || Number(m.sampleEvery) > 0 ? " changed when replies are compared" : " turned comparing replies off"],
     "notebook.update": () => [actor, m.model ? " named the Notebook model " : " turned the Notebook model off", ...(m.model ? [{ bold: String(m.model) }] : [])],
     "memory.update": () => [actor, m.enabled === false ? " turned memory off" : " changed the memory settings"],
     "log.update": () => [actor, m.enabled === false ? " turned the project log off" : " changed the project log settings"],

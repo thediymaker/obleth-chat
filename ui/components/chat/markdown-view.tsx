@@ -36,11 +36,23 @@ export function codeTitle(body: string): string {
   );
 }
 
-// Diagrams and molecules follow the theme, which next-themes keeps on <html>.
+// Diagrams and molecules follow the theme, which next-themes keeps on <html>. One
+// observer serves every message on the page.
+const themeWatchers = new Set<() => void>();
+let themeObserver: MutationObserver | null = null;
 function subscribeTheme(change: () => void) {
-  const observer = new MutationObserver(change);
-  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-  return () => observer.disconnect();
+  themeWatchers.add(change);
+  if (!themeObserver) {
+    themeObserver = new MutationObserver(() => themeWatchers.forEach((watcher) => watcher()));
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  }
+  return () => {
+    themeWatchers.delete(change);
+    if (!themeWatchers.size) {
+      themeObserver?.disconnect();
+      themeObserver = null;
+    }
+  };
 }
 const currentTheme = () => document.documentElement.dataset.theme ?? "";
 

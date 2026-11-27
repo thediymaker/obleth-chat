@@ -388,7 +388,7 @@ def op_write(args):
     if os.path.isdir(path):
         raise Refused("%s is a directory" % path)
     existed = os.path.lexists(path)
-    if existed and not args.get("overwrite", False):
+    if existed and args.get("overwrite") is not True:
         raise Refused("%s exists; set overwrite to replace it" % path)
     parent = os.path.dirname(path)
     os.makedirs(parent, exist_ok=True)

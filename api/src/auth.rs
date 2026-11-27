@@ -551,6 +551,39 @@ impl Auth {
         self.require_session(headers, mutation, false).await
     }
 
+    /// Returns once the sign-in in `headers` has ended or no longer passes `allowed`,
+    /// for a connection that stays open long after the request that began it. Asked
+    /// once a minute; a check that fails for another reason decides nothing.
+    pub(crate) async fn until_signed_out(
+        &self,
+        headers: &HeaderMap,
+        allowed: impl Fn(&Identity) -> bool,
+    ) {
+        self.signed_out_within(headers, allowed, std::time::Duration::from_secs(60))
+            .await
+    }
+
+    async fn signed_out_within(
+        &self,
+        headers: &HeaderMap,
+        allowed: impl Fn(&Identity) -> bool,
+        every: std::time::Duration,
+    ) {
+        loop {
+            tokio::time::sleep(every).await;
+            match self.require(headers, false).await {
+                Ok(user) if allowed(&user) => {}
+                Ok(_) => return,
+                Err(error)
+                    if matches!(error.0, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) =>
+                {
+                    return
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
     async fn require_session(
         &self,
         headers: &HeaderMap,
@@ -997,16 +1030,16 @@ fn parse_trusted_proxies(value: Option<&str>) -> anyhow::Result<Vec<(IpAddr, u8)
         .collect()
 }
 
+/// The hops of X-Forwarded-For, farthest first. A hop that is not text is kept as one
+/// that cannot be read, so the walk back from Chat stops at it and the hops a trusted
+/// proxy added after it still count; a client cannot make its own address disappear by
+/// sending such a byte.
 fn forwarded_hops(headers: &HeaderMap) -> Vec<&str> {
     headers
         .get_all("x-forwarded-for")
         .iter()
-        .map(|v| v.to_str())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|v| v.split(','))
-        .map(str::trim)
+        .flat_map(|v| v.as_bytes().split(|byte| *byte == b','))
+        .map(|hop| std::str::from_utf8(hop).map_or("?", str::trim))
         .collect()
 }
 

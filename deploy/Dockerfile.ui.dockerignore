@@ -3,3 +3,7 @@
 **/.next
 target
 *.log
+.local
+**/.env
+**/.env.*
+**/*.pem

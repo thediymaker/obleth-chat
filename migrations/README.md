@@ -3,7 +3,12 @@
 sqlx applies these files in order of their number when Chat starts, each in one
 transaction unless its first line is `-- no-transaction`. A file that has run is
 never edited: sqlx refuses to start when an applied file's checksum changes.
-Change the schema with a new file.
+Change the schema with a new file, numbered after the newest one.
+
+There is no `091`: the number was skipped, and it stays unused. sqlx runs any
+file it has not yet applied, whatever its number, so a new `091_*.sql` would run
+before `092` on a new install and after the newest file on one that already
+exists, and the two would not be the same database.
 
 ## Conventions
 

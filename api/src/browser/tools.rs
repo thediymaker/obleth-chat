@@ -432,7 +432,29 @@ fn web_address(text: &str) -> Result<String> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         anyhow::bail!("Only http and https addresses can be opened.");
     }
+    if own_machine(&url) {
+        anyhow::bail!("The browser's own machine cannot be opened, only web sites.");
+    }
     Ok(url.to_string())
+}
+
+/// Whether `url` names the machine the browser itself runs on. Its DevTools port
+/// listens there and lists every tab the person has open, in any chat, so neither
+/// the model nor the address bar goes there. The network rules of the browser's
+/// namespace cover every other private address; they cannot cover this one.
+pub(super) fn own_machine(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.octets()[0] == 0,
+        Some(url::Host::Ipv6(ip)) => match ip.to_ipv4_mapped() {
+            Some(ip) => ip.is_loopback() || ip.octets()[0] == 0,
+            None => ip.is_loopback() || ip.is_unspecified(),
+        },
+        None => false,
+    }
 }
 
 async fn navigate(page: &Page, url: &str) -> Result<()> {
@@ -757,6 +779,22 @@ mod tests {
             "http://example.com/"
         );
         assert!(web_address("file:///etc/passwd").is_err());
+        // The browser's own machine, where its DevTools port lists every tab.
+        for own in [
+            "http://127.0.0.1:9223/json/list",
+            "http://localhost:9222/json",
+            "http://LOCALHOST./",
+            "http://a.localhost/",
+            "http://127.1/",
+            "http://0.0.0.0:9223/",
+            "http://[::1]:9223/json",
+            "http://[::ffff:127.0.0.1]:9223/",
+            "http://2130706433:9223/",
+        ] {
+            assert!(web_address(own).is_err(), "{own}");
+        }
+        assert!(web_address("http://10.0.0.5/").is_ok());
+        assert!(web_address("https://localhost.example.com/").is_ok());
         assert!(web_address("javascript:alert(1)").is_err());
         assert_eq!(
             search_url("duckduckgo", "vllm fp8 & gaudi").unwrap(),

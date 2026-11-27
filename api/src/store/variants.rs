@@ -46,6 +46,10 @@ pub struct ReplyVersion {
     pub usage: Option<Value>,
     /// The version that was asked about, which is the one the chat shows.
     pub selected: bool,
+    /// Auto chose its model.
+    pub auto: bool,
+    /// A second opinion: Chat asked another model beside the reply (see `compare`).
+    pub second: bool,
 }
 
 impl Store {
@@ -159,7 +163,9 @@ impl Store {
     ) -> Result<Vec<ReplyVersion>, ApiError> {
         let rows = sqlx::query_as::<_, ReplyVersion>(
             "SELECT v.id, v.status, v.created_at, v.content, v.usage, v.id = m.id AS selected,
-                    COALESCE(NULLIF(v.settings->>'resolvedModel',''), NULLIF(v.settings->>'model',''), '') AS model
+                    COALESCE(NULLIF(v.settings->>'resolvedModel',''), NULLIF(v.settings->>'model',''), '') AS model,
+                    COALESCE(v.settings->'auto' = 'true'::jsonb, FALSE) AS auto,
+                    COALESCE(jsonb_exists(v.settings, 'compareOf'), FALSE) AS second
              FROM messages m
              JOIN conversations c ON c.id = m.conversation_id
              JOIN messages v ON v.conversation_id = m.conversation_id AND v.role = m.role
@@ -237,8 +243,11 @@ impl Store {
                 .filter(|m| validate_model(m).is_ok())
                 .unwrap_or(&conversation.model)
                 .to_owned();
+            // The chat takes the version's parameters only. A version's settings also
+            // say which model wrote it, that Auto chose it and why, and whether it was
+            // compared: none of that is a setting, and the next message would not parse it.
             if let Some(map) = settings.as_object_mut() {
-                map.remove("model");
+                map.retain(|key, _| crate::models::PARAMETER_KEYS.contains(&key.as_str()));
             }
             let effort = settings
                 .get("reasoningEffort")

@@ -52,6 +52,10 @@ const MAX_FILE: usize = 190 * 1024 * 1024;
 const MAX_RESULTS: usize = 192 * 1024 * 1024;
 /// Results being put together at once.
 static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+/// How long a browser may leave a part of the results untaken, and how long it may
+/// take over them all, before the download ends and gives up its turn.
+const DOWNLOAD_QUIET: Duration = Duration::from_secs(60);
+const DOWNLOAD_TIME: Duration = Duration::from_secs(15 * 60);
 /// How long a download waits for its turn before saying so.
 const DOWNLOAD_WAIT: Duration = Duration::from_secs(30);
 /// How long the gateway may take to list batches or answer about one.
@@ -462,27 +466,40 @@ fn parse(body: &[u8]) -> Result<NewBatch, ApiError> {
 }
 
 /// `template` with each `{column}` replaced by that column's value in `row`.
-/// Braces around anything that isn't a column stay as they are.
-pub fn render(template: &str, columns: &HashMap<&str, usize>, row: &[String]) -> String {
+/// Braces around anything that isn't a column stay as they are. None once the
+/// prompt would pass `limit` characters: a template can name a long cell thousands
+/// of times, so the prompt is never built past what a row may send.
+pub fn render(
+    template: &str,
+    columns: &HashMap<&str, usize>,
+    row: &[String],
+    limit: usize,
+) -> Option<String> {
     let mut out = String::with_capacity(template.len() + 64);
+    let mut left = limit;
+    let mut push = |out: &mut String, text: &str| {
+        left = left.checked_sub(text.chars().count())?;
+        out.push_str(text);
+        Some(())
+    };
     let mut rest = template;
     while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
+        push(&mut out, &rest[..open])?;
         let after = &rest[open + 1..];
         match after.find('}') {
             Some(close) if columns.contains_key(&after[..close]) => {
                 let i = columns[&after[..close]];
-                out.push_str(row.get(i).map(String::as_str).unwrap_or(""));
+                push(&mut out, row.get(i).map(String::as_str).unwrap_or(""))?;
                 rest = &after[close + 1..];
             }
             _ => {
-                out.push('{');
+                push(&mut out, "{")?;
                 rest = after;
             }
         }
     }
-    out.push_str(rest);
-    out
+    push(&mut out, rest)?;
+    Some(out)
 }
 
 /// Placeholders in `template` that name no column.
@@ -535,14 +552,13 @@ fn input_file(batch: &NewBatch) -> Result<(Vec<u8>, usize), ApiError> {
         if row.iter().all(|c| c.trim().is_empty()) {
             continue;
         }
-        let prompt = render(&batch.template, &columns, row);
-        if prompt.chars().count() > MAX_PROMPT * 4 {
-            return Err(ApiError::bad(format!(
+        let prompt = render(&batch.template, &columns, row, MAX_PROMPT * 4).ok_or_else(|| {
+            ApiError::bad(format!(
                 "Row {} makes a prompt longer than {} characters",
                 i + 1,
                 MAX_PROMPT * 4
-            )));
-        }
+            ))
+        })?;
         let mut messages = Vec::new();
         if !batch.system.trim().is_empty() {
             messages.push(json!({"role": "system", "content": batch.system}));
@@ -723,6 +739,16 @@ async fn create(
     .await
     .map_err(|_| ApiError::internal())??;
     let (batch, file, rows) = prepared;
+    // The person must be allowed this model now, as for a message of their own: one
+    // an administrator turned off, left unpublished or kept for other groups is refused.
+    crate::models::resolve_request(
+        &state.store.pool,
+        gw,
+        &user,
+        &batch.model,
+        crate::models::ParameterOverrides::default(),
+    )
+    .await?;
 
     let boundary = format!("chatbatch{}", Uuid::new_v4().simple());
     let uploaded = call(
@@ -1028,6 +1054,44 @@ struct Sheet {
     _turn: tokio::sync::SemaphorePermit<'static>,
 }
 
+/// The parts as a response body, written by a task of their own. A reader that stops
+/// taking them for `quiet`, or is not done within `whole`, has the download cut off,
+/// and with it what `parts` holds: its turn and the answers still in memory.
+fn paced(
+    parts: impl Iterator<Item = String> + Send + 'static,
+    quiet: Duration,
+    whole: Duration,
+) -> impl futures_util::Stream<Item = std::io::Result<axum::body::Bytes>> + Send {
+    // None marks the end, so a download cut short is not taken for a finished one.
+    let (send, taken) = tokio::sync::mpsc::channel::<Option<String>>(1);
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(whole, async {
+            for part in parts.map(Some).chain([None]) {
+                if !matches!(
+                    tokio::time::timeout(quiet, send.send(part)).await,
+                    Ok(Ok(()))
+                ) {
+                    return;
+                }
+            }
+        })
+        .await;
+    });
+    futures_util::stream::unfold((taken, false), |(mut taken, done)| async move {
+        if done {
+            return None;
+        }
+        match taken.recv().await {
+            Some(Some(part)) => Some((Ok(axum::body::Bytes::from(part)), (taken, false))),
+            Some(None) => None,
+            None => Some((
+                Err(std::io::Error::other("the download took too long")),
+                (taken, true),
+            )),
+        }
+    })
+}
+
 impl Iterator for Sheet {
     type Item = String;
     fn next(&mut self) -> Option<String> {
@@ -1221,9 +1285,7 @@ async fn results(
         started: false,
         _turn: turn,
     };
-    let body = axum::body::Body::from_stream(futures_util::stream::iter(
-        sheet.map(|part| Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(part))),
-    ));
+    let body = axum::body::Body::from_stream(paced(sheet, DOWNLOAD_QUIET, DOWNLOAD_TIME));
     Ok((
         [
             (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
@@ -1300,6 +1362,51 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_download_nobody_takes_gives_up_what_it_holds() {
+        use futures_util::StreamExt;
+        struct Held {
+            _held: std::sync::Arc<()>,
+            at: usize,
+        }
+        impl Iterator for Held {
+            type Item = String;
+            fn next(&mut self) -> Option<String> {
+                self.at += 1;
+                (self.at <= 5).then(|| format!("part {}\n", self.at))
+            }
+        }
+        let parts = |held: &std::sync::Arc<()>| Held {
+            _held: held.clone(),
+            at: 0,
+        };
+        // Taken promptly, it arrives whole and ends cleanly.
+        let held = std::sync::Arc::new(());
+        let all: Vec<_> = paced(
+            parts(&held),
+            Duration::from_secs(60),
+            Duration::from_secs(900),
+        )
+        .collect()
+        .await;
+        assert_eq!(all.len(), 5);
+        assert!(all.iter().all(Result::is_ok));
+        // Left alone after its first part, it is let go and ends as cut off.
+        let mut slow = Box::pin(paced(
+            parts(&held),
+            Duration::from_secs(60),
+            Duration::from_secs(900),
+        ));
+        assert!(slow.next().await.unwrap().is_ok());
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        assert_eq!(std::sync::Arc::strong_count(&held), 1);
+        let mut rest = Vec::new();
+        while let Some(part) = slow.next().await {
+            rest.push(part);
+        }
+        assert!(rest.last().unwrap().is_err(), "{}", rest.len());
+    }
+
     #[test]
     fn a_spreadsheet_is_refused_while_it_is_read() {
         let body = |columns: &str, rows: &str| {
@@ -1330,14 +1437,42 @@ mod tests {
     fn placeholders_take_the_row_values() {
         let c = cols(&["title", "abstract"]);
         let row = vec!["Gaudi".to_string(), "We measure {things}.".to_string()];
-        assert_eq!(
-            render("Summarize {title}: {abstract} {missing} {", &c, &row),
-            "Summarize Gaudi: We measure {things}. {missing} {"
-        );
+        let template = "Summarize {title}: {abstract} {missing} {";
+        let whole = "Summarize Gaudi: We measure {things}. {missing} {";
+        assert_eq!(render(template, &c, &row, 1000).as_deref(), Some(whole));
+        // The limit is in characters, and a prompt of exactly that many is whole.
+        let n = whole.chars().count();
+        assert_eq!(render(template, &c, &row, n).as_deref(), Some(whole));
+        assert_eq!(render(template, &c, &row, n - 1), None);
+        assert_eq!(render("é{title}", &c, &row, 6).as_deref(), Some("éGaudi"));
         assert_eq!(
             unknown_placeholders("{title} {missing} {missing} {}", &c),
             vec!["missing".to_string()]
         );
+    }
+
+    /// A template that names one long cell thousands of times is refused once the
+    /// prompt passes its limit, before the gigabytes it would come to are built.
+    #[test]
+    fn a_prompt_is_never_built_past_its_limit() {
+        let batch = NewBatch {
+            name: "b".into(),
+            model: "m".into(),
+            system: String::new(),
+            template: "{a}".repeat(MAX_PROMPT / 3),
+            columns: vec!["a".into()],
+            rows: vec![vec!["x".repeat(MAX_CELL)]],
+            window: None,
+            file_name: "x.csv".into(),
+        };
+        let started = std::time::Instant::now();
+        let error = input_file(&batch).err().unwrap();
+        assert!(
+            error.1.contains("Row 1 makes a prompt longer"),
+            "{}",
+            error.1
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

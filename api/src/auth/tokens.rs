@@ -118,7 +118,7 @@ impl Auth {
 
 #[derive(Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
-struct TokenView {
+pub(super) struct TokenView {
     id: Uuid,
     name: String,
     prefix: String,
@@ -147,6 +147,40 @@ struct CreateInput {
     days: i32,
     #[serde(default)]
     read_only: bool,
+}
+
+/// Makes a token in `session`, only while that sign-in still stands; the sign-in is
+/// held until the transaction ends. Signing the session out from elsewhere either
+/// comes first, and no token is made, or comes after and revokes this one with the
+/// session's others.
+pub(super) async fn insert(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user: Uuid,
+    session: Uuid,
+    name: &str,
+    scopes: &[&str],
+    days: i32,
+) -> Result<(String, TokenView), ApiError> {
+    let secret = random_token();
+    let token = format!("{MARKER}{secret}");
+    let view = sqlx::query_as::<_, TokenView>(&format!(
+        "INSERT INTO api_tokens(id,user_id,name,token_hash,prefix,scopes,expires_at,session_id,single_sign_on) \
+         SELECT $1,$2,$3,$4,$5,$6,NOW() + make_interval(days => $7),s.id,s.single_sign_on \
+         FROM auth_sessions s WHERE s.id=$8 AND s.user_id=$2 AND s.expires_at > NOW() FOR SHARE \
+         RETURNING {VIEW}"
+    ))
+    .bind(Uuid::new_v4())
+    .bind(user)
+    .bind(name)
+    .bind(digest(&token))
+    .bind(&secret[..6])
+    .bind(scopes)
+    .bind(days)
+    .bind(session)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(ApiError::unauthorized)?;
+    Ok((token, view))
 }
 
 async fn create(
@@ -197,24 +231,8 @@ async fn create(
             "You can have {MAX_ACTIVE} tokens at once. Revoke one first."
         )));
     }
-    let secret = random_token();
-    let token = format!("{MARKER}{secret}");
-    let id = Uuid::new_v4();
-    let view = sqlx::query_as::<_, TokenView>(&format!(
-        "INSERT INTO api_tokens(id,user_id,name,token_hash,prefix,scopes,expires_at,session_id,single_sign_on) \
-         VALUES($1,$2,$3,$4,$5,$6,NOW() + make_interval(days => $7),$8, \
-         COALESCE((SELECT single_sign_on FROM auth_sessions WHERE id=$8), FALSE)) RETURNING {VIEW}"
-    ))
-    .bind(id)
-    .bind(user.id)
-    .bind(name)
-    .bind(digest(&token))
-    .bind(&secret[..6])
-    .bind(&scopes)
-    .bind(input.days)
-    .bind(session)
-    .fetch_one(&mut *tx)
-    .await?;
+    let (token, view) = insert(&mut tx, user.id, session, name, &scopes, input.days).await?;
+    let id = view.id;
     audit::record(
         &mut *tx,
         Some(user.id),

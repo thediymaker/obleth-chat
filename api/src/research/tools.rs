@@ -1356,6 +1356,11 @@ mod tests {
         std::fs::remove_file(run.join("exit")).unwrap();
         let (out, _) = local(&dir, &runs, &super::super::poll_script(), &["1"], None);
         assert_eq!(out.lines().next(), Some("lost"));
+        // A run still writing its pid file has only just started.
+        std::fs::rename(run.join("pid"), run.join("pid.tmp")).unwrap();
+        std::fs::write(run.join("pid.tmp"), "").unwrap();
+        let (out, _) = local(&dir, &runs, &super::super::poll_script(), &["1"], None);
+        assert_eq!(out.lines().next(), Some("running"));
         std::fs::remove_dir_all(&root).ok();
     }
 

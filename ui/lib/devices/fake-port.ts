@@ -40,6 +40,10 @@ export class FakePort {
   print(text: string) {
     this.controller?.enqueue(new TextEncoder().encode(text));
   }
+  /** The device sends these bytes as they are. */
+  emit(bytes: number[]) {
+    this.controller?.enqueue(new Uint8Array(bytes));
+  }
   /** Everything written, as text. */
   sent() {
     return this.written.map((w) => new TextDecoder().decode(w)).join("");

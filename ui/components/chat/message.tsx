@@ -25,6 +25,7 @@ import { num, when, count, duration } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "./chat-provider";
+import { CompareCard } from "./compare-card";
 import { CompareDialog } from "./compare-dialog";
 import { NamedIcon } from "./icon";
 import { citeHtml, KnowledgeSources } from "@/components/knowledge/chat-knowledge";
@@ -133,7 +134,7 @@ function responseStatus(store: ChatStore, m: ChatMessage) {
 }
 
 /** What a finished reply ran with and what it cost, behind its Details button. */
-export function detailCells(m: ChatMessage): [string, string, boolean?][] {
+export function detailCells(m: ChatMessage, name: (id: string) => string = (id) => id): [string, string, boolean?][] {
   if (m.role !== "assistant" || (!m.settings && !m.createdAt)) return [];
   const p = m.settings || {},
     usage = m.usage || {},
@@ -151,7 +152,7 @@ export function detailCells(m: ChatMessage): [string, string, boolean?][] {
   };
   const cells: [string, unknown, boolean?][] = [
     ["Model", p.resolvedModel || p.model],
-    ["Why Auto chose it", p.auto ? autoWhyText(p.autoWhy) : null, true],
+    ["Why Auto chose it", p.auto ? autoWhyText(p.autoWhy, name) : null, true],
     ["Effort", p.reasoningEffort && effortLabel(p.reasoningEffort)],
     ["Temperature", p.temperature],
     ["Top P", p.topP],
@@ -170,7 +171,8 @@ export function detailCells(m: ChatMessage): [string, string, boolean?][] {
 }
 
 function MessageDetails({ m, id }: { m: ChatMessage; id: string }) {
-  const cells = detailCells(m);
+  const store = useChatStore();
+  const cells = detailCells(m, store.modelName);
   return (
     <div id={id} className="mt-2 rounded-lg border bg-card p-3">
       <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
@@ -190,6 +192,25 @@ function MessageDetails({ m, id }: { m: ChatMessage; id: string }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** A reply with one version: the way to ask another model the same thing and read the two side by side. */
+function CompareWith({ m }: { m: ChatMessage }) {
+  const store = useChatStore();
+  const [comparing, setComparing] = useState(false);
+  const chatId = store.active?.id;
+  if (!m.id || !chatId || store.shared || m.role !== "assistant" || m.status !== "completed" || (m.versions || []).length > 1) return null;
+  if (store.streaming || store.switchingVersion || !store.models.some((model) => model.id !== "auto")) return null;
+  // Auto's own second choice is the natural one to ask.
+  const next = m.settings?.autoWhy?.next?.[0]?.model;
+  return (
+    <>
+      <IconButton label="Compare with another model" onClick={() => setComparing(true)}>
+        <Columns2 />
+      </IconButton>
+      {comparing && <CompareDialog chatId={chatId} messageId={m.id} open onOpenChange={setComparing} suggest={next} />}
+    </>
   );
 }
 
@@ -449,6 +470,7 @@ export const MessageView = memo(
               <AppOffer m={m} index={index} />
               <ProjectOffer m={m} index={index} />
               <ModelOffer m={m} index={index} />
+              <CompareCard m={m} />
               <BrowserCard m={m} index={index} isLast={isLast} streaming={store.streaming} />
               <DeviceCard m={m} index={index} isLast={isLast} streaming={store.streaming} />
             </>
@@ -505,6 +527,7 @@ export const MessageView = memo(
             )
           )}
           <Versions m={m} />
+          {assistant && <CompareWith m={m} />}
           {assistant && (
             <span
               className={cn("ml-1 text-xs text-muted-foreground", isPendingMessage(m) && "animate-pulse", m.status === "error" && "text-destructive-foreground")}
@@ -520,7 +543,7 @@ export const MessageView = memo(
                   · <span className="underline decoration-dotted underline-offset-2">{autoWhyShort(m.settings.autoWhy)}</span>
                 </button>
               </TooltipTrigger>
-              <TooltipContent className="max-w-80">{autoWhyText(m.settings.autoWhy)}</TooltipContent>
+              <TooltipContent className="max-w-80">{autoWhyText(m.settings.autoWhy, store.modelName)}</TooltipContent>
             </Tooltip>
           )}
         </div>

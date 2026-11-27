@@ -25,6 +25,9 @@ interface Live {
   h: number;
   closed: boolean;
   frames: number;
+  /** Frames received, and the one last drawn, by the order they arrived in. */
+  arrived: number;
+  drawn: number;
 }
 
 // The notes over the live view while it is not showing a page.
@@ -75,7 +78,7 @@ export function BrowserPanel({ conversationId: id }: { conversationId: string })
       disconnect();
       const socket = new WebSocket(liveUrl(id, wake));
       socket.binaryType = "arraybuffer";
-      const mineLive: Live = { socket, w: 1280, h: 720, closed: false, frames: 0 };
+      const mineLive: Live = { socket, w: 1280, h: 720, closed: false, frames: 0, arrived: 0, drawn: 0 };
       live.current = mineLive;
       setNote(wake ? "starting" : "connecting");
       socket.onopen = () => {
@@ -96,6 +99,9 @@ export function BrowserPanel({ conversationId: id }: { conversationId: string })
           if (message.t === "state") bridge.update(id, { controller: message.controller || "model", url: message.url || "", title: message.title || "", status: "running" });
           return;
         }
+        // Frames are decoded off the main thread and can finish out of order: one
+        // that arrived before the frame already drawn is dropped, not drawn over it.
+        const arrived = ++mineLive.arrived;
         let bitmap: ImageBitmap;
         try {
           bitmap = await createImageBitmap(new Blob([event.data], { type: "image/jpeg" }));
@@ -103,10 +109,11 @@ export function BrowserPanel({ conversationId: id }: { conversationId: string })
           return;
         }
         const el = canvas.current;
-        if (live.current !== mineLive || !el) {
+        if (live.current !== mineLive || !el || arrived < mineLive.drawn) {
           bitmap.close();
           return;
         }
+        mineLive.drawn = arrived;
         if (el.width !== bitmap.width || el.height !== bitmap.height) {
           el.width = bitmap.width;
           el.height = bitmap.height;
@@ -172,18 +179,20 @@ export function BrowserPanel({ conversationId: id }: { conversationId: string })
   const point = (e: React.MouseEvent | React.WheelEvent) => pagePoint(canvas.current!.getBoundingClientRect(), canvas.current!, live.current!, e);
   const moved = useRef(0);
 
-  // Wheel needs a non-passive listener to keep the pane from scrolling.
+  // Wheel needs a non-passive listener to keep the pane from scrolling. It reads the
+  // connection and who has control as each event comes, so it is added once.
   useEffect(() => {
     const el = canvas.current;
     if (!el) return;
     const wheel = (e: WheelEvent) => {
-      if (!controlling()) return;
+      const l = live.current;
+      if (!l || l.socket.readyState !== WebSocket.OPEN || bridge.chat(id).controller !== "user") return;
       e.preventDefault();
-      send({ t: "mouse", type: "mouseWheel", ...pagePoint(el.getBoundingClientRect(), el, live.current!, e), deltaX: e.deltaX, deltaY: e.deltaY, modifiers: modifiers(e) });
+      l.socket.send(JSON.stringify({ t: "mouse", type: "mouseWheel", ...pagePoint(el.getBoundingClientRect(), el, l, e), deltaX: e.deltaX, deltaY: e.deltaY, modifiers: modifiers(e) }));
     };
     el.addEventListener("wheel", wheel, { passive: false });
     return () => el.removeEventListener("wheel", wheel);
-  });
+  }, [bridge, id]);
 
   async function take() {
     try {

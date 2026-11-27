@@ -109,6 +109,7 @@ actions! {
     DECISIONS_UPDATE => "decisions.update", Settings;
     BANNER_UPDATE => "banner.update", Settings;
     APPEARANCE_UPDATE => "appearance.update", Settings;
+    COMPARE_UPDATE => "compare.update", Settings;
     KNOWLEDGE_EMBEDDING_UPDATE => "knowledge.embedding.update", Settings;
     RETENTION_UPDATE => "retention.update", Settings;
     INSIGHTS_UPDATE => "insights.update", Settings;

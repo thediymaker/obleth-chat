@@ -14,7 +14,11 @@ chromium --headless --no-sandbox --disable-dev-shm-usage --disable-gpu \
   --no-first-run --no-default-browser-check --disable-sync --disable-component-update \
   --password-store=basic --window-size=1280,800 --lang=en-US --user-agent="$agent" \
   about:blank &
+browser=$!
 socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
+# A pod being stopped asks Chromium to close and waits for it, so the cookies and
+# sign-ins of the last moments reach the profile before the container ends.
+trap 'kill -TERM "$browser" 2>/dev/null; wait "$browser"; exit 0' TERM INT
 # Either one ending restarts the container.
 wait -n
 exit 1

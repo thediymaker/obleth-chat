@@ -450,11 +450,11 @@ pub async fn send(sh: &impl Shell) -> Result<Option<Vec<u8>>, ApiError> {
 /// Finishes a paused sync once every conflict is settled: the merge commit.
 pub async fn conclude(sh: &impl Shell, author: &Author) -> Result<(), ApiError> {
     // Files that were in conflict must not still hold both versions.
+    // The names go to grep whole, one after a NUL each: a name with a space or a
+    // letter outside ASCII is a file like any other. A file the merge deleted is
+    // passed over (-s).
     let script = r#"[ -f .git/MERGE_HEAD ] || exit 0
-left=""
-for f in $(g diff --name-only --diff-filter=U); do
-  if [ -f "$f" ] && grep -qE '^(<<<<<<<|>>>>>>>)( |$)' -- "$f"; then left="$left $f"; fi
-done
+left=$(g diff --name-only -z --diff-filter=U | xargs -0 -r grep -lsE '^(<<<<<<<|>>>>>>>)( |$)' --)
 [ -n "$left" ] && { printf '%s' "$left"; exit 21; }
 g add -A || exit 11
 g commit -q --no-edit --cleanup=strip || exit 13"#;
@@ -463,7 +463,7 @@ g commit -q --no-edit --cleanup=strip || exit 13"#;
         Some(0) => Ok(()),
         Some(21) => Err(super::ApiError::conflict(format!(
             "Some files still have both versions in them: {}",
-            out.split_whitespace().collect::<Vec<_>>().join(", ")
+            out.lines().collect::<Vec<_>>().join(", ")
         ))),
         _ => Err(gateway(format!(
             "Could not finish combining: {}",

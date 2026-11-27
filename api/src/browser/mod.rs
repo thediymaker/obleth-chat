@@ -388,19 +388,21 @@ impl Browsers {
             "enableServiceLinks": false,
             "hostname": "browser",
             "restartPolicy": "Always",
-            "terminationGracePeriodSeconds": 5,
+            // Long enough for Chromium to write the profile when asked to stop.
+            "terminationGracePeriodSeconds": 15,
             "securityContext": {"runAsNonRoot":true,"runAsUser":1000,"runAsGroup":1000,"fsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}},
             "containers": [{
                 "name": "browser",
                 "image": c.image,
                 "imagePullPolicy": "IfNotPresent",
                 "ports": [{"containerPort": PORT}],
-                "readinessProbe": {"exec":{"command":["curl","-fsS","-o","/dev/null","http://127.0.0.1:9223/json/version"]},"periodSeconds":2,"timeoutSeconds":3},
+                "readinessProbe": {"exec":{"command":["curl","-fsS","-o","/dev/null","http://127.0.0.1:9222/json/version"]},"periodSeconds":2,"timeoutSeconds":3},
                 "resources": {
                     "requests": {"cpu":"100m","memory":"256Mi","ephemeral-storage":"256Mi"},
                     "limits": {"cpu":c.cpu_limit,"memory":c.memory_limit,"ephemeral-storage":"2Gi"}
                 },
-                "securityContext": {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true},
+                // Chromium writes only to the profile and to /tmp, where its home is.
+                "securityContext": {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"readOnlyRootFilesystem":true},
                 "volumeMounts": [{"name":"profile","mountPath":"/profile"},{"name":"tmp","mountPath":"/tmp"}]
             }],
             "volumes": [

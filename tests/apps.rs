@@ -590,3 +590,69 @@ async fn a_published_app_answers_on_its_chat_page_as_the_person_chatting(pool: P
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(error.to_string().contains("limit"), "{error}");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_run_of_loops_inside_loops_stops_at_its_step_limit(pool: PgPool) {
+    let app = fixture(&pool).await;
+    let admin = session(&pool, "admin").await;
+    let lab = project(&pool, admin.id).await;
+    let (status, created) = call(
+        &app,
+        &admin,
+        "POST",
+        &format!("/api/projects/{lab}/app"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let path = format!("/api/apps/{}", created["app"]["id"].as_str().unwrap());
+    // A hundred items, three loops deep: a million passes if nothing stopped it.
+    let nested = json!({
+        "inputs": [{"name": "samples", "type": "json"}],
+        "steps": [{"type": "for_each", "id": "a", "items": "{{inputs.samples}}", "steps": [
+            {"type": "for_each", "id": "b", "items": "{{inputs.samples}}", "steps": [
+                {"type": "for_each", "id": "c", "items": "{{inputs.samples}}", "steps": [
+                    {"type": "response", "id": "out", "value": "{{item}}"}
+                ]}
+            ]}
+        ]}]
+    });
+    let (status, saved) = call(
+        &app,
+        &admin,
+        "PUT",
+        &path,
+        json!({"name": "Assay Lab", "definition": nested}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let samples: Vec<u32> = (0..100).collect();
+    let (status, tried) = call(
+        &app,
+        &admin,
+        "POST",
+        &format!("{path}/test"),
+        json!({"inputs": {"samples": samples}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tried}");
+    assert_eq!(tried["status"], "failed", "{}", tried["error"]);
+    assert!(
+        tried["error"]
+            .as_str()
+            .unwrap()
+            .contains("more than 20000 steps"),
+        "{}",
+        tried["error"]
+    );
+    // The record keeps the first steps and the failure, not every pass.
+    let kept = tried["trace"].as_array().unwrap().len();
+    assert!((1000..=1020).contains(&kept), "{kept}");
+    let (status, recorded): (String, i32) =
+        sqlx::query_as("SELECT status, jsonb_array_length(trace) FROM app_runs WHERE id = $1")
+            .bind(Uuid::parse_str(tried["runId"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), recorded as usize), ("failed", kept));
+}

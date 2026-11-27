@@ -5,7 +5,8 @@
 //! about the person's own messages and the action, and only a sure yes to all four
 //! skips the card. The judge never sees what the model read from files or pages, so
 //! text that came from there cannot talk the judge into an action the person did not
-//! ask for.
+//! ask for. It reads the action whole, a job's script or a file's content to the last
+//! line, or not at all: one too long to read whole goes to the person.
 use crate::decisions::{self, Asker, Settings};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -25,8 +26,9 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// How much of the conversation the judge reads: the person's latest messages.
 const MESSAGES: usize = 12;
 const MESSAGE_CHARS: usize = 600;
-const ARGUMENT_CHARS: usize = 400;
-const ACTION_CHARS: usize = 2400;
+/// The longest action a decision reads. A longer one is never cut to fit, since the
+/// part left out is what the judge would be answering for unread.
+const ACTION_CHARS: usize = 32_000;
 
 /// id, question, what true means, what false means.
 const QUESTIONS: [(&str, &str, &str, &str); 4] = [
@@ -79,11 +81,19 @@ impl Judgement {
     }
 
     fn no_answer(why: String) -> Self {
+        Self::asked(format!("Asked: no decision ({why})"))
+    }
+
+    fn unread() -> Self {
+        Self::asked("Asked: the action is too long for a decision to read all of it".into())
+    }
+
+    fn asked(reason: String) -> Self {
         Self {
             allowed: false,
             scores: QUESTIONS.iter().map(|(id, ..)| (*id, None)).collect(),
             model: String::new(),
-            reason: format!("Asked: no decision ({why})"),
+            reason,
         }
     }
 }
@@ -119,8 +129,9 @@ pub fn person_messages(messages: &Value) -> Vec<String> {
     texts
 }
 
-/// The action in words: what the approval card would show, then its arguments.
-pub fn describe(label: &str, review: &Value) -> String {
+/// The action in words: what the approval card would show, then every argument in
+/// full. None when that is more than a decision reads.
+pub fn describe(label: &str, review: &Value) -> Option<String> {
     let mut text = label.to_owned();
     for item in review["items"].as_array().into_iter().flatten() {
         text.push_str(&format!(
@@ -136,14 +147,15 @@ pub fn describe(label: &str, review: &Value) -> String {
     }
     for argument in review["arguments"].as_array().into_iter().flatten() {
         if let (Some(name), Some(value)) = (argument["name"].as_str(), argument["text"].as_str()) {
-            text.push_str(&format!("\n{name} = {}", clip(value, ARGUMENT_CHARS)));
+            text.push_str(&format!("\n{name} = {value}"));
         }
     }
-    clip(&text, ACTION_CHARS)
+    (text.chars().count() <= ACTION_CHARS).then_some(text)
 }
 
 /// Puts the change to a decision. Any question unanswered, under the threshold, or
-/// not answered at all means the person is asked.
+/// not answered at all means the person is asked, and so does an action too long to
+/// put to one whole.
 pub async fn judge(
     asker: Asker<'_>,
     settings: &Settings,
@@ -151,6 +163,9 @@ pub async fn judge(
     review: &Value,
     messages: &[String],
 ) -> Judgement {
+    let Some(action) = describe(label, review) else {
+        return Judgement::unread();
+    };
     let questions: serde_json::Map<String, Value> = QUESTIONS
         .iter()
         .map(|(id, question, yes, no)| {
@@ -162,7 +177,7 @@ pub async fn judge(
         .collect();
     let state = json!({
         "the person's messages": messages.join("\n---\n"),
-        "the action the assistant wants to take": describe(label, review),
+        "the action the assistant wants to take": action,
     });
     match asker
         .ask(settings, state, Value::Object(questions), TIMEOUT)
@@ -305,12 +320,34 @@ mod tests {
             "arguments":[{"name":"script","text":"#!/bin/bash\nsrun python train.py"},{"name":"name","text":"train"}]
         });
         assert_eq!(
-            describe("Sol · Submit job", &review),
+            describe("Sol · Submit job", &review).unwrap(),
             "Sol · Submit job\nSubmit train; Partition: gpu; Time limit: 2 h\nscript = #!/bin/bash\nsrun python train.py\nname = train"
         );
-        let long = json!({"items":[],"arguments":[{"name":"content","text":"x".repeat(5000)}]});
-        let shown = describe("Sol · Write file", &long);
-        assert!(shown.chars().count() <= ACTION_CHARS + 1, "{}", shown.len());
-        assert!(shown.ends_with('…'));
+    }
+
+    #[test]
+    fn the_judge_reads_an_action_whole_or_not_at_all() {
+        // A script's last line is as much the action as its first.
+        let script = format!(
+            "#!/bin/bash\n{}rm -rf ~/data",
+            "#SBATCH --mem=4G\n".repeat(200)
+        );
+        let review = json!({"items":[],"arguments":[{"name":"script","text":script}]});
+        let shown = describe("Sol · Submit job", &review).unwrap();
+        assert!(shown.ends_with("rm -rf ~/data"), "{}", shown.len());
+        let fits = "x".repeat(ACTION_CHARS - "Sol · Write file\ncontent = ".chars().count());
+        let review = json!({"items":[],"arguments":[{"name":"content","text":fits}]});
+        assert!(describe("Sol · Write file", &review).is_some());
+        // A longer one is not cut to fit: the person is asked instead.
+        let over =
+            json!({"items":[],"arguments":[{"name":"content","text":"x".repeat(ACTION_CHARS)}]});
+        assert_eq!(describe("Sol · Write file", &over), None);
+        let asked = Judgement::unread();
+        assert!(!asked.allowed);
+        assert!(asked.scores.iter().all(|(_, yes)| yes.is_none()));
+        assert_eq!(
+            asked.entry()["reason"],
+            "Asked: the action is too long for a decision to read all of it"
+        );
     }
 }

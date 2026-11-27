@@ -173,3 +173,31 @@ test("login answers the console's prompts with the saved user and the secret's v
   const bare = { id: "dev2", device: new SerialDevice(asPort(new FakePort())), vendorId: 0x1d6b };
   await expect(execute(bare, "chat1", { tool: "login", arguments: {} }, () => {}, async () => new Uint8Array(), secretValue)).rejects.toThrow("No console sign-in is saved");
 });
+
+test("a console that echoes the password gives none of it back", async () => {
+  const port = new FakePort({ usbVendorId: 0x1d6b, usbProductId: 0x0104 });
+  const a = { id: "dev1", device: new SerialDevice(asPort(port)), vendorId: 0x1d6b, user: "debian", secret: "bb-pass" };
+  // A device that repeats what it is sent, password included, and ends on it.
+  const script = (async () => {
+    await vi.waitFor(() => expect(port.sent()).toContain("\n"));
+    port.print("\r\nlogin: ");
+    await vi.waitFor(() => expect(port.sent()).toContain("debian\n"));
+    port.print("debian\r\nPassword: ");
+    await vi.waitFor(() => expect(port.sent()).toContain("temppwd\n"));
+    port.print("temppwd\r\nyou sent temppwd\r\ntemppwd $ ");
+  })();
+  // The call names another secret: the device's own is the one read.
+  const asked: string[] = [];
+  const secretValue = async (name: string) => {
+    asked.push(name);
+    return "temppwd";
+  };
+  const result = await execute(a, "chat1", { tool: "login", arguments: { secret: "WIFI_PSK" } }, () => {}, async () => new Uint8Array(), secretValue);
+  await script;
+  expect(asked).toEqual(["bb-pass"]);
+  expect(result.output).not.toContain("temppwd");
+  expect(result.detail).not.toContain("temppwd");
+  expect(result.output).toBe("Signed in as debian. The prompt is: •••• $");
+  // A secret with nothing in it is not sent as a password.
+  await expect(execute(a, "chat1", { tool: "login", arguments: {} }, () => {}, async () => new Uint8Array(), async () => "")).rejects.toThrow();
+});

@@ -145,11 +145,14 @@ async function login(a: Attached, user: string, secretValue: () => Promise<strin
   seen = (await device.read({ waitMs: 5000, until: "assword", maxChars: 2000 })).text;
   if (!/assword/.test(seen)) throw new Error(`No password prompt appeared after the user name. The console printed:\n${seen.slice(-500)}`);
   const password = await secretValue();
+  if (!password) throw new Error("The saved secret is empty. Save the password under Settings › Secrets.");
   await device.writeText(password, true);
-  seen = (await device.read({ waitMs: 6000, until: "$ ", maxChars: 4000 })).text;
+  // A console that echoes what it is sent must not hand the password to the model
+  // or the page: every copy of it is taken out of what was read before any is kept.
+  seen = (await device.read({ waitMs: 6000, until: "$ ", maxChars: 4000 })).text.split(password).join("••••");
   if (/incorrect|denied|failed/i.test(seen)) throw new Error("The console said the sign-in was incorrect. Check the user name and the saved secret.");
   const line = seen.trimEnd().split("\n").pop() || "";
-  return { ok: true, output: `Signed in as ${user}. The prompt is: ${line}`, detail: seen.slice(-1500).replace(password, "••••") };
+  return { ok: true, output: `Signed in as ${user}. The prompt is: ${line}`, detail: seen.slice(-1500) };
 }
 
 /** Carries one request out against an attached device. Exported for tests. */
@@ -192,7 +195,7 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
     }
     case "write": {
       if (typeof args.text !== "string" || !args.text) throw new Error("text is required");
-      const bytes = args.hex ? hexBytes(args.text) : new TextEncoder().encode(args.newline === false ? args.text : `${args.text}\n`);
+      const bytes = args.hex === true ? hexBytes(args.text) : new TextEncoder().encode(args.newline === false ? args.text : `${args.text}\n`);
       await device.write(bytes);
       return { ok: true, output: `Sent ${bytes.length} bytes.` };
     }
@@ -210,8 +213,9 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
     }
     case "login": {
       const user = typeof args.user === "string" && args.user.trim() ? args.user.trim() : a.user;
-      const secret = typeof args.secret === "string" && args.secret.trim() ? args.secret.trim() : a.secret;
-      if (!user || !secret) throw new Error("No console sign-in is saved for this device. The person can set a user name and a secret for it under Compute › Devices, or name them in the call.");
+      // The password is the secret the person saved for this device, whatever the call says.
+      const secret = a.secret;
+      if (!user || !secret) throw new Error("No console sign-in is saved for this device. The person can set a user name and a secret for it under Compute › Devices.");
       return login(a, user, () => secretValue(secret), progress);
     }
     case "identify": {
@@ -235,7 +239,7 @@ export async function execute(a: Attached, chatId: string, request: DeviceReques
       }
       const total = parts.reduce((n, p) => n + p.data.length, 0);
       progress(`Connecting to the chip (${bytes(total)} to write)…`);
-      const summary = await device.lend((port) => withFlasher(a.vendorId, (f) => f.flash(port, parts, { eraseAll: !!args.eraseAll, baudRate: typeof args.baudRate === "number" ? args.baudRate : undefined }, progress, logLine)));
+      const summary = await device.lend((port) => withFlasher(a.vendorId, (f) => f.flash(port, parts, { eraseAll: args.eraseAll === true, baudRate: typeof args.baudRate === "number" ? args.baudRate : undefined }, progress, logLine)));
       return { ok: true, output: summary, detail: [summary, ...log.slice(-12)].join("\n") };
     }
     case "erase": {
@@ -421,6 +425,13 @@ export function createDevicesBridge(ctx: Context): DevicesBridge {
       handled.clear();
       waiting.clear();
       progress.clear();
+      // The person signed out: their devices' ports close, so the next sign-in on
+      // this page, or another tab, can open them.
+      for (const a of attached.values()) a.device.close().catch(() => {});
+      attached.clear();
+      offers.clear();
+      known = [];
+      restoredAt = 0;
       changed();
     },
   };

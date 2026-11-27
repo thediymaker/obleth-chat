@@ -33,6 +33,17 @@ describe("citations", () => {
     expect(citeHtml("<p>x [1]</p>", { role: "assistant", content: "x [1]" })).toBe("<p>x [1]</p>");
   });
 
+  it("leave the text of a link and the TeX beside rendered math as they are", () => {
+    const linked = '<p>See <a href="https://example.org/x">the paper [1]</a> and [2].</p>';
+    const html = citeHtml(linked, reply);
+    expect(html).toContain('<a href="https://example.org/x">the paper [1]</a>');
+    expect(html).toMatch(/and <a class="cite"[^>]*>2<\/a>\./);
+    const math = '<span class="katex"><span class="katex-mathml"><math><semantics><mrow><mi>a</mi></mrow><annotation encoding="application/x-tex">a[1]</annotation></semantics></math></span></span> [1]';
+    const cited = citeHtml(math, reply);
+    expect(cited).toContain('<annotation encoding="application/x-tex">a[1]</annotation>');
+    expect(cited).toMatch(/<\/span><\/span> <a class="cite"[^>]*>1<\/a>$/);
+  });
+
   it("a saved item opens in Library, in the same tab", () => {
     const saved: ReplyLike = { role: "assistant", activity: [{ kind: "sources", items: [{ n: 1, documentId: "s1", name: "Note", excerpt: "", saved: true }] }] };
     const html = citeHtml("<p>See [1]</p>", saved);

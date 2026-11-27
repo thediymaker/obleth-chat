@@ -21,7 +21,7 @@ import { useBranding } from "@/lib/branding-context";
 import { chatDraft, useChatDraft } from "@/lib/chat/chat-draft";
 import { type Intent, intents, shownIntent } from "@/lib/chat/home";
 import type { Attachment } from "@/lib/chat/types";
-import { useConversations } from "@/lib/queries";
+import { useCapabilities, useConversations } from "@/lib/queries";
 import { ChatMenuItems } from "./chat-menu";
 import { NEW_CHAT_EVENT, OPEN_SEARCH_EVENT, useChat, useChatContent, useChatSelect, useChatStore } from "./chat-provider";
 import { Composer, TemporaryNote } from "./composer";
@@ -49,9 +49,11 @@ function Alert({ message, onRetry }: { message: string; onRetry?: () => void }) 
   );
 }
 
-/** The scroll column of a chat page, kept at its end on opening and while a reply is written. */
+/** The scroll column of a chat page, kept at its end on opening and while a reply is
+ *  written: the column's ref, and `follow` to draw inside the page. The page itself
+ *  does not repaint with every streamed word; `follow` does, and draws nothing. */
 function useScroller() {
-  const store = useChatContent();
+  const store = useChatStore();
   // A callback ref: the column only appears once the conversation has loaded.
   const [el, setEl] = useState<HTMLDivElement | null>(null);
   const pinUntil = useRef(0);
@@ -59,14 +61,6 @@ function useScroller() {
     store.attachScroller(el);
     return () => store.attachScroller(null);
   }, [store, el]);
-  useLayoutEffect(() => {
-    if (!el) return;
-    if (store.wantsEnd || (store.streaming && store.follow?.on())) {
-      el.scrollTo({ top: el.scrollHeight });
-      if (store.wantsEnd) pinUntil.current = Date.now() + 2000;
-      store.wantsEnd = false;
-    }
-  });
   // Late layout (fonts, math, diagrams, a growing composer) keeps the end in view
   // while following; scrolling up stops it.
   useEffect(() => {
@@ -79,7 +73,22 @@ function useScroller() {
     if (content) observer.observe(content);
     return () => observer.disconnect();
   }, [store, el, store.active?.id]);
-  return setEl;
+  return { ref: setEl, follow: <FollowEnd el={el} pinUntil={pinUntil} /> };
+}
+
+/** Moves the column to its end when the chat asks for that, and with each repaint of
+ *  a reply being written while the person is following it. */
+function FollowEnd({ el, pinUntil }: { el: HTMLDivElement | null; pinUntil: React.RefObject<number> }) {
+  const store = useChatContent();
+  useLayoutEffect(() => {
+    if (!el) return;
+    if (store.wantsEnd || (store.streaming && store.follow?.on())) {
+      el.scrollTo({ top: el.scrollHeight });
+      if (store.wantsEnd) pinUntil.current = Date.now() + 2000;
+      store.wantsEnd = false;
+    }
+  });
+  return null;
 }
 
 function Messages() {
@@ -147,13 +156,18 @@ export function ChatHome() {
     if (next && next.workspace !== store.workspaceDraft) void store.toggleWorkspace();
   };
   // A tab chosen before Home showed (the scratch pad's Research this), taken once.
+  // It waits for the tabs to be known: one that needs workspaces or a cluster is not
+  // offered until those have loaded, and is dropped only if it still is not then.
   const drafted = useChatDraft().intent;
+  const tabsKnown = useCapabilities().isSuccess;
   useEffect(() => {
     if (!drafted) return;
+    const there = offered.some((i) => i.id === drafted);
+    if (!there && !tabsKnown) return;
     chatDraft.setIntent(null);
-    if (offered.some((i) => i.id === drafted)) choose(drafted);
-    // Only when a tab is drafted: choose is made again on every render.
-  }, [drafted]);
+    if (there) choose(drafted);
+    // Only when a tab is drafted or the tabs change: choose is made again on every render.
+  }, [drafted, offered, tabsKnown]);
   return (
     // 820px (900px from 1600px wide), 72px down (110px from 1600px, 56px up to 1200px).
     <div
@@ -321,7 +335,8 @@ export function ChatPage({ id }: { id: string }) {
       <SelectionBar />
       {/* The header spans it; messages, the chat line and the
           composer share an 884px column (820px of text and 32px gutters). */}
-      <div ref={scroller} className="@container flex min-w-0 flex-1 flex-col overflow-y-auto leading-[normal]">
+      <div ref={scroller.ref} className="@container flex min-w-0 flex-1 flex-col overflow-y-auto leading-[normal]">
+        {scroller.follow}
         <div data-conversation-header className="flex h-[52px] shrink-0 items-center justify-between gap-4 border-b border-line-soft px-6 max-[760px]:h-12 max-[760px]:px-4">
           <div className="flex min-w-0 items-center gap-[9px]">
             <h2 className="truncate text-base leading-[normal] font-medium tracking-normal text-text-2">{c.title}</h2>

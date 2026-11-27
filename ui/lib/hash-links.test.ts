@@ -17,3 +17,11 @@ test("old hash links land on the same page as a path", () => {
   expect(hashPath("")).toBeNull();
   expect(hashPath("#")).toBeNull();
 });
+
+test("a hash Chat never wrote is left alone or passed on, never an error", () => {
+  expect(hashPath("#toString")).toBe("/toString");
+  expect(hashPath("#constructor/x")).toBe("/constructor/x");
+  expect(hashPath("#__proto__")).toBe("/__proto__");
+  expect(hashPath("#chat/%E0%A4%A")).toBeNull();
+  expect(hashPath("#100%")).toBeNull();
+});

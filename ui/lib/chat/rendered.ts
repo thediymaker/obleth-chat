@@ -52,14 +52,25 @@ export function math(tex: string, display: boolean, markup = "$", block = false)
   const close = ({ "\\(": "\\)", "\\[": "\\]" } as Record<string, string>)[markup] || markup;
   return `<${tag} class="${cls}" data-render="math" data-tex="${escape(tex)}"${display ? " data-display" : ""}>${escape(markup + tex + close)}</${tag}>`;
 }
-let katexLoading: Promise<void> | undefined;
+/** A library is fetched once and the promise kept. A fetch that failed (the network
+ *  dropped, or a new release replaced the file) is not kept, so the next block that
+ *  needs the library asks again instead of staying broken until the page is reloaded. */
+function once<T>(held: { loading?: Promise<T> }, load: () => Promise<T>): Promise<T> {
+  held.loading ||= load().catch((error) => {
+    held.loading = undefined;
+    throw error;
+  });
+  return held.loading;
+}
+const katexLoading: { loading?: Promise<void> } = {};
 /** Loads KaTeX with chemistry (\ce); its stylesheet comes with the chat's CSS. */
 export function loadMath(): Promise<void> {
-  katexLoading ||= import("katex").then(async (module) => {
-    await import("katex/contrib/mhchem");
-    loaded.katex = (module.default ?? module) as Katex;
-  });
-  return katexLoading;
+  return once(katexLoading, () =>
+    import("katex").then(async (module) => {
+      await import("katex/contrib/mhchem");
+      loaded.katex = (module.default ?? module) as Katex;
+    }),
+  );
 }
 
 /* ---------- Code ---------- */
@@ -136,14 +147,15 @@ export function highlight(code: string, language: string): string | null {
   const key = `${language}\n${code}`;
   return lights.get(key) ?? remember(lights, key, hljs.highlight(code, { language, ignoreIllegals: true }).value);
 }
-let hljsLoading: Promise<void> | undefined;
+const hljsLoading: { loading?: Promise<void> } = {};
 const triedGrammars = new Set<string>();
 /** Loads the highlighter, and the grammar files of any of `languages` it lacks. */
 export async function loadHighlight(languages: string[] = []): Promise<void> {
-  hljsLoading ||= import("highlight.js/lib/common").then((module) => {
-    loaded.hljs = (module.default ?? module) as HLJSApi;
-  });
-  await hljsLoading;
+  await once(hljsLoading, () =>
+    import("highlight.js/lib/common").then((module) => {
+      loaded.hljs = (module.default ?? module) as HLJSApi;
+    }),
+  );
   for (const language of languages) {
     const file = Object.hasOwn(GRAMMAR_FILES, language) ? language : null;
     if (!file || loaded.hljs!.getLanguage(file) || triedGrammars.has(file)) continue;
@@ -271,8 +283,8 @@ export function drawn(kind: string, source: string): string {
 }
 
 type Mermaid = typeof import("mermaid").default;
-let mermaidLoading: Promise<Mermaid> | undefined,
-  queue: Promise<unknown> = Promise.resolve(),
+const mermaidLoading: { loading?: Promise<Mermaid> } = {};
+let queue: Promise<unknown> = Promise.resolve(),
   serial = 0;
 const firstLine = (error: unknown) =>
   String((error as Error)?.message || error || "unknown error")
@@ -283,8 +295,7 @@ const firstLine = (error: unknown) =>
 // Mermaid draws one diagram at a time in the page, so diagrams take turns.
 function drawMermaid(source: string): Promise<Drawing> {
   const run = async (): Promise<Drawing> => {
-    mermaidLoading ||= import("mermaid").then((module) => module.default);
-    const mermaid = await mermaidLoading,
+    const mermaid = await once(mermaidLoading, () => import("mermaid").then((module) => module.default)),
       id = `drawing-${++serial}`;
     mermaid.initialize({
       startOnLoad: false,
@@ -309,11 +320,10 @@ function drawMermaid(source: string): Promise<Drawing> {
   return result;
 }
 type SmilesDrawer = typeof import("smiles-drawer").default;
-let smilesLoading: Promise<SmilesDrawer> | undefined;
+const smilesLoading: { loading?: Promise<SmilesDrawer> } = {};
 // One molecule per line: a SMILES string, then an optional name.
 async function drawSmiles(source: string): Promise<Drawing> {
-  smilesLoading ||= import("smiles-drawer").then((module) => module.default);
-  const SmilesDrawer = await smilesLoading;
+  const SmilesDrawer = await once(smilesLoading, () => import("smiles-drawer").then((module) => module.default));
   const lines = source
     .split("\n")
     .map((l) => l.trim())
@@ -357,10 +367,12 @@ export async function prepare(el: HTMLElement): Promise<void> {
   if (!pending.has(key))
     pending.set(
       key,
-      (kind === "mermaid" ? drawMermaid(source) : drawSmiles(source)).then((result) => {
-        remember(drawings, key, result);
-        pending.delete(key);
-      }),
+      (kind === "mermaid" ? drawMermaid(source) : drawSmiles(source))
+        .then((result) => {
+          remember(drawings, key, result);
+        })
+        // Whether it drew or failed, it is no longer on its way: a failure is tried again.
+        .finally(() => pending.delete(key)),
     );
   return pending.get(key);
 }

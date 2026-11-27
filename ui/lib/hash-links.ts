@@ -12,10 +12,17 @@ const MOVED: Record<string, string> = {
 
 export function hashPath(hash: string): string | null {
   if (!hash.startsWith("#") || hash.length < 2) return null;
-  const parts = hash.slice(1).split("/").filter(Boolean).map(decodeURIComponent);
+  let parts: string[];
+  try {
+    parts = hash.slice(1).split("/").filter(Boolean).map(decodeURIComponent);
+  } catch {
+    // Not an address Chat wrote (a stray % in it): nothing to move.
+    return null;
+  }
   if (!parts.length) return null;
   let [page, ...rest] = parts;
-  if (page in MOVED) {
+  // Only MOVED's own names: every object also answers to "toString" and the like.
+  if (page !== undefined && Object.hasOwn(MOVED, page)) {
     const moved = MOVED[page]!;
     parts.splice(0, 1, ...(moved ? moved.split("/") : []));
     [page, ...rest] = parts;

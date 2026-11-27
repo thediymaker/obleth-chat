@@ -53,3 +53,31 @@ test("lending the port to a flasher closes it and reopens it the same way", asyn
   expect(device.status()).toMatchObject({ open: true, baudRate: 74880 });
   expect(() => hexBytes("abc")).toThrow("even number");
 });
+
+test("writes asked for at the same moment each take their turn", async () => {
+  const port = new FakePort();
+  const device = new SerialDevice(asPort(port));
+  await device.open();
+  // The terminal typing while a tool sends: a port gives out one writer at a time.
+  await Promise.all([device.writeText("first"), device.writeText("second"), device.write(hexBytes("0a"))]);
+  expect(port.sent()).toBe("first\nsecond\n\n");
+  await device.close();
+  await expect(device.writeText("late")).rejects.toThrow("not open");
+  // A refused write does not block the ones after the port opens again.
+  await device.open();
+  await device.writeText("again");
+  expect(port.sent()).toBe("first\nsecond\n\nagain\n");
+});
+
+test("half a character from the last session does not show in the next", async () => {
+  const port = new FakePort();
+  const device = new SerialDevice(asPort(port));
+  await device.open();
+  // The first two bytes of a three-byte character, then the port closes.
+  port.emit([0xe2, 0x82]);
+  await new Promise((done) => setTimeout(done, 10));
+  await device.close();
+  await device.open();
+  port.print("ok");
+  expect((await device.read({ until: "ok", waitMs: 500 })).text).toBe("ok");
+});

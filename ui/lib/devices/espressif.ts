@@ -45,12 +45,11 @@ export const espressif: Flasher = {
   async identify(port, log): Promise<Identity> {
     return withLoader(port, ROM_BAUD, log, async (loader, chip) => {
       const rom = loader.chip;
-      const [features, mac, crystal, flashSize] = await Promise.all([
-        rom.getChipFeatures(loader).catch(() => [] as string[]),
-        rom.readMac(loader).catch(() => undefined),
-        rom.getCrystalFreq(loader).catch(() => undefined),
-        loader.detectFlashSize().catch(() => undefined),
-      ]);
+      // One at a time: the bootloader answers one command on the one serial line.
+      const features = await rom.getChipFeatures(loader).catch(() => [] as string[]);
+      const mac = await rom.readMac(loader).catch(() => undefined);
+      const crystal = await rom.getCrystalFreq(loader).catch(() => undefined);
+      const flashSize = await loader.detectFlashSize().catch(() => undefined);
       return { family: "Espressif", chip, mac, flashSize, features, crystal: crystal ? `${crystal} MHz` : undefined };
     });
   },
@@ -70,7 +69,7 @@ export const espressif: Flasher = {
         compress: true,
         reportProgress: (index, written, size) => {
           const part = parts[index];
-          progress(`Writing ${part.path} at 0x${part.offset.toString(16)}: ${Math.round((written / size) * 100)}%`);
+          progress(`Writing ${part.path} at 0x${part.offset.toString(16)}: ${size > 0 ? Math.round((written / size) * 100) : 100}%`);
         },
       });
       const seconds = ((Date.now() - started) / 1000).toFixed(1);

@@ -1,9 +1,9 @@
-# Optional: workspaces in a namespace of their own. deploy/k8s.yaml already runs
-# them in Chat's namespace; apply this as well to keep them apart under their own
-# quota, and set OBLETH_CHAT_SANDBOX_NAMESPACE=obleth-sandboxes. Each person's
-# browser runs here too (labelled obleth.io/browser), under the same policies.
-# Pod Security "restricted" is enforced by the API server, so Chat cannot create a
-# privileged, root or host-network pod here even if asked to.
+# Where workspaces run: a namespace of their own, apart from Chat, its database and
+# its Secrets, under their own quota. Apply it with deploy/k8s.yaml, whose
+# OBLETH_CHAT_SANDBOX_NAMESPACE names this namespace; ./setup.sh kubernetes applies
+# both. Each person's browser runs here too (labelled obleth.io/browser), under the
+# same policies. Pod Security "restricted" is enforced by the API server, so Chat
+# cannot create a privileged, root or host-network pod here even if asked to.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -13,9 +13,9 @@ metadata:
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/warn: restricted
 ---
-# The same permissions as in Chat's own namespace (deploy/k8s.yaml), here: manage
-# pods and volumes, exec into those pods and read their CPU and memory use. No
-# Secrets, Services, RBAC or other namespaces.
+# Chat's only cluster permissions: manage pods and volumes in this namespace, exec
+# into those pods and read their CPU and memory use. No Services, RBAC or other
+# namespaces, and this one holds no Secrets for a pod to mount.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

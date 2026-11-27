@@ -19,6 +19,15 @@ def run(*args, **kwargs):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout
 
 
+def file_sha256(path):
+    """The file's SHA-256, read a piece at a time: a dump can be larger than memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def remote_connection_setting(environ):
     """Name the setting that could route libpq away from a local server, if any."""
     for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
@@ -74,7 +83,12 @@ def main():
     if not (target / "COMPLETE").exists() or manifest.get("format") != "obleth-chat-backup" or manifest.get("version") != 1:
         parser.error("Not a complete supported backup")
     for name in ("database.dump", "signing-key.json"):
-        if hashlib.sha256((target / name).read_bytes()).hexdigest() != manifest["sha256"].get(name):
+        # An install that forwards each person's own token has no signing key to back up.
+        if name != "database.dump" and name not in manifest["sha256"] and not (target / name).exists():
+            continue
+        if not (target / name).is_file():
+            parser.error(f"{name} is missing from the backup")
+        if file_sha256(target / name) != manifest["sha256"].get(name):
             parser.error(f"Checksum failed for {name}")
     # Random, fixed-prefix name is generated here; no operator database name is accepted.
     database = "obleth_restore_check_" + uuid.uuid4().hex
@@ -112,9 +126,21 @@ def main():
                 result[key] = int(query(f"SELECT count(*) FROM public.{table}"))
         if "attachments" in tables:
             result["attachmentBytes"] = int(query("SELECT COALESCE(SUM(OCTET_LENGTH(data)),0) FROM public.attachments"))
+            # With object storage a file's row holds its object's key and no bytes; the
+            # dump then has the row, and the bytes are the bucket's to back up. Backups
+            # from before object storage have no such column.
+            in_bucket = query("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
+                              "AND table_name='attachments' AND column_name='object_key'") == "1"
+            wrong_bytes = "(a.data IS NOT NULL AND OCTET_LENGTH(a.data) IS DISTINCT FROM a.size)"
+            if in_bucket:
+                result["attachmentsInObjectStorage"] = int(query(
+                    "SELECT count(*) FROM public.attachments WHERE object_key IS NOT NULL"))
+                wrong_bytes += " OR (a.data IS NULL) = (a.object_key IS NULL)"
+            else:
+                wrong_bytes += " OR a.data IS NULL"
             result["invalidAttachmentFiles"] = int(query(
                 "SELECT count(*) FROM public.attachments a LEFT JOIN public.users u ON u.id=a.owner_id "
-                "WHERE u.id IS NULL OR OCTET_LENGTH(a.data) IS DISTINCT FROM a.size"))
+                f"WHERE u.id IS NULL OR {wrong_bytes}"))
             result["invalidAttachmentReferences"] = int(query(
                 "SELECT count(*) FROM public.message_attachments ma "
                 "LEFT JOIN public.messages m ON m.id=ma.message_id "
